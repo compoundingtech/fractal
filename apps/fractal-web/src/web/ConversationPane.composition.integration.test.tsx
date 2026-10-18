@@ -21,6 +21,7 @@ import type * as KitComposer from '../../../../packages/fractal-ui/src/assistant
 import type { ConversationRuntimeOptions, TranscriptTurn } from '@smalltalk/fractal-ui/assistant-ui'
 import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
+import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -29,6 +30,7 @@ const source = vi.hoisted(() => ({
   feed: { _tag: 'Waiting' } as Feed<ConversationPage>,
   sync: undefined as FeedSyncObservation | undefined,
   now: 1000,
+  clockListeners: new Set<() => void>(),
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
@@ -41,6 +43,7 @@ const source = vi.hoisted(() => ({
 vi.mock('../data/react.tsx', async () => {
   // Vitest hoists this factory before static imports are initialized.
   const Atom = await import('effect/reactivity/Atom')
+  const React = await import('react')
   const agents = Atom.make({ _tag: 'Observed' as const, freshness: 'live' as const, value: [] })
   return ({
   useConversation: () => source.feed,
@@ -48,7 +51,11 @@ vi.mock('../data/react.tsx', async () => {
   // A sendable view exposes attachments; the composer stays disabled otherwise.
   useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, ...(source.sendable ? { attachments: {} } : {}) }),
   useFeedInterest: () => {},
-  useNow: () => source.now,
+  useNow: () => React.useSyncExternalStore(listener => {
+    source.clockListeners.add(listener)
+    return () => { source.clockListeners.delete(listener) }
+  }, () => source.now),
+  useNowSnapshot: () => source.now,
   useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
   useAttention: () => ({ _tag: 'Waiting' }),
   })
@@ -115,6 +122,7 @@ const container = document.createElement('div')
 
 beforeEach(() => {
   source.now = 1000
+  source.clockListeners.clear()
   source.runtimeItems = []
   source.transcriptTurns = []
   source.scrollToBottomKeys = []
@@ -144,9 +152,17 @@ afterEach(async () => {
 
 const opened: WorkLogCall[] = []
 
-const mount = async (ux?: UxTelemetry) => {
+const clock = {
+  now: () => source.now,
+  subscribe: (listener: () => void) => {
+    source.clockListeners.add(listener)
+    return () => { source.clockListeners.delete(listener) }
+  },
+}
+const mount = async (ux?: UxTelemetry, strictMode = false) => {
   await act(async () => {
-    root!.render(<ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} ux={ux} />)
+    const pane = <HumanClockProvider clock={clock}><ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} ux={ux} /></HumanClockProvider>
+    root!.render(strictMode ? <React.StrictMode>{pane}</React.StrictMode> : pane)
   })
 }
 
@@ -368,6 +384,8 @@ describe('ConversationPane composition activation', () => {
     expect(source.composerProps.length).toBeGreaterThan(0)
     expect(source.composerProps.every(props => props.readingColumn === true)).toBe(true)
     expect(source.composerProps.every(props => props.placeholder === undefined)).toBe(true)
+    expect(source.composerProps.every(props => props.conversationLabel === 'Example Agent')).toBe(true)
+    expect(container.querySelector('form')?.getAttribute('aria-label')).toBe('Message composer, Example Agent')
   })
 
   it('keeps the source-owned scroll command stable through settlement, echo and Retry until a new Send', async () => {
@@ -405,6 +423,51 @@ describe('ConversationPane composition activation', () => {
     expect(source.scrollToBottomKeys.at(-1)).toBe(third.id)
     const changes = source.scrollToBottomKeys.filter((key, index, keys) => index === 0 || key !== keys[index - 1])
     expect(changes).toEqual([undefined, first.id, second.id, third.id])
+  })
+
+  it('updates clock labels without re-rendering the runtime or composer', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Requested', since: 0 }, observedAt: 0 }
+    await mount()
+    const runtimeRenders = source.runtimeItems.length
+    const composerRenders = source.composerProps.length
+    const transcriptRenders = source.transcriptTurns.length
+    for (let second = 1; second <= 10; second += 1) {
+      await act(async () => {
+        source.now += 1000
+        source.clockListeners.forEach(listener => listener())
+      })
+    }
+    expect(source.transcriptTurns).toHaveLength(transcriptRenders)
+    expect(source.runtimeItems).toHaveLength(runtimeRenders)
+    expect(source.composerProps).toHaveLength(composerRenders)
+    expect(text()).toContain('Loading conversation is taking longer than expected · 11s')
+  })
+
+  it('advances contextual running and transcript-header elapsed leaves without rendering the transcript', async () => {
+    source.now = Date.parse(at(0)) + 1000
+    const running: ConversationItem = { _tag: 'Status', id: 'run-status', status: 'running', at: at(1) }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, running], hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: source.now }, observedAt: source.now }
+    await mount()
+    const transcriptRenders = source.transcriptTurns.length
+    const runtimeRenders = source.runtimeItems.length
+    const composerRenders = source.composerProps.length
+    const activity = container.querySelector('[data-testid="live-activity-label"]')!
+    const header = container.querySelector('[data-testid="run-elapsed"]')!
+    expect(activity.textContent).toBe('Working · 1s')
+    expect(header.textContent).toBe('Running · 1s')
+    for (const [elapsed, label] of [[2000, '2s'], [60_000, '1m']] as const) {
+      await act(async () => {
+        source.now = Date.parse(at(0)) + elapsed
+        source.clockListeners.forEach(listener => listener())
+      })
+      expect(activity.textContent).toBe(`Working · ${label}`)
+      expect(header.textContent).toBe(`Running · ${label}`)
+    }
+    expect(source.transcriptTurns).toHaveLength(transcriptRenders)
+    expect(source.runtimeItems).toHaveLength(runtimeRenders)
+    expect(source.composerProps).toHaveLength(composerRenders)
   })
 
   it('keeps runtime items and transcript turns stable for sixty idle clock, sync and no-op frame updates', async () => {
@@ -757,7 +820,8 @@ describe('ConversationPane composition activation', () => {
     await act(async () => { stop()!.click() })
     expect(interrupt).toHaveBeenCalledExactlyOnceWith('agent/selected')
     expect(stop()?.getAttribute('aria-label')).toBe('Stopping run')
-    expect(stop()?.disabled).toBe(true)
+    expect(stop()?.getAttribute('aria-disabled')).toBe('true')
+    expect(stop()?.disabled).toBe(false)
     await act(async () => { answer({ _tag: 'Refused', detail: 'That agent has no terminal to stop its turn through.' }) })
     expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
     expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')?.textContent).toBe('That agent has no terminal to stop its turn through.')
@@ -766,6 +830,57 @@ describe('ConversationPane composition activation', () => {
     await mount()
     expect(stop()).toBeNull()
     expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')).toBeNull()
+  })
+
+  it.each([
+    { sendGranted: true, strictMode: false, moveFocus: false },
+    { sendGranted: false, strictMode: false, moveFocus: false },
+    { sendGranted: true, strictMode: true, moveFocus: false },
+    { sendGranted: false, strictMode: true, moveFocus: false },
+    { sendGranted: true, strictMode: false, moveFocus: true },
+    { sendGranted: false, strictMode: false, moveFocus: true },
+    { sendGranted: true, strictMode: true, moveFocus: true },
+    { sendGranted: false, strictMode: true, moveFocus: true },
+  ])('keeps pending Stop inert and preserves focus ownership (send granted: $sendGranted, Strict Mode: $strictMode, focus moved: $moveFocus)', async ({ sendGranted, strictMode, moveFocus }) => {
+    const answer = Promise.withResolvers<{ readonly _tag: 'Sent' }>()
+    const interrupt = vi.fn((_agent: string) => answer.promise)
+    source.agentControls = { control: () => Promise.reject(new Error('not used')), interrupt }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'running', at: at(2) }], hasOlder: false, observation: { empty: false } } }
+    source.sendable = sendGranted
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount(undefined, strictMode)
+    const stop = container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')!
+    const message = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!
+    const composer = container.querySelector<HTMLFormElement>('form[aria-label="Message composer, Example Agent"]')!
+    expect(message.disabled).toBe(!sendGranted)
+    stop.focus()
+    expect(document.activeElement).toBe(stop)
+    // Use Stop's announced keyboard shortcut, including two presses before React commits.
+    await act(async () => {
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    expect(interrupt).toHaveBeenCalledExactlyOnceWith('agent/selected')
+    expect(stop.getAttribute('aria-disabled')).toBe('true')
+    expect(stop.disabled).toBe(false)
+    expect(document.activeElement).toBe(stop)
+    await act(async () => {
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      stop.click()
+      answer.resolve({ _tag: 'Sent' })
+    })
+    expect(interrupt).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(stop)
+    const history = container.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
+    if (moveFocus) {
+      history.focus()
+      expect(document.activeElement).toBe(history)
+    }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'cancelled', at: at(3) }], hasOlder: false, observation: { empty: false } } }
+    await mount(undefined, strictMode)
+    expect(container.querySelector('[data-testid="run-stop"]')).toBeNull()
+    expect(document.activeElement).toBe(moveFocus ? history : sendGranted ? message : composer)
+    expect(message.disabled).toBe(!sendGranted)
   })
 
   it('keeps a stop refusal to the run it answered and drops a late answer for an older run', async () => {

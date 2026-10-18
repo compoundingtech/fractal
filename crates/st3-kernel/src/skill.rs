@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
-pub const SKILL: &str = include_str!("skill.md");
+pub const SKILL: &str = /* sqlite-large-value: allow-for-now lv-h27d52a30accc owner=st3_kernel::skill TODO=trace-statement-and-value-representation */ include_str!("skill.md");
 
 /// Share the skill's message sender paragraph with CLI help without duplicating its wording.
 pub fn message_sender_guidance() -> &'static str {

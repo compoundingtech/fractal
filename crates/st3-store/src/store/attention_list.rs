@@ -15,12 +15,12 @@ pub const PUBLISHED_VIEWS: [&str; 4] = ["attention", "glasses", "arrangements", 
 /// A view whose refresh has failed this long is withdrawn: its windows read for themselves, as
 /// before, until it publishes again. Once published, a window rereads only on publication, so
 /// a view that stopped publishing must not stay served.
-const WITHDRAW_AFTER_MS: u64 = 30_000;
+pub const WITHDRAW_AFTER_MS: u64 = 30_000;
 
 #[derive(Default)]
-struct ViewHealth {
+pub struct ViewHealth {
     /// When its refreshes began failing, in Unix ms; 0 while they succeed.
-    failing_since: AtomicU64,
+    pub failing_since: AtomicU64,
     withdrawn: AtomicBool,
 }
 
@@ -96,7 +96,7 @@ pub struct AttentionList {
     pairings_checked: AtomicU64,
     /// Set when the refresher task ends: no view is served after that.
     stopped: AtomicBool,
-    health: [ViewHealth; PUBLISHED_VIEWS.len()],
+    pub health: [ViewHealth; PUBLISHED_VIEWS.len()],
     /// Folds by cause: the first claim kind that could change attention, `clock`, `projection`,
     /// `first` or `many`. Republishing the same rows at a newer cut is not a fold.
     folds: Mutex<BTreeMap<String, u64>>,
@@ -200,7 +200,7 @@ impl Store {
             "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_kind_index
              WHERE kind IN ('custom.client.pairing-completed','custom.client.pairing-revoked')
                AND store_index>?1 AND store_index<=?2)",
-        )?.query_row(params![checked, index], |row| row.get(0))?;
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-he83a68523f99 owner=st3_store::store::attention_list TODO=trace-statement-and-value-representation */ params![checked, index], |row| row.get(0))?;
         list.pairings_checked.store(index, AtomicOrdering::Release);
         if changed {
             for view in PUBLISHED_VIEWS.into_iter().filter(|view| self.published_view_serving(view)) {
@@ -349,7 +349,7 @@ impl Store {
         let earliest: Option<i64> = self.readers.get().prepare_cached(
             "SELECT MIN(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
              WHERE store_index>?1 AND store_index<=?2 AND CAST(accepted_at_unix_ms AS INTEGER)>?3",
-        )?.query_row(params![after, through, i64::try_from(now).unwrap_or(i64::MAX)], |row| row.get(0))?;
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-h4866486de83e owner=st3_store::store::attention_list TODO=trace-statement-and-value-representation */ params![after, through, i64::try_from(now).unwrap_or(i64::MAX)], |row| row.get(0))?;
         Ok(earliest.and_then(|at| u128::try_from(at).ok()))
     }
 
@@ -554,7 +554,7 @@ fn blocked_on_human(connection: &Connection, id: &str) -> Result<bool> {
             "SELECT COALESCE(json_extract(body, '$.fields.blocked_on'), json_extract(body, '$.blocked_on'))='human'
              FROM claims WHERE id=?1",
         )?
-        .query_row([id], |row| row.get::<_, Option<bool>>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h87e8754492ec owner=st3_store::store::attention_list TODO=trace-statement-and-value-representation */ [id], |row| row.get::<_, Option<bool>>(0))
         .optional()?
         .flatten()
         .unwrap_or(false))
@@ -565,7 +565,7 @@ fn blocked_on_human(connection: &Connection, id: &str) -> Result<bool> {
 fn declared_stop(connection: &Connection, subject: &str) -> Result<bool> {
     Ok(connection
         .prepare_cached("SELECT kind='stop' FROM desired WHERE subject=?1")?
-        .query_row([subject], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h2e27b6db8bfd owner=st3_store::store::attention_list TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))
         .optional()?
         .unwrap_or(false))
 }

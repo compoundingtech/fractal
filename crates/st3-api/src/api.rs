@@ -1,3 +1,6 @@
+use crate::EvidenceStore;
+use crate::OwnedSetsStore;
+use crate::PublicationFactsStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd as _;
@@ -67,6 +70,7 @@ use crate::model::{
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
+mod wire_names;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
@@ -82,6 +86,7 @@ mod harness_health_controls;
 #[cfg(test)]
 mod harness_health_output_controls;
 mod delivery_probes;
+mod end_reason;
 mod github_watch;
 mod harness_events;
 mod mailbox;
@@ -107,7 +112,7 @@ pub use tile_endpoint::{
     SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
     spawn_from as spawn_tile_endpoints_from,
 };
-pub use published_lists::start_published_lists;
+pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
 
 #[cfg(test)]
@@ -181,6 +186,7 @@ pub struct AppState {
     pub planner_default: PlannerSpec,
 }
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
 const CLIENT_API_VERSION: &str = "st3.client.v0";
 const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
@@ -436,6 +442,8 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Build routes only. The owner starts background publications with
+/// [`start_published_lists`]; a bare router refuses unpublished current runtime reads.
 pub fn router(state: AppState) -> Router {
     crate::relay_trace::init();
     delivery_presence::start();
@@ -955,6 +963,9 @@ async fn response_envelope_unbounded(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    if let Err(error) = wire_names::receive_headers(request.headers_mut()) {
+        return error.into_response();
+    }
     // Anonymous pairing discovery is public, static compatibility metadata. Bypass
     // authentication, snapshots, presence and the normal envelope/activity counter entirely.
     if matches!(transport, ClientTransportBoundary::FabricLoopback)
@@ -1133,6 +1144,7 @@ async fn response_envelope_unbounded(
         server: otel.clone(),
         roster: request_route == "/v1/client/agents",
     };
+    request.extensions_mut().insert(envelope_context.clone());
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -1672,8 +1684,8 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
-    // The work list's refresher ended: nothing publishes it until the daemon restarts.
-    if matches!(code, Some(published_lists::WORK_LIST_ENDED | client_v0::published_missions::ENDED)) {
+    // An ended list publishes nothing until the daemon restarts.
+    if matches!(code, Some(published_lists::WORK_LIST_ENDED | client_v0::published_missions::ENDED | "runtime-list-ended")) {
         return false;
     }
     // An unconfirmed mutation needs the exact original request, not a generic
@@ -1751,6 +1763,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "mission-list-ended"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
+        | "runtime-list-not-ready"
+        | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
         | "conversation-content-invalidated"
@@ -1935,6 +1949,21 @@ fn client_page_read(
     query: &ClientListQuery,
     _pinned: bool,
 ) -> Result<ClientResourcePage, ApiError> {
+    client_page_read_bounded(state, snapshot, collection, items, query, _pinned, None)
+}
+
+/// Assistant reads supply their real response context so packing includes the
+/// snapshot, request ID, sync notice and the continuation cursor. Other native
+/// lists retain their existing paging policy.
+fn client_page_read_bounded(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    collection: &str,
+    items: Vec<Value>,
+    query: &ClientListQuery,
+    _pinned: bool,
+    budget: Option<(&response_body::Context, usize)>,
+) -> Result<ClientResourcePage, ApiError> {
     let (owner, terminal_state) = if collection == "terminals" {
         (query.owner.as_deref(), query.state.as_deref())
     } else {
@@ -1948,6 +1977,9 @@ fn client_page_read(
         &query.cursor
     {
         let cursor = decode_client_cursor(cursor)?;
+        if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit) {
+            return Err(client_page_expired("the page cursor has an invalid item limit"));
+        }
         if cursor.collection != collection
             || cursor.history != query.history
             || cursor.person != query.person
@@ -1984,6 +2016,9 @@ fn client_page_read(
             .ok_or_else(|| {
                 client_page_expired("the page snapshot is no longer available; restart pagination")
             })?;
+        if cursor.offset >= cached.items.len() {
+            return Err(client_page_expired("the page cursor offset is outside its cached snapshot"));
+        }
         (
             cached.items.clone(),
             cursor.items_digest,
@@ -2033,7 +2068,78 @@ fn client_page_read(
             client_v0::cut_oversized_timeline_entry(only, size);
         }
     }
-    let has_more = end < items.len();
+    let make_page = |end| -> Result<ClientResourcePage, ApiError> {
+        let has_more = end < items.len();
+        let next_cursor = if has_more {
+            Some(encode_client_cursor(&ClientPageCursor {
+                snapshot: snapshot.clone(),
+                collection: collection.into(),
+                offset: end,
+                limit,
+                history: query.history,
+                person: query.person.clone(),
+                actor: query.actor.clone(),
+                owner_run: query.owner_run.clone(),
+                status: query.status.clone(),
+                owner: owner.map(str::to_owned),
+                state: terminal_state.map(str::to_owned),
+                native_only: query.native_only,
+                items_digest: items_digest.clone(),
+                before_index: None,
+                after_key: None,
+                expires_at_unix_ms,
+            })?)
+        } else {
+            None
+        };
+        Ok(ClientResourcePage {
+            kind: "page".into(),
+            collection: collection.into(),
+            filters: client_page_filters(collection, query),
+            items: Vec::new(),
+            page: ClientPageInfo {
+                limit,
+                has_more,
+                next_cursor,
+                cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            },
+            sync: client_sync_notice(state),
+            replicated: None,
+        })
+    };
+    let mut packed_end = end;
+    let mut page = make_page(packed_end)?;
+    if let Some((context, max_bytes)) = budget {
+        let mut sizes = [0usize; CLIENT_MAX_PAGE_ITEMS];
+        let mut payload_bytes = page_items.len().saturating_sub(1);
+        for (size, item) in sizes.iter_mut().zip(&page_items) {
+            *size = response_body::json_size(item)?;
+            payload_bytes += *size;
+        }
+        // Try the complete page first: its final-page envelope has no cursor and
+        // can be smaller than a prefix's envelope. Descending prefixes then give
+        // the largest fitting page, even across cursor-size digit boundaries.
+        loop {
+            if context.page_envelope_size(snapshot, &page)? + payload_bytes <= max_bytes {
+                break;
+            }
+            if packed_end <= offset.saturating_add(1) {
+                let id = page_items.first().and_then(|item| item["id"].as_str()).unwrap_or("<empty page>");
+                return Err(ApiError {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    code: "response-budget-exceeded".into(),
+                    message: format!("not even one whole item fits the assistant response envelope byte budget; item id: {id}"),
+                    details: Box::default(),
+                });
+            }
+            payload_bytes -= sizes[packed_end - offset - 1] + 1;
+            packed_end -= 1;
+            page = make_page(packed_end)?;
+        }
+        page_items.truncate(packed_end - offset);
+    }
+    page.items = page_items;
+    let has_more = page.page.has_more;
     if query.cursor.is_none() && has_more {
         let mut cache = client_page_cache()
             .lock()
@@ -2057,42 +2163,7 @@ fn client_page_read(
             });
         }
     }
-    let next_cursor = if has_more {
-        Some(encode_client_cursor(&ClientPageCursor {
-            snapshot: snapshot.clone(),
-            collection: collection.into(),
-            offset: end,
-            limit,
-            history: query.history,
-            person: query.person.clone(),
-            actor: query.actor.clone(),
-            owner_run: query.owner_run.clone(),
-            status: query.status.clone(),
-            owner: owner.map(str::to_owned),
-            state: terminal_state.map(str::to_owned),
-            native_only: query.native_only,
-            items_digest,
-            before_index: None,
-            after_key: None,
-            expires_at_unix_ms,
-        })?)
-    } else {
-        None
-    };
-    Ok(ClientResourcePage {
-        kind: "page".into(),
-        collection: collection.into(),
-        filters: client_page_filters(collection, query),
-        items: page_items,
-        page: ClientPageInfo {
-            limit,
-            has_more,
-            next_cursor,
-            cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
-        },
-        sync: client_sync_notice(state),
-        replicated: None,
-    })
+    Ok(page)
 }
 
 /// The filters a page names: the ones its query applied.
@@ -2678,6 +2749,27 @@ fn client_agent_resources_cached(
     })
 }
 
+/// One agent's card for an exact agent selector, folded in its own projection rather than
+/// borrowed from the fleet roster.
+fn client_exact_agent_resources(
+    store: &Store,
+    history: bool,
+    snapshot_index: u64,
+    agent: &str,
+) -> anyhow::Result<Vec<Value>> {
+    store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
+        // A selected cold card needs only its own queue metadata, never roster refs.
+        let metadata = changed.filter(|(_, previous)| previous.is_empty())
+            .map(|(subjects, _)| agent_queue_metadata(store, subjects)).transpose()?;
+        let changed = changed.map(|(subjects, previous)| {
+            (subjects, metadata.as_deref().unwrap_or(previous))
+        });
+        let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
+        add_agent_todos(store, &mut items, snapshot_index)?;
+        Ok(items)
+    })
+}
+
 // Freeze membership, ordering and the inexpensive declaration/queue metadata. The expensive
 // status, usage, fault and activity reductions are needed only for the returned page.
 fn client_agent_page_refs(store: &Store, history: bool, index: u64) -> anyhow::Result<Vec<Value>> {
@@ -2688,7 +2780,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
     let connection = store.readers.get();
     let (subjects, desired) = crate::otel::roster_phase("membership", || -> anyhow::Result<_> {
         let mut subjects = connection
-            .prepare_cached(crate::store::RANGE_SUBJECTS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd2b2337a153e owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
             .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
                 row.get::<_, String>(0)
             })?
@@ -3006,10 +3098,20 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// Each seat's running subagents: open, with a lease that runs past this read. A lease runs out
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
-    let mut running = BTreeMap::<String, Vec<Value>>::new();
+    if items.is_empty() {
+        return Ok(());
+    }
+    let now = client_now_ms() as u64;
     let subagents = crate::otel::roster_phase("subagent_leases", || {
-        store.running_subagents(client_now_ms() as u64)
+        if items.len() == 1 {
+            let mut subagents = store.open_subagents(items[0]["id"].as_str().unwrap_or_default())?;
+            subagents.retain(|subagent| !subagent.expired_at(now));
+            Ok(subagents)
+        } else {
+            store.running_subagents(now)
+        }
     })?;
+    let mut running = BTreeMap::<String, Vec<Value>>::new();
     for subagent in subagents {
         running
             .entry(subagent.agent.clone())
@@ -3187,6 +3289,7 @@ fn client_agent_cards_presented(
         .collect::<BTreeMap<_, _>>();
     let usage_summaries = store.usage_summaries_at(&agent_subjects, Some(snapshot_index))?;
     let member_faults = store.member_reconcile_faults_for(&agent_subjects, snapshot_index)?;
+    let retired_subjects = store.retired_owned_subjects_at(snapshot_index)?;
     let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
         Ok(faults) => Some(faults),
         Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
@@ -3357,7 +3460,7 @@ fn client_agent_cards_presented(
                 && subject.reachability == "indeterminate"
                 && matches!(observed, Some("running" | "ready" | "working" | "idle"));
             let suspension = if card_reads.may_have_suspension(&subject.subject) {
-                crate::suspension::current(store, &subject.subject)?
+                crate::suspension::current_at(store, &subject.subject, Some(snapshot_index))?
             } else {
                 None
             };
@@ -3403,6 +3506,20 @@ fn client_agent_cards_presented(
                     })
                 })
                 .unwrap_or_default();
+            let desired_claim = subject.desired_token.as_deref()
+                .filter(|_| subject.kind.as_deref() == Some("stop"))
+                .map(|claim| store.claim_by_id(claim)).transpose()?.flatten();
+            let terminal_harness = if subject.harness.is_none()
+                && matches!(fields.and_then(|fields| fields.get("status")).and_then(Value::as_str), Some("exited" | "stopped"))
+            {
+                store.terminal_harness_at(&subject.subject, snapshot_index)?
+            } else { None };
+            let original_suspend = suspension.as_ref()
+                .filter(|state| state.action == "resume" && state.phase == "suspended")
+                .and_then(|state| state.suspend_operation_id.as_deref())
+                .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
+                .transpose()?.flatten();
+            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), retired_subjects.contains(&subject.subject), &updated_at);
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -3428,6 +3545,7 @@ fn client_agent_cards_presented(
                 "owner_run_id": subject.owner_run,
                 "driver": driver,
                 "harness_state": harness_state.as_deref().map(|state| if state == "needs-login" { "unauthenticated" } else { state }),
+                "end_reason": end_reason,
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
                 "_status_source": subject.harness,
@@ -4980,7 +5098,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
         let connection = store.readers.get();
         crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
             Ok(connection
-                .prepare_cached(crate::store::RANGE_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha0efb6efb83f owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
                 .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?)
         })
@@ -6081,15 +6199,17 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        if let Some(agent) = environment.split(|byte| *byte == 0).find_map(|entry| {
-            std::str::from_utf8(entry)
-                .ok()?
-                .strip_prefix("ST_AGENT=")
-                .filter(|value| value.starts_with("agent/"))
-                .map(str::to_owned)
-        }) {
-            return Some(agent);
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        });
+        // A masked/conflicting child identity must not inherit an ancestor's authority.
+        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
+            return st_drivers::contracts::env_with("ST_AGENT", &lookup)
+                .filter(|value| value.starts_with("agent/"));
         }
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         pid = stat
             .rsplit_once(") ")?
@@ -6139,11 +6259,14 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    let agent = env.iter().find_map(|entry| {
-        entry
-            .strip_prefix("ST_AGENT=agent/")
-            .map(|suffix| format!("agent/{suffix}"))
-    })?;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    let agent = st_drivers::contracts::env_with("ST_AGENT", &|name| {
+        env.iter().find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        })
+    }).filter(|agent| agent.starts_with("agent/"))?;
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     Some(NativeDeliveryPeer {
         agent,
         transport,

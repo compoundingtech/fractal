@@ -193,7 +193,7 @@ async fn cold_open_uncontended_snapshot_costs() {
         for temperature in ["cold", "warm"] {
             let cpu = process_cpu_ms();
             let start = Instant::now();
-            let (snapshot, items, has_more) = match collection_items_with_windows(
+            let (snapshot, items, has_more, _) = match collection_items_with_windows(
                 &state, &session, &request, slots.clone().acquire_owned().await.unwrap(), windows.clone(),
             ).await {
                 Ok(read) => read,

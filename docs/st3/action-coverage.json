@@ -421,6 +421,16 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st actor-contract",
+      "description": "Print the generated CLI actor contract and optional effective instance paths",
+      "tests": [
+        "crates/st3/tests/actor_contract.rs::actor_contract_prints_without_daemon_or_config",
+        "crates/st3/tests/actor_contract.rs::actor_contract_effective_uses_real_config_resolution",
+        "crates/st3/tests/actor_contract.rs::actor_contract_effective_uses_selected_instance"
+      ],
+      "verification": "real CLI with a private home; no daemon; configured state directory and selected instance"
+    },
+    {
       "command": "st admission override",
       "description": "Explicitly allow an installed exact harness build with a recorded reason",
       "tests": [
@@ -1143,7 +1153,7 @@
       "description": "Whether the check run or commit status named CHECK passed on a commit or branch head",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_github_gates_pass_wait_and_refuse_over_private_http_across_restart",
-        "crates/st3-store/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
+        "crates/st3-github-base/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
       ],
       "verification": "real CLI with private HTTP fixture covers pass/wait/broken and obsolete refs across daemon restarts"
     },
@@ -1152,7 +1162,7 @@
       "description": "Whether a pull request has merged; one that closed unmerged cannot pass",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_github_gates_pass_wait_and_refuse_over_private_http_across_restart",
-        "crates/st3-store/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
+        "crates/st3-github-base/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
       ],
       "verification": "real CLI with private HTTP fixture covers pass/wait/broken and obsolete refs across daemon restarts"
     },

@@ -6,6 +6,36 @@
         "fleet"
       ],
       "enforce": false,
+      "sample_one_in": 5,
+      "inputs": [
+        ".cargo",
+        ".config/nextest.toml",
+        ".github",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "claude-channel",
+        "clients",
+        "components",
+        "crates",
+        "docs/st2",
+        "docs/st3",
+        "docs/vrs",
+        "evals",
+        "examples",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "nix",
+        "plugins",
+        "scripts",
+        "slo",
+        "src",
+        "templates",
+        "tests",
+        "vendor",
+        "wit"
+      ],
       "kinds": {
         "observed": {
           "command": [
@@ -129,7 +159,8 @@
             }
           }
         }
-      }
+      },
+      "require": "shadow"
     },
     "isolation-vm": {
       "trust_levels": [
@@ -232,7 +263,8 @@
             }
           }
         }
-      }
+      },
+      "require": "shadow"
     },
     "mail-redelivery-canaries": {
       "trust_levels": [

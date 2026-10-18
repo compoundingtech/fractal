@@ -15,6 +15,9 @@
         "flake.lock",
         "flake.nix",
         "scripts"
+      ],
+      "tree_inputs": [
+        "."
       ]
     },
     "typescript-client": {

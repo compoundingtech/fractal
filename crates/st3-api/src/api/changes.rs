@@ -1,4 +1,5 @@
 use super::*;
+use crate::GitChangesStore;
 use crate::changes::{service::Entry, view};
 
 #[derive(Default, Deserialize)]
@@ -253,7 +254,7 @@ mod tests {
         let state = crate::api::tests::state(root.path());
         configured(&state);
         for number in 1..=2 {
-            let mut revision = crate::store::git_changes::tests::revision();
+            let mut revision = crate::changes::index::tests::revision();
             revision.oid = format!("{number:040x}");
             revision.record.change_id = format!("I{number:040x}");
             state

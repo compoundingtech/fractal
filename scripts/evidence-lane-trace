@@ -12,7 +12,8 @@ it reads an `strace -f` log of one real run of the lane's command and reports
   uncovered_reads            repository files the run opened or stat'ed successfully that are in none of the three lists
   uncovered_absence_probes   repository paths the run looked for and did not find (ENOENT/ENOTDIR) that are in none of the three lists
 
-A path is covered by an entry equal to it or below a directory entry. Ancestor directories of a declared path are not reported,
+A path is covered by an entry equal to it or below a directory entry; a lane whose `tree_inputs` is `.` (its input is the whole tree) has
+nothing under the root left uncovered, and the trace then only shows how many paths were touched and whether any call could not be placed. Ancestor directories of a declared path are not reported,
 and neither is anything inside `node_modules` or `.git` (installed or object storage, not tree content); a MISSING `node_modules`
 directory is still reported, because a tracked file appearing under it would change module resolution. Relative paths are resolved
 with the process's working directory (tracked through chdir and clone, starting at --root) or with the directory an `strace -y`
@@ -140,6 +141,10 @@ def ignorable_read(path):
 def report(rules, opened, missing, unresolved):
     declared = list(rules['definition_paths']) + list(rules['tree_inputs'])
     absent = list(rules.get('absent_paths', ()))
+    if '.' in rules['tree_inputs']:
+        # A lane whose input is the whole tree (genie-freshness regenerates and checks every file): nothing under the root is uncovered.
+        return {'uncovered_reads': [], 'uncovered_absence_probes': [], 'unresolved_calls': unresolved,
+                'opened': len(opened), 'missing': len(missing), 'whole_tree_lane': True}
     reads = sorted(p for p in opened if not ignorable_read(p) and not any(under(p, e) for e in declared)
                    and not is_ancestor(p, declared + absent))
     probes = sorted(p for p in missing

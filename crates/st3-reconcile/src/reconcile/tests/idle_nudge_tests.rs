@@ -4,6 +4,8 @@
 //! request that leaves the merge queue without merging, and stays out, is nudged at once. The
 //! back-off allows one nudge per idle period and, except for an action, one every two hours.
 use super::*;
+use crate::IdleHoldsStore;
+use crate::WatchesStore;
 use serde_json::json;
 
 const MINUTE: u128 = 60_000;

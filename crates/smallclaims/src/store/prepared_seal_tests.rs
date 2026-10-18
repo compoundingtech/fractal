@@ -174,7 +174,7 @@ fn sealed_rows(connection: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>>
     ]
     .iter()
     .map(|sql| {
-        let mut statement = connection.prepare(sql).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hed3c5a7f3d2f owner=smallclaims::store::prepared_seal_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         let columns = statement.column_count();
         statement
             .query_map([], |row| {
@@ -374,7 +374,7 @@ fn a_named_blob_stored_or_dropped_after_preparation_is_sealed_as_the_store_holds
                 store
                     .connection
                     .write()
-                    .execute("DELETE FROM blobs WHERE hash=?1", [&named])
+                    .execute(/* sqlite-large-value: allow-for-now lv-h909faf4e26de owner=smallclaims::store::prepared_seal_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM blobs WHERE hash=?1", [&named])
                     .unwrap();
             }
         });
@@ -446,7 +446,7 @@ fn a_member_key_fleet_id_or_keyring_changed_after_preparation_is_signed_again() 
                     .connection
                     .write()
                     .execute(
-                        "UPDATE meta SET value=?1 WHERE key='fleet_id'",
+                        /* sqlite-large-value: allow-for-now lv-h3f5f5a18a499 owner=smallclaims::store::prepared_seal_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=?1 WHERE key='fleet_id'",
                         [OTHER_FLEET],
                     )
                     .unwrap();
@@ -509,7 +509,7 @@ fn a_claim_deleted_after_preparation_is_not_sealed() {
         store
             .connection
             .write()
-            .execute("DELETE FROM claims WHERE id=?1", [&id])
+            .execute(/* sqlite-large-value: allow-for-now lv-h172c21e2590a owner=smallclaims::store::prepared_seal_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&id])
             .unwrap();
     });
     assert_eq!(seal(&store), 1);
@@ -563,7 +563,7 @@ fn an_own_envelope_found_unsigned_under_the_writer_is_prepared_again() {
             .connection
             .write()
             .execute(
-                "DELETE FROM replica_envelope_signatures WHERE envelope_hash=(
+                /* sqlite-large-value: allow-for-now lv-h6e0a902d619e owner=smallclaims::store::prepared_seal_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures WHERE envelope_hash=(
                      SELECT envelope_hash FROM replica_envelopes WHERE batch_id=?1)",
                 [&batch_id],
             )
@@ -879,7 +879,7 @@ fn legacy_seed_replica_envelopes_signed_tx(
     } else {
         "origin, replica_sequence, id"
     };
-    let mut statement = transaction.prepare(&format!(
+    let mut statement = transaction.prepare(/* sqlite-large-value: allow-for-now lv-h70209d93e42e owner=smallclaims::store::prepared_seal_tests TODO=trace-statement-and-value-representation */ &format!(
         "SELECT id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms
          FROM batches
          WHERE batches.rowid>=?1 AND batches.rowid<=?2
@@ -922,7 +922,7 @@ fn legacy_seed_replica_envelopes_signed_tx(
         for claim in &claims {
             let existing = transaction
                 .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-                .query_row([&claim.id], |row| row.get::<_, String>(0))
+                .query_row(/* sqlite-large-value: allow-for-now lv-h021fd4a251f0 owner=smallclaims::store::prepared_seal_tests TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, String>(0))
                 .optional()?
                 .and_then(|text| serde_json::from_str(&text).ok());
             let signature = match (existing, sign) {
@@ -967,7 +967,7 @@ fn legacy_seed_replica_envelopes_signed_tx(
             &payload,
         );
         transaction.execute(
-            "INSERT OR IGNORE INTO replica_envelopes(
+            /* sqlite-large-value: allow-for-now lv-h5f86c08216d1 owner=smallclaims::store::prepared_seal_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelopes(
                  writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms,
                  payload, batch_id, relay, receipt_state, received_at_unix_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'validated', ?5)",
@@ -986,7 +986,7 @@ fn legacy_seed_replica_envelopes_signed_tx(
             let mut raw = Vec::new();
             ciborium::into_writer(claim, &mut raw)?;
             transaction.execute(
-                "INSERT OR IGNORE INTO replica_records(
+                /* sqlite-large-value: allow-for-now lv-h0e2123f88bc1 owner=smallclaims::store::prepared_seal_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_records(
                      record_ref, writer, sequence, envelope_hash, position, raw, state,
                      claim_id, subject_hint, kind_hint, updated_at_unix_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, ?10)",
@@ -1032,7 +1032,7 @@ fn legacy_sign_own_envelopes_range_tx(
     } else {
         "FROM replica_envelopes AS envelopes WHERE envelopes.writer=?1 AND envelopes.rowid>?2 AND envelopes.rowid<=?4"
     };
-    let mut statement = transaction.prepare(&format!(
+    let mut statement = transaction.prepare(/* sqlite-large-value: allow-for-now lv-hb319f67c5eca owner=smallclaims::store::prepared_seal_tests TODO=trace-statement-and-value-representation */ &format!(
         "SELECT envelopes.sequence, envelopes.envelope_hash {from}
            AND NOT EXISTS (
              SELECT 1 FROM replica_envelope_signatures AS signatures
@@ -1064,7 +1064,7 @@ fn legacy_sign_own_envelopes_range_tx(
             envelope_hash,
         ));
         transaction.execute(
-            "INSERT OR IGNORE INTO replica_envelope_signatures(
+            /* sqlite-large-value: allow-for-now lv-h96c572b6f271 owner=smallclaims::store::prepared_seal_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures(
                  writer, sequence, envelope_hash, member_key, signature, stored_at_unix_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![

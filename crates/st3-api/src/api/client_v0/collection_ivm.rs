@@ -1,6 +1,7 @@
 //! Current collection cursors. The source adapter owns complete keyed dependency coverage,
 //! authorized bounded ranking and row reads; this consumer owns delivery acknowledgment.
 //! Registration alone does not select a production adapter.
+use crate::EvidenceStore;
 use super::*;
 use crate::graph_watch_ivm::{IvmViewBridge, ViewPage};
 use smallclaims::ivm::{Readiness, events};
@@ -119,6 +120,7 @@ fn authorize(
     if request.status.is_some() && request.collection != "agents" {
         return Err(validation("status filters are supported for agents only"));
     }
+    validate_agent_selector(&request.collection, request.agent.as_deref())?;
     if request.subject.is_some() {
         return Err(validation(
             "subject filters are supported for arrangements only",

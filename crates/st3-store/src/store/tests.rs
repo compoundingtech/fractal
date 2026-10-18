@@ -1,41 +1,45 @@
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::tests_shared::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 
 mod resource_pending_receive_tests {
     use super::*;
-    include!("resource_pending_receive_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-hed41369d1c81 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("resource_pending_receive_tests.rs");
 }
 
 mod terminal_projection_date_tests {
     use super::*;
-    include!("terminal_projection_date_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h949cffd48521 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("terminal_projection_date_tests.rs");
 }
 
 mod mission_eval_reuse_tests {
-    include!("mission_eval_reuse_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h8994de728686 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("mission_eval_reuse_tests.rs");
 }
-
-const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
 mod run_capacity_tests {
     use super::*;
-    include!("run_capacity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-hfb5ea66dd861 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("run_capacity_tests.rs");
 }
 
 mod mission_deadline_probe {
     use super::*;
-    include!("mission_deadline_probe.rs");
+    /* sqlite-large-value: allow-for-now lv-hb9b74ac096d6 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("mission_deadline_probe.rs");
 }
 
 mod stopped_seat_declaration_controls {
     use super::*;
-    include!("stopped_seat_declaration_controls.rs");
+    /* sqlite-large-value: allow-for-now lv-h2157629ebcfc owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("stopped_seat_declaration_controls.rs");
 }
 
 mod mission_deadline_tests {
     use super::*;
-    include!("mission_deadline_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-hfe8367e5c51f owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("mission_deadline_tests.rs");
 }
 
 #[test]
@@ -244,6 +248,48 @@ fn a_covered_page_upgrade_reuses_the_pinned_roster_rows() {
     assert_eq!(store.agent_resources_builds_for_test(), 1);
 }
 
+/// An exact agent selector folds its own card: the complete roster at the same cut neither
+/// answers it nor loses its place in the roster cache to it.
+#[test]
+fn exact_agent_cards_neither_borrow_nor_evict_the_fleet_roster() {
+    let store = roster_cache_store();
+    let index = store.index().unwrap();
+    store
+        .cached_agent_resources(index, false, |_| Ok(vec![
+            json!({"id": "agent/node.amber", "name": "amber", "_fleet": true}),
+            json!({"id": "agent/node.cobalt", "name": "cobalt", "_fleet": true}),
+        ]))
+        .unwrap();
+    let fleet = store.agent_resources_cached_at(index, false, None).unwrap().unwrap();
+    assert!(store.exact_agent_resources_cached_at(index, false, "agent/node.amber").unwrap().is_none(),
+        "a fleet publication must not answer an exact agent read");
+    let card = |agent: &str| json!({"id": agent, "name": agent});
+    let amber = store
+        .cached_exact_agent_resources(index, false, "agent/node.amber", |changed| {
+            let (subjects, previous) = changed.expect("an exact read names its agent");
+            assert_eq!(subjects, &BTreeSet::from(["agent/node.amber".to_owned()]));
+            assert!(previous.is_empty(), "no fleet rows are borrowed as the delta source");
+            Ok(vec![card("agent/node.amber")])
+        })
+        .unwrap();
+    assert_eq!(amber, [card("agent/node.amber")]);
+    store
+        .cached_exact_agent_resources(index, false, "agent/node.amber", |changed| {
+            panic!("the exact card at this cut is already folded: {changed:?}")
+        })
+        .unwrap();
+    for n in 0..super::seats::EXACT_AGENT_RESOURCES_CACHE + 1 {
+        let agent = format!("agent/node.followed-{n}");
+        store.cached_exact_agent_resources(index, false, &agent, |_| Ok(vec![card(&agent)])).unwrap();
+    }
+    assert!(store.exact_agent_resources_cached_at(index, false, "agent/node.amber").unwrap().is_none(),
+        "the least recently folded agent leaves the exact cache first");
+    let still = store.agent_resources_cached_at(index, false, None).unwrap()
+        .expect("exact reads never evict the complete roster");
+    assert!(Arc::ptr_eq(&still, &fleet));
+    assert_eq!(store.agent_roster_valid_until(index, Some("agent/node.amber")), None);
+}
+
 /// The frontier answers an old cut exactly — its newest agent timeline row — from the
 /// partial frontier index, with VM work that newer heartbeats never grow; the pre-followup
 /// lookup read every newer local row of every kind. Focused fixture: run it explicitly and
@@ -270,24 +316,24 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         let connection = store.connection.lock().unwrap();
         let mut statement = connection
             .prepare(
-                "INSERT INTO local_observations(after_store_index, subject, kind, body,
+                /* sqlite-large-value: allow-for-now lv-he3e3f427761b owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_observations(after_store_index, subject, kind, body,
                                                         observed_at_unix_ms)
                      VALUES (?1, ?2, ?3, '{}', 1)",
             )
             .unwrap();
         for _ in 0..heartbeats {
             statement
-                .execute(params![later, "agent/node.amber", "harness.observed"])
+                .execute(/* sqlite-large-value: allow-for-now lv-h36fee7a13788 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ params![later, "agent/node.amber", "harness.observed"])
                 .unwrap();
         }
         for _ in 0..irrelevant {
             statement
-                .execute(params![later, "mission-run/x", "harness.timeline"])
+                .execute(/* sqlite-large-value: allow-for-now lv-ha82f7475e4c2 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ params![later, "mission-run/x", "harness.timeline"])
                 .unwrap();
         }
         for _ in 0..usage {
             statement
-                .execute(params![later, "agent/node.amber", "harness.timeline"])
+                .execute(/* sqlite-large-value: allow-for-now lv-hc62e3c2dcd31 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ params![later, "agent/node.amber", "harness.timeline"])
                 .unwrap();
         }
     };
@@ -297,7 +343,7 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         store
             .readers
             .get()
-            .query_row(ROSTER_LOCAL_FRONTIER, [at], |row| row.get::<_, u64>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-had7a8db3c499 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [at], |row| row.get::<_, u64>(0))
             .unwrap()
     };
     assert_eq!(
@@ -333,9 +379,9 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
              WHERE after_store_index<=?1 ORDER BY id DESC LIMIT 1), 0)";
     let vm_steps = |sql: &str, at: u64| {
         let connection = store.connection.lock().unwrap();
-        let _: u64 = connection.query_row(sql, [at], |row| row.get(0)).unwrap();
+        let _: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-h05c7c850894f owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql, [at], |row| row.get(0)).unwrap();
         let before = smallclaims::sqlite::work::total().vm_steps;
-        let _: u64 = connection.query_row(sql, [at], |row| row.get(0)).unwrap();
+        let _: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-h01540efb30a9 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql, [at], |row| row.get(0)).unwrap();
         drop(connection);
         smallclaims::sqlite::work::total().vm_steps - before
     };
@@ -400,37 +446,37 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
 
 mod mailbox_fence_tests {
     use super::*;
-    include!("mailbox_fence_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h8ae9713ac6e2 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("mailbox_fence_tests.rs");
 }
 
 mod canonical_audit {
     use super::*;
-    include!("canonical_audit.rs");
+    /* sqlite-large-value: allow-for-now lv-hf7d86e8c417e owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("canonical_audit.rs");
 }
 
 mod declarative_revision_timestamp_tests {
     use super::*;
-    include!("declarative_revision_timestamp_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h03d3404887a5 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("declarative_revision_timestamp_tests.rs");
 }
 
 mod actual_purity_tests {
     use super::*;
-    include!("actual_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h15874c268ef9 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("actual_purity_tests.rs");
 }
 
 mod activity_purity_tests {
     use super::*;
-    include!("activity_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h88bb05ebde34 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("activity_purity_tests.rs");
 }
 
 mod fault_history_tests {
     use super::*;
-    include!("fault_history_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h76d2fa6a021e owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("fault_history_tests.rs");
 }
 
 mod projection_divergence_tests {
     use super::*;
-    include!("projection_divergence_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-he73cbf11f1e7 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("projection_divergence_tests.rs");
 }
 
 #[test]
@@ -534,6 +580,46 @@ agent "test/worker" { command "true"; name "A" }
 }
 
 #[test]
+fn a_suspension_lineage_snapshot_ignores_a_predecessor_replicated_after_it() {
+    let left = Store::open_memory("left").unwrap();
+    let right = Store::open_memory("right").unwrap();
+    let reader = Store::open_memory("reader").unwrap();
+    let intent = parse_intent(r#"version 2
+agent "test/worker" { command "true"; name "A" }
+"#, "left").unwrap();
+    let preview = left.mission(&intent, IntentInput {
+        kdl: String::new(), source_name: None,
+    }).unwrap();
+    left.apply(&intent, &preview.subject_tokens, "a").unwrap();
+    let declared = left.selected_desired_token("agent/test/worker").unwrap().unwrap();
+    receive_and_project(&right, "left", &exchange_from(&left, &ReplicationInventory::default()));
+    // A relabel keeps the declared launch, so the declaration stays in its successor's lineage.
+    right.rename_agent("agent/test/worker", Some("B"), "b").unwrap();
+    let renamed = right.selected_desired_token("agent/test/worker").unwrap().unwrap();
+    assert_eq!(
+        right.suspension_lineage_at("agent/test/worker", None).unwrap(),
+        vec![renamed.clone(), declared.clone()]
+    );
+    // The reader receives the relabel before the declaration it succeeds.
+    receive_and_project(
+        &reader, "right", &exchange_from(&right, &left.replication_inventory().unwrap()),
+    );
+    assert!(reader.claim_by_id(&declared).unwrap().is_none());
+    let at = reader.index().unwrap();
+    receive_and_project(&reader, "left", &exchange_from(&left, &reader.replication_inventory().unwrap()));
+    assert!(reader.claim_by_id(&declared).unwrap().is_some());
+    assert_eq!(
+        reader.suspension_lineage_at("agent/test/worker", Some(at)).unwrap(),
+        vec![renamed.clone()],
+        "a snapshot walks only the ancestry it held"
+    );
+    assert_eq!(
+        reader.suspension_lineage_at("agent/test/worker", None).unwrap(),
+        vec![renamed, declared]
+    );
+}
+
+#[test]
 fn seat_rename_refuses_an_unreadable_member_and_an_empty_label() {
     let store = Store::open_memory("node").unwrap();
     let intent = parse_intent(r#"version 2
@@ -595,7 +681,7 @@ fn subject_claim_pages_seek_the_subject_index() {
     for descending in [false, true] {
         let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(true, descending));
         let plan = connection
-            .prepare(&query)
+            .prepare(/* sqlite-large-value: allow-for-now lv-h126c08dbc527 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &query)
             .unwrap()
             .query_map(params![0, None::<u64>, "agent/target", 2], |row| {
                 row.get::<_, String>(3)
@@ -833,7 +919,7 @@ fn recent_up_observation_prevents_a_transport_timeout_flap() {
         .lock()
         .unwrap()
         .execute(
-            "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h60d499c775d9 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
                  VALUES ('target', 'up', ?1, ?2)",
             params![
                 now_ms().saturating_sub(91_000).to_string(),
@@ -862,7 +948,7 @@ fn a_failed_attempt_after_a_missed_exchange_ends_up() {
             .lock()
             .unwrap()
             .execute(
-                "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h263ced410104 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
                      VALUES ('cobalt', 'up', ?1, ?1)",
                 [now_ms().saturating_sub(ago).to_string()],
             )
@@ -1015,16 +1101,16 @@ fn an_operation_drift_repair_rewrites_only_the_drifted_rows() {
         let connection = store.connection.lock().unwrap();
         connection
             .execute(
-                "UPDATE operations SET state='conflict' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h96e6b0a9b83a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id=?1",
                 [&ids[0]],
             )
             .unwrap();
         connection
-            .execute("DELETE FROM operations WHERE id=?1", [&ids[1]])
+            .execute(/* sqlite-large-value: allow-for-now lv-he9490a70c6d5 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1", [&ids[1]])
             .unwrap();
         connection
             .execute(
-                "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
+                /* sqlite-large-value: allow-for-now lv-h8da24dd0cc6b owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
                      SELECT 'op/invented-stray', 'digest', canonical_claim_id, 'active'
                      FROM operations WHERE id=?1",
                 [&ids[0]],
@@ -1061,7 +1147,7 @@ fn the_operation_audit_walks_the_partial_operation_index() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.readers.get();
     let plan = connection
-        .prepare(&format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-hc27ad51dbec3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             smallclaims::store::EXPECTED_OPERATIONS_QUERY
         ))
@@ -1229,7 +1315,7 @@ fn replication_projection_retries_missing_and_stale_health_only() {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+            /* sqlite-large-value: allow-for-now lv-h3306c8c5399e owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
             [],
         )
         .unwrap();
@@ -1354,7 +1440,7 @@ fn a_start_keeps_the_derived_tables_it_built_before() {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
+                /* sqlite-large-value: allow-for-now lv-h4065bb757df6 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
                      VALUES ('op/kept', 'digest', 'claim/kept', 'active')",
                 [],
             )
@@ -1379,7 +1465,7 @@ fn a_start_keeps_the_derived_tables_it_built_before() {
     {
         let connection = Connection::open(&path).unwrap();
         connection
-            .execute("DELETE FROM meta WHERE key='derived_tables_version'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-h7846da6598a0 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='derived_tables_version'", [])
             .unwrap();
     }
     let rebuilt = Store::open(&path, "node").unwrap();
@@ -1606,7 +1692,7 @@ fn a_failed_batched_write_undoes_only_itself() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let insert = |transaction: &Transaction<'_>, key: &str| {
         transaction
-            .execute("INSERT INTO meta(key, value) VALUES (?1, 'written')", [key])
+            .execute(/* sqlite-large-value: allow-for-now lv-h6ce132fffbac owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, 'written')", [key])
             .map(drop)
     };
     // Hold the writer so the three writes queue behind it and share the next batch.
@@ -1667,21 +1753,21 @@ fn a_batch_that_cannot_begin_answers_its_writes_with_the_error() {
         .execute_batch("PRAGMA busy_timeout = 50")
         .unwrap();
     let other = Connection::open(&path).unwrap();
-    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-h13af1f1d012b owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
     let refused = store.connection.batched(|transaction| {
         transaction.execute(
-            "INSERT INTO meta(key, value) VALUES ('refused', 'written')",
+            /* sqlite-large-value: allow-for-now lv-hc1714c15b629 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('refused', 'written')",
             [],
         )
     });
     let error = refused.expect_err("the batch could not begin");
     assert!(error.contains("locked"), "{error}");
-    other.execute_batch("ROLLBACK").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-he9d999cce7c3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     store
         .connection
         .batched(|transaction| {
             transaction.execute(
-                "INSERT INTO meta(key, value) VALUES ('after', 'written')",
+                /* sqlite-large-value: allow-for-now lv-hfa16b95d1493 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('after', 'written')",
                 [],
             )
         })
@@ -1751,14 +1837,14 @@ fn one_claim_that_cannot_be_projected_is_quarantined_while_the_rest_project() {
             .unwrap();
         connection
             .execute(
-                "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h2cb081887812 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
                 [&bad_claim],
             )
             .unwrap();
-        connection.execute("DELETE FROM desired", []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h4ba03eafe4ac owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired", []).unwrap();
         connection
             .execute(
-                "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                /* sqlite-large-value: allow-for-now lv-h72cdda070ad8 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                 [],
             )
             .unwrap();
@@ -1792,11 +1878,11 @@ fn one_claim_that_cannot_be_projected_is_quarantined_while_the_rest_project() {
     {
         let connection = store.connection.lock().unwrap();
         connection
-            .execute("DELETE FROM claims WHERE id=?1", [&bad_claim])
+            .execute(/* sqlite-large-value: allow-for-now lv-he867311b8f53 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&bad_claim])
             .unwrap();
         connection
             .execute(
-                "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                /* sqlite-large-value: allow-for-now lv-h51b120e40c28 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                 [],
             )
             .unwrap();
@@ -1861,7 +1947,7 @@ fn one_repair_that_cannot_be_applied_is_named_and_the_rest_apply() {
             .id;
             transaction
                 .execute(
-                    "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                    /* sqlite-large-value: allow-for-now lv-h16479799d47a owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
                             position, raw, state, claim_id, updated_at_unix_ms)
                          VALUES (?1, 'peer', 1, 'envelope', ?2, x'00', 'valid', ?3, '0')",
                     params![format!("record/{agent}"), position as i64, repaired],
@@ -1890,7 +1976,7 @@ fn one_repair_that_cannot_be_applied_is_named_and_the_rest_apply() {
         // The first replacement names a desired body that this build cannot read.
         transaction
             .execute(
-                "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h48e9fc925dd9 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
                 [&repairs[0].0],
             )
             .unwrap();
@@ -1944,7 +2030,7 @@ fn structural_replication_advances_from_healthy_frontier() {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE claims SET accepted_at_unix_ms='1' WHERE kind='harness.observed'",
+            /* sqlite-large-value: allow-for-now lv-h289a16d6b077 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1' WHERE kind='harness.observed'",
             [],
         )
         .unwrap();
@@ -1953,7 +2039,7 @@ fn structural_replication_advances_from_healthy_frontier() {
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(
-                "INSERT INTO blobs(hash, bytes, size) VALUES ('sha256:abc', x'01', 1)",
+                /* sqlite-large-value: allow-for-now lv-h961ee86638eb owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO blobs(hash, bytes, size) VALUES ('sha256:abc', x'01', 1)",
                 [],
             )
             .unwrap();
@@ -2192,7 +2278,7 @@ fn replay_progress_reports_work_without_advancing_an_uncommitted_frontier() {
         }
         transaction
             .execute(
-                "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                /* sqlite-large-value: allow-for-now lv-h945816a76218 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                 [],
             )
             .unwrap();
@@ -2277,7 +2363,7 @@ fn base_replay_batches_selected_bodies_and_preserves_event_and_quarantine_answer
         None,
     )
     .unwrap();
-    tx.execute("INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h3dc8f0dc78ef owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
             VALUES ('record/repaired','node',1,'test',0,X'','repaired',?1,'1')", [&repaired.id]).unwrap();
     for number in 0..1500 {
         append_claim_record_tx(
@@ -2306,7 +2392,7 @@ fn base_replay_batches_selected_bodies_and_preserves_event_and_quarantine_answer
         .unwrap();
     }
     // Numeric time and batch/position ties cross more than one decode page.
-    tx.execute("UPDATE claims SET accepted_at_unix_ms='1'", [])
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hae5dc73f4237 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1'", [])
         .unwrap();
     let expected = tx.prepare("SELECT claims.store_index, claims.subject FROM claims JOIN batches ON batches.id=claims.batch_id
             WHERE substr(claims.subject,1,6)<>'glass/' COLLATE BINARY
@@ -2364,7 +2450,7 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
     tx.execute_batch(
-        "CREATE TEMP TABLE heal_replay_base_order(
+        /* sqlite-large-value: allow-for-now lv-h4b07067ee642 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
             ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)",
     )
     .unwrap();
@@ -2384,12 +2470,12 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
             )
             .unwrap();
             tx.execute(
-                "INSERT INTO temp.heal_replay_base_order(claim_id) VALUES (?1)",
+                /* sqlite-large-value: allow-for-now lv-h99bda2940044 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.heal_replay_base_order(claim_id) VALUES (?1)",
                 [&claim.id],
             )
             .unwrap();
         }
-        let mut statement = tx.prepare(BASE_REPLAY_PAGE_SQL).unwrap();
+        let mut statement = tx.prepare(/* sqlite-large-value: allow-for-now lv-ha16694f64fdf owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ BASE_REPLAY_PAGE_SQL).unwrap();
         let page = statement
             .query_map(params![0, 256], claim_from_row)
             .unwrap()
@@ -2465,24 +2551,24 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
             )
             .unwrap();
             if reason == "operation-conflict" {
-                transaction.execute("INSERT INTO operations(id, request_digest, canonical_claim_id, state) VALUES ('op/replay-test', 'digest-b', ?1, 'active')", [&claim.id]).unwrap();
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hbefd6cbbda5a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state) VALUES ('op/replay-test', 'digest-b', ?1, 'active')", [&claim.id]).unwrap();
             }
             match reason {
                 "missing-health" => {
                     transaction
-                        .execute("DELETE FROM projection_health WHERE aggregate='graph'", [])
+                        .execute(/* sqlite-large-value: allow-for-now lv-h6564335f8184 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
                         .unwrap();
                 }
                 "unhealthy-projection" => {
                     transaction
                         .execute(
-                            "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                            /* sqlite-large-value: allow-for-now lv-he93a1a561cff owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                             [],
                         )
                         .unwrap();
                 }
                 "frontier-ahead" => {
-                    transaction.execute("UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", []).unwrap();
+                    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5de39b31b1db owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", []).unwrap();
                 }
                 _ => {}
             }
@@ -2699,39 +2785,6 @@ fn rewrite_envelope(
     }
 }
 
-pub fn receive_and_project(
-    target: &Store,
-    relay: &str,
-    exchange: &ReplicationExchange,
-) -> ReplicationAdmission {
-    target.bind_fleet(TEST_FLEET).expect("target fleet");
-    target
-        .receive_replication_exchange(relay, TEST_FLEET, exchange)
-        .expect("replication receipt");
-    let admission = target
-        .validate_replication_backlog()
-        .expect("replication admission");
-    target
-        .apply_replication_repairs()
-        .expect("replication repairs");
-    assert!(
-        target
-            .project_replication_backlog()
-            .expect("replication projection")
-    );
-    admission
-}
-
-pub fn exchange_from(
-    source: &Store,
-    remote: &ReplicationInventory,
-) -> ReplicationExchange {
-    source.bind_fleet(TEST_FLEET).expect("source fleet");
-    source
-        .export_replication_exchange(TEST_FLEET, remote)
-        .expect("replication exchange")
-}
-
 fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, incarnation: &str) {
     super::expire_work_lease_by_claim(store, subject, actor, incarnation);
 }
@@ -2883,7 +2936,7 @@ mission "summary-child" state="ready" {
         .connection
         .write()
         .execute(
-            "UPDATE step_runs SET status='working', lease_owner='agent/tree/worker',
+            /* sqlite-large-value: allow-for-now lv-h257eddfb2d10 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='working', lease_owner='agent/tree/worker',
                  lease_incarnation='expired', lease_expires_at_unix_ms='0' WHERE subject=?1",
             [work],
         )
@@ -3087,7 +3140,7 @@ mission "page-root" state="ready" {
         let generation = format!("page-generation-{index:03}");
         connection
             .execute(
-                "INSERT INTO mission_runs
+                /* sqlite-large-value: allow-for-now lv-h7d8f601b618a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
                      SELECT ?1,mission_id,initial_revision,?2,root_revision,
                             root_run_id,parent_step_run,workspace,requester,inputs,mode,status,
                             phase,created_at_unix_ms,updated_at_unix_ms
@@ -3097,7 +3150,7 @@ mission "page-root" state="ready" {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO run_generations
+                /* sqlite-large-value: allow-for-now lv-h8c765176a427 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations
                      SELECT ?1,?2,revision,NULL,status,actor,reason,
                             created_at_unix_ms,updated_at_unix_ms
                      FROM run_generations
@@ -3111,7 +3164,7 @@ mission "page-root" state="ready" {
         .connection
         .write()
         .execute(
-            "INSERT INTO mission_runs
+            /* sqlite-large-value: allow-for-now lv-h2606e3d440df owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
                  SELECT 'page-other',mission_id,initial_revision,current_generation_id,
                         root_revision,'another-root',parent_step_run,workspace,requester,inputs,
                         mode,status,phase,created_at_unix_ms,updated_at_unix_ms
@@ -3142,10 +3195,10 @@ mission "page-root" state="ready" {
     );
     let connection = store.connection.write();
     connection
-        .execute("DELETE FROM run_generations WHERE run_id=?1", [&cursor])
+        .execute(/* sqlite-large-value: allow-for-now lv-hbdb46cb14fa8 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE run_id=?1", [&cursor])
         .unwrap();
     connection
-        .execute("DELETE FROM mission_runs WHERE id=?1", [&cursor])
+        .execute(/* sqlite-large-value: allow-for-now lv-h4661413a8932 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [&cursor])
         .unwrap();
     drop(connection);
     assert!(store
@@ -3236,7 +3289,7 @@ mission "clock-automatic" state="ready" {
             .connection
             .write()
             .execute(
-                "UPDATE mission_runs SET created_at_unix_ms='1' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h2099696c4ef7 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='1' WHERE id=?1",
                 [&excluded.id],
             )
             .unwrap();
@@ -3269,7 +3322,7 @@ mission "clock-automatic" state="ready" {
             .connection
             .write()
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h47aa3615b0ff owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
                 params![claim.id, at],
             )
             .unwrap();
@@ -3320,7 +3373,7 @@ mission "clock-automatic" state="ready" {
         .connection
         .write()
         .execute(
-            "UPDATE step_runs SET generation_id=?2 WHERE run_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h6a7a732c3792 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET generation_id=?2 WHERE run_id=?1",
             params![child.id, generation_id_from_subject(&parent.generation)],
         )
         .unwrap();
@@ -3342,13 +3395,13 @@ mission "clock-automatic" state="ready" {
     store
         .connection
         .write()
-        .execute("DELETE FROM step_runs WHERE run_id=?1", [&empty.id])
+        .execute(/* sqlite-large-value: allow-for-now lv-h23b488ee82c6 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE run_id=?1", [&empty.id])
         .unwrap();
     store
         .connection
         .write()
         .execute(
-            "UPDATE mission_runs SET created_at_unix_ms='50' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h0afaa18fd5da owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='50' WHERE id=?1",
             [&empty.id],
         )
         .unwrap();
@@ -3369,7 +3422,7 @@ fn first_readiness_order_prioritizes_current_pending_generations_then_newest() {
     // Fixed timestamps prove both the priority class and numeric newest-first ordering.
     for (run, at) in [(&first, "9"), (&second, "10"), (&third, "11")] {
         store.connection.write().execute(
-            "UPDATE mission_runs SET created_at_unix_ms=?1 WHERE id=?2",
+            /* sqlite-large-value: allow-for-now lv-hdb8e3d8253ef owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms=?1 WHERE id=?2",
             params![at, run.id],
         ).unwrap();
     }
@@ -3380,7 +3433,7 @@ fn first_readiness_order_prioritizes_current_pending_generations_then_newest() {
     assert_eq!(store.active_mission_run_ids_for_origin("node").unwrap(),
         [first.id.clone(), third.id.clone(), second.id.clone()]);
     // The order is deterministic even when two creations share the same millisecond.
-    store.connection.write().execute("UPDATE mission_runs SET created_at_unix_ms='12'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h18ef51090608 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='12'", []).unwrap();
     let ids = store.active_mission_run_ids_for_origin("node").unwrap();
     assert_eq!(ids[0], first.id);
     assert!(ids[1] > ids[2]);
@@ -3484,13 +3537,13 @@ mission "terminal-replay" state="ready" {
     let transaction = connection.transaction().unwrap();
     transaction
         .execute(
-            "UPDATE step_runs SET status='cancelled', blocked_reason='the root mission run is terminal' WHERE generation_id=?1 AND step_path='provisional'",
+            /* sqlite-large-value: allow-for-now lv-h7dd2fdc1f098 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled', blocked_reason='the root mission run is terminal' WHERE generation_id=?1 AND step_path='provisional'",
             [generation],
         )
         .unwrap();
     transaction
         .execute(
-            "UPDATE step_runs SET status='completed', blocked_reason='preserved completion' WHERE generation_id=?1 AND step_path='finished'",
+            /* sqlite-large-value: allow-for-now lv-h31599339f0cf owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='completed', blocked_reason='preserved completion' WHERE generation_id=?1 AND step_path='finished'",
             [generation],
         )
         .unwrap();
@@ -3872,7 +3925,7 @@ observer "fenced/file" {
             let counts = || {
                 let connection = store.readers.get();
                 ["claims", "batches", "operations", "idempotency"].map(|table| {
-                    connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap()
+                    connection.query_row(/* sqlite-large-value: allow-for-now lv-hbc62cd2e2f4a owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap()
                 })
             };
             let before_counts = counts();
@@ -4824,7 +4877,7 @@ fn query_plan(store: &Store, sql: &str, params: impl rusqlite::Params) -> Vec<St
     store
         .readers
         .get()
-        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .prepare(/* sqlite-large-value: allow-for-now lv-h78e4e2ff4615 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
         .unwrap()
         .query_map(params, |row| row.get::<_, String>(3))
         .unwrap()
@@ -4836,7 +4889,7 @@ fn listed(store: &Store, sql: &str, params: impl rusqlite::Params) -> Vec<String
     store
         .readers
         .get()
-        .prepare(sql)
+        .prepare(/* sqlite-large-value: allow-for-now lv-h08c12985c774 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql)
         .unwrap()
         .query_map(params, |row| row.get::<_, String>(0))
         .unwrap()
@@ -4854,7 +4907,7 @@ fn insert_raw_claims(store: &Store, claims: &[(&str, &str)]) -> u64 {
     for (subject, kind) in claims {
         connection
             .execute(
-                "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
+                /* sqlite-large-value: allow-for-now lv-h599a6558e6b4 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
                                         predecessors, accepted_at_unix_ms)
                      VALUES (?1, 'batch/raw', ?2, ?3, 'node', NULL, '{}', '[]', '1')",
                 params![Uuid::now_v7().to_string(), subject, kind],
@@ -4890,7 +4943,7 @@ fn replication_frontier_checks_seek_instead_of_scanning() {
         ] {
             connection
                 .execute(
-                    "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
+                    /* sqlite-large-value: allow-for-now lv-hdb6715fb0757 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
                                             predecessors, accepted_at_unix_ms)
                          VALUES (?1, ?2, ?3, 'harness.observed', 'node', NULL, '{}', '[]', ?4)",
                     params![Uuid::now_v7().to_string(), batch, subject, accepted],
@@ -4914,7 +4967,7 @@ fn replication_frontier_checks_seek_instead_of_scanning() {
         store
             .readers
             .get()
-            .query_row(sql, params, |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hf0ae3a5451ee owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql, params, |row| row.get(0))
             .unwrap()
     };
     for &snapshot in &snapshots {
@@ -5537,7 +5590,7 @@ fn harness_reports_neither_select_nor_hide_a_runtime_observation() {
     // The selecting reads seek past the harness reports instead of reading them.
     let connection = left.readers.get();
     let plan = connection
-        .prepare(&format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h6c14e54c6ca3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN SELECT claims.id FROM claims
                  INDEXED BY claims_subject_kind_index
                  JOIN batches ON batches.id=claims.batch_id
@@ -5850,7 +5903,7 @@ fn an_internal_apply_restores_a_repaired_desired_claim() {
         let connection = store.connection.lock().expect("store mutex");
         connection
             .execute(
-                "INSERT INTO replica_records(
+                /* sqlite-large-value: allow-for-now lv-h64b6be95750e owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                          record_ref, writer, sequence, envelope_hash, position, raw, state,
                          claim_id, subject_hint, kind_hint, updated_at_unix_ms
                      ) VALUES (?1, 'node', 1, 'test-envelope', 0, X'', 'repaired',
@@ -5859,7 +5912,7 @@ fn an_internal_apply_restores_a_repaired_desired_claim() {
             )
             .unwrap();
         connection
-            .execute("DELETE FROM desired WHERE subject='exec/work'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-h5bba8f1dca4f owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='exec/work'", [])
             .unwrap();
     }
 
@@ -7342,7 +7395,7 @@ fn work_nudged_operations_are_incremental_in_opposite_arrival_and_batch_orders()
             let mut view = follower.step_run(&step).unwrap().unwrap();
             enrich_step_nudge_at(&connection, &mut view, latest).unwrap();
             assert_eq!(view.nudged_at_unix_ms, Some(latest));
-            assert_eq!(follower.latest_nudge(&step).unwrap().unwrap().accepted_at_unix_ms, latest);
+            assert_eq!(follower.latest_claim(&step, Some(WORK_NUDGED_KIND)).unwrap().unwrap().accepted_at_unix_ms, latest);
             let rows = nudges.iter().map(|claim| {
                 let (operation, _) = operation_parts(&claim.body).expect("durable operation");
                 let signed: bool = connection.query_row(
@@ -7398,12 +7451,12 @@ fn work_nudged_incremental_guards_and_rollback_preserve_the_committed_frontier()
             WORK_NUDGED_KIND, Some("daemon/runtime"), &body, &[], None).unwrap();
         if refusal == "operation-conflict" {
             transaction.execute(
-                "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+                /* sqlite-large-value: allow-for-now lv-h9cd4eb1f24fa owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
                      VALUES ('op/nudge-guard','digest-b',?1,'active')", [&claim.id],
             ).unwrap();
         }
         if refusal == "unhealthy-projection" {
-            transaction.execute("UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h97353fe93386 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
         }
         let result = try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index).unwrap();
         match result {
@@ -7747,12 +7800,12 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
         projection_digest::register(&connection).unwrap();
         // A pre-fix full replay left the last claim's state rather than the extension's.
         connection.execute_batch(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
+            /* sqlite-large-value: allow-for-now lv-hc13fa731e002 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
                  INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version','2');",
         ).unwrap();
         connection
             .execute(
-                "UPDATE step_runs SET blocked_reason=?2, lease_expires_at_unix_ms=?3,
+                /* sqlite-large-value: allow-for-now lv-hfbeefb5b57db owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=?2, lease_expires_at_unix_ms=?3,
                     updated_at_unix_ms=?4 WHERE subject=?1",
                 params![
                     step,
@@ -7766,14 +7819,14 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
             .unwrap();
         connection
             .execute(
-                "DELETE FROM meta WHERE key='work_extended_projection_rules'",
+                /* sqlite-large-value: allow-for-now lv-h3ceaaa1a3d3a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
                 [],
             )
             .unwrap();
         // A full-store/operations rebuild would remove this unrelated derived row.
         connection
             .execute(
-                "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+                /* sqlite-large-value: allow-for-now lv-hb9795078c98b owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
                  SELECT 'op/unrelated-upgrade','digest',id,'active' FROM claims
                  WHERE kind='work.extended' LIMIT 1",
                 [],
@@ -7819,7 +7872,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     upgraded
         .connection
         .write()
-        .execute("DELETE FROM operations WHERE id='op/unrelated-upgrade'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-he7ab756501c2 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id='op/unrelated-upgrade'", [])
         .unwrap();
     assert_eq!(corrected, graph_digest_of(&upgraded));
     drop(upgraded);
@@ -7915,14 +7968,14 @@ fn work_extensions_upgrade_and_adopt_a_v5_certificate_without_changing_its_terms
         let connection = Connection::open(&path).unwrap();
         projection_digest::register(&connection).unwrap();
         connection.execute_batch(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
+            /* sqlite-large-value: allow-for-now lv-h7af6f53beb56 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
                  INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version','2');",
         ).unwrap();
-        connection.execute("UPDATE step_runs SET blocked_reason=?2, updated_at_unix_ms=?3 WHERE subject=?1",
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h64becbefe715 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=?2, updated_at_unix_ms=?3 WHERE subject=?1",
             params![step, previous.blocked_reason, previous.updated_at_unix_ms.to_string()]).unwrap();
         connection
             .execute(
-                "DELETE FROM meta WHERE key='work_extended_projection_rules'",
+                /* sqlite-large-value: allow-for-now lv-h5989c27b3c86 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
                 [],
             )
             .unwrap();
@@ -8048,7 +8101,7 @@ fn work_extensions_waiting_for_run_creation_survive_upgrade_and_later_projection
         .connection
         .write()
         .execute(
-            "DELETE FROM meta WHERE key='work_extended_projection_rules'",
+            /* sqlite-large-value: allow-for-now lv-h4385701448f9 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
             [],
         )
         .unwrap();
@@ -8072,7 +8125,7 @@ fn work_extensions_waiting_for_run_creation_survive_upgrade_and_later_projection
         .connection
         .write()
         .execute(
-            "DELETE FROM meta WHERE key='canonical_shared_projection_rules'",
+            /* sqlite-large-value: allow-for-now lv-h1a8b08c1e377 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='canonical_shared_projection_rules'",
             [],
         )
         .unwrap();
@@ -9561,7 +9614,7 @@ version 2
         let mut connection = target.connection.lock().unwrap();
         connection
             .execute(
-                "UPDATE step_runs SET status='cancelled', blocked_reason='the owning run generation was superseded'
+                /* sqlite-large-value: allow-for-now lv-h1678a48ecb1f owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled', blocked_reason='the owning run generation was superseded'
                      WHERE subject=?1",
                 [format!("step-run/{}/waiting", revised.generation)],
             )
@@ -10063,13 +10116,13 @@ fn an_unknown_field_is_retryable_and_an_old_schema_rejection_is_readmitted() {
         let connection = target.connection.lock().unwrap();
         connection
             .execute(
-                "UPDATE replica_envelopes SET receipt_state='degraded'\n                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                /* sqlite-large-value: allow-for-now lv-h0676b72a5ee8 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='degraded'\n                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                 params![envelope.writer, envelope.sequence, envelope.hash],
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO replica_records(\n                         record_ref, writer, sequence, envelope_hash, position, raw, state,\n                         claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms\n                     ) VALUES (?1, ?2, ?3, ?4, 0, X'', 'invalid', ?5, ?6, ?7,\n                               'invalid-replicated-claim', ?8, '1')",
+                /* sqlite-large-value: allow-for-now lv-h3d909ebf1e9d owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(\n                         record_ref, writer, sequence, envelope_hash, position, raw, state,\n                         claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms\n                     ) VALUES (?1, ?2, ?3, ?4, 0, X'', 'invalid', ?5, ?6, ?7,\n                               'invalid-replicated-claim', ?8, '1')",
                 params![
                     record_ref,
                     envelope.writer,
@@ -10659,7 +10712,7 @@ fn misproject_a_step(store: &Store) {
     let connection = store.connection.lock().unwrap();
     connection
         .execute(
-            "UPDATE step_runs SET attempt=attempt+1
+            /* sqlite-large-value: allow-for-now lv-h34c98944d187 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET attempt=attempt+1
                  WHERE subject=(SELECT subject FROM step_runs ORDER BY subject LIMIT 1)",
             [],
         )
@@ -10776,7 +10829,7 @@ fn the_same_envelopes_projecting_different_graphs_diverge() {
         let connection = right.connection.lock().unwrap();
         connection
             .execute_batch(
-                "CREATE TEMP TABLE dropped_claims AS
+                /* sqlite-large-value: allow-for-now lv-h217c0f2d917b owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE dropped_claims AS
                          SELECT * FROM claims WHERE subject='exec/work' AND kind='intent.desired';
                      CREATE TEMP TABLE dropped_desired AS
                          SELECT * FROM desired WHERE subject='exec/work';
@@ -10849,7 +10902,7 @@ fn the_same_envelopes_projecting_different_graphs_diverge() {
         let connection = right.connection.lock().unwrap();
         connection
             .execute_batch(
-                "PRAGMA foreign_keys=OFF;
+                /* sqlite-large-value: allow-for-now lv-ha93989c28941 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "PRAGMA foreign_keys=OFF;
                      INSERT INTO claims SELECT * FROM dropped_claims;
                      INSERT INTO desired SELECT * FROM dropped_desired;
                      PRAGMA foreign_keys=ON;",
@@ -11053,7 +11106,7 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
             .unwrap();
         connection
             .execute(
-                "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
+                /* sqlite-large-value: allow-for-now lv-hb96969b599f0 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
                 [&record_ref],
             )
             .unwrap();
@@ -11078,7 +11131,7 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
         .connection
         .lock()
         .unwrap()
-        .execute("DELETE FROM claims WHERE id=?1", [&repaired_claim])
+        .execute(/* sqlite-large-value: allow-for-now lv-h4136493746ff owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&repaired_claim])
         .unwrap();
 
     receive_and_project(
@@ -11157,7 +11210,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(
-                "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+                /* sqlite-large-value: allow-for-now lv-hd9e63039afea owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
                 [&original.id],
             )
             .unwrap();
@@ -11177,7 +11230,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .lock()
         .unwrap()
         .execute(
-            "UPDATE replica_records SET state='unknown' WHERE record_ref=?1",
+            /* sqlite-large-value: allow-for-now lv-heab6005459f6 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='unknown' WHERE record_ref=?1",
             [&record.record_ref],
         )
         .unwrap();
@@ -11194,7 +11247,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .connection
         .lock()
         .unwrap()
-        .execute("DELETE FROM claims WHERE id=?1", [&original.id])
+        .execute(/* sqlite-large-value: allow-for-now lv-hdb3ac7d008da owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&original.id])
         .unwrap();
     receive_and_project(
         &source,
@@ -11234,7 +11287,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .lock()
         .unwrap()
         .execute(
-            "DELETE FROM replica_records WHERE claim_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h51c5c2433d0d owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1",
             [&original.id],
         )
         .unwrap();
@@ -11253,7 +11306,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .lock()
         .unwrap()
         .execute(
-            "UPDATE meta SET value='old-registry' WHERE key='projection_digest_registry'",
+            /* sqlite-large-value: allow-for-now lv-hedd402041dba owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='old-registry' WHERE key='projection_digest_registry'",
             [],
         )
         .unwrap();
@@ -11805,7 +11858,7 @@ fn the_message_index_follows_the_message_claims() {
         let connection = store.readers.get();
         let rows = |sql: &str| {
             connection
-                .prepare(sql)
+                .prepare(/* sqlite-large-value: allow-for-now lv-h64d2cdb4129e owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql)
                 .unwrap()
                 .query_map([], |row| {
                     Ok((
@@ -11843,7 +11896,7 @@ fn the_message_index_follows_the_message_claims() {
         .connection
         .write()
         .execute_batch(
-            "PRAGMA foreign_keys = OFF;
+            /* sqlite-large-value: allow-for-now lv-h17981ff3ed00 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "PRAGMA foreign_keys = OFF;
                  DELETE FROM claims WHERE subject='message/index-0' AND kind='message.closed';
                  PRAGMA foreign_keys = ON;",
         )
@@ -11856,7 +11909,7 @@ fn the_message_index_follows_the_message_claims() {
         let connection = store.connection.write();
         connection
             .execute_batch(
-                "DELETE FROM message_index; DELETE FROM meta WHERE key='message_index';",
+                /* sqlite-large-value: allow-for-now lv-h38fc79858ea7 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM message_index; DELETE FROM meta WHERE key='message_index';",
             )
             .unwrap();
         backfill_message_index(&connection).unwrap();
@@ -12113,7 +12166,7 @@ proptest! {
                 if *flavor == 1 {
                     // Legacy imported sends store their fields at the body root.
                     store.connection.lock().unwrap().execute(
-                        "UPDATE claims SET body=json_extract(body,'$.fields')
+                        /* sqlite-large-value: allow-for-now lv-h54935775c2df owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_extract(body,'$.fields')
                          WHERE subject=?1 AND kind='message.sent'",
                         [&resource],
                     ).unwrap();
@@ -12432,7 +12485,7 @@ fn an_old_nonempty_database_is_rejected() {
     let path = directory.path().join("state.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection
-        .execute("CREATE TABLE desired(subject TEXT PRIMARY KEY)", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h68c176f65ea6 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE desired(subject TEXT PRIMARY KEY)", [])
         .unwrap();
     drop(connection);
 
@@ -12448,7 +12501,7 @@ fn schema_version_nine_requires_fresh_state_for_version_ten() {
     let path = directory.path().join("state.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection
-        .execute("CREATE TABLE marker(value TEXT)", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h5b16d750e988 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE marker(value TEXT)", [])
         .unwrap();
     connection.pragma_update(None, "user_version", 9).unwrap();
     drop(connection);
@@ -12467,7 +12520,7 @@ fn schema_version_ten_upgrades_additively_for_mission_deadlines() {
 
     let connection = Connection::open(&path).unwrap();
     connection
-        .execute("DROP TABLE mission_run_deadlines", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h81648c5b13e6 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE mission_run_deadlines", [])
         .unwrap();
     connection.pragma_update(None, "user_version", 10).unwrap();
     drop(connection);
@@ -12499,7 +12552,7 @@ fn schema_version_eleven_removes_writer_sequence_and_pending_proposal_indexes() 
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "PRAGMA foreign_keys=ON;
+            /* sqlite-large-value: allow-for-now lv-h2f997c205d1a owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "PRAGMA foreign_keys=ON;
                  CREATE TABLE batches (
                    id TEXT PRIMARY KEY,
                    origin TEXT NOT NULL,
@@ -12530,13 +12583,13 @@ fn schema_version_eleven_removes_writer_sequence_and_pending_proposal_indexes() 
     let connection = store.connection.lock().unwrap();
     connection
         .execute(
-            "INSERT INTO batches VALUES ('a','writer',1,NULL,'a','1')",
+            /* sqlite-large-value: allow-for-now lv-hb4e8163c2582 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('a','writer',1,NULL,'a','1')",
             [],
         )
         .unwrap();
     connection
         .execute(
-            "INSERT INTO batches VALUES ('b','writer',1,NULL,'b','1')",
+            /* sqlite-large-value: allow-for-now lv-h833e4cf7889a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('b','writer',1,NULL,'b','1')",
             [],
         )
         .unwrap();
@@ -12564,7 +12617,7 @@ fn schema_version_twelve_adds_durable_planner_configuration() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TRIGGER projection_digest_planning_sessions_insert;
+            /* sqlite-large-value: allow-for-now lv-h5b88ec40de88 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER projection_digest_planning_sessions_insert;
                  DROP TRIGGER projection_digest_planning_sessions_update;
                  DROP TRIGGER projection_digest_planning_sessions_delete;
                  ALTER TABLE planning_sessions DROP COLUMN planner_spec_json;
@@ -12639,11 +12692,11 @@ fn latest_predecessor_seeks_the_newest_time_block_and_preserves_ties() {
         ("late-arrival-old-time", "99", "z", 10, "older-time"),
     ] {
         transaction.execute(
-            "INSERT OR IGNORE INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h981bc13c6046 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,?2,?3,?1,?4)", params![batch, writer, sequence, time],
         ).unwrap();
         transaction.execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hd8ebabeb163b owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?2,'daemon/alder','daemon.diagnostic',?3,'{}','[]',?4)",
             params![id, batch, writer, time],
         ).unwrap();
@@ -12658,7 +12711,7 @@ fn latest_predecessor_seeks_the_newest_time_block_and_preserves_ties() {
         None
     );
     let plan = transaction
-        .prepare(&format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-he085b180d19a owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             canonical_sql(LATEST_CLAIM_QUERY)
         ))
@@ -12683,7 +12736,7 @@ fn claims_of_one_kind_use_the_subject_kind_index() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.connection.lock().unwrap();
     let mut statement = connection
-        .prepare(&format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h0e5990005935 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             claims_for_subject_query(true)
         ))
@@ -12754,13 +12807,13 @@ fn mailbox_state_read_preserves_ended_diagnostic_work_and_legacy_semantics() {
         let time = sequence.to_string();
         transaction
             .execute(
-                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h37cb8eaadcfc owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'alder',?2,?1,?3)",
                 params![id, sequence, time],
             )
             .unwrap();
         transaction.execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h0b96ef00afed owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?1,?2,?3,'alder',?2,?4,'[]',?5)",
             params![id, subject, kind, json!({"fields": fields}).to_string(), time],
         ).unwrap();
@@ -12831,26 +12884,26 @@ fn subscription_run_lookup_cost_does_not_grow_with_unrelated_deliveries() {
         let id = format!("started-{n}");
         transaction
             .execute(
-                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h6390d0aa7f17 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'orchid',1,?1,'1')",
                 [&id],
             )
             .unwrap();
         transaction.execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hbc993a2e7ffc owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?1,'subscription/reviews','subscription.mission-started','orchid',?2,'[]','1')",
             params![id, json!({"fields":{"mission_run":format!("mission-run/{n}")}}).to_string()],
         ).unwrap();
         if n == 100 || n == 10_000 {
             transaction
-                .prepare_cached(SUBSCRIPTION_STARTED_RUN_QUERY)
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6eaf2eccafb8 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)
                 .unwrap()
                 .reset_status(rusqlite::StatementStatus::VmStep);
             assert!(subscription_started_run_tx(&transaction, "mission-run/1").unwrap());
             assert!(!subscription_started_run_tx(&transaction, "mission-run/authored").unwrap());
             costs.push(
                 transaction
-                    .prepare_cached(SUBSCRIPTION_STARTED_RUN_QUERY)
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-he9b8021ff819 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)
                     .unwrap()
                     .get_status(rusqlite::StatementStatus::VmStep),
             );
@@ -12870,13 +12923,13 @@ fn mailbox_fence_cost_does_not_grow_with_sparse_prior_incarnations() {
     let insert = |id: &str, kind: &str, fields: Value, time: &str| {
         transaction
             .execute(
-                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hcd62c5db7381 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'alder',1,?1,?2)",
                 params![id, time],
             )
             .unwrap();
         transaction.execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h2620a3c27ccc owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?1,'agent/example',?2,'alder',?3,'[]',?4)",
             params![id, kind, json!({"fields": fields}).to_string(), time],
         ).unwrap();
@@ -12915,7 +12968,7 @@ fn mailbox_fence_cost_does_not_grow_with_sparse_prior_incarnations() {
         if n == 100 || n == 10_000 {
             for query in &queries {
                 transaction
-                    .prepare_cached(query)
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1f8d1f33efad owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ query)
                     .unwrap()
                     .reset_status(rusqlite::StatementStatus::VmStep);
             }
@@ -12924,7 +12977,7 @@ fn mailbox_fence_cost_does_not_grow_with_sparse_prior_incarnations() {
                 .iter()
                 .map(|query| {
                     transaction
-                        .prepare_cached(query)
+                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf54233f5085d owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ query)
                         .unwrap()
                         .get_status(rusqlite::StatementStatus::VmStep)
                 })
@@ -12981,7 +13034,7 @@ fn every_foreign_key_column_leads_an_index() {
     let mut unindexed = Vec::new();
     for table in tables {
         let references = connection
-            .prepare(&format!("PRAGMA foreign_key_list(\"{table}\")"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h0bd36c9cdea3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA foreign_key_list(\"{table}\")"))
             .unwrap()
             .query_map([], |row| {
                 Ok((
@@ -12994,7 +13047,7 @@ fn every_foreign_key_column_leads_an_index() {
             .unwrap();
         for (column, parent) in references {
             let leading = connection
-                .prepare(&format!("PRAGMA index_list(\"{table}\")"))
+                .prepare(/* sqlite-large-value: allow-for-now lv-ha70ebb27e260 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA index_list(\"{table}\")"))
                 .unwrap()
                 .query_map([], |row| row.get::<_, String>("name"))
                 .unwrap()
@@ -13004,7 +13057,7 @@ fn every_foreign_key_column_leads_an_index() {
                 .any(|index| {
                     connection
                         .query_row(
-                            &format!(
+                            /* sqlite-large-value: allow-for-now lv-h526b92ae6c85 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
                                 "SELECT name FROM pragma_index_info('{index}') WHERE seqno=0"
                             ),
                             [],
@@ -13046,9 +13099,9 @@ fn claude_attachment_lookup_cost_ignores_hook_runtime_and_predecessor_history() 
     append("harness.diagnostic", "current", "claude-channel-unattached", "attach");
     let work = || {
         let connection = store.connection.lock().unwrap();
-        let mut statement = connection.prepare(&claude_attachment_query()).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4d407f31171e owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &claude_attachment_query()).unwrap();
         let claim: String = statement.query_row(
-            params!["agent/grove/cedar", i64::MAX, "current"], |row| row.get(0),
+            /* sqlite-large-value: allow-for-now lv-h1cb3fc7e4dd1 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ params!["agent/grove/cedar", i64::MAX, "current"], |row| row.get(0),
         ).unwrap();
         (claim, statement.get_status(rusqlite::StatementStatus::VmStep))
     };
@@ -13075,7 +13128,7 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     let transaction = connection.transaction().unwrap();
     transaction
         .execute(
-            "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hdb57c260f187 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
              VALUES ('legacy-batch','legacy-seek',1,'synthetic','1')",
             [],
         )
@@ -13094,7 +13147,7 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     for (position, body) in bodies.iter().enumerate() {
         let index = position + 1;
         transaction.execute(
-            "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h230f6896a26c owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES (?1,?2,'legacy-batch','agent/legacy-seek','harness.observed','legacy-seek',?3,'[]',?4)",
             params![index as i64,format!("legacy-{index}"),body.to_string(),index.to_string()],
         ).unwrap();
@@ -13102,7 +13155,7 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     transaction.commit().unwrap();
     let read = |sql: &str, cut: i64, since: &str| {
         connection
-            .prepare(sql)
+            .prepare(/* sqlite-large-value: allow-for-now lv-hc0271e91f987 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql)
             .unwrap()
             .query_map(params!["agent/legacy-seek", cut, since], |row| {
                 row.get::<_, String>(0)
@@ -13134,10 +13187,10 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     }
     // The partial index also follows updates/deletes; repaired observation bodies cannot
     // leave a stale legacy candidate, and becoming unnamed must make a new candidate.
-    connection.execute("UPDATE claims SET body=json_set(body,'$.fields.incarnation_id','current') WHERE id='legacy-3'",[]).unwrap();
-    connection.execute("UPDATE claims SET body=json_remove(body,'$.fields.incarnation_id') WHERE id='legacy-5'",[]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h41964a9fed94 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.incarnation_id','current') WHERE id='legacy-3'",[]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h58de0e6f17fa owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.incarnation_id') WHERE id='legacy-5'",[]).unwrap();
     connection
-        .execute("DELETE FROM claims WHERE id='legacy-2'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h3144d3a60b63 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id='legacy-2'", [])
         .unwrap();
     assert_eq!(
         read(&query, 9, "1"),
@@ -13154,31 +13207,31 @@ fn unnamed_harness_seek_cost_ignores_named_heartbeat_growth() {
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(
-                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hfefc175b060d owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                 VALUES ('cost-batch','legacy-cost',1,'synthetic','1')",
                 [],
             )
             .unwrap();
         for index in 1..=named {
             let body = json!({"fields":{"incarnation_id":"current","state":"idle","status_transition":false}});
-            transaction.execute("INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h3df0efeb573d owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                     VALUES (?1,?2,'cost-batch','agent/legacy-cost','harness.observed','legacy-cost',?3,'[]',?4)",
                 params![index as i64,format!("named-{index}"),body.to_string(),index.to_string()]).unwrap();
         }
-        transaction.execute("INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h83edf8c86440 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                 VALUES (100000,'legacy-tail','cost-batch','agent/legacy-cost','harness.observed','legacy-cost',?1,'[]','100000')",[json!({"fields":{"state":"idle"}}).to_string()]).unwrap();
         // Native claims have a recorded canonical position. Without it, the unchanged
         // legacy-position fallback counts this synthetic batch's preceding rows, a
         // separate ordering cost from selecting unnamed candidates.
         transaction.execute(
-            "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h54f4dd5078e1 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
                  VALUES ('cost-record','legacy-cost',1,'synthetic',0,X'', 'valid','legacy-tail','1')",
             [],
         ).unwrap();
         transaction.commit().unwrap();
         let query = harness_observations_without_incarnation_query();
         let plans = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-he1e3ac7dd6f6 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap()
             .query_map(params!["agent/legacy-cost", 100000, "1"], |row| {
                 row.get::<_, String>(3)
@@ -13193,7 +13246,7 @@ fn unnamed_harness_seek_cost_ignores_named_heartbeat_growth() {
             "{plans:?}"
         );
         let work = |sql: &str| {
-            let mut statement = connection.prepare(sql).unwrap();
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h85c226ca76d0 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
             let ids = statement
                 .query_map(params!["agent/legacy-cost", 100000, "1"], |row| {
                     row.get::<_, String>(0)
@@ -13230,7 +13283,7 @@ fn person_reads_seek_what_they_show() {
     let connection = store.connection.lock().unwrap();
     let plan = |sql: &str| {
         let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-he1bde7361cf7 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap();
         let parameters = vec!["agent/example"; statement.parameter_count()];
         statement
@@ -13327,7 +13380,7 @@ fn the_incarnation_index_reads_a_claim_as_a_view_does() {
             .map(str::to_owned);
         let indexed = connection
             .query_row(
-                &format!("SELECT {INCARNATION_OF_CLAIM} FROM (SELECT ?1 AS body)"),
+                /* sqlite-large-value: allow-for-now lv-h6319f38b7077 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("SELECT {INCARNATION_OF_CLAIM} FROM (SELECT ?1 AS body)"),
                 [body.to_string()],
                 |row| row.get::<_, rusqlite::types::Value>(0),
             )
@@ -13396,7 +13449,7 @@ fn a_runtime_claim_span_is_its_first_and_last_claim() {
         // Acceptance times out of store order, as claims replicated from a peer arrive.
         transaction
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=CAST(1000 + (store_index * 37) % 97 AS TEXT)
+                /* sqlite-large-value: allow-for-now lv-hb5c501270fb7 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(1000 + (store_index * 37) % 97 AS TEXT)
                      WHERE subject=?1",
                 [subject],
             )
@@ -13507,7 +13560,7 @@ fn owned_subject_queries_look_owners_up_by_primary_key() {
         ("retired owned intake", RETIRED_OWNED_INTAKE_SUBJECTS),
     ] {
         let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h93a1a09005fb owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap();
         let plan = statement
             .query_map([], |row| row.get::<_, String>(3))
@@ -13536,7 +13589,7 @@ fn replication_inventory_uses_the_batch_indexes() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.connection.lock().unwrap();
     let plan = |query: &str| {
-        let mut statement = connection.prepare(query).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hccb8de258f25 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ query).unwrap();
         statement
             .query_map([], |row| row.get::<_, String>(3))
             .unwrap()
@@ -13704,12 +13757,12 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
     let generation =
         |store: &Store| graph_generation(&store.connection.lock().unwrap()).unwrap();
     let execute = |store: &Store, sql: &str| {
-        store.connection.lock().unwrap().execute(sql, []).unwrap();
+        store.connection.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h113d0353a75c owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
     };
     let before = generation(&store);
     execute(
         &store,
-        "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id,
+        /* sqlite-large-value: allow-for-now lv-h5d0fcc50fba9 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id,
                  root_revision, root_run_id, workspace, requester, inputs, mode, status, phase,
                  created_at_unix_ms, updated_at_unix_ms)
              VALUES ('run-example', 'mission/example', 'revision', 'generation', 'revision',
@@ -13719,7 +13772,7 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
     assert_eq!(generation(&store), before + 1);
     execute(
         &store,
-        "UPDATE mission_runs SET updated_at_unix_ms='2' WHERE id='run-example'",
+        /* sqlite-large-value: allow-for-now lv-h1015c661ef45 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='2' WHERE id='run-example'",
     );
     assert_eq!(
         generation(&store),
@@ -13728,12 +13781,12 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
     );
     execute(
         &store,
-        "UPDATE mission_runs SET status='running' WHERE id='run-example'",
+        /* sqlite-large-value: allow-for-now lv-h2d0d08793eb5 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running' WHERE id='run-example'",
     );
     assert_eq!(generation(&store), before + 1);
     execute(
         &store,
-        "UPDATE mission_runs SET status='completed' WHERE id='run-example'",
+        /* sqlite-large-value: allow-for-now lv-h8665a676a4bd owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='completed' WHERE id='run-example'",
     );
     assert_eq!(generation(&store), before + 2);
 
@@ -13745,7 +13798,7 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
         third.graph_digest,
         graph_digest(&store.connection.lock().unwrap()).unwrap()
     );
-    execute(&store, "DELETE FROM mission_runs WHERE id='run-example'");
+    execute(&store, /* sqlite-large-value: allow-for-now lv-hbd60cca4b3fb owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='run-example'");
     assert_eq!(generation(&store), before + 3);
 }
 
@@ -13794,7 +13847,7 @@ fn operation_projection_drift_is_detected_and_repaired() {
         .connection
         .lock()
         .unwrap()
-        .execute("UPDATE operations SET state='conflict'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h2a1b2de2fdff owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict'", [])
         .unwrap();
     assert_eq!(store.operation_projection_drift().unwrap().len(), 1);
     drop(store);
@@ -13957,6 +14010,10 @@ version 2
         .unwrap()
         .remove("agent/node.worker")
         .unwrap();
+    let selected = store.agent_work_queues_for(Some("agent/node.worker")).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected["agent/node.worker"], queue);
+    assert!(store.agent_work_queues_for(Some("agent/absent")).unwrap().is_empty());
     assert_eq!(queue.active_work_count, 0);
     assert_eq!(queue.queued_work_count, 2);
     assert_eq!(
@@ -14073,6 +14130,7 @@ version 2
         .unwrap()
         .remove("agent/node.worker")
         .unwrap();
+    assert_eq!(store.agent_work_queues_for(Some("agent/node.worker")).unwrap()["agent/node.worker"], queue);
     assert_eq!(queue.current_work_ids, [subject.clone()]);
     assert_eq!(queue.active_work_count, 1);
     assert_eq!(queue.next_work_id.as_deref(), Some(other.as_str()));
@@ -14094,7 +14152,7 @@ version 2
         .lock()
         .unwrap()
         .execute(
-            "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h85dbea771cb2 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
             [subject],
         )
         .unwrap();
@@ -14103,6 +14161,7 @@ version 2
         .unwrap()
         .remove("agent/node.worker")
         .unwrap();
+    assert_eq!(store.agent_work_queues_for(Some("agent/node.worker")).unwrap()["agent/node.worker"], queue);
     assert!(queue.current_work_ids.is_empty());
     assert_eq!(queue.active_work_count, 0);
     assert_eq!(queue.queued_work_count, 2);
@@ -14919,7 +14978,7 @@ fn terminal_roots_reap_nested_orphans_idempotently_across_restart_and_replicatio
         .lock()
         .unwrap()
         .execute_batch(&format!(
-            "UPDATE mission_runs SET status='running', phase='normal' WHERE id='{}';
+            /* sqlite-large-value: allow-for-now lv-hf8978b4bc9a1 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running', phase='normal' WHERE id='{}';
                  UPDATE run_generations SET status='running' WHERE id='{}';
                  UPDATE step_runs SET status='ready', blocked_reason=NULL WHERE subject='{}';",
             child.id,
@@ -15260,7 +15319,7 @@ mission "cancelled-final-repair" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-had4721dfc601 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
             [&run.id],
         )
         .unwrap();
@@ -15333,7 +15392,7 @@ mission "dispatch-repair" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hc20f32ab6492 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
             [&run.id],
         )
         .unwrap();
@@ -15557,7 +15616,7 @@ mission "nested-work" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-hc7bfbd4c4c7f owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
             [&parent.subject],
         )
         .unwrap();
@@ -15824,7 +15883,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
             assert_eq!(
                 connection
                     .execute(
-                        "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                        /* sqlite-large-value: allow-for-now lv-h6ce0557ed4b3 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                         params![time, claim.id],
                     )
                     .unwrap(),
@@ -15836,7 +15895,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     let connection = store.readers.get();
     let oracle = |cut| {
         let mut statement = connection
-            .prepare(&format!(
+            .prepare(/* sqlite-large-value: allow-for-now lv-h63bcf4d0c567 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT json_extract(claims.body, '$.fields.state'), claims.accepted_at_unix_ms
                  FROM claims JOIN batches ON batches.id=claims.batch_id
                  WHERE claims.subject=?1 AND claims.kind='harness.observed'
@@ -15879,7 +15938,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
         let writer = store.connection.write();
         writer
             .execute(
-                "UPDATE claims SET body=json_remove(body,'$.fields.state') WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h163e8e70d9ef owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.state') WHERE id=?1",
                 [&ids[5].id],
             )
             .unwrap();
@@ -15894,7 +15953,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
         let writer = store.connection.write();
         writer
             .execute(
-                "UPDATE claims SET body=json_extract(body,'$.fields') WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h2d347eab4ebe owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_extract(body,'$.fields') WHERE id=?1",
                 [&ids[3].id],
             )
             .unwrap();
@@ -15917,7 +15976,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     assert!(!connection.is_autocommit());
     connection
         .execute_batch(
-            "ROLLBACK; PRAGMA query_only=OFF; DROP INDEX claims_incarnation_accepted_index",
+            /* sqlite-large-value: allow-for-now lv-h3c81cb37eed2 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "ROLLBACK; PRAGMA query_only=OFF; DROP INDEX claims_incarnation_accepted_index",
         )
         .unwrap();
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
@@ -15928,7 +15987,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch("ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h2c3050ef14de owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
         .unwrap();
 }
 
@@ -15941,7 +16000,7 @@ fn working_episode_reverse_seek_ignores_completed_history_growth() {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         tx.execute(
-            "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-he14a17ec6878 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                 VALUES ('episode-batch','episode-growth',1,'synthetic','1')",
             [],
         )
@@ -15956,14 +16015,14 @@ fn working_episode_reverse_seek_ignores_completed_history_growth() {
             };
             let body =
                 json!({"fields":{"state":state,"driver":"codex","incarnation_id":"inc-1"}});
-            tx.execute("INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h3b50eb99285d owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                     VALUES (?1,?2,'episode-batch','agent/episode-growth','harness.observed','episode-growth',?3,'[]',?4)",
                 params![index, format!("synthetic-episode-{index}"), body.to_string(), if tied_tail && index==100003 {"100001".to_owned()} else {index.to_string()}]).unwrap();
         }
         tx.commit().unwrap();
         let query = working_episode_query();
         let plans = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h21d1114d12b4 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap()
             .query_map(params!["agent/episode-growth", "inc-1", 100003], |row| {
                 row.get::<_, String>(3)
@@ -16154,7 +16213,7 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
         })
         .unwrap();
     local.connection.lock().unwrap().execute(
-        "INSERT INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
+        /* sqlite-large-value: allow-for-now lv-h6d74bf92cd98 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
              VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', 'step-run/example/record')",
         params![subject, seed.id],
     ).unwrap();
@@ -16526,7 +16585,7 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
     let seed = observed("working", "spend-seed");
     let own_step = |step: &str| {
         local.connection.lock().unwrap().execute(
-            "INSERT OR REPLACE INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
+            /* sqlite-large-value: allow-for-now lv-hfcf2cbd2a8b5 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
                  VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', ?3)",
             params![subject, seed.id, step],
         ).unwrap();
@@ -16638,7 +16697,7 @@ fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .unwrap();
         connection.execute(
-            "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt,
+            /* sqlite-large-value: allow-for-now lv-h8a7c856d0f10 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt,
                     goals, lease_owner, lease_incarnation, lease_expires_at_unix_ms, activated_at_unix_ms,
                     created_at_unix_ms, updated_at_unix_ms)
                  VALUES ('step-run/example/build', 'example', 'example', 'build', 'hash', 'working', 1,
@@ -16681,7 +16740,7 @@ fn counted_responses_are_remembered_for_a_bounded_horizon() {
             .lock()
             .unwrap()
             .execute_batch(
-                "CREATE TABLE local_usage_seen (subject TEXT NOT NULL, source_id TEXT NOT NULL,
+                /* sqlite-large-value: allow-for-now lv-hd429d251ffb5 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE local_usage_seen (subject TEXT NOT NULL, source_id TEXT NOT NULL,
                         PRIMARY KEY(subject, source_id));
                      INSERT INTO local_usage_seen VALUES ('agent/example.worker', 'counted-before');",
             )
@@ -16852,7 +16911,7 @@ fn trimming_local_observations_keeps_the_newest_of_each_subject_and_kind() {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE local_observations SET observed_at_unix_ms=1000 WHERE id <= 12",
+            /* sqlite-large-value: allow-for-now lv-h9c77dc6f9aa2 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_observations SET observed_at_unix_ms=1000 WHERE id <= 12",
             [],
         )
         .unwrap();
@@ -16903,7 +16962,7 @@ fn local_observation_floor_seeks_the_claim_frontier() {
         let connection = store.connection.write();
         connection
             .execute_batch(
-                "INSERT INTO local_observations(id,after_store_index,subject,kind,body,observed_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h435f8a769cbf owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_observations(id,after_store_index,subject,kind,body,observed_at_unix_ms)
                      VALUES(3,10,'agent/node.a','harness.timeline','{}',1),
                            (7,30,'agent/node.a','harness.timeline','{}',1),
                            (12,20,'agent/node.a','harness.timeline','{}',1);
@@ -16921,7 +16980,7 @@ fn local_observation_floor_seeks_the_claim_frontier() {
     assert_eq!(store.local_observation_floor_after_claim(31).unwrap(), 12);
     let connection = store.readers.get();
     let plan = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {LOCAL_OBSERVATION_FLOOR_QUERY}"))
+        .prepare(/* sqlite-large-value: allow-for-now lv-h1070917c4a15 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {LOCAL_OBSERVATION_FLOOR_QUERY}"))
         .unwrap()
         .query_map([30], |row| row.get::<_, String>(3))
         .unwrap()
@@ -17002,7 +17061,7 @@ fn a_planning_rebuild_leaves_the_operations_alone() {
         .connection
         .lock()
         .unwrap()
-        .execute("DELETE FROM operations", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h9c33bdb4e237 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations", [])
         .unwrap();
     // A planning write rebuilds the planning tables only: it must not re-derive operations
     // (241,000 rows, 19 s on a real store).
@@ -17565,21 +17624,21 @@ fn retention_event_tail_work_is_bounded_during_and_after_migration() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,kind TEXT,body TEXT);
+            /* sqlite-large-value: allow-for-now lv-hdcb2f76d0aef owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,kind TEXT,body TEXT);
              CREATE TABLE event_positions(store_index INTEGER PRIMARY KEY,subject TEXT);
              CREATE TABLE local_event_payloads(store_index INTEGER PRIMARY KEY,subject TEXT);",
         )
         .unwrap();
     for count in [1_000, 10_000, 100_000] {
         connection.execute_batch(&format!(
-            "DELETE FROM claims; DELETE FROM event_positions; DELETE FROM local_event_payloads;
+            /* sqlite-large-value: allow-for-now lv-h8d65d6f51756 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims; DELETE FROM event_positions; DELETE FROM local_event_payloads;
                  WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<{count})
                  INSERT INTO claims SELECT n,'custom.test.recorded','{{}}' FROM numbers;
                  INSERT INTO event_positions SELECT store_index,'custom/test/tail' FROM claims WHERE store_index%2=0;
                  INSERT INTO local_event_payloads SELECT store_index,'custom/test/tail' FROM claims WHERE store_index%2=1;"
         )).unwrap();
         for migrating in [true, false] {
-            let mut statement = connection.prepare(event_tail_sql(migrating)).unwrap();
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha53ea38b4654 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ event_tail_sql(migrating)).unwrap();
             let indices = statement
                 .query_map([3], |row| row.get::<_, u64>(0))
                 .unwrap()
@@ -17632,7 +17691,7 @@ fn retention_event_publication_bodies_match_the_old_payload_contract() {
         // the old insert_event, independently of the new join's payload results.
         connection
             .execute_batch(
-                "DROP VIEW events; DROP TABLE event_positions;
+                /* sqlite-large-value: allow-for-now lv-hd103e891ff4b owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "DROP VIEW events; DROP TABLE event_positions;
                  CREATE TABLE events (
                      store_index INTEGER PRIMARY KEY, kind TEXT NOT NULL,
                      subject TEXT NOT NULL, body TEXT NOT NULL
@@ -17661,7 +17720,7 @@ fn retention_event_publication_bodies_match_the_old_payload_contract() {
             // This is schema-16 insert_event's INSERT and canonicalization, rather than
             // an INSERT SELECT from claims or the new view.
             connection.execute(
-                "INSERT OR IGNORE INTO events(store_index, kind, subject, body) VALUES (?1, ?2, ?3, ?4)",
+                /* sqlite-large-value: allow-for-now lv-hbb59f2659dc7 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO events(store_index, kind, subject, body) VALUES (?1, ?2, ?3, ?4)",
                 params![event.store_index, kind, subject, canonical_json_text(&old_body).unwrap()],
             ).unwrap();
         }
@@ -17754,14 +17813,14 @@ fn retention_expired_step_retry_refuses_before_any_second_effect() {
         .connection
         .write()
         .execute(
-            "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-h9c76084ef382 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("expired-retry")],
         )
         .unwrap();
     store
         .connection
         .write()
-        .execute("UPDATE idempotency SET expires_at_unix_ms=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h19ea8214040b owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
         .unwrap();
     assert_eq!(store.cleanup_idempotency(0).unwrap().deleted, 1);
     let before = store.index().unwrap();
@@ -17796,14 +17855,14 @@ fn retention_expired_quiet_renewal_cannot_extend_a_released_lease() {
         .connection
         .write()
         .execute(
-            "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-hbb7ce2d13486 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("expired-quiet-renew")],
         )
         .unwrap();
     worker
         .connection
         .write()
-        .execute("UPDATE idempotency SET expires_at_unix_ms=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h0c986f52f2a3 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
         .unwrap();
     assert_eq!(worker.cleanup_idempotency(0).unwrap().deleted, 1);
     let before = worker.index().unwrap();
@@ -17878,14 +17937,14 @@ resource "receipt/file" {
         .connection
         .write()
         .execute(
-            "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-he3316abde725 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("expired-compound")],
         )
         .unwrap();
     store
         .connection
         .write()
-        .execute("UPDATE idempotency SET expires_at_unix_ms=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h4c912ca7921f owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
         .unwrap();
     assert_eq!(store.cleanup_idempotency(0).unwrap().deleted, 1);
     let before = store.index().unwrap();
@@ -17928,7 +17987,7 @@ fn retention_retry_response_failure_rolls_back_the_transition() {
         .connection
         .write()
         .execute_batch(
-            "CREATE TRIGGER retention_receipt_failure BEFORE INSERT ON idempotency
+            /* sqlite-large-value: allow-for-now lv-hf84d3b5dc040 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_receipt_failure BEFORE INSERT ON idempotency
              BEGIN SELECT RAISE(ABORT,'injected lost receipt'); END;",
         )
         .unwrap();
@@ -17946,7 +18005,7 @@ fn retention_retry_response_failure_rolls_back_the_transition() {
     store
         .connection
         .write()
-        .execute_batch("DROP TRIGGER retention_receipt_failure")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h709b339c211c owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_receipt_failure")
         .unwrap();
     let result = store
         .retry_failed_step(&subject, "person/operator", "retry", "retention-retry")
@@ -18014,7 +18073,7 @@ fn retention_retry_survives_restart_and_active_generation_expiry() {
         .connection
         .write()
         .execute(
-            "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-h167b49b47264 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("retention-retry")],
         )
         .unwrap();
@@ -18022,7 +18081,7 @@ fn retention_retry_survives_restart_and_active_generation_expiry() {
         .connection
         .write()
         .execute(
-            "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h704ce0586e14 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
             [opaque_cache_key("retention-retry")],
         )
         .unwrap();
@@ -18051,7 +18110,7 @@ fn retention_active_response_shapes_remain_pinned_until_the_run_finishes() {
     store
         .connection
         .write()
-        .execute("DELETE FROM idempotency", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hc7f113a31e14 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency", [])
         .unwrap();
     let responses = [
         serde_json::to_value(&run).unwrap(),
@@ -18070,7 +18129,7 @@ fn retention_active_response_shapes_remain_pinned_until_the_run_finishes() {
             .connection
             .write()
             .execute(
-                "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
+                /* sqlite-large-value: allow-for-now lv-h784dd41e8510 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
                 [opaque_cache_key(key)],
             )
             .unwrap();
@@ -18095,7 +18154,7 @@ fn retention_active_response_shapes_remain_pinned_until_the_run_finishes() {
             .connection
             .write()
             .execute(
-                "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
+                /* sqlite-large-value: allow-for-now lv-hcec9828a79c4 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
                 [opaque_cache_key(key)],
             )
             .unwrap();
@@ -18194,7 +18253,7 @@ fn a_failed_mission_stays_in_the_current_view_for_a_day() {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hf2686c72cdbd owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
             params![failed.id, old.to_string()],
         )
         .unwrap();
@@ -19904,7 +19963,7 @@ fn revise_notes_inheritance_uses_the_cutover_snapshot() {
             .connection
             .write()
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h46c2f7cf6e62 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
                 params![claim.id, at],
             )
             .unwrap();
@@ -20048,7 +20107,7 @@ fn revise_notes_replicated_carries_choose_the_newest_link_and_stop_at_cycles() {
             .connection
             .write()
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-hd70ff2b0bea6 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
                 params![claim.id, at],
             )
             .unwrap();
@@ -24624,13 +24683,13 @@ fn batched_usage_preserves_canonical_ties_and_snapshot_bound() {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         tx.execute(
-            "UPDATE claims SET accepted_at_unix_ms=CAST(1000000-(store_index/8) AS TEXT)
+            /* sqlite-large-value: allow-for-now lv-h38e5404f5b9c owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(1000000-(store_index/8) AS TEXT)
                         WHERE kind='harness.usage'",
             [],
         )
         .unwrap();
         tx.execute(
-            "UPDATE batches SET replica_sequence=10000-(SELECT MIN(store_index)
+            /* sqlite-large-value: allow-for-now lv-h2d3929793db7 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=10000-(SELECT MIN(store_index)
                         FROM claims WHERE claims.batch_id=batches.id)",
             [],
         )
@@ -24664,7 +24723,7 @@ fn batched_usage_preserves_canonical_ties_and_snapshot_bound() {
 fn claim_id_order_fixture(connection: &Connection) {
     connection
         .execute_batch(
-            "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+            /* sqlite-large-value: allow-for-now lv-hc45e0ac27d05 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
@@ -24692,7 +24751,7 @@ fn full_canonical_claim_id_oracle(
     at: Option<u64>,
 ) -> Vec<String> {
     connection
-        .prepare(&canonical_sql(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h5d9fae9238d9 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id FROM claims WHERE subject=?1 AND store_index<=?2
              ORDER BY CANONICAL_ASC(claims)",
         ))
@@ -24740,7 +24799,7 @@ fn claim_ids_stream_preserves_full_order_historical_bounds_and_transaction_owner
     assert!(connection.is_autocommit());
     let tx = connection.transaction().unwrap();
     tx.execute(
-        "UPDATE replica_records SET position=0 WHERE claim_id='record-a'",
+        /* sqlite-large-value: allow-for-now lv-hbaed1abecc21 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET position=0 WHERE claim_id='record-a'",
         [],
     )
     .unwrap();
@@ -24766,10 +24825,10 @@ fn claim_ids_stream_preserves_full_order_historical_bounds_and_transaction_owner
         "the caller retains its read transaction"
     );
     connection
-        .execute_batch("ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h7992437fc712 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
         .unwrap();
     connection
-        .execute_batch("DROP TABLE replica_records")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h51c4f2ae44c4 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "DROP TABLE replica_records")
         .unwrap();
     assert!(claim_ids_at(&connection, "agent/target", None).is_err());
     assert!(
@@ -24792,7 +24851,7 @@ fn claim_ids_stream_preserves_full_order_historical_bounds_and_transaction_owner
         "a failed read must not close its caller"
     );
     connection
-        .execute_batch("ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h4a6553cd617b owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
         .unwrap();
 }
 
@@ -24808,7 +24867,7 @@ fn claim_ids_stream_pins_tie_lookups_across_a_wal_writer_and_unwind() {
         let writer = Connection::open(&path).unwrap();
         writer
             .execute_batch(
-                "BEGIN IMMEDIATE;
+                /* sqlite-large-value: allow-for-now lv-h8e103cfef115 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "BEGIN IMMEDIATE;
                  UPDATE replica_records SET position=0 WHERE claim_id='record-a';
                  UPDATE replica_records SET position=99 WHERE claim_id='record-b';
                  COMMIT;",
@@ -24894,7 +24953,7 @@ fn claim_ids_stream_keeps_real_store_status_claims_at_current_and_historical_cut
 /// canonical tie groups appear everywhere, including across the session-dating window.
 fn seeded_claim_summary_fixture(connection: &Connection, seed: u64, count: usize) {
     let mut create = String::from(
-        "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-h80261e6af604 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
@@ -24903,7 +24962,7 @@ fn seeded_claim_summary_fixture(connection: &Connection, seed: u64, count: usize
     );
     for writer in 0..3 {
         create.push_str(&format!(
-            "INSERT INTO batches VALUES ('batch-{writer}','writer-{writer}',{writer});"
+            /* sqlite-large-value: allow-for-now lv-h86e77c25b990 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('batch-{writer}','writer-{writer}',{writer});"
         ));
     }
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -24921,21 +24980,21 @@ fn seeded_claim_summary_fixture(connection: &Connection, seed: u64, count: usize
         let time = times[(next() % times.len() as u64) as usize];
         let batch = format!("batch-{}", next() % 3);
         create.push_str(&format!(
-            "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');",
+            /* sqlite-large-value: allow-for-now lv-h2a7bd82793e5 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');",
             index + 1
         ));
         if next() % 2 == 0 {
             create.push_str(&format!(
-                "INSERT INTO replica_records VALUES ('claim-{index:06}',{});",
+                /* sqlite-large-value: allow-for-now lv-h2c313e2e70e7 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records VALUES ('claim-{index:06}',{});",
                 next() % 7
             ));
         }
     }
     // Claims of other subjects must never leak into the subject's answers.
     create.push_str(
-        "INSERT INTO claims VALUES ('elsewhere','agent/other','runtime.observed','batch-0',0,'10');",
+        /* sqlite-large-value: allow-for-now lv-hf80b5973d7f5 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES ('elsewhere','agent/other','runtime.observed','batch-0',0,'10');",
     );
-    connection.execute_batch(&create).unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h60f949466464 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &create).unwrap();
 }
 
 #[test]
@@ -24994,7 +25053,7 @@ fn claims_summary_resolves_the_real_session_window_inside_a_crossing_tie() {
     // The window edge lands inside a wide tie group: only canonical ordering decides the
     // boundary, exactly what the full vector resolves claim by claim.
     let mut fixture = String::from(
-        "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-h9c91a827b749 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
@@ -25012,13 +25071,13 @@ fn claims_summary_resolves_the_real_session_window_inside_a_crossing_tie() {
             ("340282366920938463463374607431768211455", "a")
         };
         fixture.push_str(&format!(
-            "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');
+            /* sqlite-large-value: allow-for-now lv-h6ef397d07d61 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');
                  INSERT INTO replica_records VALUES ('claim-{index:06}',{});",
             index + 1,
             (index % 5) as u64
         ));
     }
-    connection.execute_batch(&fixture).unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fdf6f51b9e6 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &fixture).unwrap();
     let full = full_canonical_claim_id_oracle(&connection, "agent/target", None);
     assert_eq!(full.len(), SESSION_CLAIMS + 4);
     let summary = claims_summary_at(&connection, "agent/target", None).unwrap();

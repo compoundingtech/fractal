@@ -108,7 +108,7 @@ pub const APPEND: &[AppendProjector] = &[
 pub const REPLICATED: &[AppendProjector] = &[AppendProjector {
     name: "arrangement-project",
     takes: Takes::Kinds(&["arrangement.edited"]),
-    project: arrangements::project,
+    project: arrangements::project_replicated,
 }];
 
 /// Catches each domain up with the claims a projection pass admitted.
@@ -119,6 +119,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
+    Hook { name: "arrangements", run: arrangements::flush },
 ];
 
 /// Rebuilds the claim-derived domain tables from the claims, after the operations: the explicit

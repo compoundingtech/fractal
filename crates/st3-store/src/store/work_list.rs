@@ -123,11 +123,11 @@ pub struct ActorOrders {
     pub unchanged_seats: std::sync::atomic::AtomicUsize,
 }
 
-type OrderCell = Arc<std::sync::OnceLock<Arc<Vec<u32>>>>;
+pub type OrderCell = Arc<std::sync::OnceLock<Arc<Vec<u32>>>>;
 
 /// One actor's registered cell: kept, or overflow until it is built, and how many reads hold
 /// it, counted under the registry's lock so the last one to leave decides its removal.
-struct ActorEntry {
+pub struct ActorEntry {
     actor: String,
     cell: OrderCell,
     kept: bool,
@@ -478,7 +478,7 @@ impl Store {
         let mut requesters = BTreeSet::new();
         let mut every_ask = false;
         let mut tree_roots = BTreeSet::new();
-        let mut statement = connection.prepare_cached(published_list::CLAIMS_SINCE)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7cb9615bf250 owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ published_list::CLAIMS_SINCE)?;
         let claims = statement
             .query_map(params![after, through], |row| {
                 Ok((
@@ -499,7 +499,7 @@ impl Store {
             } else if let Some(generation) = subject.strip_prefix("run-generation/") {
                 let mut owner = connection
                     .prepare_cached("SELECT run_id FROM run_generations WHERE id=?1")?;
-                if let Some(run) = owner.query_row([generation], |row| row.get::<_, String>(0)).optional()? {
+                if let Some(run) = owner.query_row(/* sqlite-large-value: allow-for-now lv-hbba13c1fff7e owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ [generation], |row| row.get::<_, String>(0)).optional()? {
                     runs.insert(run);
                 }
             } else if let Some(proposal) = subject.strip_prefix("revision-proposal/") {
@@ -597,7 +597,7 @@ impl Store {
     /// Every step that holds a worker lease, with the lease's end: few, by the lease index.
     pub fn work_leases(&self) -> Result<HashMap<String, u128>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(WORK_LEASES)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h751302488cdd owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ WORK_LEASES)?;
         let leases = statement
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?;
@@ -609,8 +609,8 @@ impl Store {
     pub fn next_claim_after(&self, subject: &str, time: u128) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let next = connection
-            .prepare_cached(NEXT_CLAIM_AFTER)?
-            .query_row(params![subject, time.min(i64::MAX as u128) as i64], |row| row.get::<_, Option<i64>>(0))?;
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hc8441c108025 owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ NEXT_CLAIM_AFTER)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h688d5663c101 owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ params![subject, time.min(i64::MAX as u128) as i64], |row| row.get::<_, Option<i64>>(0))?;
         Ok(next.map(|next| next.max(0) as u128))
     }
 
@@ -635,7 +635,7 @@ impl Store {
         }
         let connection = self.readers.get();
         let rows = connection
-            .prepare_cached(STEP_ASSIGNEES)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hc0028d1e009f owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ STEP_ASSIGNEES)?
             .query_map([serde_json::to_string(steps)?], |row| {
                 Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
             })?
@@ -691,8 +691,8 @@ impl Store {
     pub fn repaired_since(&self, after: u64, through: u64) -> Result<bool> {
         let connection = self.readers.get();
         Ok(connection
-            .prepare_cached(REPAIRED_SINCE)?
-            .query_row(params![after, through], |_| Ok(()))
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h300ab3354cd0 owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ REPAIRED_SINCE)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h1582612a8955 owner=st3_store::store::work_list TODO=trace-statement-and-value-representation */ params![after, through], |_| Ok(()))
             .optional()?
             .is_some())
     }
@@ -703,7 +703,7 @@ impl Store {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
-                "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h8599d89040f4 owner=st3_store::store::work_list TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
                  VALUES ('graph', 'healthy', ?1, '0')
                  ON CONFLICT(aggregate) DO UPDATE SET last_good_store_index=excluded.last_good_store_index",
                 [index],
@@ -725,7 +725,7 @@ impl Store {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
-                "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position,
+                /* sqlite-large-value: allow-for-now lv-hbb3763b1c034 owner=st3_store::store::work_list TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position,
                     raw, state, claim_id, updated_at_unix_ms)
                  VALUES (?1, 'peer', 1, 'envelope', 0, x'00', ?3, ?2, '0')",
                 params![record_ref, claim, state],

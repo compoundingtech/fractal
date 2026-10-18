@@ -26,7 +26,7 @@ pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &As
 fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, St3Error> {
     let denied = || St3Error::new("forbidden", "assistant write authorization changed or expired before commit");
     let claim = |kind: &str| -> Result<Option<ClaimRecord>, St3Error> {
-        connection.query_row(&latest_claim_of_kind_query(),
+        connection.query_row(/* sqlite-large-value: allow-for-now lv-h45d00adfd56b owner=st3_store::store::assistant_write TODO=trace-statement-and-value-representation */ &latest_claim_of_kind_query(),
             params![authorization.grant_subject,kind],claim_from_row).optional().map_err(internal)
     };
     let granted = claim("custom.client.assistant.v1.granted")?.ok_or_else(denied)?;

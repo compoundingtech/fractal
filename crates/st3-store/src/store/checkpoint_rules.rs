@@ -990,7 +990,7 @@ pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
         |row| row.get(0),
     )?;
     if legacy {
-        transaction.execute("DELETE FROM local_event_payloads", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h47a731449d40 owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_event_payloads", [])?;
     }
     for table in PROJECTION_TABLES {
         let exists: bool = transaction.query_row(
@@ -999,7 +999,7 @@ pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
             |row| row.get(0),
         )?;
         if exists {
-            transaction.execute(&format!("DELETE FROM {table}"), [])?;
+            transaction.execute(&format!(/* sqlite-large-value: allow-for-now lv-h9817b8b736b1 owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])?;
         }
     }
     rebuild_operations_tx(transaction)?;
@@ -1201,7 +1201,7 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
     }
     answers.insert("latest".into(), Value::Object(latest));
     let timing_claims = connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hfa821a5dea0b owner=st3_store::store::checkpoint_rules TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind IN (
                  'step-run.state','step-run.carried','work.claimed','work.renewed',
@@ -1324,9 +1324,9 @@ pub fn clear_projections(transaction: &Transaction<'_>) -> Result<()> {
             |row| row.get(0),
         )?;
         if exists {
-            transaction.execute(&format!("DELETE FROM {table}"), [])?;
+            transaction.execute(&format!(/* sqlite-large-value: allow-for-now lv-h83cc921064a7 owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])?;
         }
     }
-    transaction.execute_batch("DELETE FROM local_observations;")?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h381eea1a19ee owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations;")?;
     Ok(())
 }

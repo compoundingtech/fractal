@@ -6,7 +6,7 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
         .map(|table| {
             let columns = projection_digest::columns(&reader, table, &[]).unwrap();
             let sql = format!("SELECT {} FROM {table} ORDER BY id", columns.join(","));
-            let mut statement = reader.prepare(&sql).unwrap();
+            let mut statement = reader.prepare(/* sqlite-large-value: allow-for-now lv-h6da9e11c6608 owner=st3_store::store::terminal_projection_date_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
             let rows = statement
                 .query_map([], |row| {
                     (0..columns.len())
