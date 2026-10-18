@@ -466,3 +466,37 @@ async fn rekey_residual_warning_survives_later_polling_and_restart() {
             .contains("old-node")
     );
 }
+
+#[tokio::test]
+async fn real_fault_class_revision_conflict_allows_fresh_reconciliation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut conflict = refusal("policy_revision_conflict");
+    conflict["reply"]["error"]["class"] = json!("fault");
+    let (socket, server) = serve(
+        root.path(),
+        vec![
+            Some(list(vec![], 7)),
+            Some(conflict),
+            Some(list(vec![], 8)),
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![], 9)),
+        ],
+    );
+    assert!(
+        reconcile(root.path(), &socket, FLEET, "own-key", &view())
+            .await
+            .is_err()
+    );
+    assert!(load_journal(root.path()).await.unwrap().pending.is_none());
+    assert_eq!(
+        reconcile(root.path(), &socket, FLEET, "own-key", &view())
+            .await
+            .unwrap()
+            .state,
+        "applied"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests[1]["request"]["expected_revision"], 7);
+    assert_eq!(requests[2]["request"]["operation"], "list");
+    assert_eq!(requests[3]["request"]["expected_revision"], 8);
+}

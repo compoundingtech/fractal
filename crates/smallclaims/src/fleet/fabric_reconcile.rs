@@ -436,9 +436,11 @@ async fn resolve_pending(
         Err(error) => {
             // Within the guaranteed receipt-retention window a coded refusal means
             // this exact transaction was rejected, not an uncertain lost commit.
-            // Faults and expired/missing receipts remain pending and fail closed.
+            // Revision conflicts are noncommitting even though Fabric classes them as
+            // faults. Other uncertain faults and expired receipts remain pending.
             let rejected = error.downcast_ref::<PolicyError>().is_some_and(|error| {
-                matches!(error.class.as_str(), "refusal" | "usage")
+                (error.code == "policy_revision_conflict"
+                    || matches!(error.class.as_str(), "refusal" | "usage"))
                     && !matches!(
                         error.code.as_str(),
                         "runtime_peers_disabled" | "cancellation_timeout" | "request_id_conflict"
