@@ -55,7 +55,7 @@ async fn unsigned_lifecycle_is_refused(anchored: bool) {
     policy["policy_revision"] = json!(2);
     append(&source, grant_subject.clone(), POLICY, ISSUER, policy, Some(&granted)).unwrap();
     let compatibility = source.store.append_claim(&ClaimInput {
-        subject: "custom/legacy-compatibility".into(), kind: "custom.legacy.note".into(),
+        subject: "custom/legacy/compatibility".into(), kind: "custom.legacy.note".into(),
         actor: None, fields: serde_json::from_value(json!({"text":"legacy remains supported"})).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
