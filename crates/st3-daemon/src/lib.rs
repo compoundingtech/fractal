@@ -7,131 +7,129 @@ pub use st3_kernel::{cli_print, cli_println};
 #[cfg(any(test, feature = "test-support"))]
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
+#[allow(dead_code)]
 mod ci_test_paths;
 
 pub use st3_kernel::accounts;
-pub mod api;
+pub use st3_api::api;
 pub use st3_kernel::archive;
-pub(crate) mod client_values;
 pub mod attach_image;
-pub mod backup;
-pub mod blobs;
+pub use st3_store::backup;
+pub use st3_store::blobs;
 pub use st3_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
-pub mod changes;
-pub(crate) mod checkout;
-pub mod claude_channel;
-pub mod client;
+pub use st3_github::changes;
+pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
+pub use st3_api::claude_channel;
+pub use st3_store::client;
 pub use st3_kernel::config;
 pub use st3_kernel::conversation_search;
-pub mod creation;
-pub mod repositories;
-pub(crate) use st3_kernel::disk;
+pub use st3_api::creation;
+pub use st3_reconcile::repositories;
 /// Answers the hooks an st3 seat's harness runs: `st driver-hook NAME`.
-pub mod delivery_hold;
-pub(crate) mod delivery_presence;
+pub use st3_api::delivery_hold;
+pub use st3_reconcile::delivery_presence;
 pub mod driver_hook;
-pub mod environment;
+pub use st3_store::environment;
 pub use st3_kernel::evidence;
-pub(crate) mod external_sessions;
-pub(crate) use st3_kernel::native_views;
-pub(crate) use st3_kernel::conversation_header;
-pub(crate) mod subagent_sessions;
+pub use st3_api::subagent_sessions;
 pub use st3_kernel::fleet;
 /// Silent messages are stored and readable without waking the recipient.
-pub mod silent;
+pub use st3_store::silent;
 /// `st missions check`: run a mission file's exec gates once, now, the way a run would.
-pub(crate) mod declaration_syntax;
-pub mod gate_check;
-pub(crate) mod gate_parse;
+pub use st3_api::gate_check;
 pub use st3_kernel::gate_kinds;
 pub use st3_kernel::gate_report;
-pub mod github_watch;
-pub mod graph;
-pub mod handoff;
-pub(crate) mod graph_watch_ivm;
+pub use st3_store::github_watch;
+pub use st3_store::graph;
+pub use st3_reconcile::handoff;
+pub use st3_api::graph_watch_ivm;
 pub use st3_kernel::harness_events;
 pub use st3_kernel::hooks;
 pub use st3_telemetry::incremental;
 pub use st3_kernel::instance;
 pub use st3_kernel::lane;
-pub mod mailbox;
-pub mod message_body;
+pub use st3_store::mailbox;
+pub use st3_store::message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
-pub mod maintenance;
+pub use st3_store::maintenance;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod malloc_trim;
-pub(crate) use st3_kernel::memory;
 pub use st3_kernel::read_cache;
-pub mod mission;
+pub use st3_store::mission;
 pub use st3_kernel::model;
 /// A driver relaunches its harness on the native session a suspended seat resumes.
-pub mod native_resume;
+pub use st3_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
-pub mod native_seed;
-pub mod node_identity;
-pub mod objectives;
+pub use st3_reconcile::native_seed;
+pub use st3_store::node_identity;
+pub use st3_api::objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 pub use st3_telemetry::otel;
 pub use st3_telemetry::otel_client_class;
 pub use st3_telemetry::otlp;
-pub mod peer;
-pub mod placement;
-pub mod person_request;
+pub use st3_peer::peer;
+pub use st3_reconcile::placement;
+pub use st3_store::person_request;
 pub use st3_kernel::pricing;
 pub use smallclaims::{performance, profile};
 pub use st3_kernel::projection;
-pub mod provenance;
-pub mod reconcile;
-pub(crate) use st3_telemetry::reconcile_telemetry;
-pub(crate) use st3_telemetry::relay_trace;
+pub use st3_store::provenance;
+pub use st3_reconcile::reconcile;
 pub use st3_kernel::rules;
+#[cfg(test)]
+pub(crate) use st3_kernel::publication;
 pub use st3_telemetry::recorder;
 /// Imports local command receipts into durable resource observations.
-pub mod recorder_receipts;
+pub use st3_store::recorder_receipts;
 pub use st3_telemetry::recorder_report;
 /// Finds references a publication or the graph names that do not resolve.
-pub(crate) mod references;
 /// Attaches a local terminal to a terminal another fleet host owns.
-pub mod remote_terminal;
-pub mod render;
-pub mod resource;
-pub mod rollout;
+pub use st3_store::remote_terminal;
+pub use st3_store::render;
+pub use st3_store::resource;
+pub use st3_store::rollout;
 pub use st3_kernel::seat_queue;
 /// Runs any CLI with credentials no seat can read, through a gateway the sekrets user owns.
-pub mod sekrets;
-pub mod sekrets_daemon;
+pub use st3_store::sekrets;
+pub use st3_store::sekrets_daemon;
 pub mod service;
 pub use st3_kernel::skill;
 pub use st3_telemetry::slo;
 pub use st3_telemetry::slo_history;
-pub mod startup;
+pub use st3_store::startup;
 pub use st3_telemetry::startup_telemetry;
-pub mod store;
+pub use st3_store::store;
 pub mod subagents;
 /// Suspends a quiet seat and resumes its own native session.
-pub mod suspension;
-pub(crate) use st3_kernel::publication;
-pub mod seat_snapshot;
+pub use st3_store::suspension;
+pub use st3_reconcile::seat_snapshot;
 pub use st3_telemetry::telemetry;
+pub use smallclaims::task_cpu;
 #[cfg(any(test, feature = "test-support"))]
-pub mod test_support;
+pub use st3_api::test_support;
 #[cfg(test)]
 mod kernel_tests;
+#[cfg(test)]
+mod peer_tests;
+#[cfg(test)]
+mod reconcile_tests;
+#[cfg(test)]
+mod store_tests;
 #[cfg(test)]
 mod telemetry_tests;
 /// Attaches a local terminal to another fleet host's PTY session over Fabric, without st daemons.
 pub mod terminal_fabric;
 pub use st3_kernel::terminal_binding;
 /// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
-pub mod tile_registry;
+pub use st3_store::tile_registry;
 pub mod tiles;
+#[cfg(test)]
+pub(crate) use st3_telemetry::relay_trace;
+#[cfg(test)]
+pub(crate) use st3_store::{checkout, external_sessions};
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, St3Error};
-
-/// Shared authentication and transport for daemon GitHub callers.
-mod github_http;
-use st3_kernel::github_admission;

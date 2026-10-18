@@ -2,10 +2,9 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import type { Undecodable } from '@st3/sdk/effect'
-import { SidebarAgentRow } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import type { Agent, Feed, Fleet, RosterDecode } from '../data/source.ts'
-import { sidebarRow } from './sidebarRow.ts'
+import { SystemNotice } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import type { Feed, Fleet, RosterDecode } from '../data/source.ts'
 
 /** Roster rows the latest decode could not show, never rows shown with an omitted open leaf. */
 export interface HiddenRoster {
@@ -67,19 +66,11 @@ export function RosterDecodeNotice({ decode, shown }: {
   )
 }
 
-/** The live sidebar's agent roster: rows plus its one availability or freshness notice. */
-export function LiveRoster({ fleet, rows, stale, now, query, current, decode, onSelect, navRef, onHoverOwner }: {
+/** The sidebar rail's one availability or freshness notice, then the decode notice for rows it could not show. */
+export function RosterStatus({ fleet, stale, decode }: {
   readonly fleet: Feed<Fleet>
-  /** Filtered rows in display order. */
-  readonly rows: readonly Agent[]
   readonly stale: boolean
-  readonly now: number
-  readonly query: string
-  readonly current: string
   readonly decode: RosterDecode
-  readonly onSelect: (ref: string) => void
-  readonly navRef?: React.Ref<HTMLElement>
-  readonly onHoverOwner?: (event: React.SyntheticEvent<HTMLElement>) => void
 }) {
   const shown = React.useMemo(
     () => new Set(fleet._tag === 'Observed' ? fleet.value.agents.map((agent) => agent.ref) : []),
@@ -87,26 +78,17 @@ export function LiveRoster({ fleet, rows, stale, now, query, current, decode, on
   )
   return (
     <>
-      <nav ref={navRef} aria-label="Agent roster" onMouseOverCapture={onHoverOwner} onFocusCapture={onHoverOwner} {...stylex.props(styles.roster)}>
-        {fleet._tag === 'Waiting' ? <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
-          {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
-            <span {...stylex.props(styles.skeletonGlyph)} />
-            <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
-            <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
-          </div>)}
-        </div> : null}
-        {rows.map((row) => (
-          <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={query} active={current === row.ref} onOpen={() => onSelect(row.ref)} />
-        ))}
-      </nav>
       {fleet._tag !== 'Observed' ? (
-        <p role="status" data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined} {...stylex.props(styles.notice)}>
-          {fleet._tag === 'Waiting' ? 'Waiting for the agent roster.' : fleet.reason === 'ungranted' ? 'Read access to the agent roster has not been granted.' : fleet.reason === 'unsupported' ? 'This connection does not support the agent roster.' : 'The agent roster could not be loaded; reconnect and try again.'}
-        </p>
+        <SystemNotice
+          scope="rail"
+          kind={fleet._tag === 'Waiting' ? 'loading' : 'error'}
+          connection={fleet._tag === 'Unavailable' && fleet.reason !== 'ungranted' && fleet.reason !== 'unsupported'}
+          title={fleet._tag === 'Waiting' ? 'Loading agents' : fleet.reason === 'ungranted' ? 'No access to the agent roster' : fleet.reason === 'unsupported' ? 'Agent roster not supported' : 'Agent roster could not load'}
+          {...(fleet._tag === 'Unavailable' && fleet.reason === 'unsupported' ? { detail: 'This connection does not offer it' } : fleet._tag === 'Unavailable' && fleet.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : {})}
+          data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined}
+        />
       ) : stale ? (
-        <p role="status" data-wf-roster-stale={decode.decodeStale ? 'decode' : 'sync'} {...stylex.props(styles.notice)}>
-          {fleet.coverage?._tag === 'Partial' ? 'Showing a partial roster · live updates pending' : 'Last observed roster · live updates pending'}
-        </p>
+        <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" data-wf-roster-stale={decode.decodeStale ? 'decode' : 'sync'} />
       ) : null}
       {fleet._tag === 'Observed' ? <RosterDecodeNotice decode={decode} shown={shown} /> : null}
     </>
@@ -114,14 +96,6 @@ export function LiveRoster({ fleet, rows, stale, now, query, current, decode, on
 }
 
 const styles = stylex.create({
-  roster: { display: 'flex', flexDirection: 'column', overflowY: 'auto', padding: s.md, minHeight: 0, flexGrow: 1, gap: 2 },
-  // Match SR-2's shared row/control/icon geometry and the roster's 2px inter-row gap.
-  rosterSkeleton: { display: 'flex', flexDirection: 'column', gap: 2 },
-  skeletonRow: { height: g.sidebarRow, flexShrink: 0, display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr)`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignContent: 'center', alignItems: 'center', columnGap: s.xs2, paddingInline: s.sm, boxSizing: 'border-box' },
-  skeletonGlyph: { gridColumn: '1', gridRow: '1', width: g.icon, height: g.icon, borderRadius: '50%', backgroundColor: c.border, opacity: 0.5 },
-  skeletonLine: { gridColumn: '2', height: 8, borderRadius: 4, backgroundColor: c.border, opacity: 0.5 },
-  skeletonName: { gridRow: '1', width: '68%' },
-  skeletonHost: { gridRow: '2', width: '44%' },
   notice: { padding: s.lg, fontSize: t.metaSize, color: c.fgMuted },
   decode: { display: 'flex', flexDirection: 'column', gap: s.xs, paddingBlockStart: 0, flexShrink: 0 },
   sentence: { margin: 0 },

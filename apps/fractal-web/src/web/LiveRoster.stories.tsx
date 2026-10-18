@@ -7,11 +7,10 @@ import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/s
 import { lightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { fleetFromAgents } from '../data/projections.ts'
 import { observed, type Feed, type Fleet, type RosterDecode } from '../data/source.ts'
-import { LiveRoster, rosterDecodeNotice } from './LiveRoster.tsx'
+import { RosterStatus, rosterDecodeNotice } from './LiveRoster.tsx'
 
 /** Synthetic old-literal snapshot; every other row is a single-field variant of it. */
 const wire = oldLiteral.items[0]!
-const now = Date.parse(oldLiteral.snapshot.published_at)
 const futureUsageRef = 'agent/example/future-usage'
 const brokenRuntimeRef = 'agent/example/broken-runtime'
 /** A daemon newer than this view: an aggregation mode the generated codec does not know. */
@@ -57,16 +56,7 @@ const Roster = ({ scenario, scheme }: { readonly scenario: keyof typeof scenario
   const { fleet, decode, stale } = scenarios[scenario]
   return (
     <aside aria-label="Agents" data-scheme={scheme} {...stylex.props(styles.sidebar, ...(scheme === 'light' ? lightTheme : []))}>
-      <LiveRoster
-        fleet={fleet}
-        rows={fleet._tag === 'Observed' ? fleet.value.agents : []}
-        stale={stale}
-        now={now}
-        query=""
-        current={wire.id}
-        decode={decode}
-        onSelect={() => undefined}
-      />
+      <RosterStatus fleet={fleet} stale={stale} decode={decode} />
     </aside>
   )
 }
@@ -85,18 +75,18 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-const rowRefs = (canvasElement: HTMLElement) =>
-  [...canvasElement.querySelectorAll<HTMLElement>('[data-wf-agent-ref]')].map((row) => row.dataset.wfAgentRef)
-const row = (canvasElement: HTMLElement, ref: string) =>
-  canvasElement.querySelector<HTMLElement>(`[data-wf-agent-ref="${ref}"]`)
+const agentRefs = (scenario: keyof typeof scenarios) => {
+  const { fleet } = scenarios[scenario]
+  if (fleet._tag !== 'Observed') throw new Error('roster must be observed')
+  return fleet.value.agents.map((agent) => agent.ref)
+}
 
-/** Negative control: the synthetic old-literal row decodes through the SDK and renders with no notice. */
+/** Negative control: the synthetic old-literal row decodes through the SDK and raises no notice. */
 export const FullyDecoded: Story = {
   args: { scenario: 'decoded' },
   play: async ({ canvasElement }) => {
     expect(decodeResourceRows([wire]).undecodable).toEqual([])
-    expect(rowRefs(canvasElement)).toEqual([wire.id])
-    expect(row(canvasElement, wire.id)?.textContent).toContain(wire.name)
+    expect(agentRefs('decoded')).toEqual([wire.id])
     expect(canvasElement.querySelector('[data-wf-roster-decode]')).toBeNull()
     expect(canvasElement.querySelector('[data-wf-roster-stale]')).toBeNull()
     expect(within(canvasElement).queryByRole('status')).toBeNull()
@@ -108,16 +98,12 @@ export const UndecodableRow: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     // Good rows remain, including the row whose usage aggregation is newer than this view.
-    expect(rowRefs(canvasElement)).toEqual([wire.id, futureUsageRef])
+    expect(agentRefs('partial')).toEqual([wire.id, futureUsageRef])
     const fleet = scenarios.partial.fleet
     if (fleet._tag !== 'Observed') throw new Error('partial roster must be observed')
     expect(fleet.value.agents.find((agent) => agent.ref === wire.id)?.usage._tag).toBe('Known')
     expect(fleet.value.agents.find((agent) => agent.ref === futureUsageRef)?.usage).toEqual({ _tag: 'Unknown' })
-    const future = row(canvasElement, futureUsageRef)!
-    expect(future.textContent).toContain('Future usage agent')
-    expect(future.querySelector('[data-row-field="total-usd"], [data-row-field="total-tokens"]')).toBeNull()
-    expect(future.textContent).not.toContain('Unknown')
-    expect(row(canvasElement, wire.id)?.dataset.observationFreshness).toBe('live')
+    expect(fleet.value.agents.find((agent) => agent.ref === futureUsageRef)?.name).toBe('Future usage agent')
 
     // One quiet, polite notice; never an alert per failed row.
     const notices = canvasElement.querySelectorAll<HTMLElement>('[data-wf-roster-decode]')
@@ -151,12 +137,11 @@ export const AllBadStale: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     expect(allBad.agents).toEqual([])
-    // The retained last-good roster stays visible and is marked stale.
-    expect(rowRefs(canvasElement)).toEqual([wire.id, futureUsageRef])
-    for (const ref of [wire.id, futureUsageRef]) expect(row(canvasElement, ref)?.dataset.observationFreshness).toBe('stale')
+    // The retained last-good roster stays and is marked stale.
+    expect(agentRefs('allBad')).toEqual([wire.id, futureUsageRef])
     const staleMarker = canvasElement.querySelector<HTMLElement>('[data-wf-roster-stale]')
     expect(staleMarker?.dataset.wfRosterStale).toBe('decode')
-    expect(staleMarker?.textContent).toBe('Last observed roster · live updates pending')
+    expect(staleMarker?.textContent).toBe('Last observed roster. Live updates pending')
 
     const notices = canvasElement.querySelectorAll<HTMLElement>('[data-wf-roster-decode]')
     expect(notices).toHaveLength(1)

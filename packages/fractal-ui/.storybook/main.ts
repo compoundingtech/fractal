@@ -4,7 +4,7 @@ import stylex from '@stylexjs/unplugin'
 
 const config: StorybookConfig = {
   // The live roster story replays captured daemon payloads through the SDK decode.
-  stories: ['../src/**/*.stories.tsx', '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx'],
+  stories: ['../src/**/*.stories.tsx', '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx', '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx'],
   staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],
