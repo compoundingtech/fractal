@@ -831,7 +831,7 @@ fn write_queue(
                 let next = run_write_batch(
                     &mut connection,
                     batched,
-                    &admission.queue,
+                    (&admission.queue, WRITE_BATCH_WINDOW),
                     committed_index,
                     batches,
                     callbacks,
@@ -845,12 +845,13 @@ fn write_queue(
 
 /// Run `first` and the batched writes queued behind it in one transaction, each in its own
 /// savepoint, then commit once and answer every caller. The batch stops taking writes when it
-/// reaches `WRITE_BATCH_LIMIT`, has run for `WRITE_BATCH_WINDOW`, fails, or meets a lending write,
-/// which it returns to run next.
+/// reaches `WRITE_BATCH_LIMIT`, has run for the intake's window (`WRITE_BATCH_WINDOW` in the
+/// writer), fails, or meets a lending write, which it returns to run next.
 fn run_write_batch(
     connection: &mut Connection,
     first: WriterJob,
-    queue: &std::sync::mpsc::Receiver<WriterJob>,
+    // Where the batch takes more writes from, and for how long.
+    intake: (&std::sync::mpsc::Receiver<WriterJob>, std::time::Duration),
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
     callbacks: (
@@ -861,6 +862,7 @@ fn run_write_batch(
     ),
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
+    let (queue, window) = intake;
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
@@ -972,7 +974,7 @@ fn run_write_batch(
         answers.push(done);
         if failure.is_none()
             && answers.len() < WRITE_BATCH_LIMIT
-            && started.elapsed() < WRITE_BATCH_WINDOW
+            && started.elapsed() < window
         {
             job = queue.try_recv().ok();
         }
@@ -2348,7 +2350,9 @@ mod tests {
         let thread = std::thread::spawn(move || {
             let batches = (AtomicU64::new(0), AtomicU64::new(0));
             assert!(run_write_batch(
-                &mut connection, first, &receiver, &AtomicU64::new(0), &batches,
+                // Both jobs are queued before the batch begins; how long the first one runs
+                // must not decide whether the second shares its batch.
+                &mut connection, first, (&receiver, std::time::Duration::MAX), &AtomicU64::new(0), &batches,
                 (&CommitObservers::default(), &TransactionFinalizers::default(), None, Some(&writer_for_batch)),
                 &fifo,
             ).is_none());
