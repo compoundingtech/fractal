@@ -1029,7 +1029,63 @@ def _insert_position(text, container):
     return items[0].start if items else scope_a
 
 
-def apply_shares(shares, share_imports, src_dir, lower_files):
+def _resolve_use(segs, base):
+    """Absolute segments (below `crate`) of a use path written in a module whose own path is `base`."""
+    if segs[0] == "crate":
+        return list(segs[1:])
+    cur = list(base)
+    i = 0
+    while i < len(segs) and segs[i] in ("super", "self"):
+        if segs[i] == "super":
+            cur = cur[:-1]
+        i += 1
+    if i == 0:
+        return None  # an external crate or a name from scope: leave it
+    return cur + list(segs[i:])
+
+
+def _shared_uses(uses, rel, cont, items, shares, dev, pairs):
+    """The `use` items of the file a shared module is cut from, adjusted to where the module sits: dev
+    dependencies dropped, child modules named absolutely, modules that only exist for tests replaced by
+    their shared module (or dropped), and names that moved away pruned."""
+    f_path = module_path(rel)
+    children = {it.name for it in items if it.kind == "mod"}
+    shared_of = {tuple(module_path(r2)): _shared_path(r2, c2) for (r2, c2) in shares if not c2}
+    out = []
+    for u in uses:
+        parsed = use_paths(u)
+        if not parsed:
+            continue
+        attrs, vis, paths = parsed
+        keep = []
+        for segs, alias in paths:
+            if segs[0] in dev:
+                continue
+            if segs[0] in children:
+                segs = ["crate"] + f_path + segs
+            elif segs[0] == "self":
+                segs = ["crate"] + f_path + segs[1:]
+            absolute = _resolve_use(segs, f_path[:-1] + ["_"])
+            if absolute is not None:
+                hit = None
+                for k in range(len(absolute), 0, -1):
+                    if tuple(absolute[:k]) in shared_of:
+                        hit = (k, shared_of[tuple(absolute[:k])])
+                        break
+                if hit is not None:
+                    segs = ["crate"] + hit[1] + absolute[hit[0]:]
+                elif any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1]):
+                    continue  # exists only for cfg(test)
+            mod = segs[-2] if len(segs) >= 2 else None
+            if (mod, segs[-1]) in pairs:
+                continue
+            keep.append((segs, alias))
+        if keep:
+            out.append(render_use(attrs, vis, keep))
+    return out
+
+
+def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev):
     """Extract the lower test items the moved tests need into a shared module next to their file, gated by
     test-support, and re-export it where the items were (`pub use`), so old paths keep resolving."""
     added_decls = collections.defaultdict(list)
@@ -1050,6 +1106,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files):
                     uses.append("use super::%s::*;" % parts[-1])
                 else:
                     uses.append(re.sub(r"\buse super::", "use super::%s::" % parts[-1], u))
+        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs)
         globs = ["use %s::*;" % "::".join(["crate"] + _shared_path(*mk)) for mk in sorted(share_imports.get((rel, cont), ()))]
         body = []
         for u in sorted(ns, key=lambda n: n.item.start):
@@ -1298,7 +1355,7 @@ def apply_cut(args, nodes, files, tfiles, order):
         new = prune_uses(cur, items_now, pairs)
         if new != cur:
             open(path, "w").write(new)
-    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles})
+    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower))
     for rel, names in macro_imports.items():
         path = os.path.join(new_src, rel)
         if not os.path.exists(path):
