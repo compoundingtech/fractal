@@ -600,7 +600,7 @@ pub fn format_wait_span(milliseconds: u128) -> String {
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc62cde9f8f14 owner=st3_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h112916c27d04 owner=st3_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -4486,6 +4486,7 @@ impl Store {
         self.connection.batched(|transaction| {
             const RECEIPT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
             transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h774d8e6e83f8 owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */
                 "DELETE FROM client_diagnostic_receipts WHERE accepted_at_unix_ms < ?1",
                 [accepted_at.saturating_sub(RECEIPT_RETENTION_MS)],
             ).map_err(internal)?;
@@ -4521,6 +4522,7 @@ impl Store {
             for (id, input) in new {
                 insert_local_observation_tx(transaction, &self.origin, input, u128::from(accepted_at))?;
                 transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-hd1faba8d884a owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */
                     "INSERT INTO client_diagnostic_receipts(device,event_id,accepted_at_unix_ms)
                      VALUES (?1,?2,?3)",
                     params![device, id, accepted_at],

@@ -1857,7 +1857,7 @@ export const ClientDiagnosticEvent = /*#__PURE__*/ (() => Schema.Struct({
   "os_version": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9][A-Za-z0-9._-]*$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(32)),
   "payload": ClientDiagnosticPayload,
   "platform": ClientDiagnosticPlatform,
-  "runtime_version": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9][A-Za-z0-9._-]*$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
+  "runtime_version": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9][A-Za-z0-9._-]*(\\([A-Za-z0-9][A-Za-z0-9._-]*\\))?$(?![\\s\\S])", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
   "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(4294967295)),
   "severity": ClientDiagnosticSeverity,
   "update_id": Schema.Union([Schema.Literal("embedded"), ClientDiagnosticUuid], { mode: "oneOf" })
