@@ -122,6 +122,8 @@ async function settleFrames() {
 /** An agent reply keeps a scrolled-up reader's line and offers the jump; the reader's own send brings it into view. */
 export const OwnSendFollows: Story = { tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  // This play starts with a reader in older history, so reveal the deliberately deferred turns first.
+  await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
   const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < historyTurns.length) throw new Error('History not committed'); return found })
   const jump = canvas.getByText('New messages ↓')
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
