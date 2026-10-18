@@ -1098,7 +1098,8 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
                 if hit is not None:
                     leaf = segs[-1]
                     if leaf == "*":
-                        extra = ["crate"] + hit[1] + absolute[hit[0]:]  # the shared module's items too
+                        if len(absolute) == hit[0] + 1:
+                            extra = ["crate"] + hit[1] + absolute[hit[0]:]  # the shared module's items too
                     elif len(absolute) == hit[0] + 1 and leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
                         segs = ["crate"] + hit[1] + absolute[hit[0]:]
                         test_only = False
