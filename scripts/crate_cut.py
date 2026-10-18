@@ -341,7 +341,7 @@ def build_refs(nodes, store_type="Store"):
             if prev == "." and prev2 != "..":
                 # method call: .w( or .w::<..>(
                 if nxt == "(" or body.startswith("::<", k):
-                    ts = list(methods.get(w, ())) + (list(tmethods.get(w, ())) if n.test else [])
+                    ts = list(methods.get(w, ())) + ([t for t in tmethods.get(w, ()) if visible(n, t)] if n.test else [])
                     for t in ts:
                         if t is n:
                             continue
@@ -943,6 +943,11 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             out.append(f"{pad}{attrs}mod {nm} {{\n{body}\n{pad}}}")
         return "\n\n".join(x for x in out if x)
 
+    included = set()
+    for n in nodes:
+        if n.test and n.kind == "macro_call":
+            for m in re.finditer(r'include!\("([^"]+)"\)', n.item.text):
+                included.add(os.path.normpath(os.path.join(os.path.dirname(n.file), m.group(1))))
     facade_blocks, new_files, decls = {}, {}, collections.defaultdict(list)
     pub_test_mods = set()
     helper_names = {u.name for u in copied if u.name}
@@ -982,7 +987,7 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             local = {u.name for u in copied if u.name} | {t.name for t in mtests if t.name}
             uses = [_without_unused_relative(_without_names(it.text, local), body) for it in items if it.kind == "use"]
             globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
-            new_files[rel] = "#![allow(unused_imports)]\n" + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
+            new_files[rel] = ("" if rel in included else "#![allow(unused_imports)]\n") + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
     return facade_blocks, new_files, decls, removals, copied, pub_test_mods, shares, share_imports, imports
 
 
@@ -1530,6 +1535,23 @@ def wire_crate(args, top_mods):
         t = t.replace(f"pub use {lower.replace('-', '_')}::*;", f"pub use {ident}::*;", 1)
         open(ul, "w").write(t)
     dl = open("crates/st3-daemon/src/lib.rs").read()
+    # grouped re-exports (`pub(crate) use st3_store::{checkout, external_sessions};`) follow the modules too
+    for it in ri.parse(dl):
+        if it.kind != "use":
+            continue
+        parsed = use_paths(it.text)
+        if not parsed:
+            continue
+        attrs, vis, paths = parsed
+        changed = False
+        new_paths = []
+        for segs, alias in paths:
+            if len(segs) >= 2 and segs[0].startswith("st3_") and segs[0] != ident and segs[1] in top_mods:
+                segs = [ident] + segs[1:]
+                changed = True
+            new_paths.append((segs, alias))
+        if changed:
+            dl = dl.replace(it.text, render_use(attrs, vis, new_paths).join(["\n" if it.text.startswith("\n") else "", ""]), 1)
     for m in top_mods:
         dl = re.sub(r"(?m)^pub use st3_[a-z_]+::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
     if getattr(args, "traits", None):
