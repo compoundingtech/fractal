@@ -2,7 +2,7 @@ use smallclaims::fleet::{MemberKey, envelope_signature_message};
 
 #[test]
 fn historical_subject_reference_readmission_uses_normal_signed_admission_once_per_schema() {
-    for case in ["ack", "invalid-reference", "malformed", "forged", "unsigned", "untrusted"] {
+    for case in ["ack", "invalid-reference", "malformed", "forged", "unsigned", "untrusted", "late-signature"] {
         let source = Store::open_memory("source").unwrap();
         let key = Arc::new(MemberKey::generate().unwrap().0);
         source.set_member_key(Some(key.clone())).unwrap();
@@ -41,7 +41,7 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
         exchange.signatures.clear();
         let envelope = &mut exchange.envelopes[0];
         envelope.member_key = Some(key.public().into());
-        envelope.signature = if case == "unsigned" { None } else {
+        envelope.signature = if matches!(case, "unsigned" | "late-signature") { None } else {
             let signing_key = if matches!(case, "forged" | "untrusted") {
                 Arc::new(MemberKey::generate().unwrap().0)
             } else { key.clone() };
@@ -62,7 +62,7 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
         older.set_member_key(Some(key.clone())).unwrap();
         older.pin_fleet_anchor(key.public()).unwrap();
         older.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
-        older.append_claim(&ClaimInput {
+        let admit_source = || older.append_claim(&ClaimInput {
             subject: "host/source".into(), kind: "fleet.member-admitted".into(), actor: None,
             fields: BTreeMap::from([
                 ("fleet_id".into(), json!(TEST_FLEET)),
@@ -71,17 +71,22 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
             ]),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
+        if case != "late-signature" {
+            admit_source();
+        }
         let mut bootstrap = exchange.clone();
         bootstrap.envelopes = bootstrap_envelopes;
         older.receive_replication_exchange("source", TEST_FLEET, &bootstrap).unwrap();
         let bootstrap_admission = older.validate_replication_backlog().unwrap();
         assert_eq!((bootstrap_admission.invalid, bootstrap_admission.held), (0, 0));
-        assert!(matches!(
-            older.fleet_membership().unwrap().window("source", original.sequence),
-            smallclaims::fleet::Window::Keyed(_)
-        ), "{case}: fixture requires keyed source membership");
+        if case != "late-signature" {
+            assert!(matches!(
+                older.fleet_membership().unwrap().window("source", original.sequence),
+                smallclaims::fleet::Window::Keyed(_)
+            ), "{case}: fixture requires keyed source membership");
+        }
         let receipt = older.receive_replication_exchange("source", TEST_FLEET, &exchange).unwrap();
-        assert_eq!(receipt.signatures, usize::from(!matches!(case, "forged" | "unsigned")), "{case}");
+        assert_eq!(receipt.signatures, usize::from(!matches!(case, "forged" | "unsigned" | "late-signature")), "{case}");
         let before = older.validate_replication_backlog().unwrap();
         if matches!(case, "forged" | "unsigned" | "untrusted") {
             assert_eq!(before.held, 1, "{case}: {before:?}");
@@ -95,6 +100,12 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
                 assert!(records[0].error_message.as_deref().unwrap().contains("violates invalid-subject-reference:"));
             }
             assert_eq!(older.validate_replication_backlog().unwrap().invalid, 0, "{case}: unchanged schema must not retry");
+        }
+        if case == "late-signature" {
+            // The older reader classified the real received envelope under legacy membership.
+            // Supported membership publication now requires the retained writer's signature.
+            admit_source();
+            older.validate_replication_backlog().unwrap();
         }
         let retained = |store: &Store| -> Vec<(String, String, u64, String, Vec<u8>, Option<String>)> {
             store.readers.get().prepare(
@@ -124,6 +135,45 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
             _ => assert_eq!((after.valid, after.held), (0, 1), "{case}: {after:?}"),
         }
         assert_eq!(retained(&upgraded), records, "{case}: record identity and bytes are immutable");
+        if case == "late-signature" {
+            assert_eq!((after.valid, after.invalid, after.held), (0, 0, 1));
+            drop(upgraded);
+            let waiting = Store::open(&path, "target").unwrap();
+            let still_held = waiting.validate_replication_backlog().unwrap();
+            assert_eq!((still_held.valid, still_held.invalid, still_held.held), (0, 0, 1));
+            for signature_case in ["forged", "untrusted", "valid"] {
+                let trusted = signature_case == "valid";
+                let signing_key = if trusted { key.clone() } else {
+                    Arc::new(MemberKey::generate().unwrap().0)
+                };
+                let mut signatures = exchange.clone();
+                signatures.envelopes.clear();
+                signatures.signatures = vec![smallclaims::claim::ReplicaEnvelopeSignature {
+                    writer: original.writer.clone(), sequence: original.sequence,
+                    hash: original.hash.clone(),
+                    member_key: if signature_case == "forged" { key.public() } else { signing_key.public() }.into(),
+                    signature: signing_key.sign(&envelope_signature_message(TEST_FLEET,
+                        &original.writer, original.sequence, &original.hash)),
+                }];
+                waiting.receive_replication_exchange("source", TEST_FLEET, &signatures).unwrap();
+                let admission = waiting.validate_replication_backlog().unwrap();
+                if !trusted {
+                    assert_eq!((admission.valid, admission.invalid, admission.held), (0, 0, 1));
+                } else {
+                    assert_eq!((admission.valid, admission.invalid, admission.held), (1, 0, 0));
+                }
+            }
+            assert_eq!(retained(&waiting), records);
+            assert_eq!(waiting.latest_claim(&claim.subject, Some(&claim.kind)).unwrap().unwrap().id, claim.id);
+            let converged = waiting.validate_replication_backlog().unwrap();
+            assert_eq!((converged.valid, converged.invalid, converged.held), (0, 0, 0));
+            drop(waiting);
+            let reopened = Store::open(&path, "target").unwrap();
+            let converged = reopened.validate_replication_backlog().unwrap();
+            assert_eq!((converged.valid, converged.invalid, converged.held), (0, 0, 0));
+            assert_eq!(retained(&reopened), records);
+            continue;
+        }
         let relayed = exchange_from(&upgraded, &ReplicationInventory::default());
         let relayed = relayed.envelopes.iter().find(|envelope| envelope.writer == original.writer
             && envelope.sequence == original.sequence && envelope.hash == original.hash).unwrap();

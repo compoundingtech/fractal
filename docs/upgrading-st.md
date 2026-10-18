@@ -193,6 +193,12 @@ and restarts at the same schema do not repeatedly revalidate invalid references.
 An interrupted pass can safely finish at the next startup. A later local schema
 change schedules a new pass; the schema digest is only a retry trigger, never
 authority to admit a claim.
+An eligible historical receipt held by fleet/signature validation returns to the
+ordinary pending admission lifecycle before schema retry completes. A later verified
+signature can therefore unblock it after a restart without another schema change.
+This transition does not change the invalid record's bytes or admit it provisionally.
+Selection retains the existing whole-backlog payload materialization; bounded writer
+transactions do not imply bounded-memory backlog selection.
 
 
 After all members are upgraded and caught up, compare replication digests as [two machines](two-machines.md#check-what-arrived) describes. Mixed builds can exchange signed history while an older member has claims waiting for an upgrade; that does not prove equal projections. Check a real conversation and its message receipt too. The example uses the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat); substitute your own existing seat when upgrading:

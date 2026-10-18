@@ -6943,6 +6943,23 @@ impl Store {
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
+                        // A historical degraded receipt selected by a schema retry must remain
+                        // discoverable after that retry's marker completes. Waiting for verified
+                        // authority uses the ordinary pending lifecycle, not another schema scan.
+                        if retry_subject_references {
+                            pass.execute(
+                                /* sqlite-large-value: allow-for-now lv-hf42544a3dbab owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'
+                                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+                                   AND receipt_state='degraded'
+                                   AND EXISTS (
+                                       SELECT 1 FROM replica_records
+                                       WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+                                         AND state='invalid' AND error_code='invalid-replicated-claim'
+                                         AND error_message LIKE '%violates invalid-subject-reference:%'
+                                   )",
+                                params![envelope.writer, envelope.sequence, envelope.hash],
+                            )?;
+                        }
                         held.push((envelope.clone(), row));
                         continue;
                     }
