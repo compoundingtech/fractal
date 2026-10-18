@@ -47,7 +47,6 @@ pub use st3_api::graph_watch_ivm;
 pub use st3_kernel::harness_events;
 pub use st3_kernel::hooks;
 pub use st3_telemetry::incremental;
-pub mod demo;
 pub use st3_kernel::instance;
 pub use st3_kernel::lane;
 pub use st3_store::mailbox;

@@ -308,7 +308,7 @@ pub fn parse(source: &str, base: &Path) -> Result<Demo> {
         .context("`demo` needs `me \"NAME\"`: the invented person whose screen this is")?;
     let me = qualified("person", &me);
     let machine = child_value(header_children, "machine")?.unwrap_or_else(|| "studio".into());
-    crate::instance::validate(&machine)
+    st3::instance::validate(&machine)
         .map_err(|_| anyhow::anyhow!("`machine` is 1 to 24 lowercase letters, digits and hyphens"))?;
     let advance = child_value(header_children, "advance")?.unwrap_or_else(|| "f8".into());
     stui::playback::Advance::parse(&advance).map_err(anyhow::Error::msg)?;
@@ -802,7 +802,7 @@ const MARKER: &str = ".st-demo";
 /// Returns once the presenter quits the interface; the daemon and the agents stop with it.
 pub fn play(
     demo: Demo,
-    instance: &crate::instance::Instance,
+    instance: &st3::instance::Instance,
     reset: bool,
     show: impl FnOnce(stui::playback::Playback) -> Result<()>,
 ) -> Result<()> {
@@ -812,8 +812,8 @@ pub fn play(
         "a demo plays in the terminal interface: run it in a terminal"
     );
     let exe = std::env::current_exe().context("cannot find this st executable")?;
-    let config = crate::config::Config::default();
-    let config_path = crate::config::Config::default_path();
+    let config = st3::config::Config::default();
+    let config_path = st3::config::Config::default_path();
     let cache = instance.cache_home().join("st3");
     // Where a demo keeps what outlives its daemon: the daemon's pid and the presenter's log.
     let dir = instance.state_home().join("st3-demo");
@@ -870,7 +870,7 @@ pub fn play(
 /// Make sure the instance is one a demo may erase, and mark it as the demo's. An instance a demo
 /// did not make keeps its graph, cache and config untouched unless the presenter passed --reset.
 fn claim_instance(
-    instance: &crate::instance::Instance,
+    instance: &st3::instance::Instance,
     config: &Path,
     state: &Path,
     cache: &Path,
@@ -907,7 +907,7 @@ fn claim_instance(
 }
 
 /// Remove the instance's graph and sockets, so the demo starts from nothing.
-fn reset_state(config: &crate::config::Config, cache: &Path) -> Result<()> {
+fn reset_state(config: &st3::config::Config, cache: &Path) -> Result<()> {
     if config.state_dir.exists() {
         fs::remove_dir_all(&config.state_dir)
             .with_context(|| format!("cannot reset {}", config.state_dir.display()))?;
@@ -1821,7 +1821,7 @@ beats {
         assert_eq!(answers[1].outcome, "decline");
         // What st apply reads is the publication with each agent's stand-in.
         let root = tempfile::tempdir().unwrap();
-        crate::graph::parse_intent(&test_runner(root.path()).with_stand_ins(&demo).unwrap(), "studio")
+        st3::graph::parse_intent(&test_runner(root.path()).with_stand_ins(&demo).unwrap(), "studio")
             .unwrap();
     }
 
@@ -1884,7 +1884,7 @@ beats {
             .collect::<Vec<_>>();
         assert_eq!(workspace.len(), 1, "{graph}");
         assert!(root.path().join("harbor-builder").is_dir());
-        crate::graph::parse_intent(&graph, "studio").unwrap();
+        st3::graph::parse_intent(&graph, "studio").unwrap();
     }
 
     #[test]
@@ -1941,7 +1941,7 @@ beats {
     #[test]
     fn a_demo_erases_only_an_instance_a_demo_made() {
         let home = tempfile::tempdir().unwrap();
-        let instance = crate::instance::Instance::new(home.path(), "work").unwrap();
+        let instance = st3::instance::Instance::new(home.path(), "work").unwrap();
         let config = instance.config_home().join("st3/config.toml");
         let state = instance.state_home().join("st3");
         let cache = instance.cache_home().join("st3");
@@ -1967,7 +1967,7 @@ beats {
         assert!(instance.root().join(MARKER).is_file());
         claim_instance(&instance, &config, &state, &cache, false).unwrap();
         // A new instance, or one holding only its installed binaries, is the demo's at once.
-        let fresh = crate::instance::Instance::new(home.path(), "demo").unwrap();
+        let fresh = st3::instance::Instance::new(home.path(), "demo").unwrap();
         fs::create_dir_all(fresh.bin_dir()).unwrap();
         fs::write(fresh.bin_dir().join("st"), "binary").unwrap();
         claim_instance(
@@ -2011,7 +2011,7 @@ beats {
                 let demo = load(&path).unwrap();
                 let root = tempfile::tempdir().unwrap();
                 let graph = test_runner(root.path()).with_stand_ins(&demo).unwrap();
-                crate::graph::parse_intent(&graph, &demo.machine)
+                st3::graph::parse_intent(&graph, &demo.machine)
                     .unwrap_or_else(|error| panic!("{}: {error:?}", path.display()));
                 for action in demo.seed.iter().chain(demo.beats.iter().map(|beat| &beat.action)) {
                     match action {

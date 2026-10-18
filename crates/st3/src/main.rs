@@ -62,6 +62,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod demo;
 mod setup;
 mod onboarding;
 mod change_cli;
@@ -4440,7 +4441,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
     let result = (|| -> Result<()> {
         match command {
             DemoCommand::Check { file } => {
-                let demo = st3::demo::load(&file)?;
+                let demo = demo::load(&file)?;
                 println!(
                     "{}: {} agents, {} seed actions, {} beats; advance key {}",
                     demo.title.as_deref().unwrap_or(&demo.name),
@@ -4451,8 +4452,8 @@ fn run_demo(command: DemoCommand) -> ExitCode {
                 );
                 for (index, beat) in demo.beats.iter().enumerate() {
                     let wait = match beat.wait {
-                        st3::demo::Wait::Key => "key".to_owned(),
-                        st3::demo::Wait::For(delay) => format!("{:.1}s", delay.as_secs_f64()),
+                        demo::Wait::Key => "key".to_owned(),
+                        demo::Wait::For(delay) => format!("{:.1}s", delay.as_secs_f64()),
                     };
                     println!(
                         "{:>3}  line {:<4} {wait:>6}  {}",
@@ -4463,18 +4464,18 @@ fn run_demo(command: DemoCommand) -> ExitCode {
                 }
                 Ok(())
             }
-            DemoCommand::Seat { player } => st3::demo::seat(player),
+            DemoCommand::Seat { player } => demo::seat(player),
             DemoCommand::Play { file, reset } => {
                 let instance = st3::instance::current().context(
                     "a demo plays in its own instance, so your fleet is never touched: st --instance demo demo play FILE",
                 )?;
-                let demo = st3::demo::load(&file)?;
+                let demo = demo::load(&file)?;
                 // The demo acts as its own people and agents; a seat's identity must not leak in.
                 for name in ["ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION"] {
                     // SAFETY: no other thread exists yet; the player starts after this.
                     unsafe { std::env::remove_var(name) };
                 }
-                st3::demo::play(demo, &instance, reset, |playback| {
+                demo::play(demo, &instance, reset, |playback| {
                     stui::run(stui::Args::default().with_playback(playback))
                 })
             }

@@ -980,9 +980,9 @@
       "command": "st demo check",
       "description": "Check a demo file and list its beats without playing it",
       "tests": [
-        "crates/st3-daemon/src/demo.rs::a_demo_file_reads_as_its_seed_and_beats",
-        "crates/st3-daemon/src/demo.rs::mistakes_are_named_with_their_line",
-        "crates/st3-daemon/src/demo.rs::the_example_demos_are_playable_files"
+        "crates/st3/src/demo.rs::a_demo_file_reads_as_its_seed_and_beats",
+        "crates/st3/src/demo.rs::mistakes_are_named_with_their_line",
+        "crates/st3/src/demo.rs::the_example_demos_are_playable_files"
       ],
       "verification": "the parser on a full demo, each kind of mistake with its line, and every example demo in examples/demos"
     },
