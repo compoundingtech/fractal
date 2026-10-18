@@ -108,3 +108,49 @@ async fn assistant_replication_keyed_issuer_grant_allows_caller_bound_read() {
     assert!(authenticate(&receiver, &credential_digest(credential), "fabric-loopback").unwrap().is_some());
     assert_eq!(summary_status(&receiver, credential).await, StatusCode::OK);
 }
+
+async fn received_authority_stays_unsigned_after_activation(already_keyed: bool) {
+    let source_root = tempfile::tempdir().unwrap();
+    let receiver_root = tempfile::tempdir().unwrap();
+    let source = state(source_root.path());
+    let receiver = state(receiver_root.path());
+    for state in [&source, &receiver] {
+        state.store.bind_fleet(FLEET).unwrap();
+    }
+    let grant = caller_bound_grant(&source).await;
+    let credential = grant["credential"].as_str().unwrap();
+    if !already_keyed {
+        sync(&source, &receiver);
+        assert_eq!(summary_status(&receiver, credential).await, StatusCode::FORBIDDEN);
+    }
+    let member = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    receiver.store.pin_fleet_anchor(member.public()).unwrap();
+    receiver.store.set_member_key(Some(member.clone())).unwrap();
+    receiver.store.append_claim(&ClaimInput {
+        subject: format!("host/{}", receiver.store.origin()),
+        kind: "fleet.member-admitted".into(), actor: None,
+        fields: serde_json::from_value(json!({"fleet_id":FLEET,"member_key":member.public(),
+            "via":"anchor","mode":"listening"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    if already_keyed {
+        receiver.store.replication_snapshot().unwrap();
+        sync(&source, &receiver);
+        assert_eq!(summary_status(&receiver, credential).await, StatusCode::FORBIDDEN);
+    }
+    receiver.store.complete_replication_activation().unwrap();
+    receiver.store.validate_replication_backlog().unwrap();
+    receiver.store.project_replication_backlog().unwrap();
+    assert!(authenticate(&receiver, &credential_digest(credential), "fabric-loopback").unwrap().is_none());
+    assert_eq!(summary_status(&receiver, credential).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn assistant_replication_received_authority_stays_unsigned_after_key_activation() {
+    received_authority_stays_unsigned_after_activation(false).await;
+}
+
+#[tokio::test]
+async fn assistant_replication_received_authority_stays_unsigned_after_startup_activation() {
+    received_authority_stays_unsigned_after_activation(true).await;
+}
