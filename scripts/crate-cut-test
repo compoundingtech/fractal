@@ -119,8 +119,11 @@ class Cut(unittest.TestCase):
             #[cfg(test)]
             mod tests {
                 use super::*;
+                fn filled(n: i64) -> Store { let mut s = Store::new(); s.append("a", n); s }
                 #[test]
-                fn reports_over() { let mut s = Store::new(); s.append("a", 11); assert!(over(&s)); assert_eq!(s.report(), "over=true"); }
+                fn reports_over() { let s = filled(11); assert!(over(&s)); assert_eq!(s.report(), "over=true"); }
+                #[test]
+                fn total_stays_with_the_store() { assert_eq!(filled(3).total(), 3); }
             }
             '''),
     }
@@ -136,7 +139,7 @@ class Cut(unittest.TestCase):
             p.write_text(text)
         (self.root / "scripts").mkdir()
         (self.root / "scripts/ci-test-paths.rs").write_text("")
-        (self.root / "crates/lowcrate/Cargo.toml").write_text('[package]\nname = "lowcrate"\nversion = "0.1.0"\nedition = "2024"\n')
+        (self.root / "crates/lowcrate/Cargo.toml").write_text('[package]\nname = "lowcrate"\nversion = "0.1.0"\nedition = "2024"\n[features]\ntest-support = []\n')
         self.cwd = os.getcwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, self.cwd)
@@ -169,7 +172,7 @@ class Cut(unittest.TestCase):
     def test_the_test_moves_with_what_it_uses(self):
         nodes, _, _ = self.plan()
         tests = [n for n in nodes if n.test]
-        self.assertEqual([(t.name, t.eff) for t in tests], [("reports_over", 1)])
+        self.assertEqual(sorted((t.name, t.eff) for t in tests if t.kind == "fn" and t.name != "filled"), [("reports_over", 1), ("total_stays_with_the_store", 0)])
 
     @unittest.skipUnless(shutil.which("cargo"), "cargo not available")
     def test_the_cut_compiles_and_moves_text_verbatim(self):
@@ -191,8 +194,13 @@ class Cut(unittest.TestCase):
         self.assertIn("    /// The report.\n    fn report(&self) -> String;", high)
         self.assertIn("fn reports_over()", high)
         self.assertNotIn("reports_over", low)
+        self.assertIn("fn total_stays_with_the_store", low)
+        # the helper both sides use is extracted once, into a module the lower crate shares
+        shared = (self.root / "crates/lowcrate/src/dom_tests_shared.rs").read_text()
+        self.assertIn("pub fn filled(n: i64) -> Store", shared)
+        self.assertNotIn("fn filled", low.replace("pub use crate::dom_tests_shared", ""))
         (self.root / "crates/highcrate/Cargo.toml").write_text(
-            '[package]\nname = "highcrate"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\nlowcrate = { path = "../lowcrate" }\n')
+            '[package]\nname = "highcrate"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\nlowcrate = { path = "../lowcrate", features = ["test-support"] }\n[features]\ntest-support = []\n')
         (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/lowcrate", "crates/highcrate"]\nresolver = "3"\n')
         env = dict(os.environ, CARGO_TARGET_DIR=str(self.root / "target"), CARGO_INCREMENTAL="0")
         for k in [k for k in env if k.startswith(("ST_", "ST3_"))] + ["LD_PRELOAD"]:
