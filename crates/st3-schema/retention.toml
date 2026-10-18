@@ -37,6 +37,7 @@
 "checkpoint.verified" = { class = "durable" }
 "daemon.diagnostic" = { class = "current" }
 "daemon.started" = { class = "transition", window = "7d", pending = "restart windows read every start" }
+"decision.observed" = { class = "durable" }
 "delivery.hold" = { class = "durable" }
 "doc.bound" = { class = "durable" }
 "eval.verdict" = { class = "durable" }

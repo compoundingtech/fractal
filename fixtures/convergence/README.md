@@ -27,6 +27,13 @@ corpus slot. After merging main, regenerate v3 with
 `cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v3.json`.
 The generator serializes the complete merged registry; do not hand-edit the snapshot.
 
+`claims-v4.json` is the serialization of the registry from the attention-decisions branch
+merged with main at `1dc995076da`, generated with
+`cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v4.json`.
+It adds `decision.observed`; v1 to v3 remain unchanged. The kind changes the shared RNG
+stream, so v3's never-trim characterization `[5, 34]` does not apply: with v4 all 17 fixed
+seeds trim. After merging main, regenerate v4 the same way; do not hand-edit the snapshot.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&st3_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation
