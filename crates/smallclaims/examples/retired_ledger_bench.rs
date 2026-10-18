@@ -35,7 +35,7 @@ fn tombstones(from: u64, to: u64) -> (Vec<EnvelopeTombstone>, Vec<ClaimTombstone
             writer: envelope.writer.clone(),
             sequence: envelope.sequence,
             envelope_hash: envelope.envelope_hash.clone(),
-            subject: format!("agent/fleet/member-{}", index % 50),
+            subject: format!("agent/example/member-{}", index % 50),
             kind: "harness.observed".into(),
             actor: None,
             predecessors: Vec::new(),
