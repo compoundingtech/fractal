@@ -121,6 +121,7 @@ async fn timeline(
         .unwrap_or_else(|| snapshot.clone());
     let mut session = ClientSession::local(Some(person))?;
     session.conversation_blocks = true;
+    session.assistant_content_handles = true;
     let reader = state.clone();
     let pinned = snapshot.clone();
     let id = session_id.clone();

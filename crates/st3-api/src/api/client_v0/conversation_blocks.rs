@@ -804,12 +804,14 @@ pub fn prepare_one(
             }
         }
     }
-    // Negotiated plain text always has a read handle, including short replies. Assistant
-    // discovery must not depend on a message being long enough to trigger clipping.
+    // Assistant projections need a handle even for short chat replies. Keep ordinary
+    // negotiated clients' display-block layout unchanged.
     if session.conversation_blocks && original["body"]["media_type"] == "text/plain"
-        && original["body"]["text"].is_string()
+        && original["body"]["text"].as_str().is_some_and(|text|
+            text.len() > VALUE_BYTES || session.assistant_content_handles)
         && body.get("blocks").and_then(Value::as_array)
-            .is_none_or(|blocks| blocks.iter().all(|block| block["kind"] == "source_record"))
+            .is_none_or(|blocks| session.assistant_content_handles
+                || blocks.iter().all(|block| block["kind"] == "source_record"))
     {
         let blocks = body.entry("blocks").or_insert_with(|| json!([])).as_array_mut().expect("blocks array");
         blocks.push(json!({"id":format!("{}/text",original["id"].as_str().unwrap_or("content")),

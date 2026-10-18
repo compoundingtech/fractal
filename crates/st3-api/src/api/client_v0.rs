@@ -2837,6 +2837,8 @@ pub struct ClientSession {
     pub local_peer: bool,
     pub custom_forms: bool,
     pub conversation_blocks: bool,
+    /// Internal assistant projection option; never negotiated by ordinary native clients.
+    assistant_content_handles: bool,
     scopes: std::collections::BTreeSet<String>,
 }
 
@@ -2853,6 +2855,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: true,
             conversation_blocks: false,
+            assistant_content_handles: false,
             scopes: std::collections::BTreeSet::new(),
         }
     }
@@ -2890,6 +2893,7 @@ impl ClientSession {
                 local_peer: false,
                 custom_forms,
                 conversation_blocks: false,
+                assistant_content_handles: false,
                 scopes: ["read.projections", "terminal.read"]
                     .into_iter()
                     .map(str::to_owned)
@@ -2908,6 +2912,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms,
             conversation_blocks: false,
+            assistant_content_handles: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
         })
     }
@@ -2923,6 +2928,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             scopes: std::collections::BTreeSet::new(),
         }
     }
@@ -3171,6 +3177,7 @@ fn paired_client_session(
         local_peer: false,
         custom_forms,
         conversation_blocks: false,
+        assistant_content_handles: false,
         scopes,
     })
 }

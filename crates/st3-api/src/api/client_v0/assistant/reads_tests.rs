@@ -266,6 +266,7 @@ fn managed_record(root: &std::path::Path, payload: Value) -> (AppState, String, 
     let session_id = super::super::super::managed_session_id(owner, incarnation);
     let mut session = ClientSession::local(Some(OWNER)).unwrap();
     session.conversation_blocks = true;
+    session.assistant_content_handles = true;
     let timeline = super::super::super::timeline_value(
         &state, &new_client_snapshot(&state), &session, &session_id, &ClientListQuery::default(),
     ).unwrap().0;
