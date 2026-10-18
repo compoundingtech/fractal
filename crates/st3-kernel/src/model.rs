@@ -67,6 +67,34 @@ pub fn new_request_id() -> String {
     )
 }
 
+/// `person/ada` → `ada`, when the name is a valid word (`sekrets`, `tile_registry`).
+pub fn person_name(person: &str) -> Option<&str> {
+    person
+        .strip_prefix("person/")
+        .filter(|name| valid_word(name))
+}
+
+/// A sekrets or tile name: lowercase letters, digits, `-`, `_` and `.`, 64 bytes at most, not
+/// starting with `.` or `-`.
+pub fn valid_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= 64
+        && !word.starts_with(['.', '-'])
+        && word.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+        })
+}
+
+/// The fault scope of the scheduler's first-readiness fault (`reconcile`).
+pub const FIRST_READINESS_FAULT_SCOPE: &str = "scheduler/first-readiness";
+
+/// The endpoints a replication worker publishes for its member (`api`, `peer`).
+#[derive(Deserialize, Serialize)]
+pub struct FleetEndpointsRequest {
+    pub mode: String,
+    pub endpoints: Vec<Value>,
+}
+
 /// The error code of a send or reply addressed to a person.
 pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
 
@@ -3228,4 +3256,19 @@ mod person_inbox_tests {
         assert!(PERSON_HAS_NO_INBOX.contains("only if the person asked for it"));
         assert!(!PERSON_HAS_NO_INBOX.contains("NO REPLY"));
     }
+}
+
+/// The id prefix of a record that `append_local_observation` produced: `local-observation/{origin}/{id}`.
+pub const LOCAL_OBSERVATION_ID_PREFIX: &str = "local-observation/";
+
+/// The local log position of a record that `append_local_observation` or a local
+/// observation read produced; `None` for a claim.
+pub fn local_observation_position(record: &ClaimRecord) -> Option<u64> {
+    record
+        .id
+        .strip_prefix(LOCAL_OBSERVATION_ID_PREFIX)?
+        .rsplit_once('/')?
+        .1
+        .parse()
+        .ok()
 }

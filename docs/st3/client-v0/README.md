@@ -473,8 +473,14 @@ The optional `agent_messages` field adds a **daily estimate**, also shown by `st
 the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
 Receipts and duplicate send claims add no messages. Bodies are never classified. Counts are
-maintained in the writer transaction and backfilled once on upgrade. Full UTC days use daily
-recipient counters; the first and last partial days use an indexed send-time range.
+backfilled atomically on the first usage-estimate request after upgrade, not during daemon
+startup. That first request can take longer; it never returns partially backfilled counts.
+Until then, daily counters are not maintained; the first request rebuilds them from every
+retained send. Once initialized, counts are maintained in each writer transaction. Full UTC
+days use daily recipient counters; the first and last partial days use an indexed send-time
+range.
+An estimate inside an already-pinned read snapshot with an uninitialized cache folds that
+snapshot's retained sends directly instead of writing or observing a later commit.
 
 `AgentMessageEstimate.days` contains at most the latest 31 UTC calendar days intersecting the
 period, including zero-message days. Each row names `day_start_ms`, the clipped `since_ms` and
@@ -1035,10 +1041,10 @@ uses this continuation and registers its wake before reading the frontier. The l
 `GET /v1/events` keeps its array shape, returns at most 200 rows, and reports continuation in
 `X-ST-Next-After`, `X-ST-Has-More`, and `X-ST-Frontier`; owner filters and subject filters
 during migration require the page endpoint. CLI condition, restart, and harness waits use pages.
-A new CLI probes that route once. On a bare missing-route 404, it negotiates only a legacy daemon
-that explicitly advertises `features.bounded_legacy_events=1`; otherwise it stops with daemon
-upgrade guidance before requesting legacy history. Typed refusals, errors and HTTP 410 never
-activate negotiation.
+The CLI requires the page endpoint and never falls back to legacy event history. On a bare
+missing-route 404, a daemon without `features.bounded_legacy_events=1` receives daemon upgrade
+guidance. A daemon advertising that capability but missing the page route receives the normal
+unexpected-response error. Typed refusals, errors and HTTP 410 retain their existing handling.
 A cursor before the recorded checkpoint deletion floor receives HTTP 410 `cursor-gap` with
 `full_resync=true`, `resume_floor`, and `frontier`. Refresh projections and establish a new
 cursor explicitly; do not silently reset or keep retrying the old cursor. Client-v0 event feeds
@@ -1326,7 +1332,7 @@ All routes below are GETs under `/v1/client/assistant/`; none uses an ordinary p
 Every input schema is closed (`additionalProperties: false`). All reads accept optional
 `max_response_bytes` (integer 1–16384); the 4096-byte default and 16384-byte ceiling cover the
 entire response envelope, and deployment policy may lower them. Paginated reads accept optional
-`cursor` and positive integer `limit`, preserve `items` / `next_cursor`, and never auto-fetch.
+`cursor` and positive integer `limit`, preserve `value.items` / `value.page.next_cursor`, and never auto-fetch.
 
 | MCP tool | Route | Required fields | Other optional fields | Scope |
 | --- | --- | --- | --- | --- |
@@ -1346,6 +1352,33 @@ entire response envelope, and deployment policy may lower them. Paginated reads 
 | `st_agent_queue` | `agent-queue` | `agent_id` | `cursor`, `limit` | `read.assistant.agents` |
 | `st_conversation_read` | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end` | — | `read.assistant.conversation` |
 
+Conversation discovery is self-contained: `st_conversations_list` returns
+`value.items[].agent_id`, `session_id`, `current_session_id`, and `read`. Copy the
+same item's `agent_id` and `session_id` into `st_conversation_timeline` to select
+that discovered session, rather than guessing identifiers or implicitly following
+a newly current session. A non-null `read` object contains exactly the six required
+`st_conversation_read` arguments: `agent_id`, `session_id`, `reference`, `revision`,
+`start`, and `end`. Pass that object unchanged for a direct discovery-to-content
+read. `read: null` means the bounded current timeline page supplies no readable text handle;
+use the returned agent/session identifiers to page its timeline.
+
+Timeline pages also return `value.items[].read` handles; pass a non-null handle
+unchanged to `st_conversation_read`. The revision pins the source and `start` /
+`end` specify the bounded range. Pagination cursors are separate:
+`value.page.next_cursor` continues the tool that produced it and is never a content
+`reference`. Content handles require the conversation grant even though discovery
+contains no conversation text.
+Work and conversation discovery use source-level keyset pages: a default of 10,
+maximum of 50 candidates, plus one lookahead. They project only that selected slice,
+and stop before the complete response envelope would exceed `max_response_bytes`.
+The cursor resumes after the last consumed source key, not after the requested
+limit, so byte-limited pages neither skip nor repeat items. A single item that
+cannot fit produces an error naming the item. Work visibility is evaluated at each
+page's current store cut; conversation membership uses the cursor's pinned cut.
+Cursors retain the initial envelope snapshot and bind the projection, grant policy,
+page limit and expiry. Changing work visibility may yield a sparse or empty page
+with a continuation; callers must follow `value.page.next_cursor` until absent.
+
 The remaining two tools are the explicitly scoped writes `st_alert_answer` and `st_message_send`.
 Registering a tool never expands the sealed grant: baseline grants do not include
 `read.assistant.conversation` or `read.assistant.work`; the owning person must add them explicitly.
@@ -1362,6 +1395,9 @@ The flake's `packages.st-chatgpt` builds only the adapter executable with the sh
 Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
 `nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
+
+Targeted adapter tests (including discovery → timeline / content chaining):
+`nix develop -c cargo test -p st-chatgpt`.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
@@ -1915,7 +1951,20 @@ An optional `subject: ArrangementId` selects only that arrangement (zero or one 
 `has_more: false`), so a selected Sidebar cannot fall outside a busy owner's byte/count
 window. Its owner must equal `person`; mismatches are refused. Snapshots, upserts and
 retirement removals retain the ordinary collection semantics. Omitting the filter
-keeps owner-wide prefix windows unchanged.
+keeps owner-wide prefix windows and additionally invalidates the complete owner
+inventory: a changed owner revision sends an existing `changes` frame even if
+`upserts` and `removes` are empty and `order`/`has_more` are unchanged. Its `snapshot`
+names the same read snapshot as that revision and prefix. Create, rename, retire,
+layout edits and replicated materialization are covered, including older admitted claims
+projected after newer local edits. Owner-local counters commit with those projection
+writes; replay/rebuild advances touched owners. Other owners and unrelated routine
+global commits do not send inventory notices. Revisions are compared for inequality,
+so a database reset can cause one extra notice. A notice can retain the previous
+snapshot ID/index when projection changes without a new claim; never discard it on
+that basis. Clients needing complete discovery paginate
+the HTTP list after the initial snapshot and every owner-wide changes frame, including
+empty ones, rather than inferring absence from the prefix. See
+[current collection subscriptions](collections.md) for the exact contract.
 Arrangement list and stream windows also fit a byte budget: the 1,048,576-byte response
 ceiling reserves 128,000 bytes for the envelope. A byte-shortened window sets `has_more`
 and retains full resources, not truncated registers or placements. A replicated full

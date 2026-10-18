@@ -184,7 +184,7 @@ async fn bounded_reads_dispatch_exact_get_routes_queries_and_bearer_and_preserve
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let expected = json!({
         "api_version":"st3.client.v0",
-        "value":{"items":[],"next_cursor":"page/next"},
+        "value":{"items":[],"page":{"next_cursor":"page/next"}},
         "snapshot":{"id":"snapshot/read"}
     });
     let response = expected.clone();
@@ -217,6 +217,95 @@ async fn bounded_reads_dispatch_exact_get_routes_queries_and_bearer_and_preserve
             .collect();
         assert_eq!(query, expected_query, "{name}");
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn conversation_discovery_chains_to_timeline_and_read_using_only_list_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let handle = json!({
+        "agent_id":"agent/discovered +&?", "session_id":"session/discovered +&?",
+        "reference":"content/discovered +&?", "revision":"revision/discovered +&?",
+        "start":7, "end":19
+    });
+    let listed = json!({
+        "api_version":"st3.client.v0",
+        "value":{"items":[
+            {"agent_id":handle["agent_id"], "session_id":handle["session_id"],
+                "current_session_id":handle["session_id"], "read":handle},
+            {"agent_id":"agent/no-text", "session_id":"session/no-text",
+                "current_session_id":"session/no-text", "read":null}
+        ], "page":{"next_cursor":null}},
+        "snapshot":{"id":"snapshot/discovery"}
+    });
+    let content = json!({
+        "api_version":"st3.client.v0",
+        "value":{"kind":"assistant-conversation-content",
+            "agent_id":handle["agent_id"], "session_id":handle["session_id"],
+            "reference":handle["reference"], "revision":handle["revision"],
+            "start":handle["start"], "end":handle["end"], "text":"bounded text",
+            "returned_bytes":12, "truncated":false, "next_range":null},
+        "snapshot":{"id":"snapshot/content"}
+    });
+    let listed_response = listed.clone();
+    let content_response = content.clone();
+    let (sent, mut received) = tokio::sync::mpsc::channel(1);
+    let gateway = Router::new().fallback(
+        move |uri: axum::http::Uri,
+              axum::extract::Query(query): axum::extract::Query<std::collections::BTreeMap<String, String>>| {
+            let sent = sent.clone();
+            let listed = listed_response.clone();
+            let content = content_response.clone();
+            async move {
+                let response = match uri.path() {
+                    "/v1/client/assistant/conversations" => listed,
+                    "/v1/client/assistant/conversation-timeline" =>
+                        json!({"api_version":"st3.client.v0","value":{
+                            "items":[{"read":listed["value"]["items"][0]["read"]}], "page":{"next_cursor":null}}}),
+                    "/v1/client/assistant/conversation-content" => content,
+                    _ => panic!("unexpected discovery route: {uri}"),
+                };
+                sent.send((uri.path().to_owned(), query)).await.unwrap();
+                axum::Json(response)
+            }
+        },
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    let adapter = Adapter {
+        client: reqwest::Client::builder().unix_socket(socket).build().unwrap(),
+        bearer: "test-only-discovery-credential".into(),
+    };
+    let discovery = call(&adapter, "st_conversations_list", &json!({})).await.unwrap();
+    assert_eq!(discovery, listed);
+    let (path, query) = received.recv().await.unwrap();
+    assert_eq!(path, "/v1/client/assistant/conversations");
+    assert!(query.is_empty());
+
+    let conversation = &discovery["value"]["items"][0];
+    let timeline_args = json!({
+        "agent_id":conversation["agent_id"], "session_id":conversation["session_id"]
+    });
+    let timeline = call(&adapter, "st_conversation_timeline", &timeline_args).await.unwrap();
+    let (path, query) = received.recv().await.unwrap();
+    assert_eq!(path, "/v1/client/assistant/conversation-timeline");
+    for key in ["agent_id", "session_id"] {
+        assert_eq!(query[key], conversation[key].as_str().unwrap());
+    }
+    assert_eq!(query.len(), 2);
+
+    for read_args in [&conversation["read"], &timeline["value"]["items"][0]["read"]] {
+        assert_eq!(call(&adapter, "st_conversation_read", read_args).await.unwrap(), content);
+        let (path, query) = received.recv().await.unwrap();
+        assert_eq!(path, "/v1/client/assistant/conversation-content");
+        let expected_query: std::collections::BTreeMap<_, _> = read_args.as_object().unwrap()
+            .iter().map(|(key, value)| (key.clone(), value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string())))
+            .collect();
+        assert_eq!(query, expected_query);
+        assert_eq!(read_args.as_object().unwrap().len(), schema("st_conversation_read")["required"].as_array().unwrap().len());
+    }
+    assert!(discovery["value"]["items"][1]["read"].is_null());
     server.abort();
 }
 
