@@ -9,6 +9,8 @@ export interface SidebarTreeItem<T> {
   readonly id: Key
   readonly depth: number
   readonly children?: readonly T[]
+  /** View-only children can remain keyboard actionable without joining the drag collection. */
+  readonly isDraggable?: boolean
   /** RAC typeahead text, and the row's accessible name unless `accessibleName` is given. */
   readonly textValue: string
   /**
@@ -129,6 +131,13 @@ const RowContent = React.memo(function RowContent<T extends SidebarTreeItem<T>>(
     ? <ButtonContext.Provider value={copyButtonSlots}><CheckboxContext.Provider value={copyCheckboxSlots}><CheckboxFieldContext.Provider value={copyCheckboxFieldSlots}>{content}</CheckboxFieldContext.Provider></CheckboxContext.Provider></ButtonContext.Provider>
     : content
 }) as <T extends SidebarTreeItem<T>>(props: RowContentProps<T>) => React.ReactNode
+
+/** RAC otherwise treats every TreeItem as draggable, even when getItems refuses its key. */
+function TreeItemDragScope({ disabled, children }: { readonly disabled: boolean; readonly children: React.ReactNode }) {
+  const context = React.useContext(DragAndDropContext)
+  const value = React.useMemo(() => disabled ? { ...context, dragState: undefined } : context, [context, disabled])
+  return <DragAndDropContext.Provider value={value}>{children}</DragAndDropContext.Provider>
+}
 
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
 export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProps<T>) {
@@ -418,12 +427,12 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${s.lg} * ${depth} + ${s.sm})` }} />)}
     {item.children?.length ? pinned ? <span data-pinned-chevron {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</span> : <Button slot="chevron" {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</Button> : null}
     <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
-    {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
+    {!pinned && item.isDraggable !== false && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
   </div>
-  const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
+  const renderItem = (item: T): React.ReactElement => <TreeItemDragScope disabled={item.isDraggable === false}><TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
     <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]}>{renderItem}</Collection>
-  </TreeItem>
+  </TreeItem></TreeItemDragScope>
   return <div {...stylex.props(styles.root, props.style)} data-sidebar-drag-active={dragging || undefined} onKeyDownCapture={event => { pending.current = undefined; keyboard(event) }} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
     const target = (event.target as HTMLElement).closest('[data-sidebar-tree-key]')
     const key = target?.getAttribute('data-sidebar-tree-key')

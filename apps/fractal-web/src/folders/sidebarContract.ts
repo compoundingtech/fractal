@@ -3,7 +3,15 @@
 import type * as React from 'react'
 import type { StyleXStyles } from '@stylexjs/stylex'
 
-export type SidebarAgent = { readonly _tag: 'Agent'; readonly id: string; readonly subject: string; readonly label: string }
+export type SidebarAgent = {
+  readonly _tag: 'Agent'; readonly id: string; readonly subject: string; readonly label: string
+  readonly children?: readonly SidebarAgent[]
+  readonly collapsed?: boolean
+  /** Native children belong to this seat, not the arrangement roster. */
+  readonly parent?: string
+  readonly childId?: string
+  readonly activationRef?: string
+}
 export type SidebarFolder = { readonly _tag: 'Folder'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
 export type SidebarGroup = { readonly _tag: 'Group'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
 export type SidebarNode = SidebarFolder | SidebarGroup | SidebarAgent

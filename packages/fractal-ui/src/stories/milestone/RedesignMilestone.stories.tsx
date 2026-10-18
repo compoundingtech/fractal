@@ -1,5 +1,5 @@
 /**
- * Redesign milestone 1 (RM1) — workshop only.
+ * Redesign milestone 1 (RM1) — accepted direction, ported to the application slice by slice.
  *
  * Composes approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) and the decided layout calls (RM1-Q1…Q7) with new shell states:
  * roster loading, empty, roster error, thread unavailable, stale, no-match, an empty main area and a command palette. No
@@ -21,7 +21,7 @@ const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: `Workshop-only milestone. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. Nothing here is the accepted live design.` } },
+    docs: { description: { component: `Johannes accepted RM1 as shown in Storybook (taste review, 2026-10-18). Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. The sidebar uses the shared kit row; other surfaces remain the reference for their application slices.` } },
   },
   args: { scheme: 'dark', state: 'slice' },
   argTypes: {
@@ -62,9 +62,19 @@ export const Stale: Story = {
     // Narrow, the roster sits in the closed drawer and is not rendered.
     if (canvasElement.querySelector('[data-roster-state="stale"]') === null) return
     await expect(within(canvasElement).getByText(/^Last observed \d+ s ago$/)).toBeVisible()
-    // A last-observed roster has one glyph tone: nothing reads as live.
-    const tones = new Set([...canvasElement.querySelectorAll('[data-row-column="glyph"] svg')].map(svg => getComputedStyle(svg).color))
+    // A last-observed roster has one glyph tone: nothing reads as live, and stale is never the danger red.
+    const glyphs = [...canvasElement.querySelectorAll<SVGElement>('[data-milestone-row] [data-row-column="status"] svg')]
+    const tones = new Set(glyphs.map(svg => getComputedStyle(svg).color))
     await expect(tones.size).toBe(1)
+    // One tone, so shape carries the state: frozen working and idle rows draw different shape cues.
+    const shape = (status: string) => canvasElement.querySelector(`[data-milestone-row][data-frozen][data-status="${status}"] [data-row-column="status"] svg`)?.innerHTML
+    await expect(shape('working')).toBeDefined()
+    await expect(shape('idle')).toBeDefined()
+    await expect(shape('working')).not.toBe(shape('idle'))
+    // Frozen times measure against the observation; nothing newer than it reads as a fake 0s.
+    const times = [...canvasElement.querySelectorAll('[data-milestone-row] [data-row-field="last-turn"] time')].map(time => time.textContent)
+    await expect(times.length).toBeGreaterThan(0)
+    await expect(times).not.toContain('0s')
   },
 }
 export const StaleLight = light(Stale)
@@ -73,16 +83,16 @@ export const Navigation: Story = {
   play: async ({ canvasElement }) => {
     // One status reads the same everywhere: the stale agent's glyph in Mod+K matches its sidebar glyph (muted, never danger).
     const paletteGlyph = await waitFor(() => { const svg = within(canvasElement).getByRole('menuitem', { name: /Fix flaky interaction gate/ }).querySelector('svg'); expect(svg).not.toBeNull(); return svg! })
-    const sidebarRow = [...canvasElement.querySelectorAll('[data-testid="milestone-agent-row"][data-status="stale"]')][0]
+    const sidebarRow = [...canvasElement.querySelectorAll('[data-milestone-row][data-status="stale"]')][0]
     if (sidebarRow === undefined) return
-    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(sidebarRow.querySelector('[data-row-column="glyph"] svg')!).color)
+    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(sidebarRow.querySelector('[data-row-column="status"] svg')!).color)
   },
 }
 export const NavigationLight = light(Navigation)
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const chord = (key: string) => isMac ? `{Meta>}${key}{/Meta}` : `{Control>}${key}{/Control}`
-const rows = (root: HTMLElement) => root.querySelectorAll('[data-testid="milestone-agent-row"]')
+const rows = (root: HTMLElement) => root.querySelectorAll('[data-milestone-row]')
 
 /** A reload the play settles itself: recovery plays assert the loading frame, then complete it with no timer to race. */
 function manualReload() {

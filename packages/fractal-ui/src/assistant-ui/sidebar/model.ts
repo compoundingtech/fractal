@@ -1,5 +1,9 @@
 export { matchPositions } from './fuzzy.ts'
-export type SidebarUsage = { readonly _tag: 'Known'; readonly scope: '24h-root-and-subagents' | 'lifetime-incl-subagents'; readonly tokens: number; readonly usd: number } | { readonly _tag: 'Unknown' }
+/** `tokens` is always reported with Known usage; `usd` only when the source reported a USD cost, never a substituted $0. */
+export type SidebarUsage = { readonly _tag: 'Known'; readonly scope: SidebarUsageScope; readonly tokens: number; readonly usd?: number } | { readonly _tag: 'Unknown' }
+/** `reported-agent` is the agent's own reported aggregate; it claims neither a 24h window nor subagent inclusion. */
+export type SidebarUsageScope = '24h-root-and-subagents' | 'lifetime-incl-subagents' | 'reported-agent'
+export const usageScopeLabel = (scope: SidebarUsageScope): string => scope === '24h-root-and-subagents' ? '24h root and subagents' : scope === 'lifetime-incl-subagents' ? 'Lifetime including subagents' : 'Reported by agent'
 export type SidebarDuration = { readonly _tag: 'Known'; readonly scope: '24h-activity-span' | 'lifetime'; readonly ms: number } | { readonly _tag: 'Unknown' }
 export type SidebarLastTurn = { readonly _tag: 'Known'; readonly kind: 'turn-completed' | 'activity'; readonly at: number } | { readonly _tag: 'Unknown' }
 export interface SidebarReported {

@@ -37,10 +37,12 @@ export { Button as CompositionButton, IconButton as CompositionIconButton, Menu,
 export type { MenuProps, MenuItemProps, PopoverProps, CheckboxProps, TooltipProps, TooltipSurfaceProps } from './composition/Controls'
 
 /** Controlled sidebar row; the host owns clock and data. */
-export { SidebarAgentRow, AgentHoverCard, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
-export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
+export { SidebarAgentRow, AgentHoverCard, AgentRowActions, type AgentRowActionsProps, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
+export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from './sidebar/MilestoneAgentRow.tsx'
+export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
-export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export { usageScopeLabel } from './sidebar/model.ts'
+export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export { SidebarTree } from './sidebar/SidebarTree.tsx'
 export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
 

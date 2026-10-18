@@ -68,6 +68,30 @@ const row = decodeUnknownSync(
   updated_at: '2026-10-04T12:00:00.000Z',
 } satisfies AgentEncoded)
 
+test('projects authoritative native subagents, distinguishes absence and retains equivalent row identity', () => {
+  const decode = decodeUnknownSync(Agent)
+  const encoded = {
+    kind: 'agent', id: 'agent/children', name: 'Parent', host_id: 'host/example',
+    runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
+    blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-18T12:00:00Z',
+    subagents: [{
+      id: 'reviewer', driver: 'omp', description: 'Review changes', session_id: 'session/review',
+      started_at: '2026-10-18T12:00:00Z', lease_expires_at: '2026-10-18T12:01:00Z',
+    }],
+  } satisfies AgentEncoded
+  const projections = createProjections()
+  const first = projections.fleetFromAgents([decode(encoded)]).agents[0]!
+  expect(first.subagents?.[0]).toMatchObject({
+    id: 'reviewer', driver: 'omp', description: 'Review changes', session_id: 'session/review',
+    started_at: '2026-10-18T12:00:00.000Z', lease_expires_at: '2026-10-18T12:01:00.000Z',
+  })
+  expect(first.subagents?.[0]).not.toHaveProperty('activity')
+  expect(first.subagents?.[0]).not.toHaveProperty('usage')
+  expect(projections.fleetFromAgents([decode(encoded)]).agents[0]).toBe(first)
+  expect(projections.fleetFromAgents([decode({ ...encoded, subagents: [] })]).agents[0]).not.toBe(first)
+  expect(fleetFromAgents([row]).agents[0]?.subagents).toBeUndefined()
+})
+
 test.each([
   ['agent/example', 'terminal/example'],
   ['agent/example-seat', 'terminal/example-seat'],

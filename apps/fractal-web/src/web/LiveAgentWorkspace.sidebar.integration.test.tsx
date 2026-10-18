@@ -22,7 +22,7 @@ import type { ConnectionState } from '@st3/sdk/effect'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const gateway = 'gateway.example.invalid'
-const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
+const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
@@ -76,6 +76,43 @@ const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
 
+it('nests authoritative children in the same tree, keeps parent filter context and omits invented child facts', async () => {
+  if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
+  const child = {
+    id: 'reviewer', driver: 'omp', description: Option.some('Review changes'),
+    session_id: Option.some('session/review'), started_at: Option.none(),
+    subagent_type: Option.none(), work_id: Option.none(),
+    lease_expires_at: DateTime.makeUnsafe(60_000),
+  }
+  registry.set(agents, observed({ value: [{ ...agent, harness_state: Option.some('working'), subagents: [child, { ...child, id: 'no-session', description: Option.some('Review unavailable'), session_id: Option.none() }] }] }))
+  await mount(1440)
+  expect(roster().textContent).not.toContain('Review changes')
+  const parent = roster().querySelector('[data-wf-agent-ref="agent/example"]')!.closest('[role="row"]')!
+  await act(async () => {
+    parent.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true }))
+  })
+  const input = sidebar().querySelector('input')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Review')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  expect(roster().textContent).toContain('Example Agent')
+  expect(roster().textContent).toContain('Review changes')
+  const childRow = [...roster().querySelectorAll('[role="row"]')].find(row => row.getAttribute('aria-label')?.includes('Review changes'))!
+  expect(childRow.getAttribute('aria-level')).toBe(String(Number(parent.getAttribute('aria-level')) + 1))
+  expect(childRow.querySelector('[aria-label="Move Review changes"]')).toBeNull()
+  expect(childRow.querySelector('[data-status="working"]')).toBeNull()
+  expect(childRow.querySelector('time')).toBeNull()
+  expect(childRow.textContent).not.toContain('$0')
+  const unavailable = [...roster().querySelectorAll<HTMLElement>('[role="row"]')].find(row => row.getAttribute('aria-label')?.includes('Review unavailable'))!
+  const previousPath = window.location.pathname
+  await act(async () => unavailable.focus())
+  await act(async () => unavailable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  expect(window.location.pathname).toBe(previousPath)
+  await act(async () => (childRow as HTMLElement).focus())
+  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  expect(window.location.pathname).toBe('/w/session/review')
+})
 it('keeps workspace providers and unchanged roster rows out of the one-second clock render', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
@@ -172,6 +209,22 @@ it('refreshes sidebar activity labels at their exact second and minute boundarie
   expect(time()).toBe('1m')
   await act(async () => registry.set(now, 121_000))
   expect(time()).toBe('2m')
+})
+
+it('renders the RM1 two-line facts and freezes age without replacing the working cue', async () => {
+  const now = Atom.make(5000)
+  const connection = Atom.make<ConnectionState>({ _tag: 'Live' })
+  source = { ...source, now, connection }
+  registry.set(agents, observed({ value: [{ ...agent, harness_state: Option.some('working'), last_activity_at: Option.some(DateTime.makeUnsafe(1000)) }] }))
+  await mount(1440)
+  const row = roster().querySelector('[data-testid="taste-agent-row"]')!
+  expect(row.querySelector('[data-row-column="title"]')?.textContent).toContain(agent.name)
+  expect(row.querySelector('[data-row-column="line2"]')?.textContent).toContain('build-1')
+  expect(row.querySelector('[data-row-column="time"] time')?.textContent).toBe('4s')
+  await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
+  await act(async () => registry.set(now, 60_000))
+  expect(row.querySelector('[data-row-column="time"] time')?.textContent).toBe('4s')
+  expect(row.getAttribute('data-status')).toBe('working')
 })
 
 it('reveals a slightly future activity timestamp when only the leaf clock catches up', async () => {
