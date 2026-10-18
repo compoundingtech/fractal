@@ -67,6 +67,7 @@ use crate::model::{
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
+mod wire_names;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
@@ -182,6 +183,7 @@ pub struct AppState {
     pub planner_default: PlannerSpec,
 }
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
 const CLIENT_API_VERSION: &str = "st3.client.v0";
 const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
@@ -958,6 +960,9 @@ async fn response_envelope_unbounded(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    if let Err(error) = wire_names::receive_headers(request.headers_mut()) {
+        return error.into_response();
+    }
     // Anonymous pairing discovery is public, static compatibility metadata. Bypass
     // authentication, snapshots, presence and the normal envelope/activity counter entirely.
     if matches!(transport, ClientTransportBoundary::FabricLoopback)
@@ -1136,6 +1141,7 @@ async fn response_envelope_unbounded(
         server: otel.clone(),
         roster: request_route == "/v1/client/agents",
     };
+    request.extensions_mut().insert(envelope_context.clone());
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -1940,6 +1946,21 @@ fn client_page_read(
     query: &ClientListQuery,
     _pinned: bool,
 ) -> Result<ClientResourcePage, ApiError> {
+    client_page_read_bounded(state, snapshot, collection, items, query, _pinned, None)
+}
+
+/// Assistant reads supply their real response context so packing includes the
+/// snapshot, request ID, sync notice and the continuation cursor. Other native
+/// lists retain their existing paging policy.
+fn client_page_read_bounded(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    collection: &str,
+    items: Vec<Value>,
+    query: &ClientListQuery,
+    _pinned: bool,
+    budget: Option<(&response_body::Context, usize)>,
+) -> Result<ClientResourcePage, ApiError> {
     let (owner, terminal_state) = if collection == "terminals" {
         (query.owner.as_deref(), query.state.as_deref())
     } else {
@@ -1953,6 +1974,9 @@ fn client_page_read(
         &query.cursor
     {
         let cursor = decode_client_cursor(cursor)?;
+        if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit) {
+            return Err(client_page_expired("the page cursor has an invalid item limit"));
+        }
         if cursor.collection != collection
             || cursor.history != query.history
             || cursor.person != query.person
@@ -1989,6 +2013,9 @@ fn client_page_read(
             .ok_or_else(|| {
                 client_page_expired("the page snapshot is no longer available; restart pagination")
             })?;
+        if cursor.offset >= cached.items.len() {
+            return Err(client_page_expired("the page cursor offset is outside its cached snapshot"));
+        }
         (
             cached.items.clone(),
             cursor.items_digest,
@@ -2038,7 +2065,78 @@ fn client_page_read(
             client_v0::cut_oversized_timeline_entry(only, size);
         }
     }
-    let has_more = end < items.len();
+    let make_page = |end| -> Result<ClientResourcePage, ApiError> {
+        let has_more = end < items.len();
+        let next_cursor = if has_more {
+            Some(encode_client_cursor(&ClientPageCursor {
+                snapshot: snapshot.clone(),
+                collection: collection.into(),
+                offset: end,
+                limit,
+                history: query.history,
+                person: query.person.clone(),
+                actor: query.actor.clone(),
+                owner_run: query.owner_run.clone(),
+                status: query.status.clone(),
+                owner: owner.map(str::to_owned),
+                state: terminal_state.map(str::to_owned),
+                native_only: query.native_only,
+                items_digest: items_digest.clone(),
+                before_index: None,
+                after_key: None,
+                expires_at_unix_ms,
+            })?)
+        } else {
+            None
+        };
+        Ok(ClientResourcePage {
+            kind: "page".into(),
+            collection: collection.into(),
+            filters: client_page_filters(collection, query),
+            items: Vec::new(),
+            page: ClientPageInfo {
+                limit,
+                has_more,
+                next_cursor,
+                cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            },
+            sync: client_sync_notice(state),
+            replicated: None,
+        })
+    };
+    let mut packed_end = end;
+    let mut page = make_page(packed_end)?;
+    if let Some((context, max_bytes)) = budget {
+        let mut sizes = [0usize; CLIENT_MAX_PAGE_ITEMS];
+        let mut payload_bytes = page_items.len().saturating_sub(1);
+        for (size, item) in sizes.iter_mut().zip(&page_items) {
+            *size = response_body::json_size(item)?;
+            payload_bytes += *size;
+        }
+        // Try the complete page first: its final-page envelope has no cursor and
+        // can be smaller than a prefix's envelope. Descending prefixes then give
+        // the largest fitting page, even across cursor-size digit boundaries.
+        loop {
+            if context.page_envelope_size(snapshot, &page)? + payload_bytes <= max_bytes {
+                break;
+            }
+            if packed_end <= offset.saturating_add(1) {
+                let id = page_items.first().and_then(|item| item["id"].as_str()).unwrap_or("<empty page>");
+                return Err(ApiError {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    code: "response-budget-exceeded".into(),
+                    message: format!("not even one whole item fits the assistant response envelope byte budget; item id: {id}"),
+                    details: Box::default(),
+                });
+            }
+            payload_bytes -= sizes[packed_end - offset - 1] + 1;
+            packed_end -= 1;
+            page = make_page(packed_end)?;
+        }
+        page_items.truncate(packed_end - offset);
+    }
+    page.items = page_items;
+    let has_more = page.page.has_more;
     if query.cursor.is_none() && has_more {
         let mut cache = client_page_cache()
             .lock()
@@ -2062,42 +2160,7 @@ fn client_page_read(
             });
         }
     }
-    let next_cursor = if has_more {
-        Some(encode_client_cursor(&ClientPageCursor {
-            snapshot: snapshot.clone(),
-            collection: collection.into(),
-            offset: end,
-            limit,
-            history: query.history,
-            person: query.person.clone(),
-            actor: query.actor.clone(),
-            owner_run: query.owner_run.clone(),
-            status: query.status.clone(),
-            owner: owner.map(str::to_owned),
-            state: terminal_state.map(str::to_owned),
-            native_only: query.native_only,
-            items_digest,
-            before_index: None,
-            after_key: None,
-            expires_at_unix_ms,
-        })?)
-    } else {
-        None
-    };
-    Ok(ClientResourcePage {
-        kind: "page".into(),
-        collection: collection.into(),
-        filters: client_page_filters(collection, query),
-        items: page_items,
-        page: ClientPageInfo {
-            limit,
-            has_more,
-            next_cursor,
-            cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
-        },
-        sync: client_sync_notice(state),
-        replicated: None,
-    })
+    Ok(page)
 }
 
 /// The filters a page names: the ones its query applied.
