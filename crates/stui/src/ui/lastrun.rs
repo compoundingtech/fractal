@@ -109,6 +109,26 @@ pub fn binary_replaced() -> bool {
     true
 }
 
+/// The terminal is gone and the watch that sees it is about to end this process without running
+/// destructors: say so in `exits.log` (an exit with no line there is a silent one), take this
+/// run's marker away so the next stui does not count it as a crash, and keep what was typed.
+pub fn terminal_gone() {
+    if let Some(runs) = directory() {
+        if let Some(log) = runs.parent().map(|dir| dir.join("exits.log")) {
+            write_line(
+                &log,
+                &format!(
+                    "{} pid {}: the terminal closed; the hangup watch ended this stui",
+                    now_unix(),
+                    std::process::id()
+                ),
+            );
+        }
+        let _ = std::fs::remove_file(runs.join(format!("{}.json", std::process::id())));
+    }
+    super::drafts_store::flush_unsaved();
+}
+
 /// Say that a turn of the main loop was slow, and what was on screen, in `slow.log` beside the
 /// panic log (Nathan, 2026-10-13: "understand why the tui crashes or is slow, if it ever is").
 /// One line a ten seconds at most, bounded to 100 KB; the context holds kinds and counts, never
