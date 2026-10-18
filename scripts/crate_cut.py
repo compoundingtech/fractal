@@ -975,7 +975,7 @@ def place_tests(nodes, mtests, files, tfiles, lower):
         body = render(rel, (), g)
         body = re.sub(r"\b(?:super::)+(?:tests|\w+_tests)::(" + "|".join(map(re.escape, sorted(helper_names))) + r")\b", r"\1", body) if helper_names else body
         if rel in files:
-            globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
+            globs = ['#[cfg(any(test, feature = "test-support"))]\nuse %s::*;' % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
             facade_blocks[rel] = ("\n".join(globs) + "\n" if globs else "") + body
         else:
             text, items = tfiles[rel]
