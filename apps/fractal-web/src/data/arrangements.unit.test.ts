@@ -55,11 +55,11 @@ const harness = () => {
   const events: InventoryEvent[] = []
   let respond: (cursor: string | undefined) => Promise<ArrangementPage> = async () => page([])
   const gateway: ArrangementInventoryGateway = {
-    arrangementsList: async (person, options, signal) => {
+    arrangementsList: async (person, options = {}, requestOptions) => {
       expect(person).toBe(owner)
       expect(options.limit).toBe(inventoryPageLimit)
       calls.push(options.cursor)
-      signals.push(signal)
+      signals.push(requestOptions?.signal!)
       return envelope(await respond(options.cursor))
     },
     collectionStream: async (options) => {

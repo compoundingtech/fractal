@@ -4,6 +4,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import re
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1003,6 +1004,36 @@ class LaneDefinitions(unittest.TestCase):
             self.base_tree = self.base_tree  # the base stays fixed; restore the files for the next case
             self.files({'scripts/run.sh': 'run\n', 'scripts/sub/more.sh': 'more\n', 'config/x.json': '{}\n', 'scripts/extra.sh': None})
 
+    def test_absent_paths_are_validated_and_none_may_exist_at_the_base_or_appear_in_the_signed_tree(self):
+        doc = json.loads(json.dumps(LANES))
+        doc['lanes']['unit']['absent_paths'] = ['.hooks.cjs', 'pkg/node_modules']
+        text = json.dumps(doc)
+        rules = evidence_verify.lane_rules(text, 'unit')
+        self.assertEqual(rules['absent_paths'], ('.hooks.cjs', 'pkg/node_modules'))
+        for bad in (['.'], [1], ['/abs'], ['../x']):
+            broken = json.loads(text)
+            broken['lanes']['unit']['absent_paths'] = bad
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.lane_rules(json.dumps(broken), 'unit')
+            self.assertEqual(caught.exception.reason, 'error', bad)
+        plain = self.definition(self.base_tree)
+        again = evidence_verify.lane_definition(str(self.f.repo), self.base_tree, self.base_tree, rules)
+        self.assertEqual(again['changed'], [])
+        self.assertNotEqual(again['sha256'], plain['sha256'])  # the list of absent paths is part of the digest
+        smaller = evidence_verify.lane_definition(str(self.f.repo), self.base_tree, self.base_tree, dict(rules, absent_paths=('.hooks.cjs',)))
+        self.assertNotEqual(again['sha256'], smaller['sha256'])
+        for appearing in ({'.hooks.cjs': 'hook\n'}, {'pkg/node_modules/dep/index.js': 'dep\n'}):
+            _, tree = self.files(appearing)
+            lane = evidence_verify.lane_definition(str(self.f.repo), self.base_tree, tree, rules)
+            self.assertEqual(lane['changed'], sorted(appearing), appearing)  # definition_changed names the file
+            self.files({name: None for name in appearing})
+        # a lane file that lists a path which exists at the base is inconsistent: an error, never a pass
+        self.files({'.hooks.cjs': 'hook\n'})
+        base_with = self.f.git('rev-parse', 'HEAD^{tree}')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_definition(str(self.f.repo), base_with, base_with, rules)
+        self.assertEqual(caught.exception.reason, 'error')
+
     def test_a_check_without_a_lane_is_unsatisfied_under_require_all_when_a_lane_file_is_given(self):
         policy = two_check_policy('reject', 'reject')
         self.f.key('x')
@@ -1058,15 +1089,54 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
         self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
 
-    def test_no_committed_check_requires_a_signed_note_yet(self):
+    def test_every_absent_path_of_the_committed_lanes_is_refused_when_it_appears_in_a_tree(self):
+        """The mutation control: add one file at each path a lane looks for and does not find; the lane must be refused for that tree."""
+        doc = json.loads((ROOT / '.st/required-lanes.json').read_text())
+        for lane, entry in doc['lanes'].items():
+            f = Fixture()
+            self.addCleanup(f.tmp.cleanup)
+            rules = evidence_verify.lane_rules(json.dumps(doc), lane)
+            for path in rules['definition_paths']:
+                target = f.repo / path / 'file' if (ROOT / path).is_dir() else f.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f'{path}\n')
+            f.git('add', '-A')
+            f.git('commit', '-q', '--allow-empty', '-m', f'base {lane}')
+            base_tree = f.git('rev-parse', 'HEAD^{tree}')
+            self.assertEqual(evidence_verify.lane_definition(str(f.repo), base_tree, base_tree, rules)['changed'], [])
+            for path in rules['absent_paths']:
+                self.assertFalse((ROOT / path).exists(), f'{path} exists in this repository: it cannot be an absent path')
+                target = f.repo / path / 'probe.txt' if path.endswith('node_modules') else f.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('appears\n')
+            if not rules['absent_paths']:
+                continue
+            f.git('add', '-A')  # one commit adds a file at every absent path; each must show up as a change
+            f.git('commit', '-q', '-m', f'add every absent path of {lane}')
+            tree = f.git('rev-parse', 'HEAD^{tree}')
+            changed = evidence_verify.lane_definition(str(f.repo), base_tree, tree, rules)['changed']
+            for path in rules['absent_paths']:
+                self.assertTrue(any(name == path or name.startswith(path + '/') for name in changed), (lane, path))
+
+    def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        for check in json.loads(text)['checks']:
-            self.assertEqual(evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'], 'off', check)
+        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'isolation-vm': 'off', 'genie-freshness': 'shadow',
+                                 'mail-redelivery-canaries': 'off'})
+        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        for check, mode in modes.items():
+            if mode != 'off':
+                self.assertIn(check, lanes, f'{check} requires a note, so the lane file must define its lane')
 
     def test_declared_inputs_are_exactly_the_reviewed_list_and_all_exist(self):
         # Written out here: changing what a check depends on is a reviewed change to the policy AND to this list.
-        declared = {'typescript-client': sorted([
-            'apps/fractal-web/package.json', 'apps/fractal-web/packages/st3-sdk/package.json', 'apps/ios',
+        declared = {'linux-gate': sorted([
+            '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
+            'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
+            'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/st3-daemon/src/attach_image.rs
+            'slo', 'src', 'templates', 'tests', 'vendor', 'wit']), 'typescript-client': sorted([
+            'apps/fractal-web/package.json', 'apps/fractal-web/packages/st3-sdk/package.json',
+            'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
             'clients/typescript', 'crates/stui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client'])}
@@ -1076,6 +1146,28 @@ class CommittedPolicy(unittest.TestCase):
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
+        self.assertEqual(self.rules('linux-gate')['sample_one_in'], 5)
+
+    def test_every_compile_time_include_of_the_rust_sources_is_inside_the_declared_inputs_of_linux_gate(self):
+        # The declared list comes from a textual scan, which cannot see paths built at run time but CAN enumerate the
+        # compile-time ones: include_str!/include_bytes!/include! with a literal path. A source file that includes something
+        # outside the declared inputs would let a change to it keep the old key (a stale pass), so this fails instead.
+        declared = [path.rstrip('/') for path in self.rules('linux-gate')['inputs']]
+        pattern = re.compile(r'include(?:_str|_bytes)?!\(\s*"([^"]+)"')
+        outside = []
+        for source in sorted(ROOT.glob('**/*.rs')):
+            parts = source.relative_to(ROOT).parts
+            if 'target' in parts or '.git' in parts or 'node_modules' in parts:
+                continue
+            for literal in pattern.findall(source.read_text(errors='replace')):
+                target = (source.parent / literal).resolve()
+                try:
+                    relative = target.relative_to(ROOT.resolve()).as_posix()
+                except ValueError:
+                    continue  # outside the repository (OUT_DIR, generated files)
+                if not any(relative == path or relative.startswith(path + '/') for path in declared):
+                    outside.append(f'{source.relative_to(ROOT)} includes {relative}')
+        self.assertEqual(outside, [], 'a compile-time include outside the declared linux-gate inputs: declare it or stop including it')
 
     def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
