@@ -33,7 +33,10 @@ test('the native socket forwards authentication, commands, frames and protocol p
   assert.deepEqual(JSON.parse(native.sent[0][1]), { kind: 'subscribe', id: 'usage-24', collection: 'usage', limit: 200, since_ms: 123, until_ms: 456 });
   native.emit({ id, kind: 'ping' });
   assert.equal(pings, 1); assert.equal(native.sent.length, 1, 'SocketRocket answers pong natively; JS sends nothing');
-  native.emit({ id, kind: 'message', data: JSON.stringify({ kind: 'snapshot', id: 'usage-24' }) });
+  native.emit({ id, kind: 'message', data: JSON.stringify({
+    kind: 'snapshot', id: 'usage-24', collection: 'usage', items: [], order: [], has_more: false,
+    snapshot: { id: 'snapshot/test', host_id: 'host/test', store_index: 1, projection_version: 'client-projection.v0', created_at: '2026-09-20T00:00:00Z' },
+  }) });
   assert.equal(frames.length, 1);
   stream.close();
   assert.deepEqual(native.closed, [[id, 1000]]);

@@ -5,7 +5,7 @@ import {
   Autocomplete, Button, Focusable, Header, ListBox, ListBoxItem, ListBoxSection, Menu, MenuItem, MenuTrigger, Popover, Text, Token, TokenField, TokenInput, Tooltip, TooltipTrigger,
   type Key,
 } from 'react-aria-components'
-import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
+import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 import { readingColumnStyles } from './reading-column.stylex'
 import { Icon } from './composition/Icons'
 import { StopRunButton } from './composition/StopRunButton'
@@ -108,7 +108,7 @@ const styles = stylex.create({
     borderRadius: r.control, backgroundColor: surface.controlFill, color: text.fg,
     paddingBlock: s.xs, paddingInline: s.md, fontFamily: t.fontSans, fontSize: t.metaSize,
     cursor: { default: 'pointer', ':disabled': 'not-allowed' }, opacity: { default: 1, ':disabled': 0.64 },
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
   primary: { backgroundColor: accent.primary, color: accent.onPrimary },
   submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, minWidth: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full },
@@ -144,7 +144,7 @@ const styles = stylex.create({
   targetCompact: { maxWidth: '72px', paddingInline: s.xs, gap: s.xs2 },
   targetIcon: { width: g.controlMd, minWidth: g.controlMd, maxWidth: g.controlMd, paddingInline: s.xs, justifyContent: 'center' },
   readoutCompact: { maxWidth: '72px', fontSize: t.denseSize },
-  readout: { maxWidth: g.crumbMax, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: text.fg, ':focus-visible': { outline: `${g.focusRing} solid ${accent.primary}`, outlineOffset: g.focusOffset } },
+  readout: { maxWidth: g.crumbMax, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: text.fg, ':focus-visible': { outline: `${g.focusRing} solid ${interaction.focusRing}`, outlineOffset: g.focusOffset } },
   iconCompact: { paddingInline: s.xs },
   targetPopup: { maxWidth: 'min(400px,90vw)', maxHeight: g.commandMaxHeight, overflowY: 'auto', backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.xs, fontFamily: t.fontSans, fontSize: t.metaSize },
   targetTooltip: { width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, boxSizing: 'border-box', padding: s.sm, borderRadius: r.sm, backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
@@ -324,12 +324,16 @@ function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestS
   const canCancel = useAuiState(s => s.composer.canCancel)
   const canStop = actions === undefined && canCancel
   const [stopping, setStopping] = React.useState(false)
+  const stopPending = React.useRef(false)
+  stopPending.current = stopping
   const [seenRefusal, setSeenRefusal] = React.useState(stopRefusal)
   if (seenRefusal !== stopRefusal) { setSeenRefusal(stopRefusal); if (stopRefusal !== undefined) setStopping(false) }
   if (!canCancel && stopping) setStopping(false)
-  const stop = () => { if (stopping) return; setStopping(true); aui.composer.cancel() }
+  const stop = () => { if (stopPending.current) return; stopPending.current = true; setStopping(true); aui.composer.cancel() }
   return (
     <ComposerPrimitive.Root
+      tabIndex={-1}
+      aria-label="Message composer"
       {...stylex.props(styles.root, style, cold && styles.cold)}
       onSubmit={event => { if (readOnly || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly) onRequestSubmit?.(false) }}
       onCompositionStartCapture={() => { composing.current = true }}
