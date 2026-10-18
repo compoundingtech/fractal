@@ -18,6 +18,11 @@ mod mission_eval_reuse_tests {
 
 const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
+mod subject_reference_readmission_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-haa08848c6d15 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("subject_reference_readmission_tests.rs");
+}
+
 mod run_capacity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-hfb5ea66dd861 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("run_capacity_tests.rs");
