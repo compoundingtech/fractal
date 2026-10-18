@@ -899,8 +899,8 @@ def place_tests(nodes, mtests, files, tfiles, lower):
                 continue  # pub in a module others can reach already
             if u.kind == "impl" and test_types.get((u.file, u.container, u.merge)) is not None and shared_pub(test_types[(u.file, u.container, u.merge)]):
                 continue
-            if u.name and (u.file != t.file or u.container != t.container) and len(defs_by_name[u.name]) > 1:
-                continue  # an ambiguous name that probably names something else
+            if u.name and (u.file != t.file or u.container != t.container) and sum(1 for x in t.refs if nodes[x].test and nodes[x].name == u.name) > 1:
+                continue  # several visible candidates: a name that probably names something else
             mk = (u.file, u.container)
             if kind == "dest":
                 imports[k].add(mk)
@@ -986,6 +986,7 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             text, items = tfiles[rel]
             local = {u.name for u in copied if u.name} | {t.name for t in mtests if t.name}
             uses = [_without_unused_relative(_without_names(it.text, local), body) for it in items if it.kind == "use"]
+            uses = [u2 for u2 in _shared_uses(uses, rel, (), items, shares, [], set(), set(tfiles), root=lower, dest=True) if u2]
             globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
             new_files[rel] = ("" if rel in included else "#![allow(unused_imports)]\n") + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
     return facade_blocks, new_files, decls, removals, copied, pub_test_mods, shares, share_imports, imports
@@ -1063,7 +1064,7 @@ def _resolve_use(segs, base):
     return cur + list(segs[i:])
 
 
-def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
+def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="crate", dest=False):
     shared_names = {tuple(module_path(r2)): {n.name for n in ns if n.name} for (r2, c2), ns in shares.items() if not c2}
     """The `use` items of the file a shared module is cut from, adjusted to where the module sits: dev
     dependencies dropped, child modules named absolutely, modules that only exist for tests replaced by
@@ -1080,11 +1081,12 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
         attrs = re.sub(r"#\[cfg\(test\)\]\s*", "", attrs)
         keep = []
         for segs, alias in paths:
+            orig_segs = segs
             if segs[0] in dev:
                 continue
-            if segs[0] in children:
+            if not dest and segs[0] in children:
                 segs = ["crate"] + f_path + segs
-            elif segs[0] == "self":
+            elif not dest and segs[0] == "self":
                 segs = ["crate"] + f_path + segs[1:]
             absolute = _resolve_use(segs, f_path[:-1] + ["_"])
             extra = None
@@ -1099,9 +1101,9 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
                     leaf = segs[-1]
                     if leaf == "*":
                         if len(absolute) == hit[0] + 1:
-                            extra = ["crate"] + hit[1] + absolute[hit[0]:]  # the shared module's items too
+                            extra = [root] + hit[1] + absolute[hit[0]:]  # the shared module's items too
                     elif len(absolute) == hit[0] + 1 and leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
-                        segs = ["crate"] + hit[1] + absolute[hit[0]:]
+                        segs = [root] + hit[1] + absolute[hit[0]:]
                         test_only = False
                     elif len(absolute) == hit[0] + 1:
                         continue  # not extracted: it stays in the cfg(test) module
@@ -1111,6 +1113,8 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
             if extra is not None:
                 keep.append((extra, None))
             if segs is None:
+                if dest:
+                    keep.append((orig_segs, alias))  # a destination file may still have that module itself
                 continue
             mod = segs[-2] if len(segs) >= 2 else None
             if (mod, segs[-1]) in pairs:
