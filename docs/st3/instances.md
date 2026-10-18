@@ -1,7 +1,7 @@
 # Instances: a second st on one machine
 
 `st --instance NAME` (or `ST_INSTANCE=NAME` in the environment) runs a second, fully separate
-Smalltalk next to the default one. Use it to try a build without risking your working install, and
+Fractal next to the default one. Use it to try a build without risking your working install, and
 to see the first run again from a clean start.
 
 ```sh
@@ -11,9 +11,14 @@ st --instance trial agents ls
 st --instance trial uninstall --yes --erase-local-graph
 ```
 
+After instance startup, `agents ls` may report that its initial roster is still being
+prepared. After changing an agent it can show the previous publication. A client that needs
+its own write uses that instance daemon's receipt `store_index` as `min_cut` and checks the
+served snapshot; a receipt from the default install or another host is not interchangeable.
+
 `st --instance NAME setup` runs the first-run questions for the instance: it installs `st3`, `st` and
 `pty` into the instance's own `bin/` (nothing goes on your login PATH or into `~/.local/bin`), and
-the built-in Smalltalk Assistant works in the instance's work folder, `work/agents/`. Run the instance's commands from
+the built-in Fractal Assistant works in the instance's work folder, `work/agents/`. Run the instance's commands from
 there, or with `--instance`.
 
 A name is 1 to 24 lowercase letters, digits and single hyphens. The flag works before or after the
@@ -35,7 +40,7 @@ Everything below one directory, `~/.st-instance/NAME`:
 | `claude/` | the instance's Claude account, plugins and `st` skill | `CLAUDE_CONFIG_DIR` |
 | `codex/` | the instance's Codex account and `st` skill | `CODEX_HOME` |
 | `home/` | the skill copy for pi, omp and opencode (`home/.agents/skills`) | |
-| `work/` | the instance's work root: default workspaces for new agents in `work/agents/NAME`, including the Smalltalk Assistant | |
+| `work/` | the instance's work root: default workspaces for new agents in `work/agents/NAME`, including the Fractal Assistant | |
 | `app/` | the macOS app bundle | |
 
 The instance is applied to the environment once, at startup, before any thread exists. The daemon

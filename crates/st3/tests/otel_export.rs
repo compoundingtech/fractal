@@ -832,6 +832,13 @@ fn cli_request_and_daemon_server_share_one_trace() {
     };
     let root = tempfile::tempdir().unwrap();
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Socket readiness is not a roster publication; this fixture explicitly needs one.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(st3_client::Client::unix(&daemon.socket).agents_list_after(None, None, false, 0))
+        .expect("the fixture must publish its initial roster");
     let mut command = isolated_command(&collector, root.path());
     command
         .args(["run", "--out"])
@@ -1735,13 +1742,18 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     // Reads serve published cuts, including after a new claim. A fresh history read
     // waits for the refresher's publication; neither kind folds cards in the request.
     let mut responses = Vec::new();
+    let mut minimum_card_cut = None;
     for attempt in 0..3 {
         if attempt != 0 {
-            daemon.request("POST", "/v1/diagnostics/harness", Some(serde_json::json!({
+            let (changed, _) = daemon.request("POST", "/v1/diagnostics/harness", Some(serde_json::json!({
                 "actor":actor, "code":"otel-roster-advance", "reason":"stage fixture",
                 "severity":"warning", "status":"healthy", "incarnation_id":"otel-session",
                 "idempotency_key":format!("otel-roster-advance-{attempt}"),
             })), TRACEPARENT, None).await;
+            // Use the actual card-affecting claim's cut, not a response snapshot that
+            // might also include an unrelated later daemon claim.
+            minimum_card_cut = Some(changed["value"]["store_index"].as_i64()
+                .expect("diagnostic claim store_index"));
         }
         for (path, expected_path, expected_fresh) in [
             ("/v1/client/agents?history=true&status=stopped", "filtered_full", false),
@@ -1749,10 +1761,10 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             ("/v1/client/agents?history=true", "published_complete", false),
         ] {
             let (body, bytes) = daemon.request("GET", path, None, TRACEPARENT, None).await;
-            responses.push((body, bytes, expected_path, expected_fresh));
+            responses.push((body, bytes, expected_path, expected_fresh, minimum_card_cut));
         }
     }
-    for (body, bytes, expected_path, expected_fresh) in responses {
+    for (body, bytes, expected_path, expected_fresh, minimum_card_cut) in responses {
         let request_id = body["request_id"].as_str().expect("response request_id");
         assert!(request_id.starts_with("request/"), "{body}");
         let rows = body["value"]["items"].as_array().expect("roster page").len();
@@ -1777,7 +1789,24 @@ async fn daemon_request_id_and_roster_stages_match_response() {
         let published = int_attribute(&span, "st.roster.publication_cut").expect("publication_cut integer");
         assert_eq!(Some(published), body["snapshot"]["store_index"].as_i64(), "{span}\n{body}");
         if fresh {
-            assert!(published >= requested, "fresh read served an older cut: {span}");
+            let outcome = string_attribute(&span, "st.roster.fresh_wait").expect("fresh wait outcome");
+            let wanted = int_attribute(&span, "st.roster.fresh_wait_cut").expect("actual wait target");
+            let proof = string_attribute(&span, "st.roster.fresh_proof").expect("served-publication proof outcome");
+            let verified = bool_attribute(&span, "st.roster.fresh_unchanged_verified").expect("unchanged verification bool");
+            assert!(wanted >= requested, "wait target cannot precede request cut: {span}");
+            assert_eq!(verified, proof == "verified", "{span}");
+            if verified {
+                assert_eq!(outcome, "unchanged", "only that wait exit may carry this proof: {span}");
+                assert!(published <= wanted, "proof must cover the actual served publication: {span}");
+            }
+            // Eviction after selection can honestly yield Refused. It is not an unchanged
+            // certificate, so an older cut still fails this assertion; never waive it here.
+            assert!(published >= requested || (outcome == "unchanged" && verified),
+                "fresh read lacks a current cut or exact-served unchanged proof: {span}");
+            if let Some(card_cut) = minimum_card_cut {
+                assert!(published >= card_cut,
+                    "fresh read missed an actual card-affecting diagnostic: {span}");
+            }
         }
     }
     // The seeded undeclared seat appears only in history. Await that one-card cold
@@ -1986,6 +2015,20 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     assert_upgrade_link(&projection, &receive);
     assert_eq!(string_attribute(&projection, "st.replication.peer"), Some("otel-source"));
     assert!(int_attribute(&projection, "st.replication.moved_envelopes").is_some_and(|count| count > 0), "{projection}");
+    // Receive has no read budget: its mutation-dispatch polls must retain the route origin
+    // for both queue waits and loan holds, including nested blocking store work.
+    daemon.await_export(&root.path().join("capture/metrics.ndjson"), |request| {
+        ["st.db.writer.hold", "st.db.writer.queue.duration"].into_iter().all(|metric| {
+            metric_points(request, metric).into_iter().any(|point| {
+                string_attribute(point, "st.db.writer.origin")
+                    == Some("POST /v1/internal/replication/receive")
+                    && point["count"].as_u64().or_else(|| {
+                        point["count"].as_str().and_then(|value| value.parse::<u64>().ok())
+                    }).is_some_and(|count| count > 0)
+                    && point["sum"].as_f64().is_some_and(|seconds| seconds > 0.)
+            })
+        })
+    });
     for (body, traceparent, trace) in [
         (payload, DUPLICATE, "91af7651916cd43dd8448eb211c80319"),
         (serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":heartbeat}),

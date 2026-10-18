@@ -18,9 +18,37 @@ pub const ASSISTANT_SUBJECT: &str = "agent/st/assistant";
 /// The seat's subject is durable; people see this name.
 const ASSISTANT_NAME: &str = "Smalltalk Assistant";
 const MISSION: &str = "st/onboarding";
-const ASSISTANT: &str = include_str!("builtins/assistant.kdl");
-const ONBOARDING: &str = include_str!("builtins/onboarding.kdl");
-const GUIDE: &str = include_str!("../../../docs/st3/onboarding-guide.md");
+const ASSISTANT: &str = /* sqlite-large-value: allow-for-now lv-h43a8d8fd5ba8 owner=st3::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/assistant.kdl");
+const ONBOARDING: &str = /* sqlite-large-value: allow-for-now lv-h5048786621c3 owner=st3::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/onboarding.kdl");
+const GUIDE: &str = /* sqlite-large-value: allow-for-now lv-he9271c41f835 owner=st3::onboarding TODO=trace-statement-and-value-representation */ include_str!("../../../docs/st3/onboarding-guide.md");
+
+type Sink = Box<dyn FnMut(String)>;
+
+thread_local! {
+    /// Where this thread's setup and onboarding output goes instead of the terminal, while the
+    /// setup screen owns it. The caller prints what was said once the screen has gone.
+    static SINK: std::cell::RefCell<Option<Sink>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Say one line to the person: on the terminal, or into the sink when one is set.
+pub(crate) fn said(line: impl Into<String>) {
+    let line = line.into();
+    let unsent = SINK.with(|sink| match sink.borrow_mut().as_mut() {
+        Some(send) => {
+            send(line);
+            None
+        }
+        None => Some(line),
+    });
+    if let Some(line) = unsent {
+        println!("{line}");
+    }
+}
+
+/// Set (or clear) this thread's sink; returns the one it replaced.
+pub(crate) fn capture(sink: Option<Sink>) -> Option<Sink> {
+    SINK.with(|current| std::mem::replace(&mut *current.borrow_mut(), sink))
+}
 
 fn client(config: &Config) -> Result<Client> {
     Client::unix_as(
@@ -59,8 +87,45 @@ async fn has_run_on(client: &Client) -> Result<bool> {
     }
 }
 
-/// Explicit reruns are the only setup path that can replace a stopped built-in seat.
-pub async fn start(config: &Config, harness: &str, rerun: bool) -> Result<Option<String>> {
+/// The harnesses the mission tells the Assistant are ready: the one it runs on, then any other
+/// that setup found, selected and set up.
+fn ready_phrase(harness: &str, ready: &[String]) -> String {
+    let mut names: Vec<&str> = vec![harness];
+    for name in ready {
+        if !names.contains(&name.as_str()) {
+            names.push(name);
+        }
+    }
+    match names.as_slice() {
+        [only] => format!("{only} (you run on it)"),
+        [first, rest @ ..] => {
+            let (last, middle) = rest.split_last().expect("two or more names");
+            let mut text = (*first).to_string();
+            for name in middle {
+                text.push_str(", ");
+                text.push_str(name);
+            }
+            format!("{text} and {last} (you run on {first})")
+        }
+        [] => unreachable!("the Assistant's own harness is always listed"),
+    }
+}
+
+/// The onboarding mission with its pinned guide and ready harnesses filled in.
+fn mission_source(guide_hash: &str, harness: &str, ready: &[String]) -> String {
+    ONBOARDING
+        .replace("@GUIDE@", &format!("doc/st/guide@{guide_hash}"))
+        .replace("@HARNESSES@", &ready_phrase(harness, ready))
+}
+
+/// Explicit reruns are the only setup path that can replace a stopped built-in seat. `ready` names
+/// every harness setup selected and set up, so the Assistant can run its demo on two.
+pub async fn start(
+    config: &Config,
+    harness: &str,
+    ready: &[String],
+    rerun: bool,
+) -> Result<Option<String>> {
     let client = client(config)?;
     if !rerun && has_run_on(&client).await? {
         return Ok(None);
@@ -80,7 +145,7 @@ pub async fn start(config: &Config, harness: &str, rerun: bool) -> Result<Option
             subject.desired_token.is_some() && subject.kind.as_deref() != Some("agent")
         })
     {
-        crate::setup::said(
+        said(
             "The built-in Smalltalk Assistant is stopped; setup leaves it stopped. Use st setup --onboarding to begin again explicitly."
         );
         return Ok(None);
@@ -105,7 +170,7 @@ pub async fn start(config: &Config, harness: &str, rerun: bool) -> Result<Option
             )
             .await?;
     }
-    let mission_source = ONBOARDING.replace("@GUIDE@", &format!("doc/st/guide@{hash}"));
+    let mission_source = mission_source(&hash, harness, ready);
     let parsed = st3::parse_intent(&mission_source, &config.node)?;
     let revision = &parsed
         .missions
@@ -177,7 +242,7 @@ pub async fn start(config: &Config, harness: &str, rerun: bool) -> Result<Option
         .await?
         .context("built-in Smalltalk Assistant disappeared during publication")?;
     if current.kind.as_deref() != Some("agent") {
-        crate::setup::said("The built-in Smalltalk Assistant was stopped; setup leaves it stopped.");
+        said("The built-in Smalltalk Assistant was stopped; setup leaves it stopped.");
         return Ok(None);
     }
     anyhow::ensure!(
@@ -220,7 +285,7 @@ pub async fn start(config: &Config, harness: &str, rerun: bool) -> Result<Option
         }
         return Err(error);
     }
-    crate::setup::said(
+    said(
         "Started mission/st/onboarding with agent/st/assistant. The Assistant stays available after onboarding."
     );
     Ok(Some(ASSISTANT_SUBJECT.into()))
@@ -231,7 +296,7 @@ fn declaration_changed(rerun: bool) -> Result<Option<String>> {
         !rerun,
         "the built-in Smalltalk Assistant changed during setup; retry setup to inspect its new state"
     );
-    crate::setup::said(
+    said(
         "The onboarding declarations changed concurrently; ordinary setup preserves their current state. Run st setup again if onboarding has not started."
     );
     Ok(None)
@@ -360,11 +425,9 @@ mod tests {
             "keep the bundled guide bounded"
         );
         let guide = hex::encode(sha2::Sha256::digest(super::GUIDE.as_bytes()));
-        let mission = st3::parse_intent(
-            &super::ONBOARDING.replace("@GUIDE@", &format!("doc/st/guide@{guide}")),
-            "studio",
-        )
-        .unwrap();
+        let ready = ["claude".to_string(), "codex".to_string()];
+        let mission = st3::parse_intent(&super::mission_source(&guide, "claude", &ready), "studio")
+            .unwrap();
         assert!(
             mission
                 .document_refs
@@ -401,6 +464,110 @@ mod tests {
         for text in [super::ASSISTANT, super::ONBOARDING, super::GUIDE] {
             assert!(!text.to_lowercase().contains("expert"));
         }
+    }
+    #[test]
+    fn the_mission_names_the_ready_harnesses_so_act_one_can_use_both() {
+        let both = ["claude".to_string(), "codex".to_string()];
+        assert_eq!(
+            super::ready_phrase("claude", &both),
+            "claude and codex (you run on claude)"
+        );
+        // The Assistant's own harness leads, whatever order setup finished them in.
+        assert_eq!(
+            super::ready_phrase("codex", &both),
+            "codex and claude (you run on codex)"
+        );
+        assert_eq!(super::ready_phrase("codex", &[]), "codex (you run on it)");
+        assert_eq!(
+            super::ready_phrase("claude", &["claude".to_string()]),
+            "claude (you run on it)"
+        );
+        let source = super::mission_source("abc", "claude", &both);
+        assert!(
+            !source.contains("@GUIDE@") && !source.contains("@HARNESSES@"),
+            "an unfilled placeholder is left: {source}"
+        );
+        assert!(source.contains("claude and codex (you run on claude)"));
+    }
+    #[test]
+    fn the_play_is_three_acts_spoken_to_you_with_an_alert_in_act_three() {
+        let guide = hex::encode(sha2::Sha256::digest(super::GUIDE.as_bytes()));
+        let mission =
+            st3::parse_intent(&super::mission_source(&guide, "claude", &[]), "studio").unwrap();
+        assert!(mission.missions.contains_key(super::MISSION));
+        for act in ["hello", "act-one", "act-two", "act-three"] {
+            assert!(
+                super::ONBOARDING.contains(&format!("step \"{act}\"")),
+                "the play lost {act}"
+            );
+        }
+        // Act three raises the alert before the interview, and the interview ends onboarding.
+        let alert = super::GUIDE.find("Raise one alert").expect("act three raises an alert");
+        let interview = super::GUIDE
+            .find("What do you want to accomplish in Smalltalk today?")
+            .expect("act three ends in the interview");
+        assert!(alert < interview, "the alert comes before the interview");
+        assert!(super::GUIDE.contains("above the message input"));
+        assert!(super::GUIDE.contains("conversations wait"), "the guide must pace with wait");
+        assert!(super::GUIDE.contains("setup --onboarding"), "skip must say how to return");
+        // The play has none of what Nathan dropped.
+        for dropped in ["canonical", "permission mode", "macOS permission"] {
+            assert!(
+                !super::GUIDE.to_lowercase().contains(dropped)
+                    && !super::ONBOARDING.to_lowercase().contains(dropped),
+                "{dropped:?} is not part of the play"
+            );
+        }
+        // The demo mission the guide hands the Assistant must be publishable as written.
+        let block = super::GUIDE
+            .split("```kdl\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("the guide carries the demo mission");
+        let demo = st3::parse_intent(block, "studio").unwrap();
+        assert!(demo.missions.contains_key("st/onboarding-demo"));
+    }
+    /// The words the 2026-10-09 eval found between tool calls. The instructions that tell the
+    /// Assistant how to speak are the only place they may appear, and only as things not to say.
+    const NARRATION: [&str; 8] = [
+        "the person",
+        "mission step",
+        "work step",
+        "the user",
+        "i need the",
+        "let me read",
+        "still working through",
+        "attention item",
+    ];
+    #[test]
+    fn what_the_person_experiences_is_written_to_them_and_leaks_no_narration() {
+        // Goals are what they live through, so each speaks to "you" or about the Assistant.
+        let goals: Vec<&str> = super::ONBOARDING
+            .lines()
+            .filter(|line| line.trim_start().starts_with("goal \""))
+            .collect();
+        assert!(goals.len() >= 6, "{goals:?}");
+        for goal in &goals {
+            let lowered = goal.to_lowercase();
+            for banned in NARRATION.iter().chain(&["home", "gate"]) {
+                assert!(!lowered.contains(banned), "{banned:?} in {goal}");
+            }
+        }
+        // The seat text addresses the Assistant as "you" and says what never to write.
+        let seat = super::ASSISTANT.to_lowercase();
+        for required in [
+            "speak to them as you",
+            "write nothing between tool calls that is not addressed to them",
+            "never refer to them in the third person",
+            "never send them to home",
+        ] {
+            assert!(seat.contains(required), "the seat text lost: {required}");
+        }
+        assert!(!seat.contains("the person"), "the seat text speaks of them in the third person");
+        // The guide carries the same rule and names no sample person.
+        let guide = super::GUIDE.to_lowercase();
+        assert!(guide.contains("write nothing between tool calls that is not addressed to them"));
+        assert!(!guide.contains("hi avery"), "the guide greets nobody by an example name");
     }
     use sha2::Digest as _;
 }

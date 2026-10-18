@@ -8,14 +8,16 @@ license = "MIT"
 autotests = false
 
 [features]
-# Enabled through the self dev-dependency during tests, never by a production build.
-test-support = []
+# Forwarded to the library; tests enable it through the dev-dependencies below, which also turn on this
+# package's own feature for build.rs and the st3-fixture binary.
+test-support = ["st3/test-support"]
 # Opt in only in Performance; ordinary workspace checks need not build a second test binary.
 perf-load = []
 convergence-audit = []
 
 [dependencies]
 anyhow = "1"
+st3 = { package = "st3-daemon", path = "../st3-daemon" }
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
 ciborium = "0.2"
@@ -43,9 +45,9 @@ opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "1ae8c187301034d2b343b6ec638f2b74c009f92e" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "1ae8c187301034d2b343b6ec638f2b74c009f92e" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "1ae8c187301034d2b343b6ec638f2b74c009f92e" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
 resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
@@ -78,8 +80,9 @@ walkdir = "2"
 [dev-dependencies]
 data-encoding = "2"
 alacritty_terminal = { version = "0.26", default-features = false }
-st3 = { path = ".", features = ["test-support"] }
+st3 = { package = "st3-daemon", path = "../st3-daemon", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
+st3_package_self = { package = "st3", path = ".", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
 agent-spec = { path = "../agent-spec" }
 assert_cmd = "2"
@@ -94,12 +97,26 @@ name = "reader_cache"
 required-features = ["test-support"]
 
 [[example]]
+name = "chatgpt_fixture"
+required-features = ["test-support"]
+
+[[example]]
 name = "collection_fixture"
 required-features = ["test-support"]
 
+[lib]
+name = "st3_package_marker"
+path = "src/package_marker.rs"
+test = false
+doctest = false
+doc = false
+
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+# Keep the existing executable target; fractal dispatches through installed links to it.
 [[bin]]
 name = "st3"
 path = "src/main.rs"
+# LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 
 [[bin]]
 name = "st3-fixture"
@@ -139,3 +156,11 @@ path = "tests/checkpoint_memory.rs"
 [[test]]
 name = "scenario_recorder"
 path = "tests/scenario_recorder.rs"
+
+[[test]]
+name = "split_host_delivery"
+path = "tests/split_host_delivery.rs"
+
+[[test]]
+name = "assistant_native"
+path = "tests/assistant_native.rs"

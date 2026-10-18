@@ -73,6 +73,8 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case publicationDefinition = "publication.definition"
     case subjectDefinition = "subject.definition"
     case mailBacklogSummary = "mail-backlog.summary"
+    case sloList = "slo.list"
+    case sloHistory = "slo.history"
     case usagePeriod = "usage.period"
     case clientsList = "clients.list"
     case nowList = "now.list"
@@ -124,6 +126,12 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case arrangementsGet = "arrangements.get"
     case glassesList = "glasses.list"
     case glassesGet = "glasses.get"
+    case assistantSummary = "assistant.summary"
+    case assistantAttention = "assistant.attention"
+    case assistantMissions = "assistant.missions"
+    case assistantAgents = "assistant.agents"
+    case assistantConversationContent = "assistant.conversation-content"
+    case assistantTerminalContent = "assistant.terminal-content"
 }
 
 public let st3ClientReadPaths: [ReadOperation: String] = [
@@ -138,6 +146,8 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .publicationDefinition: "/v1/client/publication-definition",
     .subjectDefinition: "/v1/client/subject-definition",
     .mailBacklogSummary: "/v1/client/mail-backlog",
+    .sloList: "/v1/client/slo",
+    .sloHistory: "/v1/client/slo/history",
     .usagePeriod: "/v1/client/usage",
     .clientsList: "/v1/client/clients",
     .nowList: "/v1/client/now",
@@ -189,6 +199,12 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .arrangementsGet: "/v1/client/arrangements/{person_name}/{uuid}",
     .glassesList: "/v1/client/glasses",
     .glassesGet: "/v1/client/glasses/{id}",
+    .assistantSummary: "/v1/client/assistant/summary",
+    .assistantAttention: "/v1/client/assistant/attention",
+    .assistantMissions: "/v1/client/assistant/missions",
+    .assistantAgents: "/v1/client/assistant/agents",
+    .assistantConversationContent: "/v1/client/assistant/conversation-content",
+    .assistantTerminalContent: "/v1/client/assistant/terminal-content",
 ]
 
 /// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).

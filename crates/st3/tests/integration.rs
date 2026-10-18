@@ -65,6 +65,7 @@ mod daemon_load;
 mod load_hog;
 mod daemon_environment;
 mod daemon_restart;
+mod event_waits;
 mod driver_incarnation;
 mod delivery_probe;
 mod examples;
@@ -87,6 +88,7 @@ mod messaging_faults;
 mod mission_cancellation;
 mod no_st2_seat;
 mod node_identity_cli;
+mod onboarding_eval;
 mod operation_audit;
 mod operation_audit_perf;
 mod operational_state_contract;
@@ -107,6 +109,7 @@ mod terminal_binding;
 mod tiles_root;
 mod version;
 mod typed_keys;
+mod ui_open;
 
 #[test]
 fn every_test_file_is_built() {

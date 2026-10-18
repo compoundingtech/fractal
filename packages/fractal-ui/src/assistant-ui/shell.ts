@@ -1,8 +1,11 @@
 /** Runtime-free workbench presentation. Conversation runtimes load with the thread surface. */
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
 export { ThreadHeader, ResizableSplit, TerminalDrawer } from './composition/Shell.tsx'
-export { SidebarAgentRow, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
+export { SidebarAgentRow, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
+export { SidebarTree } from './sidebar/SidebarTree.tsx'
+export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
 export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
+export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export type { AgentRowData, AgentStatus } from './composition-model.ts'
 export { colorVars, typeVars, radiusVars, spaceVars, geometryVars, geometryNumbers } from './composition-tokens.stylex.ts'

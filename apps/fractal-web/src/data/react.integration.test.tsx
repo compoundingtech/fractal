@@ -52,7 +52,7 @@ const card = decodeUnknownSync(Attention)({
   detail: 'Independent request',
   priority: 'normal',
   state: 'open',
-  actions: [],
+  actions: ['work.done'],
   revision: '1',
   requested_at: '2026-10-04T12:00:00.000Z',
   updated_at: '2026-10-04T12:00:00.000Z',
@@ -236,4 +236,19 @@ it('invalidates folder membership/order only for active filter dependencies', ()
       statuses: ['idle'],
     }),
   ).toBe(false)
+})
+
+it('invalidates folder membership when a fact read by an active facet changes', () => {
+  const fleet = createProjections().fleetFromAgents([first, second])
+  const left = observed({ value: fleet })
+  const agent = fleet.agents[0]!
+  const retooled = observed<Fleet>({ value: { ...fleet, agents: [{ ...agent, harness: 'codex' }, fleet.agents[1]!] } })
+  const moved = observed<Fleet>({ value: { ...fleet, agents: [{ ...agent, checkout: { _tag: 'Known', value: { repository: 'example/other', base: 'main', branch: 'feature' } } }, fleet.agents[1]!] } })
+  const finished = observed({ value: { ...fleet, agents: [{ ...agent, state: 'done' }, fleet.agents[1]!] } })
+  expect(sameFolderFleet(left, retooled, { ...defaultFilters, query: 'tool:omp' })).toBe(false)
+  expect(sameFolderFleet(left, retooled, { ...defaultFilters, query: 'repo:example' })).toBe(true)
+  expect(sameFolderFleet(left, moved, { ...defaultFilters, query: 'repo:example' })).toBe(false)
+  expect(sameFolderFleet(left, finished, { ...defaultFilters, query: 'state:done' })).toBe(false)
+  expect(sameFolderFleet(left, finished, { ...defaultFilters, hideEnded: true })).toBe(false)
+  expect(sameFolderFleet(left, finished, defaultFilters)).toBe(true)
 })
