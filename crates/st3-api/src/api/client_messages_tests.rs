@@ -55,7 +55,7 @@ fn selector_upgrade_state(root: &Path) -> AppState {
     // Model the first selector upgrade: authoritative messages already exist,
     // but there is no published selector cut. Opening must not drain this work.
     state.store.connection.write().execute(
-        "DELETE FROM meta WHERE key IN ('client_message_selectors_v1_cut','client_message_selectors_v1_backfill')",
+        /* sqlite-large-value: allow-for-now lv-hda4fcefaaac3 owner=st3_api::api::client_messages_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN ('client_message_selectors_v1_cut','client_message_selectors_v1_backfill')",
         [],
     ).unwrap();
     drop(std::mem::replace(&mut state.store, Arc::new(Store::open_memory("unused").unwrap())));
@@ -821,7 +821,7 @@ message "sql-removed-mail" {
     let before = collect_sql_pages(&state,ClientListQuery::default(),now).await;
     assert_eq!(before[0]["content"],"removed content");
     state.store.connection.batched(|tx| {
-        tx.execute("DELETE FROM desired WHERE subject=?1",[subject])
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h66d44e9dc81c owner=st3_api::api::client_messages_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1",[subject])
     }).unwrap().unwrap();
     assert!(!state.store.claims_for(subject,Some("intent.desired")).unwrap().is_empty());
     for history in [false,true] {

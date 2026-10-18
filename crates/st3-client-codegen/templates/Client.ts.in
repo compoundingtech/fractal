@@ -279,6 +279,7 @@ export class St3Client {
     private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, idempotencyKey?: string, raw?: { contentType: string }, options: RequestOptions = {}, readAuthorization?: { header: string; budget: number }): Promise<EnvelopeOf<T>> {
         options.signal?.throwIfAborted();
         const credential = await this.credential?.();
+        options.signal?.throwIfAborted();
         const headers: Record<string, string> = { Accept: 'application/json', 'x-st3-features': this.features() };
         if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
         if (readAuthorization) headers['x-st3-scg-read-authorization'] = readAuthorization.header;

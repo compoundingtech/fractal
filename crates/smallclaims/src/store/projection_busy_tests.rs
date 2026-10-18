@@ -507,7 +507,7 @@ fn healthy_empty_source_skips_runtime_writes_but_not_ahead_frontiers_or_verdicts
     assert!(!phases.contains(&"projection-committed"));
 
     store.connection.write().execute(
-        "UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", [],
+        /* sqlite-large-value: allow-for-now lv-hbefa73f065eb owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", [],
     ).unwrap();
     phases.clear();
     assert!(store.project_replication_backlog_with_progress("test", |progress| {
@@ -517,7 +517,7 @@ fn healthy_empty_source_skips_runtime_writes_but_not_ahead_frontiers_or_verdicts
         "an ahead frontier must reach the runtime's projection guard");
 
     store.connection.write().execute(
-        "UPDATE projection_health SET last_good_store_index=0 WHERE aggregate='graph'", [],
+        /* sqlite-large-value: allow-for-now lv-h87a5ba694468 owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=0 WHERE aggregate='graph'", [],
     ).unwrap();
     store.verdicts_due.store(true, Ordering::Release);
     phases.clear();

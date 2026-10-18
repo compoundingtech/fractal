@@ -8010,7 +8010,7 @@ fn canonical_desired_row_at(
     subject: &str,
     at_index: u64,
 ) -> Result<Option<DesiredRow>> {
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-ha21bd6da4415 owner=st3_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1f305341ff3b owner=st3_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT id, body, predecessors FROM claims
          WHERE subject=?1 AND kind='intent.desired' AND store_index<=?2
            AND {UNREPAIRED_CLAIM}
@@ -10542,7 +10542,7 @@ fn message_view_at_with_desired(
     // intent.desired claim is not permission to resurrect it in a fresh page.
     let desired = if through.is_some() && !connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM desired WHERE subject=?1)",
-    )?.query_row([subject], |row|row.get::<_,bool>(0))? {
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h2047346e3730 owner=st3_store::store TODO=trace-statement-and-value-representation */ [subject], |row|row.get::<_,bool>(0))? {
         None
     } else {
         desired_row()?

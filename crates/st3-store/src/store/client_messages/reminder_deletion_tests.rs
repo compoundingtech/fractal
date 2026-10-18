@@ -54,7 +54,7 @@ fn seed_group(store: &Store, declarations: usize) {
             desired.owner_run = Some(OWNER.into());
             let claim = append(&transaction, &desired.subject, "intent.desired", &serde_json::to_value(&desired).unwrap());
             transaction.execute(
-                "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run) VALUES(?1,?2,?3,?4,?5,?6)",
+                /* sqlite-large-value: allow-for-now lv-hd1b3420a6461 owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![desired.subject,desired.kind,super::super::desired_revision(&desired),claim.id,
                     serde_json::to_string(&desired.desired).unwrap(),OWNER],
             ).unwrap();
@@ -78,7 +78,7 @@ fn seed_group(store: &Store, declarations: usize) {
 }
 
 fn audit_deletions(connection: &Connection) {
-    connection.execute_batch(r#"
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hce444b6736cd owner=st3_store::store::client_messages::reminder_deletion_tests TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TEMP TABLE reminder_delete_context(subject TEXT NOT NULL);
 CREATE TEMP TABLE reminder_selector_writes(cause TEXT,subject TEXT NOT NULL,born_index INTEGER NOT NULL);
 CREATE TEMP TRIGGER reminder_delete_context_set BEFORE DELETE ON desired BEGIN
@@ -128,11 +128,11 @@ fn assert_bounded_deletion_predicate(connection: &Connection, affected: &str, al
     let predicate = trigger.split_once(" WHERE born_index>=0 AND retired_index IS NULL AND").unwrap().1
         .trim().strip_suffix("END").unwrap().trim().trim_end_matches(';').replace("OLD.subject", "?1");
     let sql = format!("SELECT subject FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL AND {predicate}");
-    let selected = connection.prepare(&sql).unwrap().query_map([affected], |row| row.get::<_,String>(0)).unwrap()
+    let selected = connection.prepare(/* sqlite-large-value: allow-for-now lv-he39cd638301d owner=st3_store::store::client_messages::reminder_deletion_tests TODO=trace-statement-and-value-representation */ &sql).unwrap().query_map([affected], |row| row.get::<_,String>(0)).unwrap()
         .collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert!(selected.len() <= 7, "the actual deletion predicate cannot inventory a reminder group");
     assert!(selected.iter().all(|subject|allowed.contains(subject)), "unexpected deletion candidates: {selected:?}");
-    let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+    let plan = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4cb3921af193 owner=st3_store::store::client_messages::reminder_deletion_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
         .query_map([affected], |row|row.get::<_,String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     for index in ["client_selector_reminder_candidates", "client_selector_recipient_reminder_candidates",
         "client_selector_reminder_winner", "client_selector_recipient_reminder_winner"] {
@@ -195,9 +195,9 @@ fn desired_delete_large_reminder_group_changes_only_affected_subject_and_winners
         let transaction = writer.transaction().unwrap();
         // A pre-existing pending row must also capture the deleted header's old
         // recipient, rather than leave its default empty recipient behind.
-        transaction.execute("UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
-        transaction.execute("DELETE FROM reminder_selector_writes", []).unwrap();
-        assert_eq!(transaction.execute("DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h69cc9ac61dcc owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-heaf075c4e6e6 owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM reminder_selector_writes", []).unwrap();
+        assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-h3abb7c63ab66 owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
         assert_single_delete_writes(&transaction,&affected,&allowed);
         assert_bounded_deletion_predicate(&transaction,&affected,&allowed);
         let pending: (String,String) = transaction.query_row(
@@ -251,9 +251,9 @@ fn desired_delete_preserves_native_reminder_and_promotes_only_old_recipient_winn
         let mut writer = store.connection.write();
         audit_deletions(&writer);
         let transaction = writer.transaction().unwrap();
-        transaction.execute("UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
-        transaction.execute("DELETE FROM reminder_selector_writes", []).unwrap();
-        assert_eq!(transaction.execute("DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h9895def23bae owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h19569e31826d owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM reminder_selector_writes", []).unwrap();
+        assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-hd34da68f9431 owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
         assert_single_delete_writes(&transaction,&affected,&[affected.clone(),native_subject(NATIVE_MEMBERS-1)]);
         transaction.commit().unwrap();
     }
@@ -283,7 +283,7 @@ fn bulk_owned_desired_delete_does_not_rewrite_superseded_reminder_members() {
         } else {
             let mut writer = store.connection.write();
             let transaction = writer.transaction().unwrap();
-            assert_eq!(transaction.execute("DELETE FROM desired WHERE owner_run=?1",[OWNER]).unwrap(),DECLARED_MEMBERS);
+            assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-h9ff8fdab5e31 owner=st3_store::store::client_messages::reminder_deletion_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1",[OWNER]).unwrap(),DECLARED_MEMBERS);
             let changes = writes(&transaction);
             let mut per_subject = BTreeMap::<String,usize>::new();
             for (cause,_,_) in &changes { *per_subject.entry(cause.clone()).or_default() += 1; }
