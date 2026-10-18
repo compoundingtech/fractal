@@ -67,6 +67,7 @@ use crate::model::{
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
+mod wire_names;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
@@ -182,6 +183,7 @@ pub struct AppState {
     pub planner_default: PlannerSpec,
 }
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
 const CLIENT_API_VERSION: &str = "st3.client.v0";
 const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
@@ -958,6 +960,9 @@ async fn response_envelope_unbounded(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    if let Err(error) = wire_names::receive_headers(request.headers_mut()) {
+        return error.into_response();
+    }
     // Anonymous pairing discovery is public, static compatibility metadata. Bypass
     // authentication, snapshots, presence and the normal envelope/activity counter entirely.
     if matches!(transport, ClientTransportBoundary::FabricLoopback)
@@ -6133,15 +6138,17 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        if let Some(agent) = environment.split(|byte| *byte == 0).find_map(|entry| {
-            std::str::from_utf8(entry)
-                .ok()?
-                .strip_prefix("ST_AGENT=")
-                .filter(|value| value.starts_with("agent/"))
-                .map(str::to_owned)
-        }) {
-            return Some(agent);
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        });
+        // A masked/conflicting child identity must not inherit an ancestor's authority.
+        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
+            return st_drivers::contracts::env_with("ST_AGENT", &lookup)
+                .filter(|value| value.starts_with("agent/"));
         }
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         pid = stat
             .rsplit_once(") ")?
@@ -6191,11 +6198,14 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    let agent = env.iter().find_map(|entry| {
-        entry
-            .strip_prefix("ST_AGENT=agent/")
-            .map(|suffix| format!("agent/{suffix}"))
-    })?;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    let agent = st_drivers::contracts::env_with("ST_AGENT", &|name| {
+        env.iter().find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        })
+    }).filter(|agent| agent.starts_with("agent/"))?;
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     Some(NativeDeliveryPeer {
         agent,
         transport,
