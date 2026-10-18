@@ -1247,6 +1247,16 @@ pub struct AgentRelationship {
     pub reason: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentEndReason {
+    pub kind: String,
+    pub ended_at: String,
+    pub actor: Option<String>,
+    pub reason: Option<String>,
+    pub exit_code: Option<i64>,
+    pub exit_signal: Option<String>,
+    pub diagnostic: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Agent {
     #[serde(flatten)]
     pub header: ResourceHeader,
@@ -1269,6 +1279,8 @@ pub struct Agent {
     pub since: Option<String>,
     #[serde(default)]
     pub observation: Option<String>,
+    #[serde(default)]
+    pub end_reason: Option<AgentEndReason>,
     #[serde(default)]
     pub blocked_on: Option<String>,
     #[serde(default)]
