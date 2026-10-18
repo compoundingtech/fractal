@@ -986,7 +986,9 @@ def _dev_dependencies(lower_ident):
         return []
     section = text.split("[dev-dependencies]", 1)[1].split("\n[", 1)[0]
     names = [m.group(1).replace("-", "_") for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", section)]
-    return [n for n in names if not n.endswith("_self") and not n.startswith("st3")]
+    normal = text.split("[dependencies]", 1)[1].split("\n[", 1)[0] if "[dependencies]" in text else ""
+    normal_names = {m.group(1).replace("-", "_") for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", normal)}
+    return [n for n in names if not n.endswith("_self") and not n.startswith("st3") and n not in normal_names]
 
 
 TEST_SUPPORT_CFG = '#[cfg(any(test, feature = "test-support"))]'
