@@ -19,13 +19,13 @@ CREATE TABLE IF NOT EXISTS arrangement_registers (
 );
 "#;
 
-type Head = (Value, String, Vec<u8>);
+pub type Head = (Value, String, Vec<u8>);
 fn heads(connection: &Connection, subject: &str) -> Result<BTreeMap<String, Head>> {
     let mut statement = connection.prepare_cached("SELECT register,value,revision,winner FROM arrangement_registers WHERE subject=?1 ORDER BY register")?;
     let rows = statement.query_map([subject], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter().map(|(register,value,revision,key)| Ok((register,(serde_json::from_str(&value)?,revision,key)))).collect()
 }
-fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}) }
+pub fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}) }
 
 /// Projects one edit and bumps its owner's inventory revision. The projector registry calls this
 /// for every appended or replicated `arrangement.edited` claim.

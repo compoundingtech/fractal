@@ -76,8 +76,6 @@ pub mod card_fold_tests;
 pub mod roster_controls;
 #[cfg(test)]
 pub mod roster_fresh_proof_tests;
-#[cfg(test)]
-pub mod agents_window_deadline_tests;
 pub mod step_labels;
 pub mod operation_audit;
 pub mod mission_provenance;
@@ -88,6 +86,12 @@ pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
 
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::shared_seats::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::shared::*;
@@ -133,7 +137,7 @@ use crate::model::ReplicationExchange;
 #[cfg(test)]
 #[cfg(any(test, feature = "test-support"))]
 use smallclaims::replication::ReplicationBatch;
-use crate::model::{SeatQueueMoveRequest, SeatQueueMoveView, SeatQueueRunView, SeatQueueView};
+use crate::model::{SeatQueueMoveRequest, SeatQueueMoveView};
 use crate::seat_queue::{self, Placement, QueueJoin, QueueMove, SeatStep};
 #[cfg(test)]
 use smallclaims::claim::ReplicaEnvelopePayload;
@@ -176,9 +180,9 @@ pub use smallclaims::store::{
 
 pub mod accounts;
 pub mod runtime_starts;
-pub use runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
+pub use runtime_starts::RuntimeStartOperation;
 pub mod roster_admission;
-pub use roster_admission::AdmissionGuard;
+
 pub mod adhoc_work;
 pub mod attention_snapshot;
 pub use attention_snapshot::{
@@ -191,7 +195,7 @@ pub mod owner_lists;
 pub mod summary_list;
 // Registration stays opt-in until the shared installer certifies every source family.
 #[cfg_attr(
-    not(test),
+    not(any(test, feature = "test-support")),
     expect(
         dead_code,
         reason = "prepared attention operators await certified shared-runtime integration"
@@ -219,11 +223,9 @@ pub mod idle_mail;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
-pub use limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
+pub use limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use limits::ACCOUNT_READING_WINDOW_MS;
-pub use subagents::{
-    EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
-};
+pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
 pub mod checkpoint_agreement_tests;
 #[cfg(any(test, feature = "test-support"))]
@@ -312,17 +314,29 @@ pub mod projection_digest {
 
 pub type CumulativeUsage = (u64, u64, u64, u64, Option<f64>, Option<String>);
 
+/// The latest rollup snapshot of one series, with its cost when every token in it was priced.
+#[derive(Clone)]
+struct RollupSpend {
+    total: u64,
+    input: u64,
+    output: u64,
+    writes: u64,
+    reads: u64,
+    cost_microusd: Option<u64>,
+}
+
 /// One incarnation's spend as its usage claims fold, in canonical claim order.
 #[derive(Clone, Default)]
 pub struct UsageSpend {
     cumulative: Option<CumulativeUsage>,
-    rollups: BTreeMap<String, (u64, u64, u64, u64, u64)>,
+    rollups: BTreeMap<String, RollupSpend>,
     response_total: u64,
     response_input: u64,
     response_output: u64,
     response_cached: u64,
     response_cost: f64,
     response_has_cost: bool,
+    response_unknown_cost: bool,
     response_currency: Option<String>,
 }
 
@@ -464,28 +478,38 @@ impl UsageFold {
                     .join("\0");
                 group.rollups.insert(
                     key,
-                    (
-                        fields
+                    RollupSpend {
+                        total: fields
                             .get("total_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        input: fields
                             .get("input_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        output: fields
                             .get("output_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        writes: fields
                             .get("cache_write_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        reads: fields
                             .get("cached_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                    ),
+                        cost_microusd: fields
+                            .get("cost_microusd")
+                            .and_then(Value::as_u64)
+                            .filter(|_| {
+                                fields
+                                    .get("unpriced_tokens")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                                    == 0
+                            }),
+                    },
                 );
             }
             Some("response") => {
@@ -515,9 +539,20 @@ impl UsageFold {
                 if let Some(cost) = fields.get("cost").and_then(Value::as_f64) {
                     group.response_cost += cost;
                     group.response_has_cost = true;
-                }
-                if let Some(currency) = fields.get("currency").and_then(Value::as_str) {
-                    group.response_currency = Some(currency.to_owned());
+                    if let Some(currency) = fields.get("currency").and_then(Value::as_str) {
+                        if group
+                            .response_currency
+                            .as_deref()
+                            .is_some_and(|current| current != currency)
+                        {
+                            group.response_unknown_cost = true;
+                        }
+                        group.response_currency = Some(currency.to_owned());
+                    } else {
+                        group.response_unknown_cost = true;
+                    }
+                } else if total > 0 {
+                    group.response_unknown_cost = true;
                 }
             }
             _ => {}
@@ -541,15 +576,32 @@ impl UsageFold {
         };
         let mut cost = 0.0;
         let mut has_cost = false;
+        let mut rollup_cost_microusd = 0_u128;
+        let mut unknown_cost = false;
         for group in self.spend.values().cloned() {
             summary.incarnation_count += 1;
             if !group.rollups.is_empty() {
-                for (total, input, output, writes, reads) in group.rollups.into_values() {
-                    summary.total_tokens = summary.total_tokens.saturating_add(total);
-                    summary.input_tokens = summary.input_tokens.saturating_add(input);
-                    summary.output_tokens = summary.output_tokens.saturating_add(output);
-                    summary.cache_write_tokens = summary.cache_write_tokens.saturating_add(writes);
-                    summary.cached_tokens = summary.cached_tokens.saturating_add(reads);
+                for rollup in group.rollups.into_values() {
+                    summary.total_tokens = summary.total_tokens.saturating_add(rollup.total);
+                    summary.input_tokens = summary.input_tokens.saturating_add(rollup.input);
+                    summary.output_tokens = summary.output_tokens.saturating_add(rollup.output);
+                    summary.cache_write_tokens =
+                        summary.cache_write_tokens.saturating_add(rollup.writes);
+                    summary.cached_tokens = summary.cached_tokens.saturating_add(rollup.reads);
+                    if let Some(value) = rollup.cost_microusd {
+                        rollup_cost_microusd = rollup_cost_microusd.saturating_add(u128::from(value));
+                        has_cost = true;
+                        if summary
+                            .currency
+                            .as_deref()
+                            .is_some_and(|currency| currency != "USD")
+                        {
+                            unknown_cost = true;
+                        }
+                        summary.currency.get_or_insert_with(|| "USD".into());
+                    } else if rollup.total > 0 {
+                        unknown_cost = true;
+                    }
                 }
             } else if let Some((total, input, output, cached, group_cost, currency)) =
                 group.cumulative
@@ -561,8 +613,19 @@ impl UsageFold {
                 if let Some(value) = group_cost {
                     cost += value;
                     has_cost = true;
+                    if currency.is_none()
+                        || summary
+                            .currency
+                            .as_ref()
+                            .zip(currency.as_ref())
+                            .is_some_and(|(current, candidate)| current != candidate)
+                    {
+                        unknown_cost = true;
+                    }
+                    summary.currency = summary.currency.or(currency);
+                } else if total > 0 {
+                    unknown_cost = true;
                 }
-                summary.currency = summary.currency.or(currency);
             } else {
                 summary.total_tokens = summary.total_tokens.saturating_add(group.response_total);
                 summary.input_tokens = summary.input_tokens.saturating_add(group.response_input);
@@ -571,11 +634,25 @@ impl UsageFold {
                 if group.response_has_cost {
                     cost += group.response_cost;
                     has_cost = true;
+                    if group.response_currency.is_none()
+                        || summary
+                            .currency
+                            .as_ref()
+                            .zip(group.response_currency.as_ref())
+                            .is_some_and(|(current, candidate)| current != candidate)
+                    {
+                        unknown_cost = true;
+                    }
+                    summary.currency = summary.currency.or(group.response_currency);
                 }
-                summary.currency = summary.currency.or(group.response_currency);
+                unknown_cost |= group.response_unknown_cost;
             }
         }
-        summary.cost = has_cost.then_some(cost);
+        if unknown_cost {
+            summary.currency = None;
+        } else {
+            summary.cost = has_cost.then_some(cost + rollup_cost_microusd as f64 / 1_000_000.0);
+        }
         Some(summary)
     }
 }
@@ -1313,7 +1390,7 @@ const CURRENT_VIEW_CLAIM: &str = "(kind='intent.desired'
 /// The subjects with a runtime observation at or before store index `?1`, in subject order. Each
 /// step seeks past the subject before it in `claims_runtime_subject_index`, so the query reads
 /// about one index entry per subject, not every runtime observation.
-const RUNTIME_SUBJECTS: &str = "WITH RECURSIVE runtime_subjects(subject) AS (
+pub const RUNTIME_SUBJECTS: &str = "WITH RECURSIVE runtime_subjects(subject) AS (
          SELECT (SELECT subject FROM claims INDEXED BY claims_runtime_subject_index
                  WHERE kind='runtime.observed' AND store_index<=?1 ORDER BY subject LIMIT 1)
          UNION ALL
@@ -1362,7 +1439,7 @@ const RUN_HAS_PRIOR_CLAIMS: &str =
 /// The runtime incarnation a claim names, read as a view of the claim does: from its `fields`,
 /// or from the body itself when it has none. The expression of
 /// `claims_incarnation_accepted_index`, word for word, so SQLite can use the index.
-const INCARNATION_OF_CLAIM: &str =
+pub const INCARNATION_OF_CLAIM: &str =
     "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
         THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END)";
 
@@ -1371,7 +1448,7 @@ const OPEN_MISSION_RUN: &str = "mission_runs.status NOT IN ('completed','failed'
 
 /// The first (`ASC`) or last (`DESC`) acceptance time of the claims about subject `?1` that
 /// name incarnation `?2`, at or before store index `?3`: one seek into the incarnation's claims.
-fn incarnation_claim_time_query(order: &str) -> String {
+pub fn incarnation_claim_time_query(order: &str) -> String {
     format!(
         "SELECT accepted_at_unix_ms
          FROM claims INDEXED BY claims_incarnation_accepted_index
@@ -1380,12 +1457,6 @@ fn incarnation_claim_time_query(order: &str) -> String {
          LIMIT 1"
     )
 }
-
-/// The newest claim at or before a snapshot that an agent status can depend on.
-const AGENT_STATUS_INDEX_QUERY: &str = "SELECT store_index FROM claims WHERE store_index<=?1
-     AND (+subject GLOB 'agent/*' OR +subject GLOB 'mission-run/*'
-          OR +subject GLOB 'run-generation/*')
-     ORDER BY store_index DESC LIMIT 1";
 
 /// Whether `subject` names a runtime, whose stopped or undeclared state puts it in history.
 fn runtime_subject(subject: &str) -> bool {
@@ -1404,7 +1475,7 @@ pub struct SubjectCache {
     through: u64,
     conflicts: u64,
     views: HashMap<String, ViewEntry>,
-    statuses: HashMap<String, StatusEntry>,
+    pub statuses: HashMap<String, StatusEntry>,
     summary_statuses: HashMap<String, StatusEntry>,
     runtime_statuses: HashMap<String, StatusEntry>,
     // Summary and full statuses never share entries: their provenance/harness fields differ.
@@ -1952,7 +2023,7 @@ impl Deref for Store {
 
 // Owner joins compare the run ID with the reference's suffix, so SQLite looks each owner up by
 // primary key instead of scanning every run for each desired row on every reconcile pass.
-const TERMINAL_OWNED_RUNTIME_SUBJECTS: &str = "SELECT desired.subject
+pub const TERMINAL_OWNED_RUNTIME_SUBJECTS: &str = "SELECT desired.subject
      FROM desired
      JOIN mission_runs owner
        ON substr(desired.owner_run, 1, 12)='mission-run/'
@@ -1974,25 +2045,7 @@ const TERMINAL_OWNED_RUNTIME_SUBJECTS: &str = "SELECT desired.subject
              AND (desired.owner_step IS NULL OR step.status IN ('completed','failed')))
        )
      ORDER BY desired.subject";
-const RETIRED_OWNED_INTAKE_SUBJECTS: &str = "SELECT desired.subject
-     FROM desired
-     JOIN mission_runs owner
-       ON substr(desired.owner_run, 1, 12)='mission-run/'
-      AND owner.id=substr(desired.owner_run, 13)
-     JOIN mission_runs root ON root.id=owner.root_run_id
-     WHERE desired.kind IN ('observer','subscription','schedule')
-       AND (
-         owner.status IN ('completed','failed','cancelled')
-         OR owner.phase='terminal'
-         OR root.status IN ('completed','failed','cancelled')
-         OR root.phase='terminal'
-         OR (
-           desired.owner_generation IS NOT NULL
-           AND desired.owner_generation != ('run-generation/' || owner.current_generation_id)
-         )
-       )
-     ORDER BY desired.subject";
-const ACTUAL_CACHE_LIMIT: usize = 4096;
+pub const ACTUAL_CACHE_LIMIT: usize = 4096;
 
 pub struct MessageCacheEntry {
     latest_claim_index: u64,
@@ -2084,14 +2137,7 @@ pub fn stale_pull_request_request_tx(
 
 fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0
-        || version == 13
-        || version == 14
-        || version == 15
-        || version == 16
-        || version == 17
-        || version == 18
-        || version == smallclaims::store::CURRENT_SCHEMA_VERSION
+    if version == 0 || (13..=st3_schema::STORAGE_VERSION).contains(&version)
     {
         return Ok(());
     }
@@ -2763,60 +2809,6 @@ pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
     Arc::new(SmalltalkRuntime::default())
 }
 
-/// The local rows a roster card can read: timeline entries an agent subject made, which date its
-/// activity and its managed session. Heartbeat and telemetry observations never change a card —
-/// the harness fold, working episodes, usage summaries and todos all read replicated claims —
-/// and neither do `Latest` observations, which reach cards only through the claims written when
-/// their state changes. So the frontier is the newest agent timeline row at or before the cut,
-/// an exact `MAX(id)`: it never assumes observation ids and graph cuts rise together, which
-/// repair and trim can break.
-const ROSTER_LOCAL_FRONTIER: &str = "SELECT COALESCE((SELECT id FROM local_observations
- WHERE kind='harness.timeline' AND subject LIKE 'agent/%' AND after_store_index<=?1
- ORDER BY id DESC LIMIT 1), 0)";
-
-/// One frontier read, inside the caller's SQLite snapshot when it holds one: the reader pool
-/// lends pinned reads the same connection. The partial frontier index keeps an old cut from
-/// walking newer heartbeat rows.
-pub fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64> {
-    Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h6c35bfb1264e owner=st3_store::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [index], |row| row.get::<_, u64>(0))?)
-}
-
-#[derive(Default)]
-pub struct AgentResourcesDelta {
-    pub subjects: BTreeSet<String>,
-    pub queues: bool,
-    pub membership: bool,
-}
-
-pub enum AgentResourcesChange {
-    Delta(AgentResourcesDelta),
-    Invalidated { reason: &'static str, detail: String },
-}
-
-/// The exact cache-hit contract shared by the building path and the read-only warm pin: one
-/// graph cut, one roster-relevant local frontier, one history mode, a queue lease window that
-/// has not ended, and coverage of every requested subject.
-fn agent_resources_entry_hits(
-    entry: &runtime::AgentResourcesEntry,
-    now: u128,
-    index: u64,
-    local: u64,
-    history: bool,
-    selected: Option<&BTreeSet<String>>,
-) -> bool {
-    entry.index == index
-        && entry.local == local
-        && entry.history == history
-        && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
-        && match selected {
-            None => entry.covered.is_none(),
-            Some(names) => entry
-                .covered
-                .as_ref()
-                .is_none_or(|covered| names.is_subset(covered)),
-        }
-}
-
 /// The runs that wait on a person, and the open human gates among them.
 pub type HumanAttention = (BTreeSet<String>, Vec<st3_ui_model::missions::Gate>);
 
@@ -3300,14 +3292,6 @@ impl Store {
     ) -> Result<bool> {
         let connection = self.readers.get();
         fresh_context_ready_tx(&connection, step, actor, incarnation).map_err(Into::into)
-    }
-
-    pub fn apply_internal(
-        &self,
-        intent: &NormalizedIntent,
-        key: &str,
-    ) -> Result<ApplyResponse, St3Error> {
-        self.apply_internal_with_declared_agents(intent, key, &BTreeSet::new())
     }
 
     /// Every reference in a publication that resolves neither in the publication nor here: a
@@ -4872,77 +4856,7 @@ impl Store {
         self.status_at_view(selected, selected_owner_run, at_index, true)
     }
 
-    /// Reduce only subjects whose IDs begin with `prefix`.
-    ///
-    /// Product projections use this instead of reducing every subject in the graph and filtering
-    /// afterwards. The latter made small agent and host screens temporarily allocate the complete
-    /// claim graph on large stores. `claims` picks what the answers carry: projections that never
-    /// serialize `SubjectStatus::claims` pass [`ClaimsReduction::Summary`].
-    pub fn status_for_subject_prefix_at(
-        &self,
-        prefix: &str,
-        at_index: Option<u64>,
-        include_history: bool,
-        claims: ClaimsReduction,
-    ) -> Result<StatusResponse> {
-        // Agent listings are expensive on large graphs. Hold this lock while building the
-        // snapshot so concurrent callers share one reduction, then serve clones at the same
-        // store index. A later index always rebuilds, preserving snapshot semantics.
-        if prefix == "agent/" {
-            // What this thread's reads can see, as every snapshot read checks: a read pinned to
-            // a snapshot can see a commit a moment before the writer publishes its index.
-            let current = current_index(&self.readers.get())?;
-            let index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
-            let mut cache = self
-                .smalltalk
-                .agent_status_cache
-                .lock()
-                .expect("agent status cache poisoned");
-            if let Some((_, _, _, _, status)) =
-                cache.iter().find(|(cached_index, _, history, mode, _)| {
-                    *cached_index == index && *history == include_history && *mode == claims
-                })
-            {
-                let mut result = (**status).clone();
-                result.store_index = index;
-                return Ok(result);
-            }
-            let projection_index = self.agent_status_index(index)?;
-            if let Some((cached_index, _, _, _, status)) = cache
-                .iter_mut()
-                .find(|(_, cached_projection, history, mode, _)| {
-                    *cached_projection == projection_index
-                        && *history == include_history
-                        && *mode == claims
-                })
-            {
-                *cached_index = index;
-                let mut result = (**status).clone();
-                result.store_index = index;
-                return Ok(result);
-            }
-            let status = self.status_for_subject_prefix_uncached(
-                prefix,
-                Some(index),
-                include_history,
-                claims,
-            )?;
-            cache.push_back((
-                index,
-                projection_index,
-                include_history,
-                claims,
-                Arc::new(status.clone()),
-            ));
-            if cache.len() > 8 {
-                cache.pop_front();
-            }
-            return Ok(status);
-        }
-        self.status_for_subject_prefix_uncached(prefix, at_index, include_history, claims)
-    }
-
-    fn status_for_subject_prefix_uncached(
+    pub fn status_for_subject_prefix_uncached(
         &self,
         prefix: &str,
         at_index: Option<u64>,
@@ -5688,44 +5602,6 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Compare shared claims by canonical order, independent of replica arrival.
-    pub fn claim_is_after(&self, left: &str, right: &str) -> Result<bool> {
-        let connection = self.readers.get();
-        Ok(canonical::claim_key(&connection, left)? > canonical::claim_key(&connection, right)?)
-    }
-
-    /// The subjects among `subjects` that a person or an agent stopped while `generation` of
-    /// `run` declared them. Such a stop holds for the rest of that generation, across daemon
-    /// restarts, until someone starts the seat again; the run does not declare it again.
-    pub fn stopped_by_hand(
-        &self,
-        subjects: &[String],
-        run: &str,
-        generation: &str,
-    ) -> Result<BTreeSet<String>> {
-        let mut stopped = BTreeSet::new();
-        for desired in self.desired_subjects_named(subjects)? {
-            // A run's own stop and a generation's retirement record their owner; only a stop
-            // published at the root, as `st agents stop` does, is someone's decision.
-            if desired.kind != "stop"
-                || desired.owner_run.is_some()
-                || desired.owner_generation.is_some()
-            {
-                continue;
-            }
-            let Some(ended) = self.declaration_ended_by_stop(&desired.subject)? else {
-                continue;
-            };
-            if ended.writer.is_some()
-                && ended.declaration.owner_run.as_deref() == Some(run)
-                && ended.declaration.owner_generation.as_deref() == Some(generation)
-            {
-                stopped.insert(desired.subject);
-            }
-        }
-        Ok(stopped)
-    }
-
     /// The current desired declaration of `subject` and the actor its claim records. A
     /// declaration from before claims recorded their writer, or the daemon's own, has none.
     pub fn desired_subject_with_writer(
@@ -5771,23 +5647,6 @@ impl Store {
             }
         }
         Ok(unreadable)
-    }
-
-    /// The desired subjects named in `subjects`, by their primary keys.
-    pub fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {
-        for subject in subjects {
-            smallclaims::touched::note_read(|| subject.clone());
-        }
-        if subjects.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
-             FROM desired WHERE subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
-        )?;
-        let rows = statement.query_map([serde_json::to_string(subjects)?], desired_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn unread_mail_count_before(&self, before_unix_ms: u128) -> Result<u64> {
@@ -5968,6 +5827,7 @@ impl Store {
                 .filter(|item| !item.person.starts_with("person/")),
         );
         items.extend(self.checkpoint_attention_items(None, as_of)?);
+        items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
         self.current_attention(items, as_of)?
             .into_iter()
@@ -5978,6 +5838,37 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    fn signature_attention_items(&self) -> Result<Vec<AttentionItemView>> {
+        let mut items = Vec::new();
+        for fault in self.signature_state_faults()? {
+            items.push(AttentionItemView {
+                episode: format!("{}:{}", fault.code, fault.subject),
+                priority: "high".into(),
+                kind: "fault".into(),
+                review_mode: None,
+                subject: fault.subject,
+                person: String::new(),
+                requester_id: None,
+                launch_id: None,
+                variant_id: None,
+                message_id: None,
+                prompt_call: None,
+                conversation: None,
+                answers: Vec::new(),
+                title: fault.code,
+                detail: fault.detail,
+                request: None,
+                mission: None,
+                mission_run: None,
+                step: None,
+                targets: vec![format!("host/{}", self.origin)],
+                requested_at_unix_ms: 0,
+                actions: vec![attention_action("inspect signature state", &["st", "doctor"])],
+            });
+        }
+        Ok(items)
     }
 
     pub fn selected_desired_token(&self, subject: &str) -> Result<Option<String>> {
@@ -7726,8 +7617,8 @@ pub struct DesiredRow {
     pub kind: String,
     revision: String,
     pub claim_id: String,
-    body: String,
-    member: Option<String>,
+    pub body: String,
+    pub member: Option<String>,
     owner_run: Option<String>,
     owner_generation: Option<String>,
 }
@@ -7876,7 +7767,7 @@ fn enforce_mission_run_capacity(
     Ok(())
 }
 
-fn current_desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
+pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
     connection
         .prepare_cached(
             "SELECT kind, revision, claim_id, body, member, owner_run, owner_generation
@@ -8002,7 +7893,7 @@ fn select_desired_row(rows: Vec<(String, String, String)>) -> Result<Option<Desi
         .transpose()
 }
 
-fn current_desired_row_tx(
+pub fn current_desired_row_tx(
     transaction: &Connection,
     subject: &str,
 ) -> Result<Option<DesiredRow>> {
@@ -8111,7 +8002,7 @@ fn unresolved_graph_references(
 }
 
 /// The store as the reference checks read it.
-struct ReferenceGraph<'a> {
+pub struct ReferenceGraph<'a> {
     connection: &'a Connection,
 }
 
@@ -8466,7 +8357,7 @@ fn registered_client_claim_kind(kind: &str) -> bool {
     st3_schema::is_known_claim(kind)
 }
 
-const LOCAL_OBSERVATION_COLUMNS: &str = "SELECT id, after_store_index, subject, kind, actor, body, observed_at_unix_ms FROM local_observations";
+pub const LOCAL_OBSERVATION_COLUMNS: &str = "SELECT id, after_store_index, subject, kind, actor, body, observed_at_unix_ms FROM local_observations";
 
 // MIN(id) makes SQLite walk rowids from the beginning until it finds a match, even with the
 // frontier index present. Unary + disables that shortcut so this reads only the covering
@@ -8484,13 +8375,13 @@ pub fn local_retention(kind: &str) -> bool {
         .is_some_and(|spec| spec.retention == st3_schema::Retention::Local)
 }
 
-fn system_local_retention(kind: &str) -> bool {
+pub fn system_local_retention(kind: &str) -> bool {
     st3_schema::registry()
         .claim(kind)
         .is_some_and(|spec| spec.retention == st3_schema::Retention::SystemLocal)
 }
 
-fn latest_retention(kind: &str) -> bool {
+pub fn latest_retention(kind: &str) -> bool {
     st3_schema::registry()
         .claim(kind)
         .is_some_and(|spec| spec.retention == st3_schema::Retention::Latest)
@@ -9067,7 +8958,7 @@ fn publish_changed_harness_state_tx(
     Ok(Some(claim))
 }
 
-fn usage_native_session(
+pub fn usage_native_session(
     connection: &Connection,
     subject: &str,
     fields: &BTreeMap<String, Value>,
@@ -9105,7 +8996,7 @@ fn usage_native_session(
     Ok(previous.flatten().filter(|id| !id.trim().is_empty()))
 }
 
-const USAGE_BUCKETS: [&str; 9] = [
+pub const USAGE_BUCKETS: [&str; 9] = [
     "total_tokens",
     "input_tokens",
     "output_tokens",
@@ -9117,7 +9008,7 @@ const USAGE_BUCKETS: [&str; 9] = [
     "unpriced_tokens",
 ];
 
-fn pricing_identity(entry: &Value) -> String {
+pub fn pricing_identity(entry: &Value) -> String {
     json!([
         entry.get("price_table_id"),
         entry.get("price_table_version"),
@@ -9127,7 +9018,7 @@ fn pricing_identity(entry: &Value) -> String {
     .to_string()
 }
 
-fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
+pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
     if fields.get("semantics").and_then(Value::as_str) == Some("response_rollup") {
         // Each rollup key is its own cumulative series. Sharing one slot per incarnation would
         // let a pending rollup of the next step or account replace the previous one's final
@@ -9346,7 +9237,7 @@ pub fn claim_log_order(record: &ClaimRecord) -> (u64, u64) {
     )
 }
 
-fn local_observation_dedupe_key(kind: &str, key: &str) -> String {
+pub fn local_observation_dedupe_key(kind: &str, key: &str) -> String {
     format!(
         "local/{}",
         hex::encode(Sha256::digest(
@@ -9361,7 +9252,7 @@ fn local_observation_dedupe_key(kind: &str, key: &str) -> String {
     )
 }
 
-fn local_observation_from_row(
+pub fn local_observation_from_row(
     origin: &str,
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ClaimRecord> {
@@ -9457,7 +9348,7 @@ fn append_publication_operation_tx<T: Serialize>(
     Ok(claim)
 }
 
-fn claim_by_id_tx(connection: &Connection, id: &str) -> Result<Option<ClaimRecord>> {
+pub fn claim_by_id_tx(connection: &Connection, id: &str) -> Result<Option<ClaimRecord>> {
     connection
         .prepare_cached("SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE id=?1")?
         .query_row(
@@ -9479,7 +9370,7 @@ fn launch_lineage_from_tx(connection: &Connection, current: String) -> Result<Ve
     desired_lineage_from_tx(connection, current, presentation_only_change)
 }
 
-fn desired_lineage_from_tx(
+pub fn desired_lineage_from_tx(
     connection: &Connection,
     current: String,
     equivalent: fn(&Value, &Value) -> bool,
@@ -9535,7 +9426,7 @@ fn presentation_only_change(previous: &Value, next: &Value) -> bool {
 
 /// Keep suspension under exactly the launch comparator used by preview and reconcile.
 /// Desired kind and subject are fences, even when their member launch happens to match.
-fn same_declared_launch(previous: &Value, next: &Value) -> bool {
+pub fn same_declared_launch(previous: &Value, next: &Value) -> bool {
     let parse = |body: &Value| {
         let desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
         (desired.kind == "agent").then_some(())?;
@@ -10162,7 +10053,7 @@ pub fn append_claim_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_receipt_claim_tx(
+pub fn append_receipt_claim_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     subject: &str,
@@ -10298,7 +10189,7 @@ fn normalize_local_projection_timestamps_tx(
     Ok(())
 }
 
-fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<String, Value>> {
+pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<String, Value>> {
     if let Some(fields) = body.get("fields").and_then(Value::as_object) {
         return Ok(fields
             .iter()
@@ -10500,7 +10391,7 @@ fn message_view_tx(
     })
 }
 
-fn latest_actual(connection: &Connection, subject: &str) -> Result<Option<Value>> {
+pub fn latest_actual(connection: &Connection, subject: &str) -> Result<Option<Value>> {
     latest_actual_at(connection, subject, None)
 }
 
@@ -10793,7 +10684,7 @@ fn harness_observations_without_incarnation_query() -> String {
     )
 }
 
-fn newest_claims_of_kind_query(columns: &str, kind: &str) -> String {
+pub fn newest_claims_of_kind_query(columns: &str, kind: &str) -> String {
     // Runtime observations supply live authority and its epoch. Harness observations keep
     // their existing canonical-history contract, including retained repaired originals.
     let membership = if kind == "runtime.observed" {
@@ -11122,7 +11013,7 @@ fn update_prompt_fence(
     }))
 }
 
-fn current_harness_at(
+pub fn current_harness_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -11240,7 +11131,7 @@ fn current_harness_fold_at(
 
 /// `terminal` reads the evidence of an incarnation that has exited or stopped instead of the
 /// live one: live prompt, login and attachment fences do not apply to it.
-fn harness_fold_at(
+pub fn harness_fold_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -11931,7 +11822,7 @@ fn desired_conflicts_at(
         .collect())
 }
 
-fn intent_leaves_tx(transaction: &Transaction<'_>, subject: &str) -> Result<Vec<String>> {
+pub fn intent_leaves_tx(transaction: &Transaction<'_>, subject: &str) -> Result<Vec<String>> {
     let mut statement = transaction.prepare(
         "SELECT id, predecessors FROM claims
          WHERE subject=?1 AND kind='intent.desired'
@@ -13570,16 +13461,6 @@ fn validate_replica_repair(
 #[cfg(test)]
 pub mod fleet_admission_tests;
 
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    pub static SUBJECT_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static STATUS_AFTER_DESIRED_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    /// Steps whose queue, timing and wake a read enriched, so a test can see a read's work.
-    pub static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Pinned mission definitions a read parsed, so a test can see one parse serve a whole run.
-    pub static DEFINITIONS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// The SQLite work each work action did inside its writer job, by idempotency key, so a test
 /// can see what one action holds the single writer for.
 #[cfg(any(test, feature = "test-support"))]
@@ -14128,105 +14009,6 @@ pub fn batches_accepted_in_one_millisecond_extend_the_projection_without_a_repla
     );
 }
 
-/// A document republished all day, such as a probe report, arrives from its writer after this
-/// node's own newer claims (#898). Each binding keeps the earliest claim of its version whatever
-/// order bindings arrive in, so it extends the projection without rebuilding every version, and
-/// the result is the one a replay from nothing gives.
-#[cfg(any(test, feature = "test-support"))]
-#[test]
-pub fn a_document_binding_that_arrives_out_of_order_does_not_rebuild_every_version() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
-    let source = Store::open_memory("source").unwrap();
-    source.bind_fleet(FLEET).unwrap();
-    let target = Store::open_memory("target").unwrap();
-    target.bind_fleet(FLEET).unwrap();
-    let sync = || {
-        let response = source
-            .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
-            .unwrap();
-        target
-            .receive_replication_exchange("source", FLEET, &response)
-            .unwrap();
-        target.validate_replication_backlog().unwrap();
-        target.project_replication_backlog().unwrap();
-    };
-    let publish = |version: usize| {
-        source
-            .put_document(
-                "doc/probe-report",
-                format!("An invented probe report, version {version}.").as_bytes(),
-                &source.latest_document_token("doc/probe-report").unwrap(),
-                &format!("probe-report-{version}"),
-            )
-            .unwrap();
-    };
-    for version in 0..40 {
-        publish(version);
-    }
-    sync();
-
-    // The target writes a claim of its own that sorts after the next binding.
-    let accepted_at = source
-        .connection
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap() as u128
-        + 10;
-    target.set_write_clock_at(accepted_at + 10).unwrap();
-    target
-        .append_claim(&ClaimInput {
-            subject: "custom/target/newer".into(),
-            kind: "custom.target.note".into(),
-            actor: Some("person/tester".into()),
-            fields: BTreeMap::new(),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
-    target.project_replication_backlog().unwrap();
-    source.set_write_clock_at(accepted_at).unwrap();
-    publish(40);
-    FULL_REPLAYS.with(|replays| replays.set(0));
-    BASE_REBUILDS.with(|rebuilds| rebuilds.set(0));
-    sync();
-    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
-    assert_eq!(BASE_REBUILDS.with(std::cell::Cell::get), 0);
-
-    let documents = |store: &Store| {
-        store
-            .connection
-            .lock()
-            .unwrap()
-            .prepare(
-                "SELECT name, hash, created_index, binding_claim_id, binding_key FROM documents
-                 ORDER BY name, hash",
-            )
-            .unwrap()
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                ))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-    };
-    let incremental = documents(&target);
-    assert_eq!(incremental.len(), 41);
-    target.replay_replication_graph().unwrap();
-    assert_eq!(documents(&target), incremental);
-}
-
 pub use crate::model::canonical_child_string;
 
 fn canonical_child_strings(value: &Value, name: &str) -> Vec<String> {
@@ -14263,7 +14045,7 @@ pub fn validate_replicated_claim(
 
 /// Whether this build knows a replicated claim's kind and fields, once the graph has verified
 /// its batch and hash. The graph then checks that a valid claim's blobs are stored.
-fn classify_replicated_claim_with_registry(
+pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &st3_schema::Registry,
 ) -> Result<ReplicatedClaimAdmission, St3Error> {
@@ -15156,18 +14938,6 @@ thread_local! {
     static RUN_TREE_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    /// Runs this thread rebuilt as parts of run trees whose root never ended.
-    static RUN_PART_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    /// Desired subjects, documents and missions this thread rebuilt from their own claims.
-    static BASE_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Rebuild one desired subject, document or mission from its own claims in the replay's order.
 fn rebuild_base_aggregate_tx(
     transaction: &Transaction<'_>,
@@ -15981,7 +15751,7 @@ const BASE_REPLAY_PAGE_SQL: &str =
 /// Project one replicated claim on its own. A claim whose projection fails is rolled back alone
 /// and recorded as an unhealthy projection that names it, so one claim a build cannot project
 /// never holds every later claim from every peer out of the graph.
-fn project_claim_isolated_tx(
+pub fn project_claim_isolated_tx(
     transaction: &Transaction<'_>,
     aggregate: &str,
     claim: &ClaimRecord,
@@ -16439,7 +16209,7 @@ pub fn project_mission_run_created(
     Ok(())
 }
 
-fn project_mission_run_update(
+pub fn project_mission_run_update(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
 ) -> Result<(), St3Error> {
@@ -17185,7 +16955,7 @@ fn normalize_step_run(value: &str) -> String {
     }
 }
 
-fn normalize_seat(value: &str) -> String {
+pub fn normalize_seat(value: &str) -> String {
     if value.starts_with("agent/") {
         value.to_owned()
     } else {
@@ -17246,23 +17016,23 @@ const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assigne
                 AND (SELECT phase FROM mission_runs WHERE id=step_runs.run_id)='revision-draining')
      ORDER BY length(created_at_unix_ms), created_at_unix_ms, subject";
 
-struct RecordedSeatMove {
+pub struct RecordedSeatMove {
     movement: QueueMove,
-    view: SeatQueueMoveView,
+    pub view: SeatQueueMoveView,
 }
 
 /// The durable facts that order one seat's queue: when each run joined, every
 /// recorded move in graph order, and which joined runs are still live.
 #[derive(Default)]
-struct SeatQueueInputs {
-    joins: Vec<QueueJoin>,
-    moves: Vec<RecordedSeatMove>,
-    statuses: BTreeMap<String, String>,
+pub struct SeatQueueInputs {
+    pub joins: Vec<QueueJoin>,
+    pub moves: Vec<RecordedSeatMove>,
+    pub statuses: BTreeMap<String, String>,
     live: BTreeSet<String>,
 }
 
 impl SeatQueueInputs {
-    fn live_order(&self) -> Vec<String> {
+    pub fn live_order(&self) -> Vec<String> {
         let moves = self
             .moves
             .iter()
@@ -17313,12 +17083,12 @@ pub fn seat_queue_joins_query() -> String {
 /// pending ones when `?2`, and agentless ones when `?3` and no actor is named. With `open_only`
 /// the finished steps are left out in SQL, word for word the predicate of
 /// `step_runs_open_index`, so the read covers the fleet's open steps and not every step it ran.
-fn work_at_snapshot_query(open_only: bool) -> String {
+pub fn work_at_snapshot_query(open_only: bool) -> String {
     work_at_snapshot_query_of(open_only, "")
 }
 
 /// [`work_at_snapshot_query`] of only the step subjects in the JSON array `?4`, by their key.
-fn selected_work_at_snapshot_query(open_only: bool) -> String {
+pub fn selected_work_at_snapshot_query(open_only: bool) -> String {
     work_at_snapshot_query_of(open_only, "subject IN (SELECT value FROM json_each(?4)) AND")
 }
 
@@ -17348,7 +17118,7 @@ fn work_at_snapshot_query_of(open_only: bool, selected: &str) -> String {
 /// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
 /// step the store ever ran.
-fn seat_work_at_snapshot_query(open_only: bool) -> String {
+pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
     let open = if open_only {
         "AND status NOT IN ('completed','failed','cancelled')"
     } else {
@@ -17377,7 +17147,7 @@ fn seat_work_at_snapshot_query(open_only: bool) -> String {
 /// time of its first such step in any generation. Runs that are no longer
 /// queued are read only when a move names them, because a run that never
 /// anchors or receives a move cannot change the relative order of the others.
-fn seat_queue_inputs_tx(
+pub fn seat_queue_inputs_tx(
     connection: &Connection,
     agent: Option<&str>,
 ) -> Result<BTreeMap<String, SeatQueueInputs>> {
@@ -17875,7 +17645,7 @@ fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
         .map_err(internal)
 }
 
-fn compatible_step_paths(old: &MissionSpec, new: &MissionSpec) -> BTreeSet<String> {
+pub fn compatible_step_paths(old: &MissionSpec, new: &MissionSpec) -> BTreeSet<String> {
     let old_hashes = step_hashes(old);
     let new_hashes = step_hashes(new);
     let dependencies = flattened_dependencies(new);
@@ -17911,7 +17681,7 @@ fn compatible_step_paths(old: &MissionSpec, new: &MissionSpec) -> BTreeSet<Strin
 /// unchanged. Mission-level constraints and selectors affect future execution,
 /// so an active lease is released back to ready, but they must not silently
 /// erase a completed result or a submission already awaiting verification.
-fn carried_revision_step_paths(
+pub fn carried_revision_step_paths(
     old: &MissionSpec,
     new: &MissionSpec,
     current: &[StepRunView],
@@ -18050,13 +17820,13 @@ fn carried_claimants_tx<'a>(
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn is_failed_terminal(status: &str, phase: &str) -> bool {
+pub fn is_failed_terminal(status: &str, phase: &str) -> bool {
     status == "failed" && phase == "terminal"
 }
 
 /// A reopened run keeps its completed normal work and retries its failed steps. Work that the
 /// failure cancelled and every final step start again.
-fn retain_reopened_step_paths(
+pub fn retain_reopened_step_paths(
     mission: &MissionSpec,
     current: &[StepRunView],
     compatible: &mut BTreeSet<String>,
@@ -18319,7 +18089,7 @@ fn enrich_step_nudge_at(
 /// Reads the current attempt's summaries, following revision carry links back to
 /// the cutover snapshot. Successor reports supersede inherited reports, while a
 /// new attempt cannot inherit the predecessor attempt's notes.
-fn enrich_step_summaries_at(
+pub fn enrich_step_summaries_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -18459,7 +18229,7 @@ fn pinned_generation_mission_tx(
     .transpose()
 }
 
-fn enrich_step_definition(connection: &Connection, view: &mut StepRunView) -> rusqlite::Result<()> {
+pub fn enrich_step_definition(connection: &Connection, view: &mut StepRunView) -> rusqlite::Result<()> {
     enrich_step_definition_cached(connection, view, &mut PinnedDefinitions::default())
 }
 
@@ -18467,7 +18237,7 @@ fn enrich_step_definition(connection: &Connection, view: &mut StepRunView) -> ru
 /// whole mission, so parsing it again for each of the run's steps costs the square of the run's
 /// size (4,200 steps: 170 s in a debug build).
 #[derive(Default)]
-struct PinnedDefinitions(BTreeMap<String, Option<MissionSpec>>);
+pub struct PinnedDefinitions(BTreeMap<String, Option<MissionSpec>>);
 
 impl PinnedDefinitions {
     fn of(
@@ -19158,7 +18928,7 @@ fn fold_step_clock_open(
     }
 }
 
-fn apply_effective_step_state(
+pub fn apply_effective_step_state(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -19191,9 +18961,9 @@ fn apply_effective_step_state(
     apply_effective_step_state_with_owner(connection, view, snapshot_unix_ms, owner)
 }
 
-type EffectiveStepOwner = (String, String, String, String, String, String);
+pub type EffectiveStepOwner = (String, String, String, String, String, String);
 
-fn apply_effective_step_state_with_owner(
+pub fn apply_effective_step_state_with_owner(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -20201,7 +19971,7 @@ const MISSION_RUN_HEADER_SELECT: &str =
          ORDER BY mission_runs.created_at_unix_ms, mission_runs.id";
 
 /// The headers of the runs still running, standing or blocked, read through the open runs index.
-fn open_mission_run_headers_query() -> String {
+pub fn open_mission_run_headers_query() -> String {
     MISSION_RUN_HEADER_SELECT.replace(
         "ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
         &format!(
@@ -20651,7 +20421,7 @@ pub fn append_claim_fenced_outcome(
     append_claim_with_fences(graph, input, fence, None)
 }
 
-fn append_claim_with_fences(
+pub fn append_claim_with_fences(
     graph: &GraphStore,
     input: &ClaimInput,
     fence: Option<&crate::mailbox::Fence>,
@@ -21098,7 +20868,7 @@ fn append_latest_observation_fenced(
         .map(|(record, appended, _)| (record, appended))
 }
 
-fn append_latest_observation_publication(
+pub fn append_latest_observation_publication(
     graph: &GraphStore,
     input: &ClaimInput,
     now: u128,
@@ -21428,3 +21198,90 @@ pub mod terminal_gate_evidence_shared;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod accountable_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod adhoc_work_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod arrangements_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod attention_snapshot_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod checkpoint_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod conversation_reads_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod conversation_reads_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod delegation_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod fleet_admission_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod github_workflow_failures_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod harness_event_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod harness_questions_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod limits_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod mailbox_lease_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod mailbox_lease_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod mission_ivm_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_resume_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod operations_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod person_work_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod reconcile_work_context_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod resource_preparation_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod retirements_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod runtime_starts_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod seat_status_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod subagents_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod trace_principal_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod usage_period_tests_shared_seats;

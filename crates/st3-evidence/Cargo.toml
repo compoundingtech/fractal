@@ -7,10 +7,10 @@ license = "MIT"
 
 [features]
 # Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-store/test-support"]
+test-support = ["st3-seats/test-support"]
 
 [dependencies]
-st3-store = { path = "../st3-store" }
+st3-seats = { path = "../st3-seats" }
 anyhow = "1"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
 serde = { version = "1", features = ["derive"] }

@@ -3,6 +3,8 @@
 //! --idempotency-key` says whether an unconfirmed send landed.
 #![cfg(unix)]
 
+use st3::RetirementsStore;
+use st3::SeatsStoreCore;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;

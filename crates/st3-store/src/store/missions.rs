@@ -3548,7 +3548,7 @@ impl Store {
     }
 
     /// Build queue previews from the same selector, reading only one agent's inputs when named.
-    pub(crate) fn agent_work_queues_for(
+    pub fn agent_work_queues_for(
         &self,
         selected_agent: Option<&str>,
     ) -> Result<BTreeMap<String, AgentWorkQueue>> {
@@ -7108,7 +7108,7 @@ impl Store {
     }
 }
 
-type StepStateRow = (String, bool, u32, String, String, String, String, String);
+pub type StepStateRow = (String, bool, u32, String, String, String, String, String);
 
 const AGENT_WORK_PREVIEW_LIMIT: usize = 5;
 

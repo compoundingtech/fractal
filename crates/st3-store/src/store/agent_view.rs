@@ -87,7 +87,7 @@ fn newer<'a>(left: Option<&'a Event>, right: Option<&'a Event>) -> Option<&'a Ev
         (None, r) => r,
     }
 }
-fn diagnostic(code: &str) -> Option<&'static str> {
+pub fn diagnostic(code: &str) -> Option<&'static str> {
     match code {
         "harness-admission-failed" => Some("admission"),
         "provider-update-prompt" | "provider-update-restored" => Some("update"),
@@ -215,7 +215,7 @@ impl Default for Machine {
     }
 }
 #[derive(Clone, Copy)]
-struct Status {
+pub struct Status {
     harness: usize,
     prompt: usize,
     auth: bool,
@@ -511,7 +511,7 @@ impl View for AgentView {
     }
 }
 
-fn observed(
+pub fn observed(
     connection: &Connection,
     subject: &str,
 ) -> Result<Option<crate::model::CurrentHarnessView>> {

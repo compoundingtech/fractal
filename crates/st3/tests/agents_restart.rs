@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+use st3::SeatsStore;
+use st3::SeatsStoreCore;
 use st3::OwnedSetsStore;
 use st3::WatchesStore;
 use std::collections::HashMap;
