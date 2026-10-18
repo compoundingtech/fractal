@@ -128,9 +128,15 @@ async fn adds_peer_and_replaces_exact_grants_in_one_atomic_batch() {
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve(
         root.path(),
-        vec![Some(list(vec![], 7)), Some(mutation(vec![], "complete"))],
+        vec![
+            Some(list(vec![], 7)),
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![], 8)),
+        ],
     );
-    let status = reconcile(&socket, FLEET, "own-key", &view()).await.unwrap();
+    let status = reconcile(root.path(), &socket, FLEET, "own-key", &view())
+        .await
+        .unwrap();
     assert_eq!(status.state, "applied");
     assert_eq!(status.policy_revision, Some(8));
     let requests = server.await.unwrap();
@@ -156,9 +162,12 @@ async fn rekey_removes_old_identity_and_adds_new_in_same_transaction() {
         vec![
             Some(list(vec![peer("old-node", OWNER, &["exec", "echo"])], 7)),
             Some(mutation(vec![], "complete")),
+            Some(list(vec![], 8)),
         ],
     );
-    reconcile(&socket, FLEET, "own-key", &view()).await.unwrap();
+    reconcile(root.path(), &socket, FLEET, "own-key", &view())
+        .await
+        .unwrap();
     let requests = server.await.unwrap();
     let operations = requests[1]["request"]["operations"].as_array().unwrap();
     assert_eq!(
@@ -183,9 +192,12 @@ async fn existing_owner_grants_are_replaced_without_touching_other_owners() {
                 7,
             )),
             Some(mutation(vec![], "complete")),
+            Some(list(vec![], 8)),
         ],
     );
-    reconcile(&socket, FLEET, "own-key", &view()).await.unwrap();
+    reconcile(root.path(), &socket, FLEET, "own-key", &view())
+        .await
+        .unwrap();
     let requests = server.await.unwrap();
     let operations = requests[1]["request"]["operations"].as_array().unwrap();
     assert_eq!(operations.len(), 1);
@@ -212,7 +224,7 @@ async fn already_exact_policy_needs_no_mutation() {
     );
     let (socket, server) = serve(root.path(), vec![Some(list(vec![exact], 7))]);
     assert_eq!(
-        reconcile(&socket, FLEET, "own-key", &view())
+        reconcile(root.path(), &socket, FLEET, "own-key", &view())
             .await
             .unwrap()
             .policy_revision,
@@ -230,9 +242,12 @@ async fn lost_reply_retries_identical_request_id_revision_and_contents() {
             Some(list(vec![], 7)),
             None,
             Some(mutation(vec![], "complete")),
+            Some(list(vec![], 8)),
         ],
     );
-    reconcile(&socket, FLEET, "own-key", &view()).await.unwrap();
+    reconcile(root.path(), &socket, FLEET, "own-key", &view())
+        .await
+        .unwrap();
     let requests = server.await.unwrap();
     assert_eq!(requests[1], requests[2]);
 }
@@ -243,7 +258,7 @@ async fn runtime_disabled_is_clear_and_does_not_write_policy_or_fallback_files()
     let static_path = root.path().join("peers.toml");
     std::fs::write(&static_path, "static policy").unwrap();
     let (socket, server) = serve(root.path(), vec![Some(refusal("runtime_peers_disabled"))]);
-    let error = reconcile(&socket, FLEET, "own-key", &view())
+    let error = reconcile(root.path(), &socket, FLEET, "own-key", &view())
         .await
         .unwrap_err();
     assert_eq!(error_status(&error).state, "runtime_peers_disabled");
@@ -263,7 +278,11 @@ async fn stale_revision_and_cancellation_timeout_never_report_applied() {
     ] {
         let root = tempfile::tempdir().unwrap();
         let (socket, server) = serve(root.path(), vec![Some(list(vec![], 7)), Some(reply)]);
-        assert!(reconcile(&socket, FLEET, "own-key", &view()).await.is_err());
+        assert!(
+            reconcile(root.path(), &socket, FLEET, "own-key", &view())
+                .await
+                .is_err()
+        );
         server.await.unwrap();
     }
 }
@@ -274,14 +293,10 @@ async fn removal_reports_residual_static_access_even_after_previous_owner_remova
     view.members[1].state = "ended".into();
     let root = tempfile::tempdir().unwrap();
     let retained = peer("peer-node", "static", &["st3/fleet/test-fleet"]);
-    let (socket, server) = serve(
-        root.path(),
-        vec![
-            Some(list(vec![retained.clone()], 7)),
-            Some(list(vec![retained], 7)),
-        ],
-    );
-    let status = reconcile(&socket, FLEET, "own-key", &view).await.unwrap();
+    let (socket, server) = serve(root.path(), vec![Some(list(vec![retained.clone()], 7))]);
+    let status = reconcile(root.path(), &socket, FLEET, "own-key", &view)
+        .await
+        .unwrap();
     assert_eq!(status.state, "residual_access");
     assert!(status.message.unwrap().contains("/config/peers.toml"));
     server.await.unwrap();
@@ -291,15 +306,9 @@ async fn removal_reports_residual_static_access_even_after_previous_owner_remova
 async fn repeated_withdrawal_cannot_hide_other_owner_access() {
     let root = tempfile::tempdir().unwrap();
     let retained = peer("peer-node", "other-tool", &["st3/pty/test-fleet"]);
-    let (socket, server) = serve(
-        root.path(),
-        vec![
-            Some(list(vec![retained.clone()], 7)),
-            Some(list(vec![retained], 7)),
-        ],
-    );
+    let (socket, server) = serve(root.path(), vec![Some(list(vec![retained.clone()], 7))]);
     assert_eq!(
-        withdraw(&socket, FLEET).await.unwrap().state,
+        withdraw(root.path(), &socket, FLEET).await.unwrap().state,
         "residual_access"
     );
     server.await.unwrap();
@@ -313,7 +322,7 @@ async fn pagination_never_combines_policy_generations() {
         json!({"instance":"instance-a", "revision":7, "after_node":"a"});
     let (socket, server) = serve(root.path(), vec![Some(first), Some(list(vec![], 8))]);
     assert!(
-        reconcile(&socket, FLEET, "own-key", &view())
+        reconcile(root.path(), &socket, FLEET, "own-key", &view())
             .await
             .unwrap_err()
             .to_string()
@@ -336,11 +345,124 @@ async fn too_large_atomic_change_is_refused_without_partial_mutation() {
     }
     let (socket, server) = serve(root.path(), vec![Some(list(vec![], 7))]);
     assert!(
-        reconcile(&socket, FLEET, "own-key", &view)
+        reconcile(root.path(), &socket, FLEET, "own-key", &view)
             .await
             .unwrap_err()
             .to_string()
             .contains("limit 128")
     );
     assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn restart_resolves_lost_commit_before_accepting_an_empty_diff() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, server) = serve(root.path(), vec![Some(list(vec![], 7)), None, None]);
+    assert!(
+        reconcile(root.path(), &socket, FLEET, "own-key", &view())
+            .await
+            .is_err()
+    );
+    let original = server.await.unwrap();
+    let journal = load_journal(root.path()).await.unwrap();
+    assert_eq!(
+        journal.pending.as_ref().unwrap().request,
+        original[1]["request"]
+    );
+    std::fs::remove_file(&socket).unwrap();
+    let exact = peer(
+        "peer-node",
+        OWNER,
+        &[
+            "st3-client-v0",
+            "st3/fleet/test-fleet",
+            "st3/pty/test-fleet",
+        ],
+    );
+    let (socket, server) = serve(
+        root.path(),
+        vec![
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![exact], 8)),
+        ],
+    );
+    assert_eq!(
+        reconcile(root.path(), &socket, FLEET, "own-key", &view())
+            .await
+            .unwrap()
+            .state,
+        "applied"
+    );
+    let resumed = server.await.unwrap();
+    assert_eq!(resumed[0], original[1]);
+    assert_eq!(resumed[1]["request"]["operation"], "list");
+    assert!(load_journal(root.path()).await.unwrap().pending.is_none());
+}
+
+#[tokio::test]
+async fn timed_out_cancellation_survives_restart_and_never_becomes_noop_success() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, server) = serve(
+        root.path(),
+        vec![Some(list(vec![], 7)), Some(mutation(vec![], "timed_out"))],
+    );
+    assert!(
+        reconcile(root.path(), &socket, FLEET, "own-key", &view())
+            .await
+            .is_err()
+    );
+    let original = server.await.unwrap();
+    std::fs::remove_file(&socket).unwrap();
+    let (socket, server) = serve(root.path(), vec![Some(mutation(vec![], "timed_out"))]);
+    assert!(
+        withdraw(root.path(), &socket, FLEET)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("retained transaction")
+    );
+    assert_eq!(server.await.unwrap()[0], original[1]);
+    assert!(load_journal(root.path()).await.unwrap().pending.is_some());
+}
+
+#[tokio::test]
+async fn rekey_residual_warning_survives_later_polling_and_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let retained = peer("old-node", "static", &["st3/fleet/test-fleet"]);
+    let exact = peer(
+        "peer-node",
+        OWNER,
+        &[
+            "st3-client-v0",
+            "st3/fleet/test-fleet",
+            "st3/pty/test-fleet",
+        ],
+    );
+    let (socket, server) = serve(
+        root.path(),
+        vec![
+            Some(list(
+                vec![peer("old-node", OWNER, &["st3/fleet/test-fleet"])],
+                7,
+            )),
+            Some(mutation(vec![retained.clone(), exact.clone()], "complete")),
+            Some(list(vec![retained.clone(), exact.clone()], 8)),
+            Some(list(vec![retained, exact], 8)),
+        ],
+    );
+    for _ in 0..2 {
+        let status = reconcile(root.path(), &socket, FLEET, "own-key", &view())
+            .await
+            .unwrap();
+        assert_eq!(status.state, "residual_access");
+        assert!(status.message.unwrap().contains("old-node"));
+    }
+    assert_eq!(server.await.unwrap().len(), 4);
+    assert!(
+        load_journal(root.path())
+            .await
+            .unwrap()
+            .retired
+            .contains("old-node")
+    );
 }

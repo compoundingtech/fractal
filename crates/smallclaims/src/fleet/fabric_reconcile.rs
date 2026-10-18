@@ -114,7 +114,6 @@ struct Cancellation {
 #[derive(Debug, Deserialize)]
 struct Mutation {
     current_revision: u64,
-    affected: Vec<Peer>,
     cancellation: Cancellation,
 }
 #[derive(Debug, Deserialize)]
@@ -330,115 +329,251 @@ fn residual(
     (!remaining.is_empty()).then(|| format!("Residual Fabric access was not removed (static/other-owner policy is never edited): {}", remaining.join("; ")))
 }
 
+#[derive(Default, Deserialize, Serialize)]
+struct Journal {
+    pending: Option<Pending>,
+    retired: BTreeSet<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Pending {
+    request: Value,
+    created_unix_ms: u128,
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+async fn load_journal(state_dir: &Path) -> Result<Journal> {
+    let path = state_dir.join("fleet/fabric-policy.json");
+    tokio::task::spawn_blocking(move || match std::fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Journal::default()),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    })
+    .await?
+}
+
+async fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
+    let path = state_dir.join("fleet/fabric-policy.json");
+    let bytes = serde_json::to_vec(journal)?;
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let directory = path.parent().expect("fleet directory");
+        std::fs::create_dir_all(directory)?;
+        let temporary = path.with_extension("json.tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(temporary, &path)?;
+        std::fs::File::open(directory)?.sync_all()?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
+async fn complete_pending(socket: &Path, pending: &Pending) -> Result<Mutation> {
+    let request_id = pending.request["request_id"]
+        .as_str()
+        .context("pending Fabric transaction has no request ID")?;
+    let reply = if now_ms().saturating_sub(pending.created_unix_ms) >= 24 * 60 * 60 * 1000 {
+        // Beyond guaranteed retention, query only: never reinstall an expired plan.
+        send(
+            socket,
+            &json!({"operation":"cancellation", "request_id":request_id}),
+        )
+        .await?
+    } else {
+        send(socket, &pending.request).await?
+    };
+    let mut mutation = reply
+        .mutation
+        .context("Fabric returned no retained mutation receipt")?;
+    if mutation.cancellation.state == "pending" {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        mutation = send(
+            socket,
+            &json!({"operation":"cancellation", "request_id":request_id}),
+        )
+        .await?
+        .mutation
+        .context("Fabric cancellation returned no receipt")?;
+    }
+    ensure!(
+        mutation.cancellation.state == "complete",
+        "Fabric revocation cancellation is {}; retained transaction {request_id} must be resolved before policy is reported applied",
+        mutation.cancellation.state
+    );
+    Ok(mutation)
+}
+
+async fn resolve_pending(
+    state_dir: &Path,
+    socket: &Path,
+    journal: &mut Journal,
+) -> Result<Option<Mutation>> {
+    let Some(pending) = &journal.pending else {
+        return Ok(None);
+    };
+    match complete_pending(socket, pending).await {
+        Ok(mutation) => {
+            journal.pending = None;
+            save_journal(state_dir, journal).await?;
+            Ok(Some(mutation))
+        }
+        Err(error) => {
+            // Within the guaranteed receipt-retention window a coded refusal means
+            // this exact transaction was rejected, not an uncertain lost commit.
+            // Faults and expired/missing receipts remain pending and fail closed.
+            let rejected = error.downcast_ref::<PolicyError>().is_some_and(|error| {
+                matches!(error.class.as_str(), "refusal" | "usage")
+                    && !matches!(
+                        error.code.as_str(),
+                        "runtime_peers_disabled" | "cancellation_timeout" | "request_id_conflict"
+                    )
+            }) && now_ms().saturating_sub(pending.created_unix_ms)
+                < 24 * 60 * 60 * 1000;
+            if rejected {
+                journal.pending = None;
+                save_journal(state_dir, journal).await?;
+            }
+            Err(error)
+        }
+    }
+}
+
 async fn apply(
+    state_dir: &Path,
     socket: &Path,
     fleet_id: &str,
     desired: BTreeSet<String>,
+    ended: BTreeSet<String>,
+    withdrawing: bool,
 ) -> Result<ReconcileStatus> {
     let owner = format!("st/fleet/{fleet_id}");
     let grants = grants(fleet_id);
-    let snapshot = snapshot(socket).await?;
-    let operations = plan(&snapshot, &owner, &desired, &grants);
+    let mut journal = load_journal(state_dir).await?;
+    resolve_pending(state_dir, socket, &mut journal).await?;
+    let mut journal_changed = false;
+    for node in ended {
+        journal_changed |= journal.retired.insert(node);
+    }
+    let mut current = snapshot(socket).await?;
+    let operations = plan(&current, &owner, &desired, &grants);
     ensure!(
         operations.len() <= 128,
         "Fabric reconciliation requires {} operations (limit 128); no partial policy was installed",
         operations.len()
     );
-    let mut revision = snapshot.policy_revision;
     if !operations.is_empty() {
-        // Stable for identical plans/revisions; unrelated owners still use their own IDs.
+        for operation in &operations {
+            if operation["op"] == "remove_peer" {
+                journal.retired.insert(
+                    operation["node_id"]
+                        .as_str()
+                        .context("removal has no NodeID")?
+                        .to_owned(),
+                );
+            }
+        }
+        let revision = current.policy_revision;
         let digest = Sha256::digest(serde_json::to_vec(&json!([
             &owner,
-            &snapshot.instance,
+            &current.instance,
             revision,
             &operations
         ]))?);
-        let request_id = format!("st-{}", hex::encode(digest));
-        let reply = send(
-            socket,
-            &json!({"operation":"batch", "owner":owner, "request_id":request_id,
-            "expected_revision":revision, "operations":operations}),
-        )
-        .await?;
-        let mut mutation = reply
-            .mutation
-            .context("Fabric batch returned no mutation receipt")?;
-        revision = mutation.current_revision;
-        if mutation.cancellation.state == "pending" {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            mutation = send(
-                socket,
-                &json!({"operation":"cancellation", "request_id":request_id}),
-            )
+        journal.pending = Some(Pending {
+            request: json!({"operation":"batch", "owner":owner, "request_id":format!("st-{}", hex::encode(digest)),
+                "expected_revision":revision, "operations":operations}),
+            created_unix_ms: now_ms(),
+        });
+        // Durable before sending: restarting st must not forget an uncertain commit
+        // or replace a pending/timed-out cancellation with an empty-diff success.
+        save_journal(state_dir, &journal).await?;
+        let mutation = resolve_pending(state_dir, socket, &mut journal)
             .await?
-            .mutation
-            .context("Fabric cancellation returned no receipt")?;
-        }
+            .expect("pending transaction");
+        journal_changed = false;
+        current = snapshot(socket).await?;
         ensure!(
-            mutation.cancellation.state == "complete",
-            "Fabric revocation cancellation is {}; inspect Fabric receipt {request_id}",
-            mutation.cancellation.state
+            current.policy_revision >= mutation.current_revision,
+            "Fabric policy revision regressed after mutation"
         );
-        if let Some(message) = residual(&mutation.affected, &desired, &grants) {
-            return Ok(ReconcileStatus {
-                state: "residual_access".into(),
-                message: Some(message),
-                policy_revision: Some(revision),
-            });
-        }
     }
-    // Check ended identities too: after a restart our runtime record may already be gone,
-    // but static policy must never be mistaken for successful effective revocation.
+    let retired_count = journal.retired.len();
+    journal.retired.retain(|node| {
+        !desired.contains(node)
+            && current.peers.iter().any(|peer| {
+                peer.node_id == *node
+                    && peer.services.keys().any(|service| grants.contains(service))
+            })
+    });
+    if journal_changed || journal.retired.len() != retired_count {
+        save_journal(state_dir, &journal).await?;
+    }
+    let relevant = current
+        .peers
+        .into_iter()
+        .filter(|peer| withdrawing || journal.retired.contains(&peer.node_id))
+        .collect::<Vec<_>>();
+    let message = residual(&relevant, &desired, &grants);
     Ok(ReconcileStatus {
-        state: "applied".into(),
-        message: None,
-        policy_revision: Some(revision),
+        state: if message.is_some() {
+            "residual_access"
+        } else {
+            "applied"
+        }
+        .into(),
+        message,
+        policy_revision: Some(current.policy_revision),
     })
 }
 
+/// Call under the fleet settings lock so journal writes and retirement cannot race.
 pub async fn reconcile(
+    state_dir: &Path,
     socket: &Path,
     fleet_id: &str,
     own_key: &str,
     view: &FleetView,
 ) -> Result<ReconcileStatus> {
     let desired = desired(view, own_key, fleet_id)?;
-    let mut status = apply(socket, fleet_id, desired.clone()).await?;
     let ended = view
         .members
         .iter()
         .filter(|member| member.state != "current")
         .flat_map(|member| member.endpoints.iter())
         .filter(|endpoint| endpoint["transport"] == "fabric")
-        .filter_map(|endpoint| endpoint["node"].as_str())
-        .collect::<BTreeSet<_>>();
-    if !ended.is_empty() {
-        let current = snapshot(socket).await?;
-        let peers = current
-            .peers
-            .into_iter()
-            .filter(|peer| ended.contains(peer.node_id.as_str()))
-            .collect::<Vec<_>>();
-        if let Some(message) = residual(&peers, &desired, &grants(fleet_id)) {
-            status.state = "residual_access".into();
-            status.message = Some(message);
-        }
-    }
-    Ok(status)
+        .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
+        .collect();
+    apply(state_dir, socket, fleet_id, desired, ended, false).await
 }
 
 /// Revoke this fleet's runtime records before local fleet settings are deleted.
-pub async fn withdraw(socket: &Path, fleet_id: &str) -> Result<ReconcileStatus> {
-    let status = apply(socket, fleet_id, BTreeSet::new()).await?;
-    let current = snapshot(socket).await?;
-    if let Some(message) = residual(&current.peers, &BTreeSet::new(), &grants(fleet_id)) {
-        return Ok(ReconcileStatus {
-            state: "residual_access".into(),
-            message: Some(message),
-            policy_revision: Some(current.policy_revision),
-        });
-    }
-    Ok(status)
+/// Call under the fleet settings lock, also held by the replication worker.
+pub async fn withdraw(state_dir: &Path, socket: &Path, fleet_id: &str) -> Result<ReconcileStatus> {
+    apply(
+        state_dir,
+        socket,
+        fleet_id,
+        BTreeSet::new(),
+        BTreeSet::new(),
+        true,
+    )
+    .await
 }
 
 #[cfg(test)]

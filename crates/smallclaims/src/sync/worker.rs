@@ -995,7 +995,7 @@ async fn reconcile_fabric_policy(
     let view = fleet.view.read().expect("fleet view lock poisoned").clone();
     let status = match crate::fleet::fabric_reconcile::control_socket() {
         Ok(socket) => match crate::fleet::fabric_reconcile::reconcile(
-            &socket, &settings.fleet_id, own_key, &view,
+            state_dir, &socket, &settings.fleet_id, own_key, &view,
         ).await {
             Ok(status) => status,
             Err(error) => crate::fleet::fabric_reconcile::error_status(&error),

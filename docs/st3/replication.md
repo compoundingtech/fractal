@@ -403,6 +403,14 @@ completion and reports static/other-owner residual service access instead of
 claiming complete retirement. The settings lock prevents a retiring worker
 from restoring grants after leave or Fabric transport removal.
 
+st durably journals the exact pending transaction in
+`fleet/fabric-policy.json` before sending it. A restarted worker or retried leave
+resolves that receipt and cancellation before considering an empty diff applied.
+After Fabric's guaranteed 24-hour receipt window, st only queries the receipt;
+missing completion evidence stays an error instead of reinstalling an old plan.
+Retired NodeIDs with residual st grants remain journaled, so a re-key warning
+survives subsequent polling until the residual source is removed.
+
 `st fleet status` and `st replication status` expose the worker's last local result
 as `fabric_reconcile` in JSON, including `state`, `message`, and `policy_revision`.
 Readable output shows the same state and any diagnostic. The source is

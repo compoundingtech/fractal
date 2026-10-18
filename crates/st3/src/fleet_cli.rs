@@ -786,7 +786,7 @@ async fn run_fleet_transports(
                     }),
                 "cannot remove Fabric: no remaining configured transport is usable on this machine"
             );
-            withdraw_fleet_fabric(&file.fleet_id).await?;
+            withdraw_fleet_fabric(&config.state_dir, &file.fleet_id).await?;
             file.transports.retain(|transport| transport != "fabric");
             // Retain the existing protocol setting so a later add can restore it.
             save_and_publish_fleet_settings(client, config, &file, endpoints).await?;

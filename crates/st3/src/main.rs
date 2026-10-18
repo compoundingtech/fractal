@@ -751,10 +751,10 @@ fn running_local_runtimes(machines: &Value, node: &str) -> u64 {
 }
 
 /// Call while holding the fleet settings lock, before retiring a Fabric-enabled worker.
-async fn withdraw_fleet_fabric(fleet_id: &str) -> Result<()> {
+async fn withdraw_fleet_fabric(state_dir: &Path, fleet_id: &str) -> Result<()> {
     let socket = st3::fleet::fabric_reconcile::control_socket()
         .context("resolve Fabric control socket before fleet cleanup")?;
-    let status = st3::fleet::fabric_reconcile::withdraw(&socket, fleet_id)
+    let status = st3::fleet::fabric_reconcile::withdraw(state_dir, &socket, fleet_id)
         .await
         .context("withdraw this fleet's Fabric runtime access; fleet settings kept for retry")?;
     anyhow::ensure!(
@@ -851,7 +851,7 @@ async fn fleet_leave(
     if file.transports.iter().any(|transport| transport == "fabric")
         || config.state_dir.join("fleet/fabric-reconcile.json").exists()
     {
-        withdraw_fleet_fabric(&file.fleet_id).await?;
+        withdraw_fleet_fabric(&config.state_dir, &file.fleet_id).await?;
     }
     // Already holding the settings lock: FleetFile::remove would acquire it again.
     let directory = config.state_dir.join("fleet");
