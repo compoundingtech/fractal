@@ -9,6 +9,7 @@ pub type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
 pub struct CommitChecks<'a> {
     pub owned: Option<&'a owned_sets::Options>,
     pub guard: Option<&'a Guard>,
+    pub defer_restart: Option<&'a crate::rollout::Policy>,
 }
 
 pub struct Check {

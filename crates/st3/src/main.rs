@@ -1138,6 +1138,8 @@ struct MissionPublishArgs {
     /// Mission input values for exec gate checks.
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
+    #[command(flatten)]
+    restart: ApplyRestartArgs,
 }
 
 #[derive(Args)]
@@ -2645,6 +2647,38 @@ struct LaneMarkArgs {
 }
 
 #[derive(Args)]
+struct ApplyRestartArgs {
+    /// Restart changed running seats only at a proven idle point with no open ask.
+    #[arg(long, conflicts_with = "restart_now")]
+    defer_restart: bool,
+    /// Restart launch changes immediately, even while a seat is working.
+    #[arg(long)]
+    restart_now: bool,
+    /// Alert and hold after this safe-point wait; never force a busy seat to restart.
+    #[arg(long, default_value = "30m")]
+    restart_max_wait: String,
+}
+
+impl Default for ApplyRestartArgs {
+    /// The same arguments as no restart flags: defer, with the thirty-minute default wait.
+    fn default() -> Self {
+        Self { defer_restart: false, restart_now: false, restart_max_wait: "30m".into() }
+    }
+}
+
+impl ApplyRestartArgs {
+    fn policy(&self) -> Result<Option<st3::rollout::Policy>> {
+        if self.restart_now {
+            return Ok(None);
+        }
+        let ms = st3::graph::parse_duration(&self.restart_max_wait, true)?;
+        let policy = st3::rollout::Policy::when_idle(ms, false);
+        policy.validate()?;
+        Ok(Some(policy))
+    }
+}
+
+#[derive(Args)]
 struct ApplyArgs {
     /// Input KDL files; '-' reads stdin once. All files are previewed and applied together.
     files: Vec<PathBuf>,
@@ -2682,13 +2716,15 @@ struct ApplyArgs {
     #[arg(long, visible_alias = "at", conflicts_with = "set")]
     at_index: Option<u64>,
     /// Drain changed and retiring seats, then resume their native conversation.
-    #[arg(long, value_parser = ["when-idle"], requires = "set")]
+    #[arg(long, value_parser = ["when-idle"], requires = "set", conflicts_with_all = ["restart_now", "defer_restart"])]
     rollout: Option<String>,
     #[arg(long, default_value = "30m", requires = "rollout")]
     rollout_deadline: String,
     /// Interrupt busy work at the deadline; identity and session fences still apply.
     #[arg(long, requires = "rollout")]
     force_after_deadline: bool,
+    #[command(flatten)]
+    restart: ApplyRestartArgs,
     #[arg(long = "adopt", requires = "set")]
     adopt: Vec<String>,
     #[arg(long, requires = "set")]
@@ -2774,6 +2810,7 @@ async fn run_apply(client: &Client, args: ApplyArgs, json_output: bool) -> Resul
             no_gate_check: args.no_gate_check,
             check: args.check,
             inputs: args.inputs,
+            restart: args.restart,
         },
         json_output,
     )
@@ -2798,14 +2835,14 @@ async fn run_owned_set_apply(
                 .context("--set needs --source-sequence")?,
         },
         expected_set: args.expect_set.context("--set needs --expect-set")?,
-        rollout: args
-            .rollout
-            .map(|_| {
-                st3::graph::parse_duration(&args.rollout_deadline, true).map(|duration| {
-                    st3::rollout::Policy::when_idle(duration, args.force_after_deadline)
-                })
-            })
-            .transpose()?,
+        rollout: if args.restart.defer_restart {
+            args.restart.policy()?
+        } else {
+            args.rollout
+                .map(|_| st3::graph::parse_duration(&args.rollout_deadline, true)
+                    .map(|ms| st3::rollout::Policy::when_idle(ms, args.force_after_deadline)))
+                .transpose()?
+        },
         adopt: args.adopt.into_iter().collect(),
         allow_empty: args.allow_empty,
         confirm_retire: args.confirm_retire,
@@ -2818,6 +2855,7 @@ async fn run_owned_set_apply(
         idempotency_key: uuid::Uuid::now_v7().to_string(),
     };
     let preview: Preview = client.post("/v1/sets/preview", &request).await?;
+    warn_running_restarts(&preview.running_restarts);
     if args.dry_run {
         print_value(&preview, json_output)?;
     }
@@ -2841,7 +2879,9 @@ async fn run_owned_set_apply(
         return Ok(());
     }
     request.options.expected_subjects = preview.expected_subjects;
-    let response: Value = client.post("/v1/sets/apply", &request).await?;
+    let mut response: Value = client.post("/v1/sets/apply", &request).await?;
+    response["running_restart_count"] = json!(preview.running_restart_count);
+    response["running_restarts"] = serde_json::to_value(&preview.running_restarts)?;
     print_value(&response, json_output)
 }
 
@@ -2874,6 +2914,8 @@ struct AgentApplyArgs {
     /// Print the resolved publication preview without applying or running exec gates.
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
+    #[command(flatten)]
+    restart: ApplyRestartArgs,
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
 
@@ -5806,7 +5848,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"apply_deferred_restart":1,"person_directive_note":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == st_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -6160,6 +6202,7 @@ async fn publish_mission_intent(
     args: MissionPublishArgs,
     json_output: bool,
 ) -> Result<()> {
+    let defer_restart = args.restart.policy()?;
     let mission: MissionResponse = client
         .post(
             "/v1/intent/mission",
@@ -6169,6 +6212,7 @@ async fn publish_mission_intent(
             },
         )
         .await?;
+    warn_running_restarts(&mission.running_restarts);
     if args.dry_run {
         print_value(&mission, json_output)?;
     }
@@ -6196,21 +6240,32 @@ async fn publish_mission_intent(
         .post(
             "/v1/intent/apply",
             &ApplyRequest {
-                idempotency_key: idempotency(&resolved.kdl, &mission.subject_tokens),
+                idempotency_key: idempotency(&format!("{}:{defer_restart:?}", resolved.kdl), &mission.subject_tokens),
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(args.actor),
+                defer_restart,
             },
         )
         .await?;
     // Name each exact revision so `missions start --revision` can require it on any host.
     let mut value = serde_json::to_value(&response)?;
+    value["running_restart_count"] = json!(mission.running_restart_count);
+    value["running_restarts"] = serde_json::to_value(&mission.running_restarts)?;
     value["published_missions"] = mission
         .mission_revisions
         .iter()
         .map(|(subject, revision)| json!({"subject": subject, "revision": revision}))
         .collect();
     print_value(&value, json_output)
+}
+
+/// Keep publication JSON on stdout parseable while announcing impact before publication.
+fn warn_running_restarts(restarts: &[st3::model::PlannedAction]) {
+    eprintln!("WILL RESTART {} running seats", restarts.len());
+    for restart in restarts {
+        eprintln!("  {}: {}", restart.subject, restart.reason);
+    }
 }
 
 /// Check mission and step exec gates before publication, listing loop until scripts as unchecked.
@@ -6838,6 +6893,7 @@ async fn publish_text_with_expected(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(actor),
+                defer_restart: None,
             },
         )
         .await
@@ -12159,6 +12215,11 @@ fn render_client_agent(
                 "CUTOVER      st agents rollout {} --as ACTOR",
                 agent.header.id
             );
+        } else if rollout["kind"] == "apply-restart" {
+            let _ = writeln!(output, "ROLLOUT      restart pending: launch changed ({phase})");
+            if let Some(alert) = rollout["alert"].as_str() {
+                let _ = writeln!(output, "ALERT        {alert}");
+            }
         } else {
             let _ = writeln!(output, "ROLLOUT      {phase}{forced} · {id}");
         }
@@ -12179,7 +12240,7 @@ fn render_client_agent(
         if let Some(reason) = rollout["reason"].as_str() {
             let _ = writeln!(output, "ROLLOUT WHY  {reason}");
         }
-        if matches!(phase, "held" | "failed" | "blocked") {
+        if matches!(phase, "held" | "failed" | "blocked") && rollout["kind"] != "apply-restart" {
             let _ = writeln!(
                 output,
                 "RETRY        st agents rollout {} --as ACTOR",

@@ -27,6 +27,7 @@ pub mod read_cache;
 pub mod model;
 pub mod pricing;
 pub mod projection;
+pub mod rollout_policy;
 pub mod rules;
 pub mod seat_queue;
 /// The st agent skill bundled in this binary and installed for each harness.

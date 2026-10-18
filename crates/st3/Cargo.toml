@@ -80,6 +80,7 @@ walkdir = "2"
 [dev-dependencies]
 data-encoding = "2"
 alacritty_terminal = { version = "0.26", default-features = false }
+parking_lot = "0.12"
 st3 = { package = "st3-daemon", path = "../st3-daemon", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 st3_package_self = { package = "st3", path = ".", features = ["test-support"] }
