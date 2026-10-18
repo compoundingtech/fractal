@@ -121,7 +121,7 @@ describe('bound live folder tree', () => {
     document.body.append(host)
     const root = createRoot(host)
     const agent: SidebarNode = { _tag: 'Agent', id: 'agent/atlas', subject: 'agent/atlas', label: 'Atlas Builder' }
-    const projected = fleetFromAgents([decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/host-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })]).agents[0]!
+    const projected = fleetFromAgents([decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })]).agents[0]!
     const item = sidebarRow({ agent: projected, stale: false })
     const renders = vi.fn()
     const MemoContent = React.memo(() => { renders(); return <SidebarAgentRow inTree item={item} now={5000} /> })
@@ -132,7 +132,7 @@ describe('bound live folder tree', () => {
     }
     try {
       await React.act(async () => { root.render(<AgentFolders {...props} tree={[agent]} />) })
-      const named = () => [...host.querySelectorAll<HTMLElement>('[role="row"]')].filter(element => element.getAttribute('aria-label') === 'Atlas Builder, idle')
+      const named = () => [...host.querySelectorAll<HTMLElement>('[role="row"]')].filter(element => element.getAttribute('aria-label') === 'Atlas Builder, Idle')
       const row = named()[0]!
       expect(named()).toHaveLength(1)
       expect(renders).toHaveBeenCalledTimes(1)
