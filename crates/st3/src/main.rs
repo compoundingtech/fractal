@@ -18129,7 +18129,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         let mut released = 0;
         loop {
             let vacuum_store = store.clone();
-            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages(st3::store::FREE_PAGE_CHUNK))).await {
+            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(pages)) => released += pages,
                 Ok(Err(error)) => {
