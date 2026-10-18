@@ -153,6 +153,15 @@ window and removal high water, independently of which member relayed it. Old-key
 writes cannot enter a new incarnation just because their sequence matches. Unknown/unsigned or
 fenced records remain visible as admission state, not silently accepted graph authority.
 
+Replicated assistant authority (`custom.client.assistant.v1.begun`, `granted`, `policy`
+and `revoked`) additionally requires a keyed writer window with a verified member signature.
+No-anchor stores and legacy writers cannot replicate these transitions; ordinary legacy claims
+and trusted-local issuance are unchanged. Complete the existing-fleet migration below, including
+the pinned anchor and admitted signing keys, before relying on replicated assistant grants.
+Update receiving servers first: an older peer can still accept unsigned assistant authority,
+but relaying through it cannot bypass an updated receiver. Upgrading does not remove authority
+already admitted by an older build; review existing grants separately.
+
 ## Listener capability and absence
 
 Listening members advertise endpoints; dial-out members advertise none. `st fleet mode listening`

@@ -378,6 +378,16 @@ impl Runtime for SmalltalkRuntime {
         BTreeMap::from([("mission_run_deadlines".into(), 3)])
     }
 
+    fn replicated_claim_requires_keyed_writer(&self, kind: &str) -> bool {
+        matches!(
+            kind,
+            "custom.client.assistant.v1.begun"
+                | "custom.client.assistant.v1.granted"
+                | "custom.client.assistant.v1.policy"
+                | "custom.client.assistant.v1.revoked"
+        )
+    }
+
     fn classify_replicated_claim(
         &self,
         _connection: &Connection,

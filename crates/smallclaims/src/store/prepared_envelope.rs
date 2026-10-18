@@ -47,6 +47,8 @@ pub struct PreparedEnvelope<'r> {
     pub verify: std::time::Duration,
     /// The envelope's payload bytes, which its decoded content roughly doubles while it waits.
     pub bytes: usize,
+    /// At least one claim changes authority that requires a verified keyed issuer.
+    pub requires_keyed_writer: bool,
     content: Result<PreparedPayload, St3Error>,
 }
 
@@ -94,6 +96,11 @@ pub fn prepare_envelope<'r>(
 ) -> PreparedEnvelope<'r> {
     let started = std::time::Instant::now();
     let content = prepare_payload(envelope, runtime);
+    let requires_keyed_writer = content.as_ref().is_ok_and(|content| {
+        content.payload.batch.claims.iter().any(|claim| {
+            runtime.replicated_claim_requires_keyed_writer(&claim.kind)
+        })
+    });
     PreparedEnvelope {
         writer: envelope.writer.clone(),
         sequence: envelope.sequence,
@@ -102,6 +109,7 @@ pub fn prepare_envelope<'r>(
         row,
         verify: started.elapsed(),
         bytes: envelope.payload.bytes().map_or(0, <[u8]>::len),
+        requires_keyed_writer,
         content,
     }
 }

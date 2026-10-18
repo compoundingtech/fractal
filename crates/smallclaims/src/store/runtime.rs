@@ -52,6 +52,11 @@ pub trait Runtime: Send + Sync {
     fn writer_observer(&self) -> Option<std::sync::Arc<dyn crate::sqlite::WriterObserver>> {
         None
     }
+    /// Authority-bearing replicated claims cannot use unsigned legacy writer windows.
+    /// Local trusted appends are unaffected; keyed windows still require their normal signature.
+    fn replicated_claim_requires_keyed_writer(&self, _kind: &str) -> bool {
+        false
+    }
     /// A completed local response still names live work. Cleanup extends its retry window;
     /// the runtime checks only the bounded candidate, never its complete history.
     fn idempotency_response_in_use(
