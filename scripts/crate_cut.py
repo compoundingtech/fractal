@@ -858,8 +858,8 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             u = nodes[r]
             if not u.test or u.kind == "method" or u.id in moved_ids or u.fixed is not None or (u.id, k) in seen:
                 continue
-            if u.kind in ("struct", "enum", "union", "type", "trait") and shared_pub(u):
-                continue  # a pub type others can reach is shared with the code that stays: a copy would be a different type
+            if u.kind in ("struct", "enum", "union", "type", "trait", "fn", "const", "static") and shared_pub(u):
+                continue  # pub in a module others can reach: shared with the code that stays (a copied type would be a different type)
             if u.kind == "impl" and test_types.get((u.file, u.container, u.merge)) is not None and shared_pub(test_types[(u.file, u.container, u.merge)]):
                 continue
             if u.name and (u.file != t.file or u.container != t.container) and len(defs_by_name[u.name]) > 1:
