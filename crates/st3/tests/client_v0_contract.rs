@@ -35,7 +35,7 @@ fn fixture(name: &str) -> Value {
 /// ResourceHeader and resource-specific fields are composed with allOf, so closing either
 /// branch with additionalProperties would reject the other branch's legitimate fields.
 /// Draft 2020-12 unevaluatedProperties closes their union without flattening or duplicating it.
-pub(super) fn contract_validator(definition: &str) -> jsonschema::Validator {
+fn contract_validator(definition: &str) -> jsonschema::Validator {
     let mut schema = json(asset_root().join("schemas/client-v0.schema.json"));
     // Consumers preserve future cases, but this daemon must emit only declared cases.
     // Tighten every open enum (`anyOf: [{enum: known}, {type: string}]`) in a test-only copy.

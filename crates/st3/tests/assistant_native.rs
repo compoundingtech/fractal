@@ -262,7 +262,16 @@ async fn assistant_message_and_agent_reply_decode_from_real_session_timeline() {
 
     // Validate the actual API serializer output against the source of the generated codecs,
     // then decode both entries with the generated Rust SDK. No timeline fixture is fabricated.
-    let validator = super::client_v0_contract::contract_validator("TimelineEntry");
+    // This test also runs as its own binary, without sibling integration-test modules.
+    let mut schema: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../../docs/st3/client-v0/schemas/client-v0.schema.json"
+    ))).unwrap();
+    schema.as_object_mut().unwrap().remove("oneOf");
+    schema["$ref"] = json!("#/$defs/TimelineEntry");
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .should_validate_formats(true)
+        .build(&schema).unwrap();
     for entry in [original_entry, reply_entry] {
         validator.validate(entry).unwrap_or_else(|error| panic!("timeline wire contract: {error}"));
         let decoded: st3_client::TimelineEntry = serde_json::from_value(entry.clone()).unwrap();
