@@ -349,7 +349,7 @@ fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
 
 #[tokio::test]
 async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_native_content() {
-    let mut fixture = fixture(&["read.assistant.conversation"], true).await;
+    let mut fixture = fixture(SCOPES, true).await;
     let text = format!("boundedneedle {}", "word ".repeat(1900));
     content_source(&mut fixture, &text);
     let mut handle = None;
@@ -381,7 +381,7 @@ async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_na
     assert!(bytes <= MAX_RESPONSE_BYTES);
     assert!(text.starts_with(value["value"]["text"].as_str().unwrap()));
 
-    let denied = self::fixture(&["read.assistant.agents"], true).await;
+    let denied = self::fixture(&SCOPES[..4], true).await;
     for route in ["conversations", "conversation-detail", "conversation-timeline", "conversation-search"] {
         let payload = denied.payload(route, "");
         let header = denied.header(&payload, &denied.attestor);
