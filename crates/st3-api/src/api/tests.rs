@@ -563,7 +563,17 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
     assert!(suspension.holds_seat());
     let (_, body) = ask("/v1/agents/suspend", "again").await;
     assert_eq!(body["code"], "already-suspended");
-    let (_, body) = ask("/v1/agents/restart", "restart").await;
+    let (_, body) = json_request(
+        app,
+        "/v1/agents/restart",
+        json!({
+            "subject": subject,
+            "actor": "person/test",
+            "idempotency_key": "restart",
+            "incarnation_id": incarnation,
+        }),
+    )
+    .await;
     assert_eq!(body["code"], "restart-suspended");
 }
 
@@ -10604,6 +10614,8 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-runtime".into()),
         })
         .unwrap();
+    // Readiness is independent of the daemon-wide mailbox startup grace.
+    delivery_presence::record_legacy(&subject, "codex-channel", std::process::id());
     let resources =
         client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
     assert_eq!(resources[0]["state"], "starting");
@@ -11824,6 +11836,141 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
         descending["claims"][0]["subject"].as_str(),
         Some("host/two")
     );
+}
+
+#[tokio::test]
+async fn native_session_endpoint_owns_availability_and_current_harness_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/binding";
+    let source = "version 2\nagent \"example/binding\" { workspace \"/tmp\"; harness \"codex\" { effort \"high\"; }; restart \"never\" }\n";
+    let intent = crate::graph::parse_intent(source, &state.node).unwrap();
+    let preview = state.store.mission(&intent, IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    state.store.apply(&intent, &preview.subject_tokens, "binding-fixture").unwrap();
+    state.store.append_claim(&ClaimInput {
+        subject: agent.into(), kind: "runtime.observed".into(), actor: Some(agent.into()),
+        fields: BTreeMap::from([
+            ("runtime_id".into(), json!("binding-runtime")),
+            ("incarnation_id".into(), json!("current")),
+            ("status".into(), json!("running")),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let app = router(state.clone()).layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| async move {
+            match guard_bound_request(request, Some("agent/example/binding")).await {
+                Ok(request) => next.run(request).await,
+                Err(error) => error.into_response(),
+            }
+        },
+    ));
+    let binding = json!({
+        "subject": agent, "actor": agent, "harness": "codex", "session_id": "exact-thread",
+        "incarnation_id": "current", "path": null,
+    });
+    // The transport guard rejects foreign agents before the router adds its envelope.
+    let mut foreign = binding.clone();
+    foreign["actor"] = json!("agent/foreign");
+    let response = app.clone().oneshot(Request::builder().method("POST")
+        .uri("/v1/agents/native-session").header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&foreign).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+    ).unwrap();
+    assert_eq!(body["code"], "foreign-agent-actor");
+    let mut foreign_subject = binding.clone();
+    foreign_subject["subject"] = json!("agent/foreign");
+    let (status, refused) = json_request(
+        app.clone(), "/v1/agents/native-session", foreign_subject,
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "foreign-agent-actor");
+    for (field, value, code, expected_status) in [
+        ("incarnation_id", "old", "stale-incarnation", StatusCode::CONFLICT),
+        ("harness", "omp", "binding-driver-mismatch", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let mut invalid = binding.clone();
+        invalid[field] = json!(value);
+        let (status, body) = json_request(
+            app.clone(), "/v1/agents/native-session", invalid,
+        ).await;
+        assert_eq!(status, expected_status, "{body}");
+        assert_eq!(body["code"], code);
+    }
+    assert!(state.store.latest_claim(agent, Some("harness.session-file")).unwrap().is_none());
+    let (status, accepted) = json_request(
+        app.clone(), "/v1/agents/native-session", binding.clone(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["actor"], agent);
+    assert_eq!(accepted["body"]["fields"]["session_id"], "exact-thread");
+    assert_eq!(accepted["body"]["fields"]["incarnation_id"], "current");
+    let (status, replay) = json_request(
+        app.clone(), "/v1/agents/native-session", binding.clone(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], accepted["id"]);
+    assert_eq!(accepted["body"]["fields"]["resume_available"], true);
+    assert_eq!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+        .unwrap().unwrap().0, "exact-thread");
+    let saved_index = state.store.index().unwrap();
+    let mut unsaved = binding.clone();
+    unsaved["resume_available"] = json!(false);
+    let (status, unavailable) = json_request(
+        app.clone(), "/v1/agents/native-session", unsaved.clone(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{unavailable}");
+    assert_ne!(unavailable["id"], accepted["id"]);
+    assert!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+        .unwrap().is_none());
+    assert_eq!(restart_native_session(
+        &state.store, agent, "current", Some("codex"), Some(saved_index),
+    ).unwrap().unwrap().0, "exact-thread");
+    assert!(restart_native_session(&state.store, agent, "old", Some("codex"), None)
+        .unwrap().is_none());
+    let (status, saved_again) = json_request(
+        app.clone(), "/v1/agents/native-session", binding.clone(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{saved_again}");
+    assert_ne!(saved_again["id"], accepted["id"]);
+    assert_eq!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+        .unwrap().unwrap().0, "exact-thread");
+    unsaved["session_id"] = json!("unsaved-switch");
+    let (status, switched) = json_request(
+        app.clone(), "/v1/agents/native-session", unsaved.clone(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{switched}");
+    assert_eq!(switched["body"]["fields"]["session_id"], "unsaved-switch");
+    assert!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+        .unwrap().is_none());
+    unsaved["resume_available"] = json!(true);
+    unsaved["idempotency_key"] = json!("explicit-availability-update");
+    let (status, explicit) = json_request(
+        app.clone(), "/v1/agents/native-session", unsaved.clone(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{explicit}");
+    let (status, replay) = json_request(
+        app.clone(), "/v1/agents/native-session", unsaved,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], explicit["id"]);
+    assert_eq!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+        .unwrap().unwrap().0, "unsaved-switch");
+    let (status, removed) = json_request(
+        app.clone(), "/v1/claims/harness-session-binding", binding,
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{removed}");
+    // Imported/requester claims remain unavailable through generic publication.
+    let (status, forbidden) = json_request(app, "/v1/claims", json!({
+        "subject": agent, "kind": "harness.session-file", "actor": agent,
+        "fields": {"harness":"codex", "session_id":"imported", "source_session":"session/import"},
+        "evidence": [], "idempotency_key": "raw-import-forbidden",
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{forbidden}");
+    assert_eq!(forbidden["code"], "claim-write-forbidden");
 }
 
 #[tokio::test]

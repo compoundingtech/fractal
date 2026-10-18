@@ -51,6 +51,7 @@ export type ActionCommon = {
   | "agent.stop"
   | "agent.retire"
   | "agent.start"
+  | "agent.restart"
   | "agent.suspend"
   | "agent.resume"
   | "terminal.create"
@@ -119,6 +120,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  restart_will_resume?: boolean;
   rollout?: {
 
 } | null;
@@ -299,6 +301,11 @@ export type AgentRepository = {
   agent_ids: Array<string>;
   path: string;
   workspaces: Array<string>;
+};
+
+export type AgentRestartParameters = {
+  agent: Id;
+  fresh_context?: boolean;
 };
 
 export type AgentResumeParameters = {
@@ -3310,6 +3317,7 @@ export type ActionRequest =
   placement: "top" | "bottom" | "before" | "after";
   reason?: string;
 }; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.restart'; parameters: AgentRestartParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.resume'; parameters: AgentResumeParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.retire'; parameters: AgentRetireParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.start'; parameters: AgentStartParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |

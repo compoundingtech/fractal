@@ -505,12 +505,23 @@ pub(super) async fn run_agents(
             let timeout = st3::graph::parse_duration(&args.timeout, false)?;
             let subject = format!("agent/{}", args.subject);
             let client = cli_client(endpoint);
+            let status = status_for(&client, &subject).await?;
+            let current = status.subjects.iter().find(|item| item.subject == subject)
+                .context("the seat has no current declaration")?;
+            let incarnation = current.actual.as_ref()
+                .map(|actual| actual.get("fields").unwrap_or(actual))
+                .and_then(|fields| fields.get("incarnation_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let request: ClaimRecord = client
                 .post(
                     "/v1/agents/restart",
                     &json!({
                         "subject": subject,
                         "actor": args.actor,
+                        "incarnation_id": incarnation,
+                        "desired_revision": current.desired_token,
+                        "fresh_context": args.fresh_context,
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                     }),
@@ -543,6 +554,13 @@ pub(super) async fn run_agents(
                                 .incarnation_id
                                 .as_deref()
                                 .is_some_and(|incarnation| incarnation != previous)
+                            && match request.body["fields"]["native_session_id"].as_str() {
+                                Some(expected) => restart_has_native_binding(
+                                    &client, &subject, agent.incarnation_id.as_deref().unwrap(),
+                                    request.store_index, expected,
+                                ).await?,
+                                None => true,
+                            }
                         {
                             return Ok::<_, anyhow::Error>(agent);
                         }
@@ -571,6 +589,19 @@ pub(super) async fn run_agents(
                             anyhow::bail!("`{subject}` could not restart: {fault}");
                         }
                         if agent.state == "waiting"
+                            && agent.blocked_on.as_deref() == Some("channel")
+                            && agent
+                                .incarnation_id
+                                .as_deref()
+                                .is_some_and(|incarnation| incarnation != previous)
+                        {
+                            anyhow::bail!(
+                                "`{subject}` restarted but its message channel is blocked: {}; inspect it with `st agents show {subject}`",
+                                agent.reason.as_deref().unwrap_or("channel unavailable")
+                            );
+                        }
+                        if agent.state == "waiting"
+                            && agent.blocked_on.as_deref() == Some("human")
                             && agent
                                 .incarnation_id
                                 .as_deref()

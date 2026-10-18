@@ -157,7 +157,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(session) = st3::native_seed::first_launch(
             client, subject, &incarnation, &args.driver, args.seed.as_deref(), &sessions,
-            st3::native_resume::requested().is_some(),
+            st3::native_resume::requested().is_some() || st3::native_resume::fresh(),
         ).await? {
             argv = st3::native_resume::pi_family_argv("omp", argv, &sessions, &session, None)
                 .map_err(|refusal| anyhow::anyhow!("{}: {}", refusal.code, refusal.reason))?;
@@ -182,6 +182,9 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
     let (program, arguments) = args.argv.split_first().context("driver argv is empty")?;
     let mut child = tokio::process::Command::new(program)
         .args(arguments)
+        .env_remove(st3::suspension::RESUME_ENV)
+        .env_remove(st3::suspension::CONTINUE_ENV)
+        .env_remove(st3::suspension::CONTINUE_PATH_ENV)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -295,7 +298,8 @@ async fn run_st2_native_driver(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     let argv = if let Some(session) = st3::native_resume::requested() {
         if driver == "claude" {
-            let path = std::env::var_os(st3::rollout::RESUME_PATH_ENV).map(PathBuf::from);
+            let path = std::env::var_os(st3::suspension::CONTINUE_PATH_ENV)
+                .or_else(|| std::env::var_os(st3::rollout::RESUME_PATH_ENV)).map(PathBuf::from);
             if let Err(refusal) = st3::native_resume::claude_carry_transcript(
                 &session,
                 &std::env::current_dir()?,
@@ -312,7 +316,10 @@ async fn run_st2_native_driver(
                 .await);
             }
         }
-        let path = std::env::var_os(st3::rollout::RESUME_PATH_ENV).map(PathBuf::from);
+        // A strict import names its transcript; an explicit restart names the one it captured.
+        let path = std::env::var_os(st3::rollout::RESUME_PATH_ENV)
+            .or_else(|| std::env::var_os(st3::suspension::CONTINUE_PATH_ENV))
+            .map(PathBuf::from);
         match select(argv, &session, path.as_deref())? {
             Ok(argv) => {
                 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
@@ -668,7 +675,11 @@ async fn drive_st2_native(
     let mut delivery = NativeDeliverySupervisor::resumed(loop_state.delivery_episode);
     let mut replacement = DriverReplacement::new();
     let mut binding_watch = ClaudeBindingWatch::default();
-    let mut reported_session = None;
+    let native_binding_path = match driver {
+        "claude" => Some(agent_dir.join("claude-native-session")),
+        "opencode" => Some(agent_dir.join("opencode-native-session")),
+        _ => None,
+    };
     // Claude's hooks and omp's extension keep the subagent ledger; this driver records it on the
     // seat.
     let mut subagents = matches!(driver, "claude" | "omp").then(|| {
@@ -849,35 +860,6 @@ async fn drive_st2_native(
                     None
                 }
                 };
-                let bound = match driver {
-                    // Claude writes the transcript a resume needs only with its first turn.
-                    "claude" => provider_incarnation
-                        .as_deref()
-                        .and_then(|token| st3::hooks::claude_binding(&agent_dir, token))
-                        .filter(|session| {
-                            let workspace = std::env::current_dir().unwrap_or_default();
-                            st3::native_resume::claude_home().is_some_and(|home| {
-                                st3::native_resume::claude_transcript(&home, &workspace, session)
-                                    .is_file()
-                            })
-                        }),
-                    "opencode" => st3::native_resume::opencode_bound_session(&agent_dir),
-                    _ => None,
-                };
-                if let Some(session) = bound.filter(|_| settled)
-                    && let Err(error) = report_native_session(
-                        client,
-                        subject,
-                        &incarnation,
-                        driver,
-                        &session,
-                        None,
-                        &mut reported_session,
-                    )
-                    .await
-                {
-                    note_driver_tick_failure(subject, error, &mut last_control_warning);
-                }
                 if driver == "claude" && settled
                     && let Some(reason) = binding_watch.overdue(
                         &agent_dir,
@@ -963,6 +945,15 @@ async fn drive_st2_native(
                 if settled && control_retry.ready() {
                 let tick: Result<()> = async {
                     if observations.enabled || !settled { return Ok(()) }
+                    if let Some(binding_path) = native_binding_path.as_deref()
+                        && let Some(wrapper) = provider_incarnation.as_deref()
+                        && let Some(binding) = read_native_session_binding(
+                            binding_path, wrapper, false,
+                        )
+                    {
+                        publish_native_session_binding(client, subject, driver, &incarnation,
+                            &binding, &mut loop_state.published_native_session).await?;
+                    }
                     // The wrapper writes admission before claiming a new harness session. Wait
                     // for that claim so a predecessor's record cannot fence a successor.
                     if matches!(driver, "omp" | "opencode") && loop_state.harness_record_started {
@@ -1084,6 +1075,11 @@ async fn drive_st2_native(
                 match tick {
                     Ok(()) => control_retry.succeeded(),
                     Err(error) => {
+                        if error.is::<NativeSessionMismatch>() {
+                            return Err(refuse_restart_session_mismatch(
+                                client, subject, &incarnation, driver, error,
+                            ).await);
+                        }
                         control_retry.failed(&error);
                         note_driver_tick_failure(subject, error, &mut last_control_warning);
                     }
@@ -1233,6 +1229,17 @@ async fn publish_harness_timeline(
 /// The driver cannot relaunch the native session its suspended seat names. Record the typed
 /// reason where the daemon's resume reads it, and end this launch: a harness must never start on
 /// another session in its place.
+async fn refuse_restart_session_mismatch(
+    client: &Client,
+    subject: &str,
+    incarnation: &str,
+    driver: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    refuse_native_resume(client, subject, incarnation, driver,
+        st3::native_resume::Refusal::new("session-mismatch", error.to_string())).await
+}
+
 async fn refuse_native_resume(
     client: &Client,
     subject: &str,
@@ -1339,52 +1346,6 @@ async fn skip_native_continue(
             &json!({"type":"native_continue_skip_unrecorded","error":format!("{error:#}")}).to_string(),
         );
     }
-}
-
-/// Report the native session the harness bound for this incarnation, once per session.
-async fn report_native_session(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
-    harness: &str,
-    session: &str,
-    path: Option<&Path>,
-    reported: &mut Option<String>,
-) -> Result<()> {
-    if reported.as_deref() == Some(session) {
-        return Ok(());
-    }
-    let _: ClaimRecord = client
-        .post(
-            "/v1/agents/native-session",
-            &json!({
-                "subject": subject,
-                "actor": subject,
-                "incarnation_id": incarnation,
-                "harness": harness,
-                "session_id": session,
-                "path": path.map(|path| path.to_string_lossy().into_owned()),
-                "account_ref": std::env::var("ST3_ACCOUNT").ok(),
-                "desired_token": std::env::var(st3::suspension::LAUNCH_DESIRED_TOKEN_ENV)
-                    .ok().filter(|token| !token.is_empty()),
-            }),
-        )
-        .await?;
-    *reported = Some(session.to_owned());
-    Ok(())
-}
-
-/// The thread a Codex wrapper bound in `binding.json` since `prior` was read at launch.
-fn codex_bound_thread(state_dir: &Path, prior: Option<&Vec<u8>>) -> Option<String> {
-    let bytes = fs::read(state_dir.join("binding.json")).ok()?;
-    if Some(&bytes) == prior {
-        return None;
-    }
-    let binding: Value = serde_json::from_slice(&bytes).ok()?;
-    binding["threadId"]
-        .as_str()
-        .filter(|thread| !thread.is_empty())
-        .map(str::to_owned)
 }
 
 async fn publish_harness_state(
@@ -1647,6 +1608,11 @@ async fn run_pi_channel(
                                 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
                             ) {
                                 Ok(changed) => publish |= changed,
+                                Err(error) if error.is::<NativeSessionMismatch>() => {
+                                    return Err(refuse_restart_session_mismatch(
+                                        client, subject, &incarnation, driver, error,
+                                    ).await);
+                                }
                                 Err(error) => warn_pi_channel(subject, &error, &mut last_warning),
                             }
                         }
@@ -2233,7 +2199,8 @@ async fn drive_codex_native(
     } else {
         loop_state.harness_record_started = true;
     }
-    let prior_binding = std::fs::read(state_dir.join("binding.json")).ok();
+    let binding_path = state_dir.join("binding.json");
+    let prior_binding = std::fs::read(&binding_path).ok();
     let inbox = st_drivers::message::inbox_dir(&agent_dir);
     let archive = st_drivers::message::archive_dir(&agent_dir);
     let mut mailbox =
@@ -2255,7 +2222,6 @@ async fn drive_codex_native(
         .then(|| codex_continued_thread(&argv))
         .flatten();
     let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
-    let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
     let mut subagents = st3::subagents::Publisher::start(
         subject,
@@ -2329,7 +2295,7 @@ async fn drive_codex_native(
                 // A resume that ended before its thread bound was refused by Codex itself, such
                 // as a thread with no rollout. The wrapper can end cleanly and leave the reason in
                 // its harness record. The refusal goes first, so nothing after it can delay it.
-                if reported_session.is_none() && st3::native_resume::requested().is_some() {
+                if loop_state.published_native_session.is_none() && st3::native_resume::requested().is_some() {
                     let reason = match &outcome {
                         Err(error) => format!("{error:#}"),
                         Ok(()) => st_drivers::harness_state::read(&harness_state_path, None)
@@ -2341,7 +2307,7 @@ async fn drive_codex_native(
                         reason: reason.chars().take(2_000).collect(),
                     };
                     let _ = refuse_native_resume(client, subject, &incarnation, "codex", refusal).await;
-                } else if reported_session.is_none()
+                } else if loop_state.published_native_session.is_none()
                     && let Some(thread) = &continued
                 {
                     // The next relaunch starts a new thread instead of trying this one again.
@@ -2438,7 +2404,7 @@ async fn drive_codex_native(
                 if settled && control_retry.ready() {
                 let tick: Result<()> = async {
                     if !settled { return Ok(()) }
-                    if !loop_state.ready && std::fs::read(state_dir.join("binding.json"))
+                    if !loop_state.ready && std::fs::read(&binding_path)
                         .ok()
                         .is_some_and(|binding| Some(&binding) != prior_binding.as_ref())
                     {
@@ -2458,21 +2424,15 @@ async fn drive_codex_native(
                         }).await?;
                         loop_state.ready = true;
                     }
-                    if let Some(thread) = codex_bound_thread(&state_dir, prior_binding.as_ref())
-                        && let Err(error) = report_native_session(
-                            client,
-                            subject,
-                            &incarnation,
-                            "codex",
-                            &thread,
-                            None,
-                            &mut reported_session,
-                        )
-                        .await
-                    {
-                        note_driver_tick_failure(subject, error, &mut last_control_warning);
+                    if observations.enabled {
+                        if let Some(wrapper) = observations.provider_incarnation.as_deref()
+                            && let Some(binding) = read_native_session_binding(&binding_path, wrapper, true)
+                        {
+                            publish_native_session_binding(client, subject, "codex", &incarnation,
+                                &binding, &mut loop_state.published_native_session).await?;
+                        }
+                        return Ok(());
                     }
-                    if observations.enabled { return Ok(()) }
                     let current_record = fs::read(&harness_state_path).ok();
                     loop_state.harness_record_started = harness_record_belongs_to_current_session(
                         loop_state.harness_record_started,
@@ -2484,6 +2444,14 @@ async fn drive_codex_native(
                         .then(|| st_drivers::harness_state::read(&harness_state_path, None))
                         .flatten()
                     {
+                        if let Some(wrapper) = observed.evidence_incarnation.as_deref()
+                            && let Some(binding) = read_native_session_binding(
+                                &binding_path, wrapper, true,
+                            )
+                        {
+                            publish_native_session_binding(client, subject, "codex", &incarnation,
+                                &binding, &mut loop_state.published_native_session).await?;
+                        }
                         publish_harness_activity(
                             &ObservationClient { client, event: None },
                             subject,
@@ -2560,6 +2528,11 @@ async fn drive_codex_native(
                 match tick {
                     Ok(()) => control_retry.succeeded(),
                     Err(error) => {
+                        if error.is::<NativeSessionMismatch>() {
+                            return Err(refuse_restart_session_mismatch(
+                                client, subject, &incarnation, "codex", error,
+                            ).await);
+                        }
                         control_retry.failed(&error);
                         note_driver_tick_failure(subject, error, &mut last_control_warning);
                     }

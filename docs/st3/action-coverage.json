@@ -21,6 +21,15 @@
       "behavior": "stale fence refused; accepted after restart; replay after restart has no duplicate writes"
     },
     {
+      "action": "agent.restart",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::restart_requests_capture_native_context_and_survive_stale_fences_and_restarts",
+        "crates/st3-api/src/api/client_v0.rs::typed_restart_without_an_incarnation_accepts_a_keyless_seat",
+        "crates/st3-api/src/api/client_v0.rs::typed_restart_captures_current_session_and_preserves_person_under_never_policy"
+      ],
+      "behavior": "real typed client refuses stale fences without writes; native context and person attribution are captured without changing declaration; accepted requests and exact replay survive daemon restarts without duplicate writes; incarnation omission also accepts a keyless seat"
+    },
+    {
       "action": "agent.resume",
       "tests": [
         "crates/st3/tests/action_coverage.rs::suspension_requests_survive_stale_incarnations_and_restarts"

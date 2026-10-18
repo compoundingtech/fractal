@@ -53,18 +53,31 @@ pub async fn rollout_agent(
 
 #[derive(Deserialize)]
 pub struct AgentRestartRequest {
-    subject: String,
-    actor: String,
-    idempotency_key: String,
+    pub(super) subject: String,
+    pub(super) actor: String,
+    pub(super) idempotency_key: String,
+    #[serde(default)]
+    pub(super) incarnation_id: Option<String>,
+    #[serde(default)]
+    pub(super) fresh_context: bool,
+    #[serde(default)]
+    pub(super) desired_revision: Option<String>,
     /// Restart without first asking the seat for its handoff.
     #[serde(default)]
-    now: bool,
+    pub(super) now: bool,
 }
 
 pub async fn restart_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    request_agent_restart(&state, request).map(Json)
+}
+
+pub(super) fn request_agent_restart(
+    state: &AppState,
+    request: AgentRestartRequest,
+) -> Result<ClaimRecord, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-restart-actor")?;
     let subject = if request.subject.starts_with("agent/") {
         request.subject
@@ -78,7 +91,7 @@ pub async fn restart_agent(
         .operation_claim(&key)
         .map_err(ApiError::internal)?
     {
-        return Ok(Json(prior));
+        return Ok(prior);
     }
     if state
         .store
@@ -158,6 +171,25 @@ pub async fn restart_agent(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    if request.incarnation_id.as_deref().is_some_and(|expected| expected != incarnation) {
+        return Err(ApiError::bad(St3Error::new(
+            "stale-incarnation",
+            "the seat's runtime incarnation changed",
+        )));
+    }
+    if request.desired_revision.as_deref().is_some_and(|expected| expected != token) {
+        return Err(ApiError::bad(St3Error::new(
+            "stale-revision",
+            "the seat's desired revision changed",
+        )));
+    }
+    let native_session = if request.fresh_context {
+        None
+    } else {
+        restart_native_session(
+            &state.store, &subject, incarnation, member.driver.as_deref(), None,
+        ).map_err(ApiError::internal)?
+    };
     let claim = state
         .store
         .append_claim(&ClaimInput {
@@ -171,6 +203,9 @@ pub async fn restart_agent(
                     Value::String(member.runtime_id.clone()),
                 ),
                 ("incarnation_id".into(), Value::String(incarnation.into())),
+                ("native_session_id".into(), json!(native_session.as_ref().map(|(id, _)| id))),
+                ("native_session_path".into(), json!(native_session.as_ref().and_then(|(_, path)| path.as_deref()))),
+                ("fresh_context".into(), Value::Bool(request.fresh_context)),
             ])
             .into_iter()
             .chain(request.now.then(|| {
@@ -185,8 +220,47 @@ pub async fn restart_agent(
             idempotency_key: Some(key),
         })
         .map_err(ApiError::bad)?;
-    signal_changed(&state);
-    Ok(Json(claim))
+    signal_changed(state);
+    Ok(claim)
+}
+
+/// Only evidence bound to this exact incarnation and supported launch driver can resume.
+pub(super) fn restart_native_session(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+    driver: Option<&str>,
+    snapshot_index: Option<u64>,
+) -> anyhow::Result<Option<(String, Option<String>)>> {
+    let Some(driver @ ("claude" | "codex" | "omp" | "pi" | "opencode")) = driver else {
+        return Ok(None);
+    };
+    let mut before = snapshot_index.and_then(|index| index.checked_add(1));
+    loop {
+        let page = store.claims_for_subject_kind_at(
+            subject, "harness.session-file", before, true, 64,
+        )?;
+        for claim in page.claims {
+            let fields = claim.body.get("fields").unwrap_or(&claim.body);
+            if fields.get("incarnation_id").and_then(Value::as_str) == Some(incarnation)
+                && fields.get("harness").and_then(Value::as_str) == Some(driver)
+            {
+                if fields.get("resume_available").and_then(Value::as_bool) != Some(true) {
+                    return Ok(None);
+                }
+                let Some(id) = fields.get("session_id").and_then(Value::as_str)
+                    .filter(|id| !id.is_empty()) else { return Ok(None) };
+                let path = fields.get("path").and_then(Value::as_str)
+                    .filter(|path| !path.is_empty()).map(str::to_owned);
+                if driver == "pi" && path.is_none() {
+                    return Ok(None);
+                }
+                return Ok(Some((id.to_owned(), path)));
+            }
+        }
+        let Some(cursor) = page.next_cursor else { return Ok(None) };
+        before = Some(cursor);
+    }
 }
 
 #[derive(Deserialize)]
@@ -323,6 +397,10 @@ pub struct NativeSessionReport {
     path: Option<String>,
     #[serde(default)]
     desired_token: Option<String>,
+    #[serde(default)]
+    resume_available: Option<bool>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 /// A seat's driver reports the native session its harness bound for one incarnation. Only the
@@ -338,50 +416,97 @@ pub async fn report_native_session(
             "a seat reports only its own native session",
         )));
     }
-    if request.session_id.is_empty() || request.incarnation_id.is_empty() {
+    if request.session_id.is_empty() || request.incarnation_id.is_empty()
+        || !matches!(request.harness.as_str(), "claude" | "codex" | "omp" | "pi" | "opencode")
+    {
         return Err(ApiError::bad(St3Error::new(
             "invalid-native-session",
-            "a native session report needs a session ID and an incarnation",
+            "a native session report needs a supported harness, session ID and an incarnation",
         )));
     }
-    let mut fields = BTreeMap::from([
-        ("harness".into(), Value::String(request.harness)),
-        (
-            "session_id".into(),
-            Value::String(request.session_id.clone()),
-        ),
-        ("agent".into(), Value::String(subject.clone())),
-        (
-            "incarnation_id".into(),
-            Value::String(request.incarnation_id.clone()),
-        ),
-        ("status".into(), Value::String("active".into())),
-    ]);
-    if let Some(path) = request.path {
-        fields.insert("path".into(), Value::String(path));
-    }
-    if let Some(account) = request.account_ref.filter(|name| !name.is_empty()) {
-        fields.insert("account_ref".into(), Value::String(account));
-    }
-    if let Some(token) = request.desired_token.filter(|token| !token.is_empty()) {
-        fields.insert("desired_token".into(), Value::String(token));
-    }
-    let claim = state
-        .store
-        .append_claim(&ClaimInput {
+    let store = state.store.clone();
+    let (claim, appended) = blocking_action(move || {
+        let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
+        let status = store.status(Some(&subject)).map_err(internal)?;
+        let current = status.subjects.iter().find(|item| item.subject == subject)
+            .ok_or_else(|| St3Error::new("missing-agent", "the native report has no current seat"))?;
+        let incarnation = current.actual.as_ref()
+            .map(|actual| actual.get("fields").unwrap_or(actual))
+            .and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
+        if incarnation != Some(request.incarnation_id.as_str())
+            || current.actual_origin.as_deref() != Some(store.origin())
+        {
+            return Err(St3Error::new(
+                "stale-incarnation", "the native report does not name this host's current incarnation",
+            ));
+        }
+        let desired = store.desired_subject_with_writer(&subject).map_err(internal)?
+            .map(|(desired, _)| desired)
+            .filter(|desired| desired.kind == "agent")
+            .ok_or_else(|| St3Error::new("binding-not-declared", "the seat has no active native declaration"))?;
+        if !current.conflicts.is_empty()
+            || desired.member.as_ref().and_then(|member| member.driver.as_deref())
+                != Some(request.harness.as_str())
+        {
+            return Err(St3Error::new(
+                "binding-driver-mismatch", "the native report must match the seat's declared harness",
+            ));
+        }
+        let mut fields = BTreeMap::from([
+            ("harness".into(), json!(request.harness)),
+            ("session_id".into(), json!(request.session_id)),
+            ("agent".into(), json!(subject)),
+            ("incarnation_id".into(), json!(request.incarnation_id)),
+            ("status".into(), json!("active")),
+            // Existing callers report a bound saved session without an availability field.
+            ("resume_available".into(), json!(request.resume_available.unwrap_or(true))),
+        ]);
+        if let Some(path) = request.path {
+            fields.insert("path".into(), json!(path));
+        }
+        if let Some(account) = request.account_ref.filter(|name| !name.is_empty()) {
+            fields.insert("account_ref".into(), json!(account));
+        }
+        if let Some(token) = request.desired_token.filter(|token| !token.is_empty()) {
+            fields.insert("desired_token".into(), json!(token));
+        }
+        // Availability and selected-session changes are new observations, not per-session replays.
+        let key = match request.idempotency_key {
+            Some(key) => key,
+            None => {
+                let latest = store.latest_claim(&subject, Some("harness.session-file"))
+                    .map_err(internal)?;
+                let previous_id = match latest {
+                    Some(claim) => {
+                        if claim.body.get("fields").and_then(Value::as_object).is_some_and(|previous| {
+                            previous.len() == fields.len()
+                                && fields.iter().all(|(key, value)| previous.get(key) == Some(value))
+                        }) {
+                            return Ok((claim, false));
+                        }
+                        claim.id
+                    },
+                    None => String::new(),
+                };
+                let digest = hex::encode(Sha256::digest(
+                    serde_json::to_vec(&fields).map_err(|error| internal(error.into()))?,
+                ));
+                format!("native-session:{subject}:{previous_id}:{digest}")
+            },
+        };
+        store.append_claim_outcome(&ClaimInput {
             subject: subject.clone(),
             kind: "harness.session-file".into(),
-            actor: Some(subject.clone()),
+            actor: Some(subject),
             fields,
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: Some(format!(
-                "native-session:{subject}:{}:{}",
-                request.incarnation_id, request.session_id
-            )),
+            idempotency_key: Some(key),
         })
-        .map_err(ApiError::bad)?;
-    signal_changed(&state);
+    }).await?;
+    if appended {
+        signal_changed(&state);
+    }
     Ok(Json(claim))
 }
 

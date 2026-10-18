@@ -4,6 +4,7 @@
 pub const ACTION_NAMES: &[&str] = &[
     "agent.create",
     "agent.queue-move",
+    "agent.restart",
     "agent.resume",
     "agent.retire",
     "agent.start",

@@ -368,6 +368,152 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 }
 
 #[test]
+fn explicit_restart_first_native_binding_rejects_fallback_but_allows_later_switches() {
+    let error = verify_first_native_session(Some("captured"), "fresh", false).unwrap_err();
+    let mismatch = error.downcast_ref::<NativeSessionMismatch>().unwrap();
+    assert_eq!(mismatch.expected, "captured");
+    assert_eq!(mismatch.actual, "fresh");
+    assert!(verify_first_native_session(Some("captured"), "captured", false).is_ok());
+    assert!(verify_first_native_session(Some("captured"), "switched", true).is_ok());
+    assert!(verify_first_native_session(None, "ordinary", false).is_ok());
+}
+
+#[tokio::test]
+async fn native_publisher_uses_one_endpoint_for_availability_and_repeated_session_switches() {
+    use axum::{Json, Router, routing::post};
+    use tokio::sync::Mutex;
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let store = Arc::new(Store::open_memory("native-publisher").unwrap());
+    let app = Router::new().route("/v1/agents/native-session", post({
+        let captured = captured.clone();
+        move |Json(request): Json<Value>| {
+            let captured = captured.clone();
+            let store = store.clone();
+            async move {
+                captured.lock().await.push(request.clone());
+                let record = store.append_claim(&ClaimInput {
+                    subject: request["subject"].as_str().unwrap().into(),
+                    actor: Some(request["actor"].as_str().unwrap().into()),
+                    kind: "harness.session-file".into(),
+                    fields: serde_json::from_value(json!({
+                        "harness": request["harness"],
+                        "session_id": request["session_id"],
+                        "incarnation_id": request["incarnation_id"],
+                        "resume_available": request["resume_available"],
+                    })).unwrap(),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                Json(json!({"api_version":"st3.v1", "value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(Endpoint::Http(format!("http://{address}")));
+    let unsaved = NativeSessionBinding { session_id: "native-one".into(), path: None, resume_available: false };
+    let saved = NativeSessionBinding { resume_available: true, ..unsaved.clone() };
+    let switched = NativeSessionBinding { session_id: "native-two".into(), ..saved.clone() };
+    let mut published = None;
+    for binding in [&unsaved, &unsaved, &saved, &switched, &saved] {
+        publish_native_session_binding(&client, "agent/publisher", "omp", "incarnation", binding, &mut published).await.unwrap();
+    }
+    let requests = captured.lock().await;
+    assert_eq!(requests.len(), 4, "only the identical current binding is suppressed");
+    assert_eq!(requests.iter().map(|r| r["session_id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["native-one", "native-one", "native-two", "native-one"]);
+    assert_eq!(requests.iter().map(|r| r["resume_available"].as_bool().unwrap()).collect::<Vec<_>>(),
+        [false, true, true, true]);
+    assert!(requests.iter().all(|r| r["actor"] == r["subject"] && r["incarnation_id"] == "incarnation" && r.get("idempotency_key").is_none()));
+    assert_eq!(published.as_ref(), Some(&saved));
+    server.abort();
+}
+
+
+#[test]
+fn restart_context_binding_requires_exact_provider_incarnation_and_saved_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("transcript.jsonl");
+    let transcript_path = transcript.to_str().unwrap();
+    for (codex, binding) in [
+        (false, json!({"incarnation":"wrapper-current", "native_session_id":"native-exact", "path":transcript_path})),
+        (true, json!({"runtimeIncarnation":"wrapper-current", "threadId":"native-exact"})),
+    ] {
+        assert!(native_session_binding(&binding, "wrapper-previous", codex).is_none());
+        let current = native_session_binding(&binding, "wrapper-current", codex).unwrap();
+        assert_eq!(current.session_id, "native-exact");
+        assert_eq!(current.path.as_deref(), if codex { None } else { Some(transcript_path) });
+        assert!(!current.resume_available, "an unsaved session is not resumable");
+    }
+    assert!(native_session_binding(&json!({"incarnation":"current", "native_session_id":""}), "current", false).is_none());
+    // Claude/pi/omp: the exact session file existing is the saved evidence.
+    std::fs::write(&transcript, "{}\n").unwrap();
+    let saved = native_session_binding(
+        &json!({"incarnation":"current", "native_session_id":"native", "path":transcript_path}), "current", false,
+    ).unwrap();
+    assert!(saved.resume_available);
+    // OpenCode states its server store's answer, which wins over a missing path.
+    for answer in [true, false] {
+        let opencode = native_session_binding(
+            &json!({"incarnation":"current", "native_session_id":"ses", "resume_available":answer}), "current", false,
+        ).unwrap();
+        assert_eq!(opencode.resume_available, answer);
+    }
+    // Codex: only rollout evidence for this exact runtime and thread counts.
+    let state = root.path().join("codex");
+    std::fs::create_dir_all(&state).unwrap();
+    let binding_path = state.join("binding.json");
+    std::fs::write(&binding_path, serde_json::to_vec(&json!({
+        "runtimeIncarnation":"current", "threadId":"thread", "resume_available": true,
+    })).unwrap()).unwrap();
+    let codex = |evidence: Value| {
+        std::fs::write(state.join("rollout.json"), serde_json::to_vec(&evidence).unwrap()).unwrap();
+        read_native_session_binding(&binding_path, "current", true).unwrap()
+    };
+    assert!(!codex(json!({"runtimeIncarnation":"previous", "threadId":"thread", "path":transcript_path})).resume_available);
+    assert!(!codex(json!({"runtimeIncarnation":"current", "threadId":"other", "path":transcript_path})).resume_available);
+    let missing = root.path().join("missing.jsonl");
+    assert!(!codex(json!({"runtimeIncarnation":"current", "threadId":"thread", "path":missing})).resume_available);
+    let rollout = codex(json!({"runtimeIncarnation":"current", "threadId":"thread", "path":transcript_path}));
+    assert!(rollout.resume_available);
+    assert_eq!(rollout.path.as_deref(), Some(transcript_path));
+    assert!(codex(json!({"runtimeIncarnation":"current", "threadId":"thread", "path":null})).resume_available);
+}
+
+#[test]
+fn restart_context_pi_binding_survives_adoption_and_tracks_native_session_switches() {
+    let mut channel = PiChannelResume::default();
+    assert!(channel.accept_frame(r#"{"type":"session","sessionId":"native-one","path":"/one.jsonl"}"#));
+    let mut adopted: PiChannelResume = serde_json::from_slice(&serde_json::to_vec(&channel).unwrap()).unwrap();
+    assert_eq!(adopted.pending.native_session.as_ref().unwrap().0, "native-one");
+    let (session, path) = adopted.pending.native_session.take().unwrap();
+    adopted.pending.published_native_session = NativeSessionBinding::from_session_file(&session, path.as_deref());
+    assert!(!adopted.accept_frame(r#"{"type":"session","sessionId":"native-one","path":"/one.jsonl"}"#));
+    assert!(adopted.accept_frame(r#"{"type":"session","sessionId":"native-two","path":"/two.jsonl"}"#));
+    assert_eq!(adopted.pending.native_session.as_ref().unwrap().0, "native-two");
+    assert!(!adopted.accept_frame(r#"{"type":"session","sessionId":""}"#));
+}
+
+#[test]
+fn restart_context_pi_session_saved_after_its_frame_becomes_resumable() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("session.jsonl");
+    let frame = json!({"type":"session", "sessionId":"native", "path":file}).to_string();
+    let mut channel = PiChannelResume::default();
+    assert!(channel.accept_frame(&frame));
+    let (session, path) = channel.pending.native_session.take().unwrap();
+    let published = NativeSessionBinding::from_session_file(&session, path.as_deref()).unwrap();
+    assert!(!published.resume_available);
+    assert!(published.saved_since().is_none());
+    std::fs::write(&file, "{}\n").unwrap();
+    let saved = published.saved_since().unwrap();
+    assert!(saved.resume_available);
+    assert_eq!((saved.session_id.as_str(), saved.path.as_ref()), ("native", published.path.as_ref()));
+    channel.pending.published_native_session = Some(saved);
+    assert!(!channel.accept_frame(&frame), "the saved binding is already published");
+}
+
+#[test]
 fn a_claude_session_without_a_binding_is_reported_once_after_the_grace() {
     let dir = tempfile::tempdir().unwrap();
     let start = Instant::now();
@@ -1568,6 +1714,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            published_native_session: None,
             settle: ResumeSettle::resumed(),
         },
     };

@@ -131,6 +131,7 @@ use launches::{
     approve_planning_session, cancel_planning_session, mission, preview_named_planning_candidate,
     revise_planning_session, start_planning_session,
 };
+use agents::{AgentRestartRequest, request_agent_restart, restart_native_session};
 use messages::post_message_claim;
 use operations::{get_slo, get_slo_history};
 use records::post_review;
@@ -3418,6 +3419,14 @@ fn client_agent_cards_presented(
                 .as_deref()
                 .or(runtime_id)
                 .map(|identity| managed_session_id(&subject.subject, identity));
+            let restart_will_resume = match incarnation_id.as_deref() {
+                Some(incarnation) => restart_native_session(
+                    store, &subject.subject, incarnation,
+                    subject.desired.as_ref().and_then(desired_harness_driver).as_deref(),
+                    Some(snapshot_index),
+                )?.is_some(),
+                None => false,
+            };
             let updated_at = subject
                 .harness
                 .as_ref()
@@ -3498,6 +3507,7 @@ fn client_agent_cards_presented(
                 "silent_since": silent_since.map(client_timestamp),
                 "fault": fault,
                 "incarnation_id": incarnation_id,
+                "restart_will_resume": restart_will_resume,
                 "current_session_id": current_session_id,
                 "usage": usage,
                 "under": subject.under.into_iter().map(|relationship| json!({

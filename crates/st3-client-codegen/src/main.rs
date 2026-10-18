@@ -1559,6 +1559,24 @@ mod tests {
     }
 
     #[test]
+    fn restart_schema_keeps_the_incarnation_fence_optional() -> Result<()> {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let restart = schema["$defs"]["ActionRequest"]["oneOf"]
+            .as_array()
+            .context("action alternatives")?
+            .iter()
+            .find(|action| action["properties"]["type"]["const"] == "agent.restart")
+            .context("restart action")?;
+        assert_eq!(
+            restart["properties"]["fence"],
+            serde_json::json!({"$ref": "#/$defs/Fence"}),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn check_rejects_model_and_route_drift_and_generation_restores_stable_bytes() -> Result<()> {
         let operations: Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/schemas/operations.json"
