@@ -1155,8 +1155,10 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                 # named explicitly, because a glob import of the same name elsewhere would make them ambiguous
                 uses.append("use super::%s::*;" % parts[-1])
                 groups_ = collections.defaultdict(set)
-                for it in items:
-                    if it.kind in FREE_KINDS and it.kind != "mod" and it.is_pub and it.name:
+                cur_path = os.path.join(src_dir, rel)
+                cur_items = ri.parse(Path(cur_path).read_text()) if os.path.exists(cur_path) else []
+                for it in cur_items:
+                    if it.kind in FREE_KINDS and it.kind != "mod" and it.is_pub and it.name and not any(x.startswith("#[test]") for x in it.attrs):
                         groups_[tuple(x for x in it.attrs if x.startswith("#[cfg"))].add(it.name)
                 for cfgs, names_ in sorted(groups_.items()):
                     own = sorted(names_)
