@@ -395,6 +395,106 @@ async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_na
 }
 
 #[tokio::test]
+async fn discovery_authenticates_payload_before_snapshot_or_handle_disclosure() {
+    let mut fixture = fixture(SCOPES, true).await;
+    content_source(&mut fixture, &format!("PRIVATE discovery source {}", "word ".repeat(1900)));
+    fixture.state.store.append_claim(&ClaimInput {
+        subject:"agent/zzz-discovery".into(), kind:"runtime.observed".into(),
+        actor:Some("agent/zzz-discovery".into()),
+        fields:serde_json::from_value(json!({"status":"running","runtime_id":"discovery-runtime",
+            "incarnation_id":"discovery-incarnation"})).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let query = "?limit=1&max_response_bytes=16384";
+    let payload = fixture.payload("conversations", query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, first, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["value"]["items"][0]["read"].is_object(), "{first}");
+    let issued = first["value"]["page"]["next_cursor"].as_str().unwrap().to_owned();
+    let (wrapper, encoded) = issued.rsplit_once(':').unwrap();
+    let cursor = decode_client_cursor(encoded).unwrap();
+    let mut attacks = Vec::new();
+    for field in ["snapshot", "keyset", "limit", "expiry-past", "expiry-future", "collection"] {
+        let mut forged = cursor.clone();
+        match field {
+            "snapshot" => {
+                forged.snapshot.id = "snapshot/ATTACKER-SNAPSHOT".into();
+                forged.snapshot.store_index = 0;
+            }
+            "keyset" => forged.after_key = Some((0, "agent/ATTACKER-KEYSET".into())),
+            "limit" => forged.limit = 2,
+            "expiry-past" => forged.expires_at_unix_ms = 0,
+            "expiry-future" => forged.expires_at_unix_ms = u128::MAX,
+            "collection" => forged.collection = "assistant.conversations:foreign-grant-policy".into(),
+            _ => unreachable!(),
+        }
+        let encoded = encode_client_cursor(&forged).unwrap();
+        attacks.push(format!("{wrapper}:{encoded}"));
+        // Removing the wrapper must not restore the old unauthenticated admission path.
+        attacks.push(encoded);
+    }
+    for cursor in &attacks {
+        let query = format!("?cursor={}&max_response_bytes=16384", urlencoding::encode(cursor));
+        let payload = fixture.payload("conversations", &query);
+        let header = fixture.header(&payload, &fixture.attestor);
+        let (status, value, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{value}");
+        assert!(value.get("value").is_none(), "{value}");
+        let encoded = value.to_string();
+        for forbidden in ["PRIVATE discovery source", "ATTACKER-SNAPSHOT", "ATTACKER-KEYSET", "agent/reads-codex", "conversation-content:"] {
+            assert!(!encoded.contains(forbidden), "{value}");
+        }
+    }
+    // Re-pair on the same daemon, then transplant both the visible grant collection
+    // and wrapper namespace. The original signature must not authorize the new grant.
+    let request = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
+        "device_name":"discovery-second","assistant_id":PRINCIPAL,"scopes":SCOPES,
+        "disclosure_consent":true,"consent_evidence":"discovery-isolation"})).unwrap();
+    let Json(challenge) = begin(fixture.state.clone(), ClientSession::local(Some(OWNER)).unwrap(), request).await.unwrap();
+    let key = signing_key();
+    let request = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"code":challenge["code"],
+        "device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.public_key().as_ref())})).unwrap();
+    let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+    let Json(paired) = complete(&fixture.state, id, &request, "fabric-loopback").await.unwrap().unwrap();
+    fixture.credential = paired["credential"].as_str().unwrap().into();
+    fixture.grant = paired["grant"]["id"].as_str().unwrap().into();
+    let Json(grant) = pin(State(fixture.state.clone()), Extension(ClientSession::local(Some(OWNER)).unwrap()),
+        AxumPath(fixture.grant.clone()), Json(fixture.trust_request())).await.unwrap();
+    fixture.revision = grant["policy_revision"].as_u64().unwrap();
+    let payload = fixture.payload("conversations", query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, second, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second_cursor = second["value"]["page"]["next_cursor"].as_str().unwrap();
+    let (second_wrapper, second_encoded) = second_cursor.rsplit_once(':').unwrap();
+    let second_payload = decode_client_cursor(second_encoded).unwrap();
+    let (_, original_signature) = wrapper.rsplit_once(':').unwrap();
+    let (second_namespace, _) = second_wrapper.rsplit_once(':').unwrap();
+    let mut transplanted = cursor;
+    transplanted.collection = second_payload.collection;
+    attacks.push(format!("{second_namespace}:{original_signature}:{}", encode_client_cursor(&transplanted).unwrap()));
+    attacks.push(issued);
+    for cursor in attacks {
+        let query = format!("?cursor={}&max_response_bytes=16384", urlencoding::encode(&cursor));
+        let payload = fixture.payload("conversations", &query);
+        let header = fixture.header(&payload, &fixture.attestor);
+        let (status, value, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{value}");
+        assert!(value.get("value").is_none(), "{value}");
+        let encoded = value.to_string();
+        for forbidden in ["PRIVATE discovery source", "ATTACKER-SNAPSHOT", "ATTACKER-KEYSET", "agent/reads-codex", "conversation-content:"] {
+            assert!(!encoded.contains(forbidden), "{value}");
+        }
+    }
+    let query = format!("?cursor={}&max_response_bytes=16384", urlencoding::encode(second_cursor));
+    let payload = fixture.payload("conversations", &query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, value, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+}
+
+#[tokio::test]
 async fn assistant_signed_content_binds_exact_unicode_range_revision_and_no_private_replay() {
     let mut fixture=fixture(SCOPES,true).await;
     let prefix="Ünïcødé 決定 ";

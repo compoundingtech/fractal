@@ -108,6 +108,12 @@ directly into `st_conversation_read`, rather than synthesizing native references
 guessing a byte range. Discovery cursors and issued content handles are bound to the
 authenticated grant and its effective policy revision; another grant cannot reuse
 them. Timeline and search pages default to 10 items and accept at most 50.
+The entire discovery continuation is authenticated, including its pinned snapshot,
+expiry and keyset; editing and re-encoding a cursor cannot transplant its grant
+binding. A detail preview's `page.next_cursor` continues through
+`st_conversation_timeline` with the returned agent and session IDs. Discovery keeps
+its pinned metadata rows when an agent restarts; a no-longer-current session has
+`read: null` rather than an invalid content handle or a failed page.
 
 Conversation DTOs disclose only allowlisted identifiers, timestamps, role/type
 metadata, bounded chat text and content references. Native tool bodies, diagnostic

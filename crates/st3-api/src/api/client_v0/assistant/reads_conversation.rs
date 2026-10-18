@@ -1,12 +1,21 @@
 //! Bounded conversation discovery and native timeline/search projections. Only chat text,
 //! opaque content references and conversation identities leave this boundary. Native tool,
 //! status, attachment, source-record and diagnostic bodies are deliberately not copied.
+//! Detail previews continue through the timeline tool. Pinned discovery metadata survives
+//! session replacement without issuing old-session read handles; other failures propagate.
 use super::*;
 
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 50;
 const SNIPPET_BYTES: usize = 512;
 const REFERENCE_BYTES: usize = 4096;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimelineProjection {
+    Detail,
+    Timeline,
+    Discovery,
+}
 
 #[cfg(test)]
 pub(super) async fn project(
@@ -49,11 +58,11 @@ pub(super) async fn project_bound_with_context(
         "conversations" => discovery::page(state, snapshot, "conversations", parameters, max_bytes, binding, context).await,
         "conversation-detail" => {
             allow(parameters, &["agent_id", "max_response_bytes"], max_bytes)?;
-            timeline(state, snapshot, &person, parameters, (DEFAULT_LIMIT, max_bytes), true, binding).await
+            timeline(state, snapshot, &person, parameters, (DEFAULT_LIMIT, max_bytes), TimelineProjection::Detail, binding).await
         }
         "conversation-timeline" => {
             allow(parameters, &["agent_id", "session_id", "cursor", "limit", "max_response_bytes"], max_bytes)?;
-            timeline(state, snapshot, &person, parameters, (limit(parameters)?, max_bytes), false, binding).await
+            timeline(state, snapshot, &person, parameters, (limit(parameters)?, max_bytes), TimelineProjection::Timeline, binding).await
         }
         "conversation-search" => {
             allow(parameters, &["text", "agent_id", "cursor", "limit", "max_response_bytes"], max_bytes)?;
@@ -95,17 +104,20 @@ fn timeline_cursor_mac(collection: &str, cursor: &str) -> Result<hmac::Hmac<sha2
 }
 
 pub(in super::super) fn bind_reference(reference: &str, binding: &str) -> Result<String, ApiError> {
-    use hmac::Mac as _;
-    let collection = format!("assistant.conversation-content:{binding}:");
-    let signature = hex::encode(timeline_cursor_mac(&collection, reference)?.finalize().into_bytes());
-    Ok(format!("{collection}{signature}:{reference}"))
+    bind_cursor(reference, &format!("assistant.conversation-content:{binding}:"))
 }
 
 pub(in super::super) fn unbind_reference(reference: &str, binding: &str) -> Result<String, ApiError> {
     timeline_cursor(reference, &format!("assistant.conversation-content:{binding}:"))
 }
 
-fn timeline_cursor(encoded: &str, collection: &str) -> Result<String, ApiError> {
+pub(super) fn bind_cursor(cursor: &str, collection: &str) -> Result<String, ApiError> {
+    use hmac::Mac as _;
+    let signature = hex::encode(timeline_cursor_mac(collection, cursor)?.finalize().into_bytes());
+    Ok(format!("{collection}{signature}:{cursor}"))
+}
+
+pub(super) fn timeline_cursor(encoded: &str, collection: &str) -> Result<String, ApiError> {
     use hmac::Mac as _;
     let invalid = || stale("the cursor does not belong to this assistant projection and grant policy");
     let (signature, cursor) = encoded.strip_prefix(collection).and_then(|value| value.split_once(':'))
@@ -124,21 +136,29 @@ async fn timeline(
     person: &str,
     parameters: &BTreeMap<String, String>,
     capacity: (usize, usize),
-    detail: bool,
+    projection: TimelineProjection,
     binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     let (limit, max_bytes) = capacity;
     let agent_id = agent(parameters)?.to_owned();
     let current = state.store.index().map_err(ApiError::internal)?;
     let owner = state.store.conversation_owner_at(&agent_id, current).map_err(ApiError::internal)?;
-    let incarnation = owner.incarnation.as_deref().or(owner.runtime.as_deref())
+    let incarnation = owner.incarnation.as_deref().or(owner.runtime.as_deref());
+    let session_id = incarnation.map(|incarnation| client_session_id(&agent_id, incarnation));
+    // Discovery owns a pinned metadata row, not a promise that its session is still
+    // current. Only this identity transition may omit enrichment; all reader,
+    // authentication and storage failures still propagate.
+    if projection == TimelineProjection::Discovery && session_id.as_ref() != parameters.get("session_id")
+    {
+        return Ok((snapshot.clone(), Value::Null));
+    }
+    let session_id = session_id
         .ok_or_else(|| ApiError::not_found("the agent has no current conversation"))?;
-    let session_id = client_session_id(&agent_id, incarnation);
     if parameters.get("session_id").is_some_and(|requested| requested != &session_id) {
         return Err(stale("the session is not the agent's current conversation"));
     }
-    let projection = if detail { "assistant.conversation-detail" } else { "assistant.conversation-timeline" };
-    let collection = format!("{projection}:{binding}:");
+    // Detail is a preview of this same timeline; only timeline accepts continuations.
+    let collection = format!("assistant.conversation-timeline:{binding}:");
     let cursor = parameters.get("cursor")
         .map(|cursor| timeline_cursor(cursor, &collection)).transpose()?;
     // The gateway cannot inspect the authenticated assistant wrapper. Recover the
@@ -169,12 +189,10 @@ async fn timeline(
         }).collect::<Result<Vec<_>, ApiError>>()?;
     let mut projected_page = safe_page(&native["page"]);
     if let Some(cursor) = projected_page["next_cursor"].as_str() {
-        use hmac::Mac as _;
-        let signature = hex::encode(timeline_cursor_mac(&collection, cursor)?.finalize().into_bytes());
-        projected_page["next_cursor"] = json!(format!("{collection}{signature}:{cursor}"));
+        projected_page["next_cursor"] = json!(bind_cursor(cursor, &collection)?);
     }
     Ok((snapshot, json!({
-        "kind":if detail { "conversation-detail" } else { "conversation-timeline" },
+        "kind":if projection == TimelineProjection::Detail { "conversation-detail" } else { "conversation-timeline" },
         "agent_id":agent_id, "session_id":session_id, "current_session_id":session_id,
         "items":items, "page":projected_page,
     })))
@@ -238,7 +256,7 @@ pub(super) async fn discovery_read(
         ("session_id".into(), item["session_id"].as_str().unwrap_or_default().into()),
     ]);
     let (_, page) = timeline(state, snapshot, &owner(state)?, &parameters,
-        (DEFAULT_LIMIT, MAX_RESPONSE_BYTES), false, binding).await?;
+        (DEFAULT_LIMIT, MAX_RESPONSE_BYTES), TimelineProjection::Discovery, binding).await?;
     Ok(page["items"].as_array().into_iter().flatten()
         .find(|item| item["read"].is_object()).map_or(Value::Null, |item| item["read"].clone()))
 }
@@ -428,6 +446,96 @@ mod tests {
             ("agent_id","agent/reads-codex"), ("session_id","session/foreign"),
         ]), MAX_RESPONSE_BYTES).await.unwrap_err();
         assert_eq!(error.code, "stale-fence");
+    }
+
+    #[tokio::test]
+    async fn detail_preview_continues_through_timeline_without_gaps() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id, _, _) = super::super::tests::managed_conversation(
+            root.path(), &"word ".repeat(1900));
+        let mut transcript = std::fs::OpenOptions::new().append(true).open(
+            root.path().join("home/.codex/sessions/2026/10/11/assistant.jsonl")).unwrap();
+        for number in 2..=17 {
+            writeln!(transcript, "{}", json!({
+                "type":"response_item", "timestamp":format!("2026-10-11T12:00:{number:02}Z"),
+                "payload":{"type":"message", "role":"assistant", "id":format!("answer-{number}"),
+                    "content":[{"type":"output_text", "text":format!("answer {number}")}]},
+            })).unwrap();
+        }
+        let snapshot = new_client_snapshot(&state);
+        let (_, complete) = project(&state, &snapshot, "conversation-timeline", &parameters(&[
+            ("agent_id","agent/reads-codex"), ("session_id",&session_id), ("limit","50"),
+        ]), MAX_RESPONSE_BYTES).await.unwrap();
+        assert_eq!(complete["page"]["has_more"], false);
+        let expected: Vec<_> = complete["items"].as_array().unwrap().iter()
+            .map(|item| item["id"].clone()).collect();
+        assert!(expected.len() > DEFAULT_LIMIT);
+
+        let (_, mut page) = project(&state, &snapshot, "conversation-detail",
+            &parameters(&[("agent_id","agent/reads-codex")]), MAX_RESPONSE_BYTES).await.unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), DEFAULT_LIMIT);
+        assert_eq!(page["page"]["has_more"], true);
+        let mut delivered = Vec::new();
+        loop {
+            delivered.extend(page["items"].as_array().unwrap().iter().map(|item| item["id"].clone()));
+            let Some(cursor) = page["page"]["next_cursor"].as_str() else { break; };
+            assert!(cursor.starts_with("assistant.conversation-timeline:"));
+            assert!(delivered.len() < expected.len(), "continuation must make progress");
+            let (_, next) = project(&state, &snapshot, "conversation-timeline", &parameters(&[
+                ("agent_id","agent/reads-codex"), ("session_id",&session_id), ("cursor",cursor),
+            ]), MAX_RESPONSE_BYTES).await.unwrap();
+            page = next;
+        }
+        assert_eq!(delivered, expected, "detail and timeline neither skip nor repeat entries");
+    }
+
+    #[tokio::test]
+    async fn discovery_continuation_preserves_restarted_and_unrelated_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id, _, _) = super::super::tests::managed_conversation(
+            root.path(), &"word ".repeat(1900));
+        for id in ["agent/a-before-1", "agent/a-before-2", "agent/z-after"] {
+            state.store.append_claim(&ClaimInput {
+                subject:id.into(), kind:"runtime.observed".into(), actor:Some(id.into()),
+                fields:serde_json::from_value(json!({"status":"running",
+                    "runtime_id":"unrelated-runtime", "incarnation_id":"unrelated-incarnation"})).unwrap(),
+                evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+            }).unwrap();
+        }
+        let snapshot = new_client_snapshot(&state);
+        let stale_row = json!({"agent_id":"agent/reads-codex","session_id":session_id});
+        assert!(discovery_read(&state, &snapshot, &stale_row, "conversation-test-binding")
+            .await.unwrap().is_object());
+        let (pinned, first) = project(&state, &snapshot, "conversations",
+            &parameters(&[("limit","2")]), MAX_RESPONSE_BYTES).await.unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 2);
+        assert_eq!(first["items"][0]["agent_id"], "agent/a-before-1");
+        assert_eq!(first["items"][1]["agent_id"], "agent/a-before-2");
+        let cursor = first["page"]["next_cursor"].as_str().unwrap();
+        state.store.append_claim(&ClaimInput {
+            subject:"agent/reads-codex".into(), kind:"runtime.observed".into(),
+            actor:Some("agent/reads-codex".into()),
+            fields:serde_json::from_value(json!({"status":"running",
+                "runtime_id":"reads-codex-restarted", "incarnation_id":"native-pty:restarted"})).unwrap(),
+            evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        let (returned, next) = project(&state, &new_client_snapshot(&state), "conversations",
+            &parameters(&[("limit","2"), ("cursor",cursor)]), MAX_RESPONSE_BYTES).await.unwrap();
+        assert_eq!(returned.id, pinned.id);
+        assert_eq!(returned.store_index, pinned.store_index);
+        let rows = next["items"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "a stale enrichment must not abort unrelated metadata");
+        assert_eq!(rows[0]["agent_id"], "agent/reads-codex");
+        assert_eq!(rows[0]["session_id"], session_id, "metadata stays pinned to the original session");
+        assert!(rows[0]["read"].is_null(), "never issue a handle for a no-longer-current session");
+        assert_eq!(rows[1]["agent_id"], "agent/z-after");
+        assert_eq!(next["page"]["has_more"], false);
+        let error = project(&state, &new_client_snapshot(&state), "conversation-timeline",
+            &parameters(&[("agent_id","agent/reads-codex"), ("session_id",&session_id)]),
+            MAX_RESPONSE_BYTES).await.unwrap_err();
+        assert_eq!(error.code, "stale-fence", "direct timeline reads still reject stale sessions");
     }
 
     #[tokio::test]

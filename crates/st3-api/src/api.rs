@@ -1051,7 +1051,11 @@ async fn response_envelope_unbounded(
         && !client_request
         && request.uri().path() != "/v1/health")
         .then(client_v0::fabric_boundary_forbidden);
-    let cursor_snapshot = client_request.then(|| {
+    // Conversation continuations carry projection/grant authentication. Their
+    // readers recover pinned snapshots only after verifying that wrapper.
+    let cursor_snapshot = (client_request
+        && request_path != "/v1/client/assistant/conversations"
+        && !request_path.starts_with("/v1/client/assistant/conversation-")).then(|| {
         request
             .uri()
             .query()

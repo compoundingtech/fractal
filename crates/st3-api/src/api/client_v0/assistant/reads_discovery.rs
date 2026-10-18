@@ -12,10 +12,15 @@ pub(super) async fn page(
         .filter(|limit| (1..=50).contains(limit))
         .ok_or_else(|| validation("limit must be between 1 and 50"))).transpose()?;
     let collection = format!("assistant.{projection}:{binding}");
-    let cursor = parameters.get("cursor").map(|value| decode_client_cursor(value)).transpose()?;
+    // Authenticate every continuation field before trusting its pinned snapshot or keyset.
+    let wrapper = format!("{collection}:");
+    let cursor = parameters.get("cursor").map(|value| {
+        let payload = conversation_reads::timeline_cursor(value, &wrapper)?;
+        decode_client_cursor(&payload)
+    }).transpose()?;
     if let Some(cursor) = &cursor {
-        if cursor.collection != collection || cursor.snapshot.id != snapshot.id
-            || cursor.snapshot.store_index != snapshot.store_index
+        if cursor.collection != collection
+            || cursor.snapshot.host_id != client_host_id(&state.node)
             || cursor.expires_at_unix_ms < client_now_ms()
             || !(1..=50).contains(&cursor.limit)
             || requested_limit.is_some_and(|limit| limit != cursor.limit)
@@ -24,6 +29,7 @@ pub(super) async fn page(
             return Err(client_page_expired("the discovery cursor does not match its collection, grant, policy or snapshot"));
         }
     }
+    let snapshot = cursor.as_ref().map_or(snapshot, |cursor| &cursor.snapshot);
     let limit = cursor.as_ref().map_or(requested_limit.unwrap_or(10), |cursor| cursor.limit);
     let expires = cursor.as_ref().map_or_else(|| client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS), |cursor| cursor.expires_at_unix_ms);
     let after = cursor.as_ref().and_then(|cursor| cursor.after_key.as_ref()).map(|(_, id)| id.clone());
@@ -77,12 +83,13 @@ fn value(
     items: &[Value], after: Option<&str>, has_more: bool, limit: usize, expires: u128,
 ) -> Result<Value, ApiError> {
     let next = if has_more {
-        Some(encode_client_cursor(&ClientPageCursor {
+        let payload = encode_client_cursor(&ClientPageCursor {
             snapshot:snapshot.clone(), collection:collection.into(), offset:0, limit,
             history:false, person:None, actor:None, owner_run:None, status:None, owner:None,
             state:None, native_only:false, items_digest:"assistant-source-keyset-v1".into(),
             before_index:None, after_key:after.map(|id| (0,id.to_owned())), expires_at_unix_ms:expires,
-        })?)
+        })?;
+        Some(conversation_reads::bind_cursor(&payload, &format!("{collection}:"))?)
     } else { None };
     Ok(json!({"kind":"page","collection":format!("assistant.{projection}"),"filters":{},"items":items,
         "page":{"limit":limit,"has_more":has_more,"next_cursor":next,
@@ -137,7 +144,8 @@ mod tests {
             assert!(pages <= expected.len());
             let Some(next) = value["page"]["next_cursor"].as_str() else { break; };
             assert!(items.len() < 20, "byte budget, not count limit, packs this page");
-            let cursor = decode_client_cursor(next).unwrap();
+            let payload = conversation_reads::timeline_cursor(next, "assistant.conversations:test-grant-policy:").unwrap();
+            let cursor = decode_client_cursor(&payload).unwrap();
             assert_eq!(cursor.after_key.unwrap().1, items.last().unwrap()["id"].as_str().unwrap());
             parameters.insert("cursor".into(), next.into());
         }
