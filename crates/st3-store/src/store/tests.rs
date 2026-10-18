@@ -106,6 +106,11 @@ mod declarative_revision_timestamp_tests {
     /* sqlite-large-value: allow-for-now lv-h03d3404887a5 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("declarative_revision_timestamp_tests.rs");
 }
 
+mod subagents_purity_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-h8182d4400c47 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("subagents_purity_tests.rs");
+}
+
 mod actual_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-h15874c268ef9 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("actual_purity_tests.rs");
