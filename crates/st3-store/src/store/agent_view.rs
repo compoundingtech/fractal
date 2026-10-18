@@ -40,7 +40,7 @@ pub fn definitions() -> Vec<Box<dyn View>> {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-struct Event {
+pub struct Event {
     claim: String,
     subject: String,
     kind: String,
@@ -59,19 +59,19 @@ impl Event {
     }
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
-struct Field {
+pub struct Field {
     rank: Vec<u8>,
     value: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Run {
+pub struct Run {
     first: Option<String>,
     last: Option<String>,
     uniform: bool,
     since: u128,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
-struct Summary {
+pub struct Summary {
     state: Option<Event>,
     fields: BTreeMap<String, Field>,
     auth: Option<Event>,
@@ -208,7 +208,7 @@ impl Summary {
 // Composition is associative; heartbeats explicitly excluded by the canonical oracle
 // are identities. Source pointers are local row IDs, never canonical winner ranks.
 #[derive(Clone)]
-struct Machine(Vec<(u16, u64)>);
+pub struct Machine(Vec<(u16, u64)>);
 impl Default for Machine {
     fn default() -> Self {
         Self((0..MACHINE_STATES).map(|s| (s as u16, 0)).collect())
@@ -762,7 +762,7 @@ mod tests {
     use crate::store::tests::{exchange_from, exchange_of, receive_and_project};
     use smallclaims::ivm::{Readiness, SourceCut, Views};
     struct Fixture {
-        store: Store,
+        pub store: Store,
         views: Views,
     }
     impl Fixture {

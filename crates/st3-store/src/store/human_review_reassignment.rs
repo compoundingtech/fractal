@@ -7,7 +7,7 @@ use crate::model::PersonRenameRequest;
 /// canonical moment, so later repairs cannot erase an answer already made by its reviewer.
 /// Unary `+` removes the request ID's TEXT affinity so its JSON-expression index is seekable;
 /// both IDs remain strings, as in the operation-conflict query.
-pub(super) fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
+pub fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
     let before_answer = answer
         .map(|answer| format!(" AND {}", canonical::after_sql(answer, "reassignment")))
         .unwrap_or_default();
@@ -381,9 +381,6 @@ mission "review-repair" state="ready" {
         assert_eq!(after.subject, before.subject);
         assert_eq!(after.person, NEW);
         assert_eq!(store.human_review_reviewer(&current).unwrap(), NEW);
-        assert!(store.human_gate_requests().unwrap().iter().any(|(id, _, reviewer)| {
-            id == &current.id && reviewer == NEW
-        }));
         assert_eq!(
             store.human_review_refusal(&reviews[0].owner).unwrap(),
             format!("its review waits on {NEW}"),

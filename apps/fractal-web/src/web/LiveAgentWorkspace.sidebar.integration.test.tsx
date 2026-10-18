@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -14,6 +15,9 @@ import { observed, waiting, type ConversationPage, type DataSource, type Feed } 
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
+import * as treeProjection from './liveSidebarTree.ts'
+import * as folderComponents from '../shell/AgentFolders.tsx'
+import type { ConnectionState } from '@st3/sdk/effect'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -78,19 +82,76 @@ it('keeps workspace providers and unchanged roster rows out of the one-second cl
   registry.set(agents, observed({ value: [agent, { ...agent, id: 'agent/other', name: 'Other Agent' }] }))
   const workspaceRenders = vi.spyOn(dataHooks, 'useFleet')
   const projectedRows = vi.spyOn(rowProjection, 'sidebarRow')
+  const projectedTree = vi.spyOn(treeProjection, 'liveSidebarTree')
   try {
     await mount(1440)
     const workspaceCount = workspaceRenders.mock.calls.length
     const rowCount = projectedRows.mock.calls.length
+    const treeCount = projectedTree.mock.calls.length
     for (let second = 1; second <= 10; second += 1) {
       await act(async () => registry.set(now, 5000 + second * 1000))
     }
     expect(workspaceRenders).toHaveBeenCalledTimes(workspaceCount)
     expect(projectedRows).toHaveBeenCalledTimes(rowCount)
+    expect(projectedTree).toHaveBeenCalledTimes(treeCount)
   } finally {
     workspaceRenders.mockRestore()
     projectedRows.mockRestore()
+    projectedTree.mockRestore()
   }
+})
+
+it('keeps tree render callbacks and unchanged rows stable when one agent receives a data frame', async () => {
+  const first = { ...agent, last_activity_at: Option.some(DateTime.makeUnsafe(1000)) }
+  const other: Agent = { ...agent, id: 'agent/other', name: 'Other Agent' }
+  registry.set(agents, observed({ value: [first, other] }))
+  const rows = vi.spyOn(dataHooks, 'useAgent')
+  const folders = vi.spyOn(folderComponents, 'AgentFolders')
+  const calls = (ref: string) => rows.mock.calls.filter(([value]) => value === ref).length
+  try {
+    await mount(1440)
+    const firstCount = calls(first.id)
+    const otherCount = calls(other.id)
+    const before = folders.mock.calls.at(-1)![0]
+    if (!('tree' in before)) throw new Error('Expected the bound live sidebar')
+    await act(async () => registry.set(agents, observed({ value: [{ ...first, last_activity_at: Option.some(DateTime.makeUnsafe(2000)) }, other] })))
+    const after = folders.mock.calls.at(-1)![0]
+    if (!('tree' in after)) throw new Error('Expected the bound live sidebar')
+    expect(calls(first.id)).toBeGreaterThan(firstCount)
+    expect(calls(other.id)).toBe(otherCount)
+    expect(after.renderAgent).toBe(before.renderAgent)
+    expect(after.renderFolderSignal).toBe(before.renderFolderSignal)
+    expect(after.accessibleNames).toBe(before.accessibleNames)
+    expect(after.tree).toBe(before.tree)
+    expect(roster().querySelector('[data-wf-agent-ref="agent/example"] [data-row-column="time"] time')?.textContent).toBe('3s')
+  } finally {
+    rows.mockRestore()
+    folders.mockRestore()
+  }
+})
+
+it('marks retained live-feed rows stale on a connection-only transition', async () => {
+  const connection = Atom.make<ConnectionState>({ _tag: 'Live' })
+  source = { ...source, connection }
+  const retained = observed({ value: [agent] })
+  registry.set(agents, retained)
+  await mount(1440)
+  const row = () => roster().querySelector('[role="row"][data-wf-agent-ref="agent/example"]') ?? roster().querySelector('[data-wf-agent-ref="agent/example"]')!.closest('[role="row"]')!
+  const freshness = () => row().querySelector('[data-observation-freshness]')!.getAttribute('data-observation-freshness')
+  const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
+  expect(freshness()).toBe('live')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, idle')
+  expect(status()).toContain('idle;')
+  await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
+  expect(registry.get(agents)).toBe(retained)
+  expect(freshness()).toBe('stale')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · idle')
+  expect(status()).toContain('Last verified · idle;')
+  expect(status()).toContain('stale observation')
+  await act(async () => registry.set(connection, { _tag: 'Live' }))
+  expect(freshness()).toBe('live')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, idle')
+  expect(status()).toContain('live observation')
 })
 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {
@@ -216,8 +277,8 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
   })
 })
 
-describe('shipped live sidebar machine query', () => {
-  it('applies typed hosts to the real roster and preserves substring text and stripped highlights', async () => {
+describe('shipped live sidebar search', () => {
+  it('applies typed hosts to the real roster, matches free text on names and IDs only, and strips facets from highlights', async () => {
     const candidates: readonly Agent[] = [
       { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/synthetic-138/1') },
       { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/SYNTHETIC-138/2') },
@@ -226,8 +287,8 @@ describe('shipped live sidebar machine query', () => {
     ]
     registry.set(agents, observed({ value: candidates }))
     await mount(1440)
-    const input = sidebar().querySelector<HTMLInputElement>('input')!
-    expect(input.getAttribute('aria-description')).toBe('Use machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match. Combine with search text.')
+    const input = sidebar().querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
+    expect(input.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
     const search = async (value: string) => {
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
@@ -245,8 +306,10 @@ describe('shipped live sidebar machine query', () => {
       ['machine:synthetic-138/9', []],
       ['machine: host:,,', ['Compiler Alpha', 'Sidebar Beta', 'Compiler synthetic-138/1 decoy']],
       ['Alpha machine:SYNTHETIC-138', ['Compiler Alpha']],
-      ['cmp machine:synthetic-138', []],
-      ['synthetic-138/1', ['Compiler Alpha', 'Compiler synthetic-138/1 decoy']],
+      ['cmp machine:synthetic-138', ['Compiler Alpha']],
+      // Free text reaches the decoy's displayed name, not the host.
+      ['synthetic-138/1', ['Compiler synthetic-138/1 decoy']],
+      ['agent/sidebar', ['Sidebar Beta']],
       ['machine:host/synthetic-138/1', []],
     ] as const) {
       await search(query)
@@ -259,6 +322,14 @@ describe('shipped live sidebar machine query', () => {
     expect([...roster().querySelectorAll('mark')].map(mark => mark.textContent).join('')).toContain('Alpha')
     expect([...roster().querySelectorAll('mark')].some(mark => mark.textContent?.includes('machine:'))).toBe(false)
   })
+  it('names each native tree row with the displayed freshness-qualified status', async () => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(1440)
+    const rowName = () => roster().querySelector('[role="row"][data-sidebar-tree-key="agent/example"]')?.getAttribute('aria-label')
+    expect(rowName()).toBe('Example Agent, idle')
+    await act(async () => registry.set(agents, { _tag: 'Observed', value: [agent], freshness: 'stale' }))
+    expect(rowName()).toBe('Example Agent, Last verified · idle')
+  })
 })
 
 describe('workspace overlays', () => {
@@ -268,10 +339,16 @@ describe('workspace overlays', () => {
     if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, (char) => `\\${char}`) })
     registry.set(agents, observed({ value: [agent] }))
     await mount(1440)
-    const trigger = roster().querySelector<HTMLElement>('[data-agent-menu]')!
+    const trigger = roster().querySelector<HTMLElement>('[role="row"][data-sidebar-tree-key="agent/example"] [data-agent-menu]')!
+    expect(trigger).not.toBeNull()
+    // Enter the RAC collection before focusing a descendant control: initial entry
+    // deliberately restores the tree's owning row, as keyboard Tab entry does.
+    await act(async () => trigger.closest<HTMLElement>('[role="row"]')!.focus())
+    await act(async () => trigger.focus())
+    expect(document.activeElement).toBe(trigger)
     await act(async () => {
-      trigger.focus()
-      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+      // RAC reserves vertical arrows for row navigation, even from a row control.
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
     })
     const menu = document.querySelector('[role="menu"]')
     expect(menu).not.toBeNull()

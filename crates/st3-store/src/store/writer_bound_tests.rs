@@ -96,7 +96,7 @@ fn a_late_claim_in_a_large_standing_tree_holds_the_writer_for_its_own_part() {
         .unwrap();
     let inventory = worker.replication_inventory().unwrap();
     let (exchange, _) = stage("bound/standing-tree/export", || {
-        super::tests::exchange_from(&controller, &inventory)
+        crate::store::tests_shared::exchange_from(&controller, &inventory)
     });
     stage("bound/standing-tree/receive", || {
         worker

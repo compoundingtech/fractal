@@ -10,7 +10,7 @@ pub struct AdmissionState {
     holder: Option<Arc<Holder>>,
 }
 
-enum Blocked {
+pub enum Blocked {
     Known {
         id: u64,
         class: &'static str,
@@ -27,7 +27,7 @@ enum Blocker {
     Unknown,
 }
 
-struct Holder {
+pub struct Holder {
     id: u64,
     class: &'static str,
     acquired: std::time::Instant,

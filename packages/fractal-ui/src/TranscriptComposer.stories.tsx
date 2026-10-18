@@ -49,6 +49,7 @@ async function columns(canvasElement: HTMLElement) {
   await document.fonts.ready
   const row = await waitFor(() => { const found = canvasElement.querySelector('[data-testid="transcript-turn"]'); if (found === null) throw new Error('No transcript row'); return found })
   const composer = canvasElement.querySelector('[data-testid="kit-composer"] form')!
+  await expect(composer).toHaveAccessibleName('Message composer')
   const dock = canvasElement.querySelector('[data-testid="story-composer-dock"]')!
   const lane = parseFloat(getComputedStyle(canvasElement.querySelector('[data-testid="kit-composer"]')!).maxWidth)
   return { row: bounds(row), composer: bounds(composer), dock: bounds(dock), lane }
@@ -73,7 +74,7 @@ const placeholderOptions = { messages: [], isRunning: false, onNew: async () => 
 const overridePlaceholder = 'Ask about this conversation'
 function PlaceholderStory({ scheme }: { scheme: Scheme }) {
   return <Surface scheme={scheme}><div {...stylex.props(styles.placeholders)}>
-    {[undefined, overridePlaceholder].map(placeholder => <section key={placeholder ?? 'default'} data-testid={placeholder === undefined ? 'default-placeholder' : 'override-placeholder'}><EmbraceRuntimeProvider options={placeholderOptions}><EmbraceComposer variant="C1" placeholder={placeholder} /></EmbraceRuntimeProvider></section>)}
+    {[undefined, overridePlaceholder].map(placeholder => <section key={placeholder ?? 'default'} data-testid={placeholder === undefined ? 'default-placeholder' : 'override-placeholder'}><EmbraceRuntimeProvider options={placeholderOptions}><EmbraceComposer variant="C1" conversationLabel={placeholder === undefined ? 'Default placeholder example' : 'Custom placeholder example'} placeholder={placeholder} /></EmbraceRuntimeProvider></section>)}
   </div></Surface>
 }
 const keyboardText = /enter|shift|return|ctrl|cmd|⌘|⏎|↵|mod\s*\+/i
@@ -83,6 +84,7 @@ export const Placeholder: Story = { tags: ['critical'], render: args => <Placeho
     const section = canvasElement.querySelector(`[data-testid="${testId}"]`)!
     const guidance = await waitFor(() => { const found = section.querySelector<HTMLElement>('[data-testid="composer-placeholder"]'); if (found === null) throw new Error(`No guidance in ${testId}`); return found })
     const input = section.querySelector('textarea')!
+    await expect(section.querySelector('form')).toHaveAccessibleName(`Message composer, ${expected === undefined ? 'Default placeholder example' : 'Custom placeholder example'}`)
     await expect(guidance).toBeVisible()
     await expect(guidance.textContent, `${testId} guidance`).not.toMatch(keyboardText)
     await expect(input.placeholder).toBe('')
@@ -122,6 +124,8 @@ async function settleFrames() {
 /** An agent reply keeps a scrolled-up reader's line and offers the jump; the reader's own send brings it into view. */
 export const OwnSendFollows: Story = { tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  // This play starts with a reader in older history, so reveal the deliberately deferred turns first.
+  await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
   const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < historyTurns.length) throw new Error('History not committed'); return found })
   const jump = canvas.getByText('New messages ↓')
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
