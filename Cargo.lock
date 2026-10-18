@@ -4960,6 +4960,7 @@ dependencies = [
  "st3-api",
  "st3-client",
  "st3-daemon",
+ "st3-github",
  "st3-kernel",
  "st3-peer",
  "st3-reconcile",
@@ -5040,6 +5041,28 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "st3-github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-github",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5153,8 +5176,8 @@ dependencies = [
  "sha2",
  "smallclaims",
  "st3-client",
+ "st3-github",
  "st3-peer",
- "st3-store",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.27.0",

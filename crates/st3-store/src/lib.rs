@@ -26,7 +26,6 @@ pub mod backup;
 pub mod external_sessions;
 pub mod recorder_receipts;
 pub mod render;
-pub mod changes;
 pub mod client_values;
 pub mod graph;
 pub mod maintenance;

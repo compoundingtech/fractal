@@ -3,8 +3,9 @@
 
 pub mod transport;
 pub use crate::config::changes as config;
-pub mod service;
 pub mod discovery;
+pub mod index;
+pub mod service;
 pub mod view;
 
 use anyhow::{Result, ensure};
