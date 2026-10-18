@@ -17,8 +17,8 @@ base64 = "0.22"
 futures-util = "0.3"
 hex = "0.4"
 notify = "8"
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
 serde = { version = "1", features = ["derive"] }
