@@ -4,6 +4,7 @@
 //! `st3` CLI. Nothing here touches the real fleet's state, services, ports, or Fabric names: every
 //! node runs in the foreground under a temporary root, and no test installs a service.
 
+use st3::WatchesStore;
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;

@@ -18,8 +18,15 @@ pub trait WriterObserver: Send + Sync {
     /// Supported physical rowid tables. Schema replacement is checked before publication.
     fn tables(&self) -> &'static [(&'static str, &'static str)];
     fn mutated(&self, database: &str, table: &str);
+    /// Physical row identity, delivered without executing SQL inside SQLite's hook.
+    fn row_mutated(&self, action: rusqlite::hooks::Action, database: &str, table: &str, rowid: i64) {
+        let _ = (action, rowid);
+        self.mutated(database, table);
+    }
     fn unobserved(&self, database: &str, table: &str);
     fn failed(&self, error: Arc<str>);
+    /// Called only after native hook coverage and all watched physical tables validate.
+    fn coverage_verified(&self) {}
     fn published(&self, connection: &Connection);
 }
 
@@ -175,6 +182,11 @@ impl MutationState {
         self.replacing_authorizer.store(false, Ordering::Relaxed);
     }
 
+    pub(crate) fn reverify(self: &Arc<Self>, connection: &Connection) {
+        self.schema_dirty.store(true, Ordering::Relaxed);
+        self.resolved(connection);
+    }
+
     pub(crate) fn resolved(self: &Arc<Self>, connection: &Connection) {
         if !connection.is_autocommit() {
             return;
@@ -239,6 +251,7 @@ impl MutationState {
                     }
                     *previous = current;
                     *previous_generations = generations;
+                    self.observer.coverage_verified();
                 }
             }
         }
@@ -261,7 +274,7 @@ fn schema_generations(
         }
         let identifier = database.replace('"', "\"\"");
         let version = connection.query_row(
-            &format!("PRAGMA \"{identifier}\".schema_version"),
+            /* sqlite-large-value: allow-for-now lv-h72783baac7c1 owner=smallclaims::sqlite::writer_observer TODO=trace-statement-and-value-representation */ &format!("PRAGMA \"{identifier}\".schema_version"),
             [],
             |row| row.get(0),
         )?;
@@ -306,7 +319,7 @@ fn validate_tables(
              WHERE tbl_name=?1 ORDER BY name"
         );
         let rows = connection
-            .prepare(&sql)?
+            .prepare(/* sqlite-large-value: allow-for-now lv-h710267011525 owner=smallclaims::sqlite::writer_observer TODO=trace-statement-and-value-representation */ &sql)?
             .query_map([table], |row| {
                 Ok((
                     database.to_string(),
@@ -334,10 +347,10 @@ pub(crate) fn install_rows(connection: &Connection, state: Option<Arc<MutationSt
         rows: true,
     });
     let installed = state.clone();
-    connection.update_hook(Some(move |_, database: &str, table: &str, _| {
+    connection.update_hook(Some(move |action, database: &str, table: &str, rowid| {
         let _keep_lease = &lease;
         if let Some(state) = &state {
-            state.observer.mutated(database, table);
+            state.observer.row_mutated(action, database, table, rowid);
         }
     }));
     if let Some(state) = installed {
