@@ -100,12 +100,13 @@ impl Store {
     /// `Some((size, None))` distinguishes a budget refusal from a missing/non-text claim.
     pub fn conversation_message_text_bounded(&self, id: &str, max_bytes: usize) -> Result<Option<(usize, Option<String>)>> {
         self.readers.get().prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h191813e5a6fe owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */
             "WITH message AS (SELECT CASE WHEN json_type(body,'$.fields') IS NULL
                 THEN json_extract(body,'$.content') ELSE json_extract(body,'$.fields.content') END AS text
                 FROM claims WHERE id=?1 AND kind='message.sent')
              SELECT length(CAST(text AS BLOB)), CASE WHEN length(CAST(text AS BLOB))<=?2 THEN text END
              FROM message WHERE typeof(text)='text'",
-        )?.query_row(params![id, max_bytes], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(Into::into)
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hda0a5b471daa owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ params![id, max_bytes], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(Into::into)
     }
 
     /// Resolve one conversation identity without constructing the owner collection.
@@ -252,7 +253,7 @@ impl Store {
         selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
         let connection = self.readers.get();
         let ids = connection
-            .prepare_cached(ASSISTANT_OWNER_IDS_PAGE)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h76adc0444a63 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ ASSISTANT_OWNER_IDS_PAGE)?
             .query_map(params![through, after, limit.saturating_add(1)], |row| {
                 row.get::<_, String>(0)
             })?
