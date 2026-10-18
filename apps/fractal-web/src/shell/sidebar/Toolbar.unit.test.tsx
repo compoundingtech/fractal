@@ -25,7 +25,7 @@ it('ANDs the host menu with typed facets, counts them, and resets facets while p
   try {
     await act(async () => render())
     const search = host.querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
-    expect(search.getAttribute('aria-description')).toMatch(/names and IDs.*repo:.*machine:synthetic-138\/1.*host:synthetic-138\/1,synthetic-138\/2/)
+    expect(search.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
     const filterButton = host.querySelector<HTMLButtonElement>('button[aria-label="Filter agents · 2 active"]')!
     expect(filterButton).not.toBeNull()
     await act(async () => filterButton.click())

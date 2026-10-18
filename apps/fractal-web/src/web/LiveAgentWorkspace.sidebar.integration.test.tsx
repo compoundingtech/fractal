@@ -266,7 +266,7 @@ describe('shipped live sidebar search', () => {
     registry.set(agents, observed({ value: candidates }))
     await mount(1440)
     const input = sidebar().querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
-    expect(input.getAttribute('aria-description')).toMatch(/names and IDs.*machine:.*host:/)
+    expect(input.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
     const search = async (value: string) => {
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
