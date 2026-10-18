@@ -1138,7 +1138,10 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                 else:
                     uses.append(re.sub(r"\buse super::", "use super::%s::" % module_path(irel)[-1], u))
         elif not cont:
-            uses = file_uses
+            uses = list(file_uses)
+            if rel not in test_rels:
+                # a production file's own items (the ones that stay) are neighbours of the shared module
+                uses.append("use super::%s::*;" % parts[-1])
         else:
             # inside the inline module `super` is the file's module; here that module is a sibling
             uses = list(file_uses)
