@@ -494,7 +494,8 @@ impl PtyRuntime {
                 let _ = std::fs::remove_file(&fence);
                 return Ok(());
             }
-            let _ = self.remove(id);
+            // The spawn lock is held for the whole launch, so the retry must not take it again.
+            let _ = self.remove_locked(id);
             std::thread::sleep(Duration::from_millis(100 * u64::from(attempt + 1)));
         }
         let _ = std::fs::remove_file(&fence);
@@ -882,6 +883,11 @@ impl PtyRuntime {
 
     pub fn remove(&self, id: &str) -> Result<()> {
         let _spawn_lock = self.acquire_spawn_lock(id)?;
+        self.remove_locked(id)
+    }
+
+    /// `remove` for a caller that already holds the spawn lock, such as a spawn retry.
+    fn remove_locked(&self, id: &str) -> Result<()> {
         // The record is the last place that names the session's work scope.
         let session = self.snapshot()?.into_iter().find(|session| session.name == id);
         if !session.as_ref().is_some_and(|session| {
