@@ -262,6 +262,10 @@ export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
     await assertThemedOverlay(themed, popover, raised)
     const item = await waitFor(() => { const element = menu.querySelector('[role="menuitem"][data-focus-visible]'); if (element === null) throw new Error('no keyboard-focused item'); return element })
     await assertNeutralRing(item, focus)
+    await userEvent.keyboard('r')
+    const reportedDetails = within(menu as HTMLElement).getByRole('menuitem', { name: 'Reported agent details' })
+    await expect(reportedDetails).toHaveFocus()
+    await assertNeutralRing(reportedDetails, focus)
     // Negative controls: an overlay outside the themed surface and an accent ring must both be rejected.
     const escaped = document.createElement('div')
     escaped.className = popover.className

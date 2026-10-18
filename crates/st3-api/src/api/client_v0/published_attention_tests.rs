@@ -43,7 +43,7 @@ async fn window(
     }))
     .unwrap();
     let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
-    collection_items(state, session, &request, permit).await
+    collection_items(state, session, &request, permit).await.map(|(snapshot, items, has_more, _)| (snapshot, items, has_more))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -140,7 +140,7 @@ async fn summary_window_for(
     }))
     .unwrap();
     let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
-    collection_items(state, session, &request, permit).await
+    collection_items(state, session, &request, permit).await.map(|(snapshot, items, has_more, _)| (snapshot, items, has_more))
 }
 
 /// The counts a summary window computes for itself at the current cut.

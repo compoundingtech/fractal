@@ -561,6 +561,24 @@ workflow-level path filters. `linux-gate` does not depend on them.
   fixtures that must trip these failures, and controls (quoted URLs with parentheses,
   faces declared by the entry's stylesheet, the deferred processed app stylesheet)
   that must pass.
+  The `App unit tests` lane (`apps/fractal-web/scripts/ci/unit-tests.mjs`) runs every test file
+  in merge groups and manual runs. Pull requests (`APP_TEST_SET=related`) run only the test files whose
+  import graph reaches a changed file, as `vitest related` resolves it across the app, the kit and
+  the clients, from the diff against the base commit. Everything that could change a test without being
+  imported by it runs all of them: package, lock, TypeScript, Vite and Vitest configuration, the
+  test environment, the app scripts, CI inputs, a deleted or renamed file, and a module-less data file
+  in the app, kit or client trees; so does a diff that cannot be read. A change to a file no test
+  imports, or entirely outside the app, kit and client trees (docs, Rust), selects no tests: the lane
+  prints `none selected` and runs no app test on the pull request (typecheck and the merge gate still
+  cover it). The lane
+  `App unit test selection` pins these rules.
+  After the install the lanes run as four parallel streams on the runner's four vCPUs
+  (`stream_scenarios`, `stream_checks`, `stream_app`, `stream_kit` in `scripts/ci-fractal-web`);
+  each stream is a sequence of mostly single-threaded lanes and its output is printed whole
+  once all four have finished, in the job summary's lane table as the streams' wall time. The
+  generated changelog registry is written atomically and only when it differs, so the streams'
+  parallel readers are safe. The SDK frame CPU budgets (which measure CPU time) and the strict
+  plays (which use every vCPU, and need the Storybook build) run alone afterwards.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them. The detector separately emits `kit-inputs`: app-only changes
   skip kit play-index contracts, Storybook and strict browser plays; kit source,

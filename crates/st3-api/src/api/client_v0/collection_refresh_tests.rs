@@ -98,6 +98,7 @@ impl Fixture {
                                         new_client_snapshot(&state),
                                         vec![json!({"id":request.id,"read":count})],
                                         false,
+                                        None,
                                     ))
                                 }
                             },
@@ -436,7 +437,7 @@ async fn assert_parity(fixture: &Fixture, session: &ClientSession, held: &BTreeM
     for request in requests {
         let request: CollectionSubscribe = serde_json::from_value(request.clone()).unwrap();
         let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
-        let (_, items, has_more) = collection_items(&fixture.state, session, &request, permit)
+        let (_, items, has_more, _) = collection_items(&fixture.state, session, &request, permit)
             .await.unwrap();
         let window = &held[&request.id];
         assert_eq!(window.items(), items, "{step}: window {} differs from a full read", request.id);
