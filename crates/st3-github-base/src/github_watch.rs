@@ -93,6 +93,14 @@ impl ThreadRef {
         })
     }
 
+    /// The thread GitHub links to at `url`, or this one when the link names none. A renamed or
+    /// transferred repository still answers under its old name, so a watch follows the link:
+    /// under the old name it would start a second standing observer of the same repository,
+    /// recording into the same resources, and each poll would undo the other's `moved_to`.
+    pub fn followed(self, url: Option<&str>) -> Self {
+        url.and_then(|url| Self::parse(url).ok()).unwrap_or(self)
+    }
+
     /// `OWNER/REPO`, the repository observer's locator.
     pub fn locator(&self) -> String {
         format!("{}/{}", self.owner, self.repository)
