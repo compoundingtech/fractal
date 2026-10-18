@@ -835,6 +835,22 @@ def is_vacant(text):
     return True
 
 
+def _shared_import_lines(lower, mk, shares, prefix=""):
+    """`use` lines importing a shared module into a destination: the glob, and its names explicitly (an explicit
+    import wins over the globs of the surrounding scope, which the helpers used to shadow)."""
+    path = "::".join([lower] + _shared_path(*mk))
+    names = set()
+    for n in shares.get(mk, ()):
+        if n.kind in ("impl",):
+            continue
+        names |= set(n.names) if n.kind == "macro_call" else ({n.name} if n.name else set())
+    names = sorted(names)
+    lines = ["%suse %s::*;" % (prefix, path)]
+    for k in range(0, len(names), 10):
+        lines.append("%suse %s::{%s};" % (prefix, path, ", ".join(names[k : k + 10])))
+    return lines
+
+
 def place_tests(nodes, mtests, files, tfiles, lower):
     """Where the moved tests land and what they leave behind.
 
@@ -936,7 +952,7 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             pad = "    " * len(prefix)
             uses = [u2 for u2 in (_without_names(u, defined[(rel, c)] | {x.name for x in copied if x.name}) for u in uses) if u2]
             for mk in sorted(imports.get((rel, c), ())):
-                uses.append("use %s::*;" % "::".join([lower] + _shared_path(*mk)))
+                uses += _shared_import_lines(lower, mk, shares)
             if attrs.rstrip().endswith("pub") and "test-support" in attrs:
                 uses.append("pub use %s::%s::*;" % (lower, "::".join(module_path(rel) + list(c))))
             body = "\n".join(pad + "    " + u for u in uses) + ("\n\n" if uses else "") + inner
@@ -980,14 +996,14 @@ def place_tests(nodes, mtests, files, tfiles, lower):
         body = render(rel, (), g)
         body = re.sub(r"\b(?:super::)+(?:tests|\w+_tests)::(" + "|".join(map(re.escape, sorted(helper_names))) + r")\b", r"\1", body) if helper_names else body
         if rel in files:
-            globs = ['#[cfg(any(test, feature = "test-support"))]\nuse %s::*;' % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
+            globs = [ln for mk in sorted(imports.get((rel, ()), ())) for ln in _shared_import_lines(lower, mk, shares, '#[cfg(any(test, feature = "test-support"))]\n')]
             facade_blocks[rel] = ("\n".join(globs) + "\n" if globs else "") + body
         else:
             text, items = tfiles[rel]
             local = {u.name for u in copied if u.name} | {t.name for t in mtests if t.name}
             uses = [_without_unused_relative(_without_names(it.text, local), body) for it in items if it.kind == "use"]
             uses = [u2 for u2 in _shared_uses(uses, rel, (), items, shares, [], set(), set(tfiles), root=lower, dest=True) if u2]
-            globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
+            globs = [ln for mk in sorted(imports.get((rel, ()), ())) for ln in _shared_import_lines(lower, mk, shares)]
             new_files[rel] = ("" if rel in included else "#![allow(unused_imports)]\n") + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
     return facade_blocks, new_files, decls, removals, copied, pub_test_mods, shares, share_imports, imports
 
