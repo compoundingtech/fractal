@@ -1546,14 +1546,14 @@ def wire_crate(args, top_mods):
         changed = False
         new_paths = []
         for segs, alias in paths:
-            if len(segs) >= 2 and segs[0].startswith("st3_") and segs[0] != ident and segs[1] in top_mods:
+            if len(segs) >= 2 and segs[0] == lower.replace("-", "_") and segs[1] in top_mods:
                 segs = [ident] + segs[1:]
                 changed = True
             new_paths.append((segs, alias))
         if changed:
             dl = dl.replace(it.text, render_use(attrs, vis, new_paths).join(["\n" if it.text.startswith("\n") else "", ""]), 1)
     for m in top_mods:
-        dl = re.sub(r"(?m)^pub use st3_[a-z_]+::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
+        dl = re.sub(r"(?m)^pub use " + re.escape(lower.replace("-", "_")) + r"::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
     if getattr(args, "traits", None):
         dl = dl.replace("pub use st3_github::{GitChangesStore", "pub use %s::{%s};\npub use st3_github::{GitChangesStore" % (ident, ", ".join(sorted(args.traits))), 1)
     open("crates/st3-daemon/src/lib.rs", "w").write(dl)
