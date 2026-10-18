@@ -120,6 +120,34 @@ async fn run_handoff(
     }
 }
 
+pub(super) async fn run_persons(
+    endpoint: &Endpoint,
+    configured_person: Option<&str>,
+    command: PersonsCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        PersonsCommand::Rename(args) => {
+            let actor = args.actor.as_deref().or(configured_person).context(
+                "st3 persons rename needs --as ACTOR or a configured person",
+            )?;
+            let response: Value = cli_client(endpoint)
+                .post(
+                    "/v1/persons/rename",
+                    &json!({
+                        "old_person": args.old_person,
+                        "new_person": args.new_person,
+                        "actor": actor,
+                        "idempotency_key": args.idempotency_key
+                            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+                    }),
+                )
+                .await?;
+            print_value(&response, json_output)
+        }
+    }
+}
+
 pub(super) async fn run_agents(
     endpoint: &Endpoint,
     configured_person: Option<&str>,

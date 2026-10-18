@@ -67,7 +67,7 @@ use crate::model::{
     SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
-use crate::model::{PersonAskRequest, PersonStepResponse};
+use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 use crate::store::Store;
 
 mod wire_names;
@@ -369,10 +369,12 @@ impl ApiError {
             | "stale-launch-preview"
             | "fleet-leaving"
             | "glass-deleted"
+            | "person-rename-conflict"
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
             | "lane-approval-denied"
+            | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" => StatusCode::SERVICE_UNAVAILABLE,
@@ -687,6 +689,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/restart", post(agents::restart_agent))
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
@@ -1790,12 +1793,15 @@ fn client_error_code(code: Option<&str>) -> String {
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
         "lane-not-found" => "not-found".into(),
         "invalid-person-ask"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"
+        | "invalid-person-rename"
+        | "unknown-person"
         | "answer-required"
         | "unsupported-person-request"
         | "missing-ask-owner"
@@ -1809,6 +1815,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "invalid-review-decision"
         | "feedback-gate-needs-step" => "validation-failed".into(),
         "wrong-reviewer" => "forbidden".into(),
+        "person-rename-conflict" => "conflict".into(),
         "stale-work-ask"
         | "stale-subject"
         | "missing-subject-token"
@@ -6442,6 +6449,7 @@ async fn guard_bound_request(
         "/v1/sets/",
         "/v1/agent-queue-moves",
         "/v1/agents/rename",
+        "/v1/persons/rename",
         "/v1/agents/restart",
         "/v1/agents/rollout",
         "/v1/agents/start",

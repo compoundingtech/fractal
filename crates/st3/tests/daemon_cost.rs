@@ -77,8 +77,6 @@ const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 /// much worse unnoticed. Each breaks the daemon's rule that no query's cost grows with the whole
 /// store and is owed a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // Attention reads every person ask (11.8x full-scan steps).
-    ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
     ("GET /v1/checkpoint/status", 15.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
@@ -90,8 +88,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Reviews scan every claim of their kinds (19.6x steps, 25.0x full-scan steps).
-    ("GET /v1/reviews", 38.0),
     // Sessions read every harness observation (11.5x full-scan steps).
     ("GET /v1/sessions", 17.5),
 ];
@@ -295,6 +291,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     // Writes that need a live runtime or a person's approval the generated store lacks.
     ("POST /v1/agents/rename", "renames a declared agent"),
+    (
+        "POST /v1/persons/rename",
+        "explicit identity repair enumerates the old person's current work and reviews once; requires that person's authority and is not a steady-state daemon request; covered by api::tests::human_review_list_and_decisions_use_exact_current_requests",
+    ),
     ("POST /v1/agents/restart", "restarts a live seat"),
     (
         "POST /v1/agents/rollout",

@@ -416,3 +416,12 @@ pub async fn rename_agent(
     signal_changed(&state);
     Ok(Json(response))
 }
+
+pub async fn rename_person(
+    State(state): State<AppState>,
+    Json(request): Json<PersonRenameRequest>,
+) -> Result<Json<PersonRenameReport>, ApiError> {
+    let response = state.store.rename_person(&request).map_err(ApiError::bad)?;
+    signal_changed(&state);
+    Ok(Json(response))
+}

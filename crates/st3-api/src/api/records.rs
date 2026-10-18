@@ -603,12 +603,11 @@ pub async fn post_review(
             .claim_by_id(&pending.request)
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::internal("the pending review request does not exist"))?;
-        let reviewer = review_request
-            .body
-            .pointer("/fields/reviewer")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::internal("a human review request has no reviewer"))?;
-        if actor.as_deref() != Some(reviewer)
+        let reviewer = state
+            .store
+            .human_review_reviewer(&review_request)
+            .map_err(ApiError::internal)?;
+        if actor.as_deref() != Some(reviewer.as_str())
             && !request.delegation.as_ref().is_some_and(|proof| {
                 proof.person == reviewer
                     && actor

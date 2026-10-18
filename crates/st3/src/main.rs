@@ -91,7 +91,7 @@ mod replication_cli;
 mod terminals_cli;
 mod uninstall_cli;
 mod work_cli;
-use agents_cli::run_agents;
+use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
 use conversations_cli::{run_message, upload_attachments};
 use driver_cli::{run_driver, run_driver_hook};
@@ -258,6 +258,11 @@ enum Command {
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
+    },
+    /// Repair current work after a person identity changes.
+    Persons {
+        #[command(subcommand)]
+        command: PersonsCommand,
     },
     /// Read, follow, and send normalized conversations.
     Conversations {
@@ -2475,6 +2480,24 @@ struct AgentHoldArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum PersonsCommand {
+    /// Reassign open work and pending reviews; report declarations needing republishing.
+    Rename(PersonRenameArgs),
+}
+
+#[derive(Args)]
+struct PersonRenameArgs {
+    #[arg(value_parser = parse_person_subject)]
+    old_person: String,
+    #[arg(value_parser = parse_person_subject)]
+    new_person: String,
+    #[arg(long = "as", value_parser = parse_actor_subject)]
+    actor: Option<String>,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -4897,6 +4920,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Agents { command } => {
             run_agents(&endpoint, config.person.as_deref(), command, cli.json).await
         }
+        Command::Persons { command } => {
+            run_persons(&endpoint, config.person.as_deref(), command, cli.json).await
+        }
         Command::Conversations { command } => {
             run_message(
                 &client,
@@ -5162,6 +5188,11 @@ fn guard_mutating_cli_actor(
                 None => None,
             },
             _ => None,
+        },
+        Command::Persons { command } => match command {
+            PersonsCommand::Rename(args) => Some(args.actor.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("a harness person rename needs explicit --as {own}")
+            })?),
         },
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),

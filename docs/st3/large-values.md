@@ -83,6 +83,25 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Person rename and review reassignment inventory review
+
+Owner review for [PR #1185](https://github.com/compoundingtech/smalltalk/pull/1185):
+the PR-owning fleet seat reviewed the following transitional exceptions. The
+producer modules named by the markers retain responsibility for their TODOs.
+These accept existing inline representations, not a value-size or cost bound.
+
+| Inventory ID | Producer and reviewed value flow | Reason and next step |
+| --- | --- | --- |
+| `lv-h737241b591da` | `store::attention` prepares `human_review_reassignment::pending_requests_sql`; hydrates request bodies, predecessors and IDs, with an optional reviewer key. Replaces removed `lv-h4073ad76bfec`. | Preserve effective-reviewer and canonical episode semantics over existing claims; trace the generated query and reference/chunk request values without changing those predicates. |
+| `lv-h4a4e5800fed4` | `store::evidence` reads request ID, owner and effective reviewer through the generated reviewer fold. | Existing inline claim fields remain the authority for historical gate evidence; trace the composed query and reference representation while preserving exact request identity. |
+| `lv-ha8c00ac6f48c` | `store::human_review_reassignment` reads the effective reviewer for one request ID, including canonical repair/receipt selection. | Keep immutable request and repair authority intact; trace generated SQL and move variable reviewer/request keys to a reviewed reference representation. |
+| `lv-h0bb078bcf6e7` | `store::person_rename` hydrates an existing receipt body, predecessors and IDs by idempotency key. | Replay must return the original report and validate actor/people; trace the canonical query and prepare a body/reference representation preserving replay semantics. |
+| `lv-h3fc98290ad14` | `store::person_rename` reads the canonical receipt's destination person by old-person subject. | Both repair reducers must choose the same winner; trace this lookup and reference variable person keys without changing canonical ordering. |
+| `lv-hd6b038d4eb59` | `store::person_work` evaluates generated receipt-winner SQL for one reassignment claim ID. | Preserve replicated winner selection before projection; trace the composed query and variable claim/person keys toward a reference representation. |
+| `lv-h6010e488e8da` | `store::person_work` updates `step_runs.assignee` and its assignee index key from the accepted claim's person, plus the timestamp, fenced by subject and previous assignee. | Preserve atomic episode-fenced assignment using the existing projection schema; bound/reference person and subject values and account for old cell/index-key reclamation before changing representation. |
+| `lv-h14927d84b2de` (was `lv-h852d069ae2ac`) | `store` hydrates the first authorized answer body, predecessors and IDs through the exact-request answer index and effective-reviewer predicate. | Preserve answer authority at its canonical moment; trace generated SQL and reference/chunk hydrated values while preserving historical answers. |
+| `lv-h09503de2aa68` (was `lv-hc62cde9f8f14`) | `store` schema adds exact-request repair/answer indexes, reviewer-to-request repair routing, and the owner/reviewer/attempt/revision/definition episode index. Their JSON-extracted keys and subject strings remain variable; existing declarations are unchanged apart from the schema fingerprint. | Existing inline claim keys are needed for indexed episode seeks, not evidence of bounded size; identify and reference/chunk all variable columns and index expressions while preserving query and canonical-fold semantics. |
+
 ## What the static guard checks
 
 Run these lightweight source controls; neither opens SQLite or compiles Rust:
