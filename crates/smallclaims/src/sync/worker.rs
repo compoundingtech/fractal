@@ -121,6 +121,8 @@ impl<B> PeerState<B> {
 #[derive(Clone)]
 pub struct FleetContext {
     view: Arc<std::sync::RwLock<FleetView>>,
+    /// A completed refresh includes Fabric policy publication before the next sync proceeds.
+    view_refresh: Arc<tokio::sync::Mutex<()>>,
     /// Bumped whenever the view changes, so the dial set follows membership.
     view_changed: watch::Sender<u64>,
     config_peers: BTreeSet<String>,
@@ -133,6 +135,7 @@ pub struct FleetContext {
     /// Which transports this machine can dial with right now.
     transports: Arc<std::sync::RwLock<LocalTransports>>,
     fabric: Option<Fabric>,
+    runtime_policy: Option<(PathBuf, FleetFile)>,
     /// The sponsor and how this node reached it when it joined, dialed until membership names
     /// the sponsor.
     bootstrap: Option<(String, Vec<Route>)>,
@@ -160,6 +163,7 @@ impl FleetContext {
     pub fn legacy(config_peers: BTreeSet<String>) -> Self {
         Self {
             view: Arc::default(),
+            view_refresh: Arc::default(),
             view_changed: watch::channel(0).0,
             config_peers,
             configured_fabric_peers: BTreeMap::new(),
@@ -168,6 +172,7 @@ impl FleetContext {
             bootstrap_keys: BTreeSet::new(),
             transports: Arc::default(),
             fabric: None,
+            runtime_policy: None,
             bootstrap: None,
             removed: Arc::default(),
             state_dir: None,
@@ -193,6 +198,7 @@ impl FleetContext {
     ) -> Self {
         Self {
             view: Arc::new(std::sync::RwLock::new(store.fleet_view().unwrap())),
+            view_refresh: Arc::default(),
             view_changed: watch::channel(0).0,
             config_peers: config_peers.iter().map(|peer| (*peer).into()).collect(),
             configured_fabric_peers: BTreeMap::new(),
@@ -201,6 +207,7 @@ impl FleetContext {
             bootstrap_keys: bootstrap.iter().map(|key| (*key).into()).collect(),
             transports: Arc::default(),
             fabric: None,
+            runtime_policy: None,
             bootstrap: None,
             removed: Arc::default(),
             state_dir: None,
@@ -445,12 +452,15 @@ pub async fn run<B: Backend>(
     };
     let fleet = FleetContext {
         view: Arc::default(),
+        view_refresh: Arc::default(),
         view_changed: watch::channel(0).0,
         transports: Arc::new(std::sync::RwLock::new(LocalTransports {
             tailscale: false,
             fabric: fabric.is_some(),
         })),
         fabric: fabric.clone(),
+        runtime_policy: config.fleet.clone().filter(|_| wants("fabric"))
+            .map(|settings| (config.state_dir.clone(), settings)),
         bootstrap: config.fleet.as_ref().and_then(|file| {
             let sponsor = file.sponsor.clone()?;
             let routes = file
@@ -500,6 +510,12 @@ pub async fn run<B: Backend>(
     backend.ready().await;
     let notify = wake;
     refresh_fleet_view(&backend, &fleet).await;
+    if let (Some(settings), Some(own)) = (config.fleet.clone().filter(|_| wants("fabric")), member_key.as_ref()) {
+        tokio::spawn(crate::task_cpu::account(
+            "replication.fabric_policy",
+            keep_fabric_policy_current(config.state_dir.clone(), settings, own.public().to_owned(), fleet.clone()),
+        ));
+    }
     tokio::spawn(crate::task_cpu::account("replication.fleet_view", keep_fleet_view_current(
         backend.clone(),
         fleet.clone(),
@@ -864,13 +880,23 @@ async fn keep_fabric_presence_current(fabric: Fabric, fleet: FleetContext) {
 }
 
 async fn refresh_fleet_view<B: Backend>(backend: &B, fleet: &FleetContext) {
+    let _refresh = fleet.view_refresh.lock().await;
     if let Ok(view) = backend.fleet_view().await {
-        let mut current = fleet.view.write().expect("fleet view lock poisoned");
-        if *current != view {
-            *current = view;
-            fleet
-                .view_changed
-                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        let changed = {
+            let mut current = fleet.view.write().expect("fleet view lock poisoned");
+            if *current == view {
+                false
+            } else {
+                *current = view;
+                fleet.view_changed.send_modify(|generation| *generation = generation.wrapping_add(1));
+                true
+            }
+        };
+        if changed
+            && let (Some((state_dir, settings)), Some(own_key)) = (&fleet.runtime_policy, &fleet.own_key)
+            && let Err(error) = reconcile_fabric_policy(state_dir, settings, own_key, fleet).await
+        {
+            eprintln!("Fabric runtime policy status could not be persisted: {error:#}");
         }
     }
 }
@@ -953,6 +979,53 @@ pub fn dial_targets(
         }
     }
     targets
+}
+
+/// Policy follows the same signed membership generation as replication. Serialize with
+/// CLI retirement so an old worker cannot restore grants after leave removes settings.
+async fn reconcile_fabric_policy(
+    state_dir: &Path,
+    settings: &FleetFile,
+    own_key: &str,
+    fleet: &FleetContext,
+) -> Result<bool> {
+    let Some(_lock) = lock_current_settings(state_dir, settings).await? else {
+        return Ok(false);
+    };
+    let view = fleet.view.read().expect("fleet view lock poisoned").clone();
+    let status = match crate::fleet::fabric_reconcile::control_socket() {
+        Ok(socket) => match crate::fleet::fabric_reconcile::reconcile(
+            &socket, &settings.fleet_id, own_key, &view,
+        ).await {
+            Ok(status) => status,
+            Err(error) => crate::fleet::fabric_reconcile::error_status(&error),
+        },
+        Err(error) => crate::fleet::fabric_reconcile::error_status(&error),
+    };
+    let path = state_dir.join("fleet/fabric-reconcile.json");
+    let bytes = serde_json::to_vec(&status)?;
+    tokio::task::spawn_blocking(move || {
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes)?;
+        std::fs::rename(temporary, path)
+    }).await??;
+    Ok(true)
+}
+
+async fn keep_fabric_policy_current(
+    state_dir: PathBuf,
+    settings: FleetFile,
+    own_key: String,
+    fleet: FleetContext,
+) {
+    loop {
+        tokio::time::sleep(worker_interval(Duration::from_secs(30))).await;
+        match reconcile_fabric_policy(&state_dir, &settings, &own_key, &fleet).await {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => eprintln!("Fabric runtime policy status could not be persisted: {error:#}"),
+        }
+    }
 }
 
 /// Reread membership on every graph change and at least every 30 seconds.
@@ -2320,6 +2393,7 @@ async fn exchange_inner<B: Backend>(
     let pulled = received.receipt.received != 0;
     if received.changed {
         backend.changed().await;
+        refresh_fleet_view(backend, fleet).await;
     }
     let mut pushed = false;
     let mut pulled_follow_up = false;
@@ -2357,6 +2431,7 @@ async fn exchange_inner<B: Backend>(
         pulled_follow_up = received.receipt.received != 0;
         if received.changed {
             backend.changed().await;
+            refresh_fleet_view(backend, fleet).await;
         }
     }
     let adopted = match &remote.inventory.checkpoint {
@@ -2377,6 +2452,7 @@ async fn exchange_inner<B: Backend>(
     };
     if adopted {
         backend.changed().await;
+        refresh_fleet_view(backend, fleet).await;
     }
     let progressed = pulled || pulled_follow_up || pushed || adopted;
     Ok(progressed)

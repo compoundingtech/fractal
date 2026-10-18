@@ -6,6 +6,7 @@
 //! migrated replicates.
 
 pub mod code;
+pub mod fabric_reconcile;
 pub mod file;
 pub mod handshake;
 pub mod join;

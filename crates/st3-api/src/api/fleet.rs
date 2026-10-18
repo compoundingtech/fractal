@@ -1,5 +1,99 @@
 use super::*;
 
+pub(super) fn fabric_reconcile_status(
+    state_dir: &std::path::Path,
+    file: Option<&crate::config::FleetFile>,
+) -> smallclaims::fleet::fabric_reconcile::ReconcileStatus {
+    use smallclaims::fleet::fabric_reconcile::ReconcileStatus;
+    let path = state_dir.join("fleet/fabric-reconcile.json");
+    let result = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<ReconcileStatus>(&bytes)
+            .map_err(|error| format!("read {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ReconcileStatus {
+                state: if file.is_some_and(|file| {
+                    file.transports.iter().any(|transport| transport == "fabric")
+                }) {
+                    "pending"
+                } else {
+                    "disabled"
+                }
+                .into(),
+                ..ReconcileStatus::default()
+            };
+        }
+        Err(error) => Err(format!("read {}: {error}", path.display())),
+    };
+    match result {
+        Ok(status) if !status.state.is_empty() => status,
+        Ok(_) => ReconcileStatus {
+            state: "error".into(),
+            message: Some(format!("read {}: missing reconciliation state", path.display())),
+            policy_revision: None,
+        },
+        Err(message) => ReconcileStatus {
+            state: "error".into(),
+            message: Some(message),
+            policy_revision: None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod fabric_reconcile_status_tests {
+    use super::fabric_reconcile_status;
+
+    #[test]
+    fn missing_result_is_pending_only_with_fabric_enabled() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(fabric_reconcile_status(root.path(), None).state, "disabled");
+        let mut file = crate::config::FleetFile::default();
+        file.transports = vec!["tailscale".into()];
+        assert_eq!(
+            fabric_reconcile_status(root.path(), Some(&file)).state,
+            "disabled"
+        );
+        file.transports.push("fabric".into());
+        assert_eq!(
+            fabric_reconcile_status(root.path(), Some(&file)).state,
+            "pending"
+        );
+    }
+
+    #[test]
+    fn recorded_results_are_preserved_and_bad_results_are_errors() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("fleet")).unwrap();
+        let path = root.path().join("fleet/fabric-reconcile.json");
+        for state in ["applied", "error", "pending", "runtime_peers_disabled"] {
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "state": state,
+                    "message": "recorded diagnostic",
+                    "policy_revision": 42
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let status = fabric_reconcile_status(root.path(), None);
+            assert_eq!(status.state, state);
+            assert_eq!(status.message.as_deref(), Some("recorded diagnostic"));
+            assert_eq!(status.policy_revision, Some(42));
+        }
+        for bytes in [b"not json".as_slice(), br#"{"state":""}"#.as_slice()] {
+            std::fs::write(&path, bytes).unwrap();
+            let status = fabric_reconcile_status(root.path(), None);
+            assert_eq!(status.state, "error");
+            assert!(status.message.is_some());
+            assert_eq!(status.policy_revision, None);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(fabric_reconcile_status(root.path(), None).state, "error");
+    }
+}
+
 pub async fn fleet_publish_endpoints(
     State(state): State<AppState>,
     Json(request): Json<FleetEndpointsRequest>,
@@ -29,6 +123,7 @@ pub async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetSta
             node,
             fleet_id,
             member_key: store.member_public_key(),
+            fabric_reconcile: fabric_reconcile_status(&state_dir, file.as_ref()),
             transports: file
                 .as_ref()
                 .map(|file| file.transports.clone())

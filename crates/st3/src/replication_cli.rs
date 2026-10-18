@@ -2,6 +2,25 @@ use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
 use st3::{cli_print as print, cli_println as println};
 
+pub(super) fn render_fabric_reconcile(
+    status: &smallclaims::fleet::fabric_reconcile::ReconcileStatus,
+) -> String {
+    let mut text = status.state.clone();
+    if let Some(revision) = status.policy_revision {
+        text.push_str(&format!(" (policy revision {revision})"));
+    }
+    if let Some(message) = &status.message {
+        text.push_str(": ");
+        text.push_str(message);
+    }
+    if status.state == "runtime_peers_disabled" {
+        text.push_str(
+            "; restart Fabric with --runtime-peers to enable runtime membership; static peers still work",
+        );
+    }
+    text
+}
+
 pub(super) async fn run_replication(
     client: &Client,
     config: &Config,
@@ -18,6 +37,9 @@ pub(super) async fn run_replication(
                 "fleet\t{}",
                 status.fleet_id.as_deref().unwrap_or("local-only")
             );
+            if let Some(reconcile) = &status.fabric_reconcile {
+                println!("fabric-reconcile\t{}", render_fabric_reconcile(reconcile));
+            }
             if let Some(removed) = &status.removed {
                 println!("removed\t{}", removed.describe(status.fleet_id.as_deref()));
             }

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Reconcile signed fleet membership into Fabric runtime peers and report local policy status (#2842)",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay or admission-format change. Runtime Fabric policy is derived from the existing signed fleet membership view."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database migration. The worker records local reconciliation state in fleet/fabric-reconcile.json; fleet and replication status expose state, message and policy_revision."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or coordinated member upgrade. Fleet membership remains authoritative for the st/fleet/<fleet-id> runtime policy owner."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Fabric-enabled workers manage owner-scoped runtime peers and protocol grants without rewriting static configuration. Existing static peers and independently owned grants remain independent. Status reports pending or error instead of assuming runtime policy success."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No coordinated fleet downtime is required. Runtime policy management requires a Fabric daemon started with --runtime-peers; status reports runtime_peers_disabled when that capability is unavailable. Static peers still work."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "For runtime membership management, restart Fabric with --runtime-peers when fleet or replication status reports runtime_peers_disabled. No static peer file edits or extra daemon are required."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Membership refresh reconciles the owner's desired runtime policy, including ended members. Fleet and replication status read the worker's recorded result and retain failures; applied reports policy application, not connectivity or replication convergence. Other owners or static policy may retain rights after this owner's records are withdrawn."
+  }
+}

@@ -374,6 +374,50 @@ See [Tailscale setup](tailscale.md) for direct-host setup and
 [the migration procedure](../fleet-join.md#move-an-existing-fleet-off-local-dial-helpers)
 for replacing a legacy local dial helper.
 
+### Runtime Fabric membership
+
+With Fabric enabled, the replication worker reconciles signed fleet membership into
+Fabric runtime peers and protocol-scoped grants, owned by `st/fleet/<fleet-id>`.
+It does not rewrite Fabric's static peer configuration or require another daemon.
+Ended members are removed from this owner's desired runtime policy; independently
+configured static peers or grants from other owners can still retain access.
+
+The runtime API requires Fabric v0.9.1 or newer (v0.9.0 predates Fabric #324).
+st uses the documented newline-delimited control socket directly; the separate
+typed client proposal (Fabric #310) is not a prerequisite. Socket resolution
+follows `FABRIC_HOME/run/control.sock`, defaulting to
+`$HOME/.local/share/fabric/run/control.sock`.
+Each current member receives exactly `st3/fleet/<fleet-id>`,
+`st3/pty/<fleet-id>`, and the paired-only `st3-client-v0` gateway grant.
+The gateway still requires a paired client credential. Arbitrary endpoint
+protocols are not promoted into grants; a nonstandard replication protocol
+reports an error rather than broadening policy.
+
+Reconciliation runs before a received membership update completes sync, and
+retries every 30 seconds for daemon restarts or policy drift. It reads one
+revision-consistent snapshot and publishes owner-scoped removals, additions,
+and grant replacements in one batch (maximum 128 operations). A lost reply is
+retried with identical request ID and contents; later passes read current
+policy rather than replaying a stale plan. Revocation checks cancellation
+completion and reports static/other-owner residual service access instead of
+claiming complete retirement. The settings lock prevents a retiring worker
+from restoring grants after leave or Fabric transport removal.
+
+`st fleet status` and `st replication status` expose the worker's last local result
+as `fabric_reconcile` in JSON, including `state`, `message`, and `policy_revision`.
+Readable output shows the same state and any diagnostic. The source is
+`fleet/fabric-reconcile.json` in the state directory: a missing result is `pending`
+when Fabric is enabled and `disabled` otherwise. An unreadable or malformed result
+is an `error`, not an assumed successful reconciliation.
+
+`applied` means the runtime policy was applied at the reported revision; it does
+not prove transport connectivity or replication convergence. `pending` means no
+result has been recorded yet; `error` retains the failure for inspection.
+`runtime_peers_disabled` means Fabric must be restarted with `--runtime-peers`
+before runtime membership can be managed. Existing static peers still work.
+The status reports policy reconciliation separately from each peer's replication
+state and does not turn static transport success into runtime-policy success.
+
 After a successful exchange on a fallback route, the worker keeps using it for a
 60-second cooldown, then starts the next exchange from the preferred route again.
 Successful fallback exchanges do not extend that cooldown. If the preferred route

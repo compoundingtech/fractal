@@ -515,6 +515,10 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             if let Some(protocol) = &status.fabric_protocol {
                 println!("FABRIC-PROTOCOL  {protocol}");
             }
+            println!(
+                "FABRIC-RECONCILE  {}",
+                replication_cli::render_fabric_reconcile(&status.fabric_reconcile)
+            );
             if let Some(removed) = &status.removed {
                 println!("REMOVED  {}", removed.describe(status.fleet_id.as_deref()));
             }
@@ -782,6 +786,7 @@ async fn run_fleet_transports(
                     }),
                 "cannot remove Fabric: no remaining configured transport is usable on this machine"
             );
+            withdraw_fleet_fabric(&file.fleet_id).await?;
             file.transports.retain(|transport| transport != "fabric");
             // Retain the existing protocol setting so a later add can restore it.
             save_and_publish_fleet_settings(client, config, &file, endpoints).await?;

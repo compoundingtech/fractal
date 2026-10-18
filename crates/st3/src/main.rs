@@ -750,8 +750,24 @@ fn running_local_runtimes(machines: &Value, node: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Leave the fleet: stop local writes, drain, write the leave as the last batch, confirm, and
-/// remove this machine's fleet settings. Returns the member that confirmed, if any.
+/// Call while holding the fleet settings lock, before retiring a Fabric-enabled worker.
+async fn withdraw_fleet_fabric(fleet_id: &str) -> Result<()> {
+    let socket = st3::fleet::fabric_reconcile::control_socket()
+        .context("resolve Fabric control socket before fleet cleanup")?;
+    let status = st3::fleet::fabric_reconcile::withdraw(&socket, fleet_id)
+        .await
+        .context("withdraw this fleet's Fabric runtime access; fleet settings kept for retry")?;
+    anyhow::ensure!(
+        status.state == "applied",
+        "Fabric withdrawal incomplete ({}): {}; fleet settings kept for retry",
+        status.state,
+        status.message.as_deref().unwrap_or("revocation was not confirmed")
+    );
+    Ok(())
+}
+
+/// Leave the fleet: stop local writes, drain, write the leave as the last batch, confirm,
+/// withdraw Fabric runtime access, and remove the fleet settings. Returns the confirming member.
 async fn fleet_leave(
     client: &Client,
     config: &Config,
@@ -829,7 +845,19 @@ async fn fleet_leave(
         }))?
         .as_bytes(),
     )?;
-    st3::config::FleetFile::remove(&config.state_dir)?;
+    // Serialize withdrawal and settings deletion with the worker's reconciliation. In
+    // particular, an offline leave must not let a cached active view restore these grants.
+    let settings_lock = lock_fleet_settings(&config.state_dir).await?;
+    if file.transports.iter().any(|transport| transport == "fabric")
+        || config.state_dir.join("fleet/fabric-reconcile.json").exists()
+    {
+        withdraw_fleet_fabric(&file.fleet_id).await?;
+    }
+    // Already holding the settings lock: FleetFile::remove would acquire it again.
+    let directory = config.state_dir.join("fleet");
+    fs::remove_dir_all(&directory)
+        .with_context(|| format!("remove fleet settings {}", directory.display()))?;
+    drop(settings_lock);
     // The member key signed for this node and the people and agents it held keys for; a node
     // that joins again starts with new keys.
     let keys = st3::fleet::join::key_directory(&config.state_dir);

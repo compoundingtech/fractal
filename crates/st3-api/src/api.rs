@@ -8047,6 +8047,9 @@ pub struct FleetStatus {
     pub transports: Vec<String>,
     #[serde(default)]
     pub fabric_protocol: Option<String>,
+    /// Last local runtime Fabric policy reconciliation, not a connectivity proof.
+    #[serde(default)]
+    pub fabric_reconcile: smallclaims::fleet::fabric_reconcile::ReconcileStatus,
     pub view: crate::fleet::FleetView,
     pub peers: Vec<crate::model::ReplicationPeerStatus>,
     pub invites: Vec<crate::store::FleetInviteView>,

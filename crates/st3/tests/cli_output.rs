@@ -300,3 +300,151 @@ mission "orchid" state="ready" {
     }
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offline_leave_requires_confirmed_fabric_withdrawal_before_local_cleanup() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    for outcome in ["unavailable", "disabled", "residual", "applied", "prior_transport"] {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        st3::fleet::join::found(
+            &state_dir,
+            "orchid",
+            &st3::fleet::join::MemberSettings {
+                mode: st3::config::FleetMode::DialOut,
+                port: None,
+                transports: Some(vec![]),
+                advertise_loopback: false,
+                fabric: None,
+                tailscale: None,
+            },
+        )
+        .unwrap();
+        let mut file = st3::config::FleetFile::load(&state_dir).unwrap().unwrap();
+        file.transports = vec!["fabric".into()];
+        file.fabric = Some(root.path().join("no-fabric-executable"));
+        file.save(&state_dir).unwrap();
+        if outcome == "prior_transport" {
+            file.transports.clear();
+            file.save(&state_dir).unwrap();
+            std::fs::write(
+                state_dir.join("fleet/fabric-reconcile.json"),
+                r#"{"state":"applied","policy_revision":1}"#,
+            )
+            .unwrap();
+        }
+        let keys = st3::fleet::join::key_directory(&state_dir);
+        let config = root.path().join("config/st3");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            format!(
+                "node = \"orchid\"\nstate_dir = {}\nperson = \"person/avery\"\n",
+                serde_json::to_string(&state_dir).unwrap(),
+            ),
+        )
+        .unwrap();
+        let fabric_home = root.path().join("fabric");
+        std::fs::create_dir_all(fabric_home.join("run")).unwrap();
+        let server = if outcome == "unavailable" {
+            None
+        } else {
+            let listener =
+                tokio::net::UnixListener::bind(fabric_home.join("run/control.sock")).unwrap();
+            let owner = format!("st/fleet/{}", file.fleet_id);
+            let service = format!("st3/fleet/{}", file.fleet_id);
+            Some(tokio::spawn(async move {
+                let mut withdrawn = false;
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let residual = outcome == "residual";
+                    let static_source = json!({"kind":"static","path":"/untouched/peers.toml"});
+                    let peer = json!({
+                        "node_id":"remote",
+                        "trust_sources": if withdrawn {
+                            vec![static_source.clone()]
+                        } else {
+                            vec![json!({"kind":"runtime","owner":owner})]
+                        },
+                        "services": {service.clone(): [static_source]},
+                    });
+                    let reply = if outcome == "disabled" {
+                        json!({"error":{
+                            "code":"runtime_peers_disabled", "class":"policy",
+                            "message":"runtime peers disabled",
+                        }})
+                    } else if request["request"]["operation"] == "list" {
+                        json!({"snapshot":{
+                            "instance":"test", "policy_revision":if withdrawn {2} else {1},
+                            "peers":if withdrawn && !residual {vec![]} else {vec![peer]},
+                            "next_cursor":null, "fault":null,
+                        }})
+                    } else {
+                        assert_eq!(request["request"]["operation"], "batch");
+                        assert_eq!(request["request"]["owner"], owner);
+                        assert_eq!(
+                            request["request"]["operations"],
+                            json!([{"op":"remove_peer","node_id":"remote"}]),
+                        );
+                        // No deletion or key rotation is allowed before Fabric acknowledges.
+                        assert!(st3::config::FleetFile::path(&state_dir).exists());
+                        assert!(keys.exists());
+                        withdrawn = true;
+                        json!({"mutation":{
+                            "current_revision":2,
+                            "affected":if residual {vec![json!({
+                                "node_id":"remote",
+                                "trust_sources":[{"kind":"static","path":"/untouched/peers.toml"}],
+                                "services":{service.clone():[{"kind":"static","path":"/untouched/peers.toml"}]},
+                            })]} else {vec![]},
+                            "cancellation":{"state":"complete"},
+                        }})
+                    };
+                    let mut response =
+                        serde_json::to_vec(&json!({"type":"runtime_peers","reply":reply})).unwrap();
+                    response.push(b'\n');
+                    reader.get_mut().write_all(&response).await.unwrap();
+                }
+            }))
+        };
+        let output = st3::test_support::async_command(test_bin!("st3-fixture"))
+            .env("HOME", root.path())
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("FABRIC_HOME", &fabric_home)
+            .env("TMPDIR", root.path())
+            .args([
+                "--endpoint", root.path().join("absent.sock").to_str().unwrap(),
+                "--daemon-wait", "0", "fleet", "leave", "--offline", "--no-service",
+                "--as", "person/avery",
+            ])
+            .output()
+            .await
+            .unwrap();
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        let applied = matches!(outcome, "applied" | "prior_transport");
+        assert_eq!(output.status.success(), applied, "{outcome}: {diagnostic}");
+        assert_eq!(
+            st3::config::FleetFile::path(&root.path().join("state")).exists(),
+            !applied,
+            "{outcome}: {diagnostic}",
+        );
+        assert_eq!(
+            st3::fleet::join::key_directory(&root.path().join("state")).exists(),
+            !applied,
+        );
+        match outcome {
+            "unavailable" => assert!(diagnostic.contains("withdraw this fleet"), "{diagnostic}"),
+            "disabled" => assert!(diagnostic.contains("runtime_peers_disabled"), "{diagnostic}"),
+            "residual" => assert!(diagnostic.contains("residual_access"), "{diagnostic}"),
+            _ => {}
+        }
+        if let Some(server) = server {
+            server.abort();
+        }
+    }
+}

@@ -134,10 +134,10 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         "st uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
     );
     let daemon_running = client.get::<Value>("/v1/health").await.is_ok();
-    if let Some(file) = st3::config::FleetFile::load(&config.state_dir)?
-        && file.removed.is_none()
-    {
-        if args.offline {
+    if let Some(file) = st3::config::FleetFile::load(&config.state_dir)? {
+        // Removed members no longer have a drain to perform, but still own runtime
+        // Fabric records. Withdraw those before stopping the worker or erasing settings.
+        if args.offline || file.removed.is_some() {
             fleet_leave(&client, &config, "person/uninstall", true, true, 0).await?;
         } else {
             anyhow::ensure!(

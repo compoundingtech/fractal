@@ -191,13 +191,14 @@ and endpoints are unchanged. The protocol defaults to the saved `fabric_protocol
 remove it and add it with `--fabric-protocol PROTOCOL`. Configure Fabric trust and grants on
 the peers as described below.
 
-Removing Fabric first publishes the endpoint list without Fabric, then unexposes the saved
-protocol. It refuses an absent configured Fabric transport, the last configured transport,
-or a listening member with no usable remaining configured endpoint. The saved protocol is
-retained for a later add. If unexposure fails, the endpoint stays withdrawn and the command
-reports the exact `fabric unexpose PROTOCOL` cleanup command. Withdrawal succeeds even when
-the Fabric executable or daemon is unavailable, so a broken carrier can be removed; the
-reported cleanup remains to be done when Fabric is available.
+Removing Fabric first withdraws this fleet's owner-scoped runtime peer records, then publishes
+the endpoint list without Fabric and unexposes the saved protocol. It refuses an absent configured
+Fabric transport, the last configured transport, or a listening member with no usable remaining
+configured endpoint. The saved protocol is retained for a later add. Runtime withdrawal must be
+confirmed before settings change: an unavailable control socket, disabled runtime peers, or
+remaining st grants from static configuration or another owner aborts removal. Those other
+sources are never edited. If only unexposure fails after withdrawal, the endpoint stays withdrawn
+and the command reports the exact `fabric unexpose PROTOCOL` cleanup command.
 
 If endpoint publication fails after the settings write, the command reports that partial
 result and keeps the exposure reachable: a lost response can follow a committed claim.
@@ -253,6 +254,15 @@ digest before and after that claim or a signed `member-left` naming its key. Int
 resumes; `--cancel` restores normal mode before the claim is written. Offline leave skips the peer
 proof and prints the removal command for another member. The local history remains fleet-bound;
 joining a different fleet needs a separately authorized reset.
+
+For a machine using Fabric (or with a recorded runtime reconciliation), leave withdraws
+`st/fleet/FLEET_ID` runtime peer records before deleting fleet settings or stopping the worker.
+`--offline` skips only the replication proof, not this local revocation check. Fabric must be
+reachable with runtime peers enabled. A failed withdrawal or remaining st grants from static
+configuration or another runtime owner fails visibly and keeps fleet settings and member keys
+for a retry; resolve that policy at its source, then retry leave. st never changes static peers.
+Uninstall performs the same check, including for a member already removed from the fleet,
+before stopping services or erasing state.
 
 `st uninstall [--dry-run] [--yes] [--offline] [--keep-binaries] [--erase-local-graph] [--no-service] [--as PERSON]`
 leaves the fleet, stops owned runtimes, removes services/exposure and st's Claude plugin/marketplace,

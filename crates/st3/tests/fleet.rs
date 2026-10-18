@@ -3281,6 +3281,37 @@ fn member_has_fabric(status: &Value, name: &str) -> bool {
         })
 }
 
+/// Existing carrier tests do not install runtime records; acknowledge their empty cleanup
+/// through the real Unix control transport without depending on a host Fabric daemon.
+fn empty_fabric_runtime(node: &mut Node) -> tokio::task::JoinHandle<()> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    let home = node.root.join("fabric-runtime");
+    fs::create_dir_all(home.join("run")).unwrap();
+    let listener = tokio::net::UnixListener::bind(home.join("run/control.sock")).unwrap();
+    node.env.push(("FABRIC_HOME".into(), home.to_str().unwrap().into()));
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["request"]["operation"], "list");
+            let mut response = serde_json::to_vec(&json!({
+                "type":"runtime_peers",
+                "reply":{"snapshot":{
+                    "instance":"carrier-fixture", "policy_revision":0,
+                    "peers":[], "next_cursor":null, "fault":null,
+                }},
+            }))
+            .unwrap();
+            response.push(b'\n');
+            reader.get_mut().write_all(&response).await.unwrap();
+        }
+    })
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
     if st3::test_support::supervise_test() {
@@ -3436,7 +3467,9 @@ async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
         b.socket().as_os_str().as_encoded_bytes(),
     )
     .unwrap();
+    let runtime_cleanup = empty_fabric_runtime(&mut b);
     b.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    runtime_cleanup.abort();
     assert!(!exposure.exists());
     assert!(!member_has_fabric(
         &b.st_json(&["fleet", "status"]),
@@ -3556,7 +3589,23 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
     file.transports.push("loopback".into());
     file.fabric = Some(root.path().join("absent-fabric"));
     file.save(&node.state_dir()).unwrap();
+    node.env.push((
+        "FABRIC_HOME".into(),
+        root.path().join("unavailable-runtime").to_str().unwrap().into(),
+    ));
+    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+    let refused = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("withdraw this fleet"));
+    assert_eq!(
+        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        before,
+    );
+    assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
+    let runtime_cleanup = empty_fabric_runtime(&mut node);
     let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    runtime_cleanup.abort();
     assert!(output.contains("unexposure still needs cleanup"));
     assert!(output.contains(&format!(
         "run fabric unexpose {}",

@@ -219,6 +219,9 @@ pub struct ReplicationStatus {
     /// A member refused this node as removed or left, so it no longer syncs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed: Option<crate::fleet::RemovalNotice>,
+    /// Last local runtime Fabric policy reconciliation, filled by the status API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_reconcile: Option<crate::fleet::fabric_reconcile::ReconcileStatus>,
 }
 
 /// Cumulative replication time in one daemon process since it started, split by stage, for
