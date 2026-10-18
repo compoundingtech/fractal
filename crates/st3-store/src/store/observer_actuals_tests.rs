@@ -124,10 +124,10 @@ fn observer_actuals_external_writer_invalidates_warm_result() {
 fn observer_actuals_lru_is_bounded() {
     let cache = Actuals::default();
     let connection = Connection::open_in_memory().unwrap();
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h59ad9e8c88d9 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h483ca304fb64 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
         CREATE TABLE claims(store_index INTEGER PRIMARY KEY,id TEXT,batch_id TEXT,subject TEXT,kind TEXT,body TEXT,accepted_at_unix_ms TEXT);
         CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
-        CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
+        CREATE TABLE replica_records(claim_id TEXT,position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);").unwrap();
     let serial = cache.seed(&connection, || cache.coverage_verified()).unwrap();
     for index in 0..LIMIT + 10 {

@@ -36,10 +36,10 @@ fn single_key_sort(connection: &Connection, messages: &mut [MessageView]) -> Res
 fn schema(connection: &mut Connection) {
     smallclaims::sqlite::observe(connection);
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hba775661f3b0 owner=st3_store::store::message_canonical_sort_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-hf7172e90ac47 owner=st3_store::store::message_canonical_sort_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
          CREATE TABLE claims(store_index INTEGER PRIMARY KEY, id TEXT UNIQUE,
             batch_id TEXT, subject TEXT, kind TEXT, accepted_at_unix_ms TEXT);
-         CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+         CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
          CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
          CREATE INDEX claims_subject_accepted_index
             ON claims(subject,length(accepted_at_unix_ms),accepted_at_unix_ms);

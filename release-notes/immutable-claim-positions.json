@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Store each claim's batch position at admission so removing inputs never renumbers a survivor",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or history backfill. Existing claims keep the canonical position the legacy expression gives today; it is stored lazily, by trigger, only immediately before a deletion or record change could alter it."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds the WITHOUT ROWID table claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER) and five triggers: AFTER INSERT and BEFORE/AFTER UPDATE OF claim_id, position and BEFORE DELETE on replica_records, and BEFORE DELETE on claims. Admission writes one row per admitted claim (and per claim-bearing record). Rows are never deleted. Storage version stays 20; earlier binaries open the store and the triggers keep maintaining positions for records they write, while their claim inserts take the legacy value. Created with IF NOT EXISTS at open; no index build or table scan."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Rule versions are unchanged. The canonical position now reads claim_positions first, then the previous MIN(record position), then the previous surviving-sibling count. Answers are identical until a deletion: an old build renumbers a survivor without a wire record after an earlier sibling is deleted, and raises a claim's position when its lowest-position duplicate record is deleted; this build keeps the earlier value. A checkpoint proof copy deletes records outside the sealed envelopes, so a sealed claim that also has a lower-position record in an unsealed duplicate envelope can order differently on old and new builds during checkpoint agreement. The local member census on 2026-10-18 found every admitted claim has a wire record (largest batch 430 claims); duplicate-position counts were not measured."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Claim and wire formats, IDs, signatures and replication digests are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal restart. The schema statements create an empty table and triggers; no measured startup cost beyond that."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back to an earlier binary is supported: the table and triggers remain and are harmless, and the stored values equal the legacy values except where a deletion would have renumbered."
+  }
+}

@@ -297,6 +297,20 @@ Triggers persist and increment the epoch in the mutation's own transaction on ev
 
 The checkpoint guard requires the normal process restart. Storage version 20 atomically renames and preserves the complete pre-candidate signature projection and its indexes, then inventories candidates online in bounded loans while the whole legacy authorization model serves. One atomic control-row update activates the candidate model; the version marker commits with the rename, so older builds refuse the store before creating empty signature state. The restart duration has not been measured. Builds limited to storage version 19 or earlier reject version 20; in-place rollback below 20 is unsupported. Earlier version-18 PR-head binaries are not rollback targets: guard version 1 cannot safely operate the cut-aware schema, and guard version 2 rejects trigger version 3 on open. Their copied stores can migrate forward only. Binary rollback requires restoring a pre-upgrade database snapshot; otherwise roll forward. No replicated claim, checkpoint rule, or wire protocol changes. Local signature provenance and grant proof responses label the serving authorization model.
 
+## Immutable claim positions
+
+`claim_positions` holds each claim's position in its batch, the canonical order's fifth
+component. Admission stores it: a replicated claim takes its record's wire position before the
+claim row is inserted, and a local claim takes the number of claims its batch already holds,
+which is where sealing places its record. A later record of the same claim can only lower the
+value, so the stored position is the least position over every record the member has held and
+does not depend on arrival order. For claims stored before this table existed, triggers store
+the legacy value (least record position, else arrival count among surviving siblings) just
+before deleting an earlier sibling, deleting a record or changing a record's claim or position
+could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
+never deleted. No history backfill runs at open; a claim without a row and without any removal
+since keeps the legacy value, which equals what would be stored.
+
 ## Local runtime start operations
 
 Storage version 19 adds the owner-local `local_runtime_starts` ledger and its admission/pending indexes transactionally. It retains immutable prepared input, original declaration and operation identity, dispatch/result status, revocation and verified cleanup. The ledger does not replicate or enter graph digests, checkpoints or claim backups. Unresolved operations are never trimmed. Existing request receipts precede dispatch and revocation; completion receipts commit only while their original declaration remains selected and the operation remains unrevoked.
