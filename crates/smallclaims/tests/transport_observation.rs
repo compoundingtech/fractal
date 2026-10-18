@@ -219,7 +219,7 @@ fn transport_observation_bootstrap_waits_for_managed_deferred_read_then_write_tr
         drop(foreground);
         let page = completed_received.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
         assert!(!page.ready);
-        assert_eq!(page.copied, usize::try_from(index::PAGE_SIZE).unwrap());
+        assert!((1..=usize::try_from(index::PAGE_SIZE).unwrap()).contains(&page.copied));
         background.join().unwrap();
     }
     finish(&writer);

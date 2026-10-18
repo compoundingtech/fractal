@@ -49,7 +49,11 @@ arithmetic bounds, not measured saturated-daemon costs.
 The receive path's latest-observation lookup uses a local transport-only side index once
 its background bootstrap completes. Store opening does no work for this index: after both
 APIs serve, the managed background writer queue atomically installs capture triggers and a
-high-water mark, then copies at most 128 source rows per transaction with 100 ms yields.
+high-water mark, then commits after 128 source rows or 20 ms of work, whichever comes
+first, checking the elapsed budget between rows and preserving the last processed cursor.
+The budget bounds work, not I/O latency: one cold read, capture setup or commit can still
+exceed 20 ms. A page always processes at least one row to make progress; 100 ms yields
+between pages remain unchanged.
 Each page releases its background loan; pending foreground writers retain priority.
 Sharing the writer also preserves deferred read-then-write snapshots: no independent
 bootstrap connection can commit across an application writer's pending upgrade.
