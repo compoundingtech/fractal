@@ -4,6 +4,43 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('pairing challenge object siblings constrain every union branch in both decode modes', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const assistantEnvelope = require('../../../docs/st3/client-v0/fixtures/assistant-pairing-challenge.json');
+    const capabilities = require('../../../docs/st3/client-v0/fixtures/capabilities.json');
+    const person = {
+        kind: 'pairing-challenge', pairing_id: 'pairing/person', code: 'ABCDEFGH',
+        expires_at: assistantEnvelope.value.expires_at,
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const challenge = Rich.decodeUnknownSync(Rich.PairingChallenge, mode);
+        const envelope = Rich.decodeUnknownSync(Rich.Envelope, mode);
+        for (const wire of [person, { ...person, grant_kind: 'person' }, assistantEnvelope.value]) {
+            const encoded = Schema.encodeSync(Rich.PairingChallenge)(challenge(wire));
+            assert.equal(encoded.kind, wire.kind);
+            assert.equal(encoded.pairing_id, wire.pairing_id);
+            assert.equal(encoded.code, wire.code);
+            assert.equal(encoded.expires_at, new Date(wire.expires_at).toISOString());
+            assert.equal(envelope({ ...assistantEnvelope, value: wire }).value.kind, 'pairing-challenge');
+            for (const key of ['kind', 'pairing_id', 'code', 'expires_at']) {
+                const missing = { ...wire };
+                delete missing[key];
+                assert.throws(() => challenge(missing), `${mode}: missing ${key}`);
+            }
+            for (const invalid of [{ kind: 'capabilities' }, { code: 'invalid' }, { expires_at: 'invalid' }]) {
+                assert.throws(() => challenge({ ...wire, ...invalid }));
+            }
+        }
+        assert.equal(envelope(capabilities).value.kind, 'capabilities');
+        assert.throws(() => challenge(capabilities.value));
+        assert.throws(() => challenge({ ...person, grant_id: assistantEnvelope.value.grant_id }));
+        assert.throws(() => challenge({ ...assistantEnvelope.value, person_root_fingerprint: `sha256:${'A'.repeat(43)}` }));
+    }
+    const future = { ...person, future_field: true };
+    assert.equal(Rich.decodeUnknownSync(Rich.PairingChallenge)(future).kind, 'pairing-challenge');
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PairingChallenge, 'strict')(future));
+});
+
 test('queued mission deadlines decode null and admission timestamps', async () => {
     const [{ Option, Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
@@ -97,6 +134,8 @@ test('unknown cases round-trip tolerantly and reject in both strict decoding API
     assert.deepEqual(future, { _tag: 'Unknown', raw: 'future-error' });
     assert.equal(Schema.encodeSync(Rich.ErrorCode)(future), 'future-error');
     assert.equal(Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')('not-found'), 'not-found');
+    assert.equal(Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')('agent-roster-cut-not-ready'), 'agent-roster-cut-not-ready');
+    assert.equal(Schema.encodeSync(Rich.ErrorCode)('agent-roster-cut-not-ready'), 'agent-roster-cut-not-ready');
     assert.throws(() => Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')('future-error'));
     assert.deepEqual(Effect.runSync(Rich.decodeUnknownEffect(Rich.ErrorCode)('future-error')), future);
     assert.throws(() => Effect.runSync(Rich.decodeUnknownEffect(Rich.ErrorCode, 'strict')('future-error')));
@@ -364,6 +403,23 @@ test('usage identity metadata is additive and independent of quota age', async (
         assert.equal(Schema.encodeSync(Rich.UsageLimit)(decoded).identified, identified);
     }
     assert.throws(() => decode({ ...wire, identified: 'stale' }));
+});
+
+test('exact agent subscriptions preserve the selector and reject other collections', async () => {
+    const [{ Schema, Option }, Rich] = await modules;
+    const command = { kind: 'subscribe', id: 'details', collection: 'agents', agent: 'agent/example/worker', limit: 1 };
+    const decode = Rich.decodeUnknownSync(Rich.CollectionCommand, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionCommand)(decode(command)), {
+        ...command, actor: null, person: null, status: null,
+    });
+    assert(Option.isNone(decode({ ...command, agent: null }).agent));
+    assert(Option.isNone(decode({ ...command, agent: undefined }).agent));
+    for (const agent of ['worker', 'person/worker', 'agent/', 'agent/bad id']) {
+        assert.throws(() => decode({ ...command, agent }));
+    }
+    for (const collection of ['missions', 'attention', 'work', 'glasses', 'arrangements']) {
+        assert.throws(() => decode({ ...command, collection }));
+    }
 });
 
 test('arrangement subscriptions require a concrete owner and placements preserve explicit root', async () => {
