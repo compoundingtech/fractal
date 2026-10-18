@@ -5,6 +5,7 @@ import { createStylexVitePlugins } from '../../../apps/fractal-web/scripts/style
 const config: StorybookConfig = {
   stories: [
     '../src/**/*.stories.tsx',
+    '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx',
     '../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx',
   ],
   staticDirs: ['./fixtures'],
