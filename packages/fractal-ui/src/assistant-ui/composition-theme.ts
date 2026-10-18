@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex'
-import { surfaceVars, textVars, borderVars, accentVars, interactionVars, focusRingBridgeVars, elevationVars, statusVars, colorVars } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, accentVars, interactionVars, focusRingBridgeVars, elevationVars, statusVars, colorVars, diffPanelVars } from './composition-tokens.stylex'
 
 export type Scheme = 'dark' | 'light'
 
@@ -94,6 +94,12 @@ const colorTheme = stylex.createTheme(colorVars, {
   scrollThumbHover: 'rgba(0, 0, 0, 0.25)',
 })
 
-export const lightThemeWithoutStatus = [surfaceVarsTheme, textVarsTheme, borderVarsTheme, accentVarsTheme, interactionTheme, focusRingBridgeTheme, elevationTheme, colorTheme] as const
+const diffPanelTheme = stylex.createTheme(diffPanelVars, {
+  added: '#1d4ed8',
+  removed: '#b91c1c',
+  literal: '#92400e',
+})
+
+export const lightThemeWithoutStatus = [surfaceVarsTheme, textVarsTheme, borderVarsTheme, accentVarsTheme, interactionTheme, focusRingBridgeTheme, elevationTheme, colorTheme, diffPanelTheme] as const
 export const lightTheme = [...lightThemeWithoutStatus, lightStatusTheme] as const
 export const lightThemes = { color: colorTheme }
