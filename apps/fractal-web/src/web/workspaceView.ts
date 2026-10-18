@@ -27,9 +27,6 @@ export const workspaceView = (pane: { readonly ref: string } | undefined): Works
           ? { _tag: 'Document', ref: pane.ref }
         : { _tag: 'ViewUnavailable', ref: pane.ref, reason: 'This web client does not render this view yet.' }
 
-export const workspaceViewNotice = (view: Extract<WorkspaceView, { _tag: 'ViewUnavailable' }>): string =>
-  `View unavailable. ${view.reason}`
-
 // App screens opened from the sidebar footer: their tabs read as the buttons that opened them.
 const SCREEN_LABELS: Readonly<Record<string, string | undefined>> = { [MISSIONS_REF]: 'Missions', 'monitor/quota': 'Usage' }
 
