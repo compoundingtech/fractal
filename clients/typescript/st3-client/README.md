@@ -13,6 +13,22 @@ The client uses standard `fetch`, so callers can supply a fetch implementation a
 
 The default transport binds `globalThis.fetch` to `globalThis`, preserving the receiver required by browser implementations. Supplying `fetchImpl` overrides that default without rebinding the custom implementation.
 
+Every HTTP method accepts a final optional `RequestOptions` argument (`{ signal?: AbortSignal }`).
+Existing query options and optional defaults keep their positions: for example,
+`runtimesGet(id, { signal })`, `messageSend(input, { signal })`, and
+`resourcesList(filters, pageOptions, { signal })`. Cancellation is checked before fetching
+and after asynchronous credentials/discovery; the signal stays attached to native fetch while
+the JSON body is consumed. Cancellation does not prove an action was not delivered and never retries it.
+
+`collectionStream` resolves to the pre-open command surface. Its optional `onOpen` callback
+reports actual WebSocket readiness once, before buffered commands flush. Commands issued inside
+`onOpen` queue behind prior commands, preserving cancellation and replacement order. Closing or
+throwing during `onOpen` discards the queue. Known frame envelopes
+are structurally validated before `onFrame`; resource rows and timeline entries remain raw for
+tolerant per-row decoding. Unknown kinds and additive fields remain available to consumers.
+Malformed framing and exceptions from `onFrame` or `onOpen` close the socket and reach `onEnd(error)`
+once instead of escaping the WebSocket event handler.
+
 Run the client checks from the repository root with Node 24 and Corepack:
 
 ```sh
@@ -22,7 +38,7 @@ pnpm --filter @smalltalk/st3-client test
 pnpm --filter @smalltalk/st3-client typecheck
 ```
 
-The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.0-rc.118 in its development dependencies. `pnpm --filter @smalltalk/st3-client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
+The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.0 stable in its development dependencies. `pnpm --filter @smalltalk/st3-client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
 
 To verify generated files against the Rust generator, also run `cargo run -p st3-client-codegen -- --check`. The sibling [`st3-views`](../st3-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2.
 
@@ -69,7 +85,7 @@ Browser `WebSocket` cannot set headers. A browser socket factory must move the c
 
 ## Rich Effect schemas
 
-Import `@smalltalk/st3-client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0-rc.118` peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
+Import `@smalltalk/st3-client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0` stable peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
 
 ```ts
 import * as St3Schema from '@smalltalk/st3-client/schema'
@@ -80,6 +96,10 @@ const strictDecode = St3Schema.decodeUnknownEffect(St3Schema.ErrorCode, 'strict'
 ```
 
 The synchronous and effectful decode helpers default to tolerant mode: unknown enum values survive as `UnknownCase`, excess struct keys are ignored, and `null` on an optional nonnullable field becomes absence. Strict mode rejects unknown enum cases, excess struct keys, and those optional nonnullable nulls. Declared nullable fields decode to `Option` in both modes; optional nullable fields equate missing with null, and `None` encodes as null. Required nonnullable fields reject null in both modes. Arbitrary JSON bags are not interpreted as unknown enum cases merely because they contain `_tag` and `raw`.
+
+Object constraints beside `oneOf` apply to every generated branch, including shared required fields and discriminators. Tolerant decoding may ignore future keys, but does not relax those shared constraints or forbidden branch fields; a capabilities response cannot also decode as a pairing challenge.
+
+Source break for general pairing callers: `PairingBegin` and `PairedSession` are now untagged unions (`PersonPairingBegin | AssistantPairingBegin`, `PersonPairedSession | AssistantPairedSession`), so callers that read `person_id` or person-only fields off the generic types must narrow to the person variant first; `person_id` is optional on shared projections such as `Device`. Person-only callers can switch to the `PersonPairingBegin`/`PersonPairedSession` types and keep their existing shape. The Rust person variants enforce `deny_unknown_fields`.
 
 Inline semantic keywords provide branded strings and subject references, UTC instants, durations, and redacted credentials. Integer codecs reject unsafe JavaScript integers on decode and encode. Duration codecs round to whole wire units on encode; second durations preserve exact safe-integer units without overflowing millisecond precision. Recursive Glass layouts remain validated through suspended schemas.
 

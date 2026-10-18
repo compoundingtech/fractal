@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "89aeadb59b0975baeb1d641696cdb28e05f5ee4d7b2a725fb29c2f3bd79fdb08",
+  "lockfileSha256": "9715380f6cb356ce08fde54093cb4d3140c1792a4f779af8a091d073a9d5a994",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -396,12 +396,12 @@
     },
     {
       "name": "@effect/atom-react",
-      "version": "4.0.0-rc.118",
+      "version": "4.0.0",
       "license": "MIT"
     },
     {
       "name": "@effect/vitest",
-      "version": "4.0.0-rc.118",
+      "version": "4.0.0",
       "license": "MIT"
     },
     {
@@ -1881,17 +1881,12 @@
     },
     {
       "name": "@types/react",
-      "version": "19.2.14",
-      "license": "MIT"
-    },
-    {
-      "name": "@types/react",
       "version": "19.2.18",
       "license": "MIT"
     },
     {
       "name": "@types/react-dom",
-      "version": "19.2.3",
+      "version": "19.2.7",
       "license": "MIT"
     },
     {
@@ -2571,7 +2566,7 @@
     },
     {
       "name": "effect",
-      "version": "4.0.0-rc.118",
+      "version": "4.0.0",
       "license": "MIT"
     },
     {

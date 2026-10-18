@@ -12,7 +12,7 @@ import { terminalSubjectForAgent } from '../data/projections.ts'
 import { makeScreen } from '../terminal/fixtures.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: ['runtime/example'], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
 const screen = { ...makeScreen({ scene: 'F3', columns: 40, rows: 4, frame: 0 }), terminal_id: 'terminal/example' as const }
 let registry: AtomRegistry.AtomRegistry
@@ -45,9 +45,9 @@ const grid = () => host.querySelector(`[data-testid="terminal-pane"] [aria-label
 
 describe('agent roster notice', () => {
   it.each([
-    ['ungranted', 'Read access to the agent roster has not been granted.'],
-    ['unsupported', 'This connection does not support the agent roster.'],
-    ['failed', 'The agent roster could not be loaded; reconnect and try again.'],
+    ['ungranted', 'No access to the agent roster. Read access has not been granted'],
+    ['unsupported', 'Agent roster not supported. This connection does not offer it'],
+    ['failed', 'Agent roster could not load'],
   ] as const)('states %s with fixed copy and keeps the read detail out of the page', async (reason, copy) => {
     await mount(unavailable({ reason, detail: 'gateway said EACCES at /private/socket' }))
     const notice = host.querySelector(`[data-wf-roster-reason="${reason}"]`)
@@ -80,7 +80,7 @@ describe('terminal navigation toggle', () => {
   })
   it('enables the same named control only after the roster proves a runtime is present', async () => {
     await mount(waiting)
-    expect(host.textContent).toContain('Waiting for the agent roster.')
+    expect(host.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents')
     expect(toggle()?.disabled).toBe(true)
     expect(toggleDescription()).toBe(waitingReason)
     await mount(observed({ value: [agent] }))

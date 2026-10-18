@@ -18,23 +18,25 @@ it('ANDs the host menu with typed facets, counts them, and resets facets while p
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler machine:dev3 HOST:dev', sort: 'name' }
+  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler machine:synthetic-138/1 HOST:synthetic-138', sort: 'name' }
   const update = (value: SidebarFilters) => { filters = value; render() }
-  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['dev3', 'dev5']} />)
-  const row: SidebarRow = { workspace: { id: 'agent/compiler', title: 'Compiler', host: 'dev3', layout: dailyDriver, unread: [], notifications: [] }, agent: undefined, status: 'idle', needsMe: false }
+  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['synthetic-138/1', 'synthetic-138/2']} />)
+  const row: SidebarRow = { workspace: { id: 'agent/compiler', title: 'Compiler', host: 'synthetic-138/1', layout: dailyDriver, unread: [], notifications: [] }, agent: undefined, status: 'idle', needsMe: false }
   try {
     await act(async () => render())
+    const search = host.querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
+    expect(search.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
     const filterButton = host.querySelector<HTMLButtonElement>('button[aria-label="Filter agents · 2 active"]')!
     expect(filterButton).not.toBeNull()
     await act(async () => filterButton.click())
     const menu = document.body.querySelector<HTMLSelectElement>('select[aria-label="Filter by host"]')!
     expect(menu).not.toBeNull()
-    await act(async () => { menu.value = 'dev5'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
-    expect(filters.host).toBe('dev5')
-    expect(matchesRow({ row, filters, context: '' })).toBe(false)
+    await act(async () => { menu.value = 'synthetic-138/2'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(filters.host).toBe('synthetic-138/2')
+    expect(matchesRow({ row, filters })).toBe(false)
     expect(host.querySelector('button[aria-label="Filter agents · 3 active"]')).not.toBeNull()
-    await act(async () => { menu.value = 'dev3'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
-    expect(matchesRow({ row, filters, context: '' })).toBe(true)
+    await act(async () => { menu.value = 'synthetic-138/1'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(matchesRow({ row, filters })).toBe(true)
     const reset = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Reset filters')!
     await act(async () => reset.click())
     expect(filters).toEqual({ ...defaultFilters, query: 'compiler', sort: 'name' })

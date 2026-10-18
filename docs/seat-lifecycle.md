@@ -39,6 +39,9 @@ held claims do not read full subject status for lease maintenance. Checking work
 status keeps resident seats cheap without extending the renewal period or weakening the
 incarnation check.
 
+A restart of a seat that is up and ready first asks it for its handoff and waits at most two minutes
+(`--now` skips the wait); see [seat handoff](st3/seat-continuity.md).
+
 A restarted seat that cannot continue its conversation (another account, another model, a crash)
 gets a first message with the handoff it left and the live state of its work. See
 [seat handoff](st3/seat-continuity.md); a seat writes its handoff with `st agents handoff write`.
@@ -52,6 +55,27 @@ st agents resume agent/garden/worker --as person/ada
 ```
 
 Suspend refuses a busy seat with its blockers: a turn, claimed work, pending question, unsent input, or running subagent. A new harness may need one turn before it has a saved native session. Mail waits while suspended; it does not wake the seat. Resume verifies the same session on the same host. See [suspend/resume](st3/suspend.md) for failure reasons and limits.
+
+## Client end reasons
+
+Client-v0 agent rows optionally carry `end_reason`: a derived terminal classification,
+not a new lifecycle write. Its `kind` distinguishes clean completion, a stop requested
+by a person or agent, a crash, a diagnostic harness exit, a lost host, and retirement.
+`ended_at` identifies the observed boundary; available actor, reason, exit code/signal,
+and diagnostic accompany it.
+
+Missing evidence remains absent. Completion requires a current ended harness or an
+observed exited runtime, explicit exit 0, no signal, and no stop request. Terminal
+harness diagnostics remain tied to that runtime incarnation after its exit; a newer
+incarnation cannot inherit them. Unknown actors are not guessed. A stop request is
+not an ended reason until termination is observed; confirmed suspension is separate
+positive evidence. Confirmed owned-set retirement and actor-attributed stops remain
+explainable on historical rows and take precedence over an otherwise clean exit.
+Provider exit codes take precedence over wrapper outcome codes; failure in either
+source prevents completion. Suspension evidence uses the same snapshot and retains
+the original suspend actor and boundary when a different requester fails to resume.
+Consumers preserve stale/missing observation states instead of displaying retained
+completion evidence as current success.
 
 ## One-shot seats
 
@@ -169,6 +193,70 @@ originating `CODEX_HOME`. Discovery currently reads `$HOME/.codex/sessions`, inc
 symlink to another home; sessions stored only in another home are not discovered yet
 ([#1495](https://github.com/compoundingtech/smalltalk/issues/1495)).
 
+OMP imports use the same strict resume handshake, with `ST3_NATIVE_RESUME_SESSION`
+holding the native session ID and `ST3_NATIVE_RESUME_PATH` pinning the absolute
+transcript path. The driver validates the transcript header, links the transcript
+and its artifacts into the managed inventory without copying them, and launches OMP with that exact
+path. Missing or mismatched transcripts fail the launch rather than starting anew.
+The pair bootstraps an imported or repaired seat until an incarnation-bearing
+durable `harness.session-file` binding records a `desired_token` naming the
+declaration that introduced or last changed the pair, or a canonically later
+declaration carrying the same pair. The launcher stamps this token into
+`ST3_LAUNCH_DESIRED_TOKEN`, and the native-session report persists it in the binding.
+An incumbent's late binding carrying a pre-repair token cannot consume bootstrap.
+Local start-observation trimming and replication to another node cannot rearm it.
+Bindings from older drivers without this optional field never expire bootstrap;
+they remain strict until an upgraded driver publishes a proven binding.
+Unrelated declaration edits do not reset it. Subsequent restarts ignore the pair
+and continue the latest bound native session by ID within the linked inventory.
+Only strict import bootstrap uses its pinned transcript path. Explicit suspension
+resumes and rollouts retain strict selectors.
+Declaration/binding and refusal/binding precedence use canonical claim order,
+so replication arrival order does not change which native session launches.
+
+Ordinary continuation reads the linked managed inventory by native ID. If its
+transcript is missing, the driver reports a visible `native-continue-unavailable`
+warning with status `transcript-missing` and starts a fresh session. The refusal is
+remembered permanently for that native ID, even after a newer binding. Subsequent
+launches do not retry the refused continuation or the original import bootstrap,
+so relocation does not cause a repeated refusal loop. A selector-scoped
+`authored-session-selection` refusal can stop applying after the selector changes
+or a canonically newer binding. Supporting relocation requires an
+owned-inventory relink shared by reporting, ask recovery, suspension and rollout
+consumers.
+
+The daemon and native driver must both support strict OMP import paths. An older
+driver with a new import declaration rejects the strict path contract; upgrade
+both before importing.
+
+### Repair an OMP import created before strict resume
+
+Upgrading st does not migrate stored declarations. Re-importing an already-declared
+seat does not replace its declaration. Stop the seat and export its current KDL:
+
+```sh
+st agents stop agent/import/omp/ID --as person/ada
+st subject show agent/import/omp/ID --kdl --show-env-values > imported.kdl
+```
+
+Keep the identity, workspace, and other settings. Remove the harness's
+`args "--resume=/absolute/transcript.jsonl"` selector and add:
+
+```kdl
+env {
+  ST3_NATIVE_RESUME_SESSION "NATIVE_SESSION_ID"
+  ST3_NATIVE_RESUME_PATH "/absolute/transcript.jsonl"
+}
+```
+
+The native ID must match the transcript's session header. Apply the repaired
+declaration and inspect the resulting seat:
+
+```sh
+st apply imported.kdl --as person/ada
+st agents show agent/import/omp/ID
+```
+
 ### Repair a Codex import created before strict resume
 
 Upgrading st does not rewrite an existing imported seat's stored declaration. A Codex import
@@ -232,6 +320,12 @@ st agents show agent/garden/worker --json
 st subject history agent/garden/worker --limit 20
 st doctor
 ```
+
+Ordinary `st agents ls` and `st agents tree` read the latest published roster without
+requesting a refresh. Immediately after starting or changing an agent they can show the
+earlier roster; after daemon startup the roster may still be being prepared. When you need
+to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
+client read and check the served snapshot index. This is not a replicated or cross-host cut.
 
 Read the selected declaration, latest runtime, and stop/suspension reason together. A seat hidden from the default list can still be shown by its exact ID. A `stale` delivery path means its message channel is not proving readiness; `outdated` means it is running older code. Check the local host's doctor report and any login/trust prompt before restarting. Resume a suspended seat; start an intentionally stopped one; restart a stale running one after fixing the cause.
 
@@ -424,7 +518,7 @@ The version-19 roll is forward-only. Operations' routine pre-roll backup remains
 
 Before either a requested pre-upgrade rollback cut or an emergency restoration capture:
 
-1. Record the member's exact binary SHA, resolved roots and a reviewed, explicit JSON array of owned runtime IDs. On that owner's daemon, run `st agents ls --all --json`, follow every returned cursor with `--cursor`, and retain all pages. Use each local agent's runtime ID, plus the exact runtime IDs of operations being closed and declared exec runtimes from the owner inventory. Historical agent rows are not proof of live writers. Supplement this with Operations' service/process inventory so an undeclared but live producer/runtime cannot be omitted. An unlisted live writer makes the capture inconsistent and prohibits swap-back. Resolve every unknown producer and runtime; an incomplete inventory prohibits swap-back. Do not enumerate or copy the exec/PTY trees to construct this list.
+1. Record the member's exact binary SHA, resolved roots and a reviewed, explicit JSON array of owned runtime IDs. On that owner's daemon, run `st agents ls --all --json`, follow every returned cursor with `--cursor`, and retain all pages. Use each local agent's runtime ID, plus the exact runtime IDs of operations being closed and declared exec runtimes from the owner inventory. The roster is the latest publication, not a synchronous inventory: after startup it may be unavailable and after a write it may lag. A same-host receipt cut fences only graph publication, not the completeness of the service/process inventory. Historical agent rows are not proof of live writers. Supplement this with Operations' service/process inventory so an undeclared but live producer/runtime cannot be omitted. An unlisted live writer makes the capture inconsistent and prohibits swap-back. Resolve every unknown producer and runtime; an incomplete inventory prohibits swap-back. Do not enumerate or copy the exec/PTY trees to construct this list.
 2. Withdraw launch authority, stop each owned runtime through ordinary incarnation-fenced controls, and obtain the per-operation evidence below while the daemon can still reconcile. `START JOBS=0` and `START OPEN=0` are necessary checks for modern operations, not closure proof. If a producer or runtime cannot be proved closed, preserve the store and roll forward. Stopping the daemon or losing a PID does not supply that proof.
 3. Quiesce the daemon under its service manager only after closure is established. Keep it stopped and prevent any listed runtime/producer from writing its records throughout the capture. If a writer cannot be quiesced, do not take a purportedly consistent capture.
 4. Take a SQLite backup and copy only the named generation/scope files into one new private archive, recording each listed file's presence or absence. The following Python 3.9-compatible recipe uses point lookups, not directory walks. A SQLite backup includes committed WAL contents; copying `claims.sqlite3` alone while a WAL exists is insufficient. The archive does not contain live sockets, processes or kernel locks.

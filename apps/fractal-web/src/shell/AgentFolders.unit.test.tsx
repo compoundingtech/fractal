@@ -16,11 +16,12 @@ import { describe, expect, it, vi } from 'vitest'
 // Node tests stub only the CSS runtime (see ConversationPane tests). This stub keeps the one
 // fact under test observable: each style a component applies through stylex.props becomes a
 // `stylex:<key>` class, and a key missing from stylex.create applies nothing.
-vi.mock('@stylexjs/stylex', () => {
+vi.mock('@stylexjs/stylex', async () => {
   type Applied = string | false | null | undefined | readonly Applied[]
   const classNames = (style: Applied): readonly string[] =>
     typeof style === 'string' ? [style] : Array.isArray(style) ? style.flatMap(classNames) : []
   return {
+    ...await import('../testStylex.ts'),
     create: (styles: Readonly<Record<string, unknown>>) =>
       Object.fromEntries(
         Object.entries(styles).map(([key, style]) => [
@@ -28,14 +29,12 @@ vi.mock('@stylexjs/stylex', () => {
           typeof style === 'function' ? () => `stylex:${key}` : `stylex:${key}`,
         ]),
       ),
-    defineVars: (variables: unknown) => variables,
-    createTheme: () => ({}),
-    keyframes: () => 'test-animation',
     props: (...styles: readonly Applied[]) => ({ className: classNames(styles).join(' ') }),
   }
 })
 
 import { fixtureSource } from '../data/fixtureSource.ts'
+import { fleetFromAgents } from '../data/projections.ts'
 import { DataSourceProvider, useSubjectList } from '../data/react.tsx'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import type { ArrangementRefusal, SidebarOperation } from '../folders/edit.ts'
@@ -53,10 +52,12 @@ const viewportSize: ResizeObserverSize = { inlineSize: viewport.width, blockSize
 
 class StubResizeObserver implements ResizeObserver {
   private readonly callback: ResizeObserverCallback
+  private readonly targets = new Set<Element>()
   constructor(callback: ResizeObserverCallback) {
     this.callback = callback
   }
   observe(target: Element): void {
+    this.targets.add(target)
     const entry: ResizeObserverEntry = {
       target,
       contentRect: DOMRect.fromRect(viewport),
@@ -64,18 +65,23 @@ class StubResizeObserver implements ResizeObserver {
       contentBoxSize: [viewportSize],
       devicePixelContentBoxSize: [viewportSize],
     }
-    this.callback([entry], this)
+    // Browser observers deliver after layout, never synchronously inside React's commit.
+    queueMicrotask(() => {
+      if (this.targets.has(target)) this.callback([entry], this)
+    })
   }
-  unobserve(): void {}
-  disconnect(): void {}
+  unobserve(target: Element): void { this.targets.delete(target) }
+  disconnect(): void { this.targets.clear() }
 }
 globalThis.ResizeObserver = StubResizeObserver
 Element.prototype.getBoundingClientRect = function (): DOMRect {
   return DOMRect.fromRect(viewport)
 }
 
+const placedName = fixtureProjections.agents[0]!.name!
+const folderName = `Product ${placedName}`
 const folderOps = (refs: readonly string[]): readonly SidebarOperation[] => [
-  { op: 'folder.create', id: 'product', name: 'Product', parent: null, key: 'V' },
+  { op: 'folder.create', id: 'product', name: folderName, parent: null, key: 'V' },
   { op: 'subject.place', subject: refs[0]!, folder: 'product', key: 'W' },
 ]
 
@@ -116,7 +122,7 @@ const FolderTree = ({ query }: { readonly query: string }) => {
   )
 }
 
-const mountTree = ({ query }: { readonly query: string }) => {
+const mountTree = ({ query, collapsed = [] }: { readonly query: string; readonly collapsed?: readonly string[] }) => {
   const registry = AtomRegistry.make()
   const source = fixtureSource({ world: fixtureProjections })
   registry.get(fixtureFolders).edit(folderOps(fixtureProjections.agents.map((a) => a.id)))
@@ -124,6 +130,7 @@ const mountTree = ({ query }: { readonly query: string }) => {
     ...defaultFilters,
     query,
   })
+  registry.set(fixtureSidebarState(source.gateway ?? source.mode).collapsed, collapsed)
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
@@ -145,12 +152,14 @@ const mountTree = ({ query }: { readonly query: string }) => {
 
 describe('AgentFolders row styling', () => {
   it('applies the folder row, search highlight and notice styles', async () => {
-    const tree = mountTree({ query: 'product' })
+    // Free text matches agent identities; ancestors of matching members remain visible.
+    // Include that identity in the folder label to exercise both highlight surfaces.
+    const tree = mountTree({ query: placedName })
     try {
       await vi.waitFor(() =>
         expect(tree.container.querySelectorAll('[role="row"]').length).toBeGreaterThan(0),
       )
-      const folderRow = tree.container.querySelector('[role="row"][aria-label="Product"]')
+      const folderRow = tree.container.querySelector(`[role="row"][aria-label="${folderName}"]`)
       expect(folderRow).not.toBeNull()
       expect(folderRow!.querySelector('[class~="stylex:folder"]')).not.toBeNull()
       const marks = [...tree.container.querySelectorAll('mark')]
@@ -160,6 +169,19 @@ describe('AgentFolders row styling', () => {
       const notice = tree.container.querySelector('[role="status"]')
       expect(notice).not.toBeNull()
       expect(notice!.classList.contains('stylex:notice')).toBe(true)
+    } finally {
+      tree.unmount()
+    }
+  })
+
+  it('reveals a saved-collapsed folder for a facet-only search without highlighting facet text', async () => {
+    const placed = fleetFromAgents(fixtureProjections.agents).agents[0]!
+    const tree = mountTree({ query: `state:${placed.state}`, collapsed: ['product'] })
+    try {
+      await vi.waitFor(() =>
+        expect(tree.container.querySelector(`[role="row"] [data-wf-agent-ref="${placed.ref}"]`)).not.toBeNull(),
+      )
+      expect(tree.container.querySelectorAll('mark')).toHaveLength(0)
     } finally {
       tree.unmount()
     }
