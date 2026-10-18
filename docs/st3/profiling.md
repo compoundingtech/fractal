@@ -20,6 +20,11 @@ newest publication at once. Its original snapshot cut and publication time show 
 The other two answer at once from a published roster. Count the fresh row against its own
 target: the route total includes it.
 
+A first page with `min_cut=N` instead waits for that fixed host-local acceptance index,
+not the changing request head. It uses the same `fresh` request-latency classification and
+`fresh-wait`/`fresh-page` stages. If both `fresh=true` and `min_cut` are supplied, only the
+named barrier runs. Plain CLI listings send neither and remain `first-page` reads.
+
 `scope: "agents-roster"` rows (also under route `/v1/client/agents`) time where that wait goes,
 each in its own last-512 sample, `duration_scope: "roster-stage"`. Stage `refresh` is one refresher
 fold from the previous publication, `refresh-cold` one with no publication to start from, which
@@ -46,6 +51,91 @@ subtract writer wait or report only a hierarchy component. This is server comple
 network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
 route durations include deliberate waiting.
 
+## Background task CPU
+
+The daemon exports `st.task.cpu_time`, a monotonic counter in seconds, and
+`st.task.polls`, a counter of future polls and blocking invocations, through its
+existing OTel meter provider. Both carry the bounded static attribute `st.task`.
+Two thread-CPU clock reads bracket each future poll, on the thread executing
+that poll; time asleep, queued, or waiting between polls is not CPU. Blocking
+callbacks are measured on their executing thread, not the awaiting Tokio worker.
+These counters do not require file profiling. An unavailable thread CPU clock
+omits that CPU sample rather than recording wall time; polls still count.
+Task metric recording is enabled only after the OTel metrics provider is installed.
+With metrics disabled, each async wrapper checks that switch once and awaits its
+future directly; each blocking scope checks it once before constructing instruments,
+reading clocks or entering the task-metric recorder. New callback and writer batch
+lexical scopes also skip performance/profile/origin entry entirely when disabled.
+Callbacks that already had synchronous attribution use explicit profile-preserving
+or performance-only adapters; their existing shared performance-meter lock and
+attribution remain independent of metrics export and are not claimed to be zero-cost.
+The reconcile cost-counter metric covers classified background passes only:
+completed startup, notification, deadline and changed-repeat trigger spans, with
+only SQL recorded inside those same spans. It reads both operation buckets:
+`reconcile` owns a pass with task metrics on; `task reconcile-pass` owns it with
+file profiling on and task metrics off. The inner task never starts a second
+operation while the outer one is current, so each pass contributes only once.
+Direct and unclassified passes, next-deadline callbacks and async polls are excluded.
+The direct/unclassified remainder is not measured and is not exported as zero.
+Process CPU remains a whole-process measurement, not classified-pass CPU.
+Each future keeps CPU and poll totals locally, flushing to OTel at most once a
+second while polling and once when it completes or is dropped. A parked task's
+remaining sample is flushed when it next polls or is dropped; there is no timer
+task per wrapper. Nested wrappers on the same thread count their polls but leave
+CPU to the outermost wrapper, so adding their rates does not count that CPU twice.
+Blocking invocations flush on return (or unwind), not once per second. An
+outermost invocation reads the thread CPU clock twice; each invocation adds its
+poll count and nonzero CPU to OTel and records a performance task (including the
+shared meter lock).
+The CPU counter measures the wrapped work, not the full cost of publishing its
+own sample; process CPU is needed to measure instrumentation overhead.
+
+For a Prometheus translation that replaces dots with underscores and appends the
+counter suffix, CPU usage in cores is:
+
+```promql
+sum by (st_task) (rate(st_task_cpu_time_total[5m]))
+```
+
+Collectors that add unit suffixes may expose this as
+`st_task_cpu_time_seconds_total`; use the collector's translated name. In Grafana
+dashboards use `$__rate_interval` instead of a fixed range.
+
+Names distinguish `reconcile` and its timers, `published_list.agents`,
+`published_list.missions`, `published_list.work`, replication transport and
+export/receive work, startup warmup, checkpoints/WAL, retention and other
+maintenance. They contain no seat IDs, peer names, collection values from
+requests, or request paths. HTTP handlers and serving tasks remain under their
+existing HTTP instrumentation, not these background-task wrappers. Work done by
+child processes is not included in the parent's thread CPU.
+
+The same static task scopes label background writer submissions when file
+profiling is enabled. Each batched savepoint runs under its own submitter's
+profile operation. `writer.batch.job` includes SAVEPOINT, the callback and
+RELEASE or ROLLBACK TO/RELEASE, including unsuccessful callbacks. Its `st.task`
+CPU is an aggregate across writer jobs, not attribution to an individual request
+or original background task. Nested wrappers count invocations but leave CPU to
+this outer job scope. Shared setup uses `writer.batch.setup`; finalizers, COMMIT
+(or failed-batch resolution) and postcommit observers use one nonoverlapping
+`writer.batch.commit` invocation. Thus a batch with N executed jobs has N job
+invocations and one setup and one commit invocation; nested callbacks can add
+their own poll counts, but not duplicate CPU. A job skipped after batch failure
+has no executed-job sample. Individual submitters retain their profile CPU,
+I/O and SQL attribution. All accounting scopes finish before acknowledgements,
+so callers cannot snapshot their completed operations before samples arrive.
+
+The batch `WriterHold` and telemetry `Holding` guard also drop before the first
+ACK is sent, after postcommit callbacks and sample publication. Previously they
+dropped when the batch function returned, after sending every ACK. The holds
+window now removes the in-progress batch and records its held duration before
+ACK delivery; holder totals/maxima, long-hold durations and over-target counts
+exclude ACK-channel blocking/delivery time. The OTel writer holder is cleared
+before ACKs, so a waiter during ACK delivery no longer sees the preceding job as
+the holder. This does not mean the writer has started its next batch: ACK
+backpressure can still delay that. It does not change COMMIT durability or
+move observers after acknowledgements.
+
+
 ## Targets and live windows
 
 [`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
@@ -60,9 +150,9 @@ time from a subscription on the client collections socket to its first snapshot,
 page or terminal screen. A read the daemon relayed from another machine's owner counts toward
 the target's `remote_windows` and its remote target. A request that asks to wait (`wait_ms` above
 zero, or `wait=true`) is a long poll: it is kept under `METHOD /route (long poll)` and counts
-toward no target. An agents list asked to be fresh (`fresh=true`, which `st agents ls` and
-`st agents tree` always send) waits for one roster refresh by design but is still a wait a person
-sits through, so it is the path `GET /v1/client/agents (fresh)` with its own `person-read-fresh`
+toward no target. An agents list with legacy `fresh=true` or an explicit `min_cut` asks to wait for a
+publication. Ordinary `st agents ls` and `st agents tree` send neither. The explicit wait is
+still a wait a person sits through, so it is the path `GET /v1/client/agents (fresh)` with its own `person-read-fresh`
 target and counts toward no other: a first page is held to the 100 ms of `person-read`, a fresh
 list to 300 ms. The `sql-statement`, `transaction` (`read`, `write`, `writer_hold`) and `cpu`
 rows cover the store's statements, its read and write transactions, each hold of its single
@@ -77,10 +167,39 @@ oldest first, with its holder, start (`started_unix_ms`) and `held_ms`, so a stu
 before it ends. `holders` ranks up to 16 holders by writer time over the last hour (count, over
 target, total and max). `long_holds` and `long_reads` keep the last 64 writer holds and read
 transactions over the target in that hour, newest first; a long hold also gives its `kind`
-(`batch` or `lend`), `writes` and `longest_write_ms`. `open_reads` lists up to eight read
+(`batch` or `lend`), `writes` and `longest_write_ms`. The replication projection chunk's loan
+also says where its hold went: `stages` gives the time in each of `begin` (BEGIN IMMEDIATE),
+`chunk-read` (the frontier and chunk bounds), `incremental`, `replay`, `after-projection`,
+`health` (the projection_health write), `commit`, `rollback`, `callbacks` (the caller's progress
+and log sinks, which run under the writer) and `release` (giving the connection back, with the
+commit observers it runs). `unattributed_ms` is the rest: the handoff between the writer thread
+and the borrower. Its hold in progress names the `stage` it is in. Other holds carry no stages.
+`begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
+not by itself show that their marks are placed right. `open_reads` lists up to eight read
 snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
 waiting for admission, and `threads` counts this process's threads, in all and by name. `st
 doctor` prints it as `slo/writer-hold`.
+
+Three more fields show what keeps the WAL from recycling:
+- `read_loans` lists every read loan now, grouped by the route label of the read budget it works
+  under (`(no budget)` for background work). Each route gives `checkouts`,
+  `snapshot_checkouts`, `expired` (loans whose budget has run out), `oldest_checkout_age_ms` and
+  `oldest_snapshot_confirmed_age_ms`. The eight routes with the oldest checkouts come first, and
+  the rest are summed as `(other)`. A checked-out loan need not hold a read transaction; a
+  confirmed snapshot has completed its first read and does.
+- `wal` is the newest attempt by the WAL checkpoint worker, which tries every five seconds:
+  `checkpoint` (`outcome` empty, recycled, deferred or error, with `frames`, `backfilled`,
+  `not_backfilled` and its phase times), `wal_bytes` (the WAL file's size), `age_ms`, and
+  `deferred_ms`, how long checkpoints have been deferred or failing since one last settled.
+- `snapshot_build` gives windows for the three phases of building a replication snapshot:
+  `wait` for the build lock, which one build holds at a time; `inventory` for reading the
+  envelope inventory; and `digest` for hashing its digests. A build that fails partway still
+  records the phases it reached, so these are not only successful builds.
+
+Waiting for a reader, the writer's queue, commits and checkpoints are measured as OpenTelemetry
+histograms when export is on: `db.client.connection.wait_time` (read admission),
+`st.db.writer.queue.duration` (writer admission), `st.db.writer.commit.duration` and
+`st.db.wal.checkpoint.duration`.
 
 The `database` row is this member's store: `max_live_gb` for the pages in use (the file less its
 free pages, which SQLite reuses before the file grows) and `max_growth_mb_per_day` for their net
@@ -161,8 +280,8 @@ load.
 | `ST3_PROFILE_SLOW_MS` | Writes a line for each operation slower than this. The default is 250. |
 | `ST3_PROFILE_PTRACER` | Linux only. Lets any process of the same user trace the daemon, so a stack sampler such as `eu-stack` can attach on hosts that allow tracing only a process's own children. |
 
-The daemon records each request route (`GET /v1/messages/page`) and each background pass (`task
-reconcile-pass`, `startup open-store`) as one operation. For each operation it records:
+The daemon records each request route (`GET /v1/messages/page`) and each background pass
+(`reconcile`, `startup.open_store`) as one operation. For each operation it records:
 
 - Its wall time and how long it queued before a thread began it.
 - How long it waited for the store's writer, how long it held the writer, and which operation held
@@ -218,12 +337,12 @@ The socket's existing 30-second timer remains the delivery cadence for clock-onl
 This cache covers the six collections named above.
 
 A disposable local single-client cold-read comparison is available with:
-`cargo test -p st3 --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
+`cargo test -p st3-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
 It compares uncached, cold cached and warm reads for 100 glass rows under Unix and paired
 sessions, alternating case order and reporting aggregate wall/process CPU. Debug-profile
 fixture results do not measure deployed paired-client CPU or production tail latency.
 
-`cargo test -p st3 --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
+`cargo test -p st3-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
 compares 22 uncached projections with shared cold and 22 warm reads over 70 generated missions
 and person steps, asserting projection parity. Its stage profile separates mission attention-run
 selection, definition reads, run overviews, step previews and attention snapshot work. The
@@ -443,10 +562,10 @@ checks. A full safety read every thirty seconds with a randomized per-binding ph
 dependencies, missed notifications and ownership changes. Initial dispatcher-cursor failures never replay from zero: they retry at
 the current head and resync subscribers once. Batch failures retain their cursor and retry every
 five seconds. A warning log and the `mailbox-wake-dispatcher` doctor check expose failures since
-startup and whether routing is currently degraded. There is no debounce. `task mailbox-wake-dispatch`,
+startup and whether routing is currently degraded. There is no debounce. `mailbox.wake_dispatch`,
 `task mailbox-change-check` and `task mailbox-snapshot` expose the routing, checking and full-read
 costs separately in doctor and profiling counters. Run the isolated many-stream comparison with
-`cargo test --release -p st3 --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
+`cargo test --release -p st3-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
 `ST_MAILBOX_PROFILE_DIR` retains its generated store, latency/CPU results, doctor counters and
 profile. Its load client and daemon run in separate processes.
 
@@ -516,7 +635,7 @@ projection's frontier, full-card reads bypass shared cached rows and cold-build 
 they do not borrow stale queue fields from an earlier physical snapshot.
 
 The isolated 60-agent, six-mission, 60-step fixture counts canonical claim kinds and local samples:
-`cargo test -p st3 --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
+`cargo test -p st3-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
 Its frozen pre-incremental classification distinguishes the old cold fallback from the current
 selected-card build count. Full JSON parity, including queues, todos and usage, is checked by
 `agent_roster_seeded_claim_sequences_match_cold_json` with reproducible proptest sequences,
@@ -558,15 +677,30 @@ With trace export enabled, HTTP reads of a published complete roster or startup 
 `st.roster.mode=hit` and the served publication's card count on their request span. Rebuilds
 remain independent roots of the background refresher, not children of the reading request.
 
+Fresh published first pages also add attributes to that existing request span:
+`st.roster.fresh_wait` is `published`, `unchanged`, `refresh_failed`, `disconnected`,
+`timeout` or `read_failed`. `st.roster.fresh_wait_cut` is the actual wait target,
+which can follow `st.roster.requested_cut`; neither is the served
+`st.roster.publication_cut`. The wait cut is absent if its initial index read failed.
+`st.roster.fresh_proof` is `not_checked`, `verified`, `refused` or `read_failed`,
+and `st.roster.fresh_unchanged_verified` is true exactly for `verified`.
+Only an `unchanged` exit attempts verification, against the exact complete cards,
+cut and publication timestamp served, using the existing fault, expiry, local-frontier
+and claim-delta guards. Eviction between selection and proof honestly refuses verification;
+a head or not-ready response cannot verify a complete publication. Failure, disconnection
+and timeout never imply unchanged cards. These attributes change no response fields or wait
+policy. Only recording traced requests perform the additional read-only snapshot/range proof;
+its cost under claim churn remains unmeasured until the focused native receipt is available.
+
 The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
-incremental-update costs with `cargo test -p st3 --lib agent_roster_snapshot_fixture_timing --
+incremental-update costs with `cargo test -p st3-daemon --lib agent_roster_snapshot_fixture_timing --
 --ignored --nocapture`. It is a serial fixture micro-measure, not a load benchmark. CI's
 `perf-load` workload holds concurrent agents WS subscribers and measures first-snapshot
 latency against the roster's 300 ms budget.
 
 Normal tests include a small cached-versus-uncached roster comparison before and after local
 timeline activity, in both history modes. Run the heartbeat-only fixture with
-`cargo test -p st3 --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
+`cargo test -p st3-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
 it prints append/probe/hit counts, hit rate and elapsed time, requires every heartbeat probe to
 reuse the same immutable rows, and requires a subsequent timeline append to miss before rebuild.
 The normal warm HTTP fixture
@@ -788,7 +922,7 @@ not browser-specific back/forward-cache eligibility. This proves the early path 
 is loading; it does not promise that every network's WebSocket handshake outruns an already-cached
 bundle. Both commands close their ephemeral servers and browser sessions in `finally`.
 
-The daemon's existing [`CollectionSubscribe`](../../crates/st3/src/api/client_v0.rs)
+The daemon's existing [`CollectionSubscribe`](../../crates/st3-api/src/api/client_v0.rs)
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 
