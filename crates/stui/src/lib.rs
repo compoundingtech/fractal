@@ -8,7 +8,7 @@ mod ui;
 mod version;
 mod voice;
 
-pub use ui::screens::HOME_IDLE_TEXT;
+pub use ui::screens::{HOME_IDLE_TEXT, HOME_UNKNOWN_TEXT};
 pub use ui::checklist;
 pub use version::display_version;
 
@@ -146,24 +146,56 @@ fn terminal_closed(revents: libc::c_short) -> bool {
     }
     false
 }
+/// How many looks, a tenth of a second apart, a terminal must keep looking closed before the
+/// watch below ends stui. A terminal that is really gone stays gone; the macOS test in
+/// `terminal_closed` (readable with nothing queued) can also hold for an instant while another
+/// thread of this process drains the keys that made it readable.
+const HANGUP_LOOKS: u32 = 10;
+
+/// Whether the terminal is gone, given one more look: `closed` says this look found it closed,
+/// `definite` that it did so by a hang-up the system reported (a closed look that cannot be a
+/// race). `run` counts the looks in a row that found it closed.
+fn hangup_confirmed(run: &mut u32, closed: bool, definite: bool) -> bool {
+    if !closed {
+        *run = 0;
+        return false;
+    }
+    *run += 1;
+    definite || *run >= HANGUP_LOOKS
+}
 fn watch_terminal_hangup() {
     // crossterm can loop inside event::poll (Darwin) or event::read (Linux) on PTY EOF and
     // never return to the main loop's terminal check; a stui left like that spins at full CPU
     // and keeps polling the daemon for hours. A separate poller observes the hangup without
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
+    //
+    // Nathan, 2026-10-17: stui on a macOS laptop ended again and again with no panic, no signal and no
+    // line in exits.log (`silent_exits` in its counters, a draft restored as unclean). This
+    // thread was the one place that ends the process without a trace, and on macOS a single
+    // look at "readable, nothing queued" was enough. It now needs the look to hold for a
+    // second, and says so in exits.log when it does end stui.
     std::thread::spawn(|| {
+        let mut run = 0;
         loop {
             let mut fd = libc::pollfd {
                 fd: 0,
                 events: libc::POLLIN,
                 revents: 0,
             };
-            if unsafe { libc::poll(&mut fd, 1, 100) } > 0 && terminal_closed(fd.revents) {
+            let closed = unsafe { libc::poll(&mut fd, 1, 100) } > 0 && terminal_closed(fd.revents);
+            let definite = closed && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
+            if closed {
+                // A closed terminal answers at once; keep the looks a tenth of a second apart.
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if hangup_confirmed(&mut run, closed, definite) {
                 std::thread::sleep(Duration::from_millis(25));
                 if stdin_hung_up() {
+                    ui::lastrun_terminal_gone();
                     std::process::exit(0);
                 }
+                run = 0;
             }
         }
     });
@@ -684,7 +716,10 @@ async fn send_terminal_key(
 
 /// Options for the terminal interface shared by `st ui` and plain interactive `st`.
 #[derive(clap::Args, Debug, Default)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Args {
+    #[command(subcommand)]
+    pub action: Option<Action>,
     #[arg(skip)]
     endpoint: Option<PathBuf>,
     #[arg(skip)]
@@ -723,6 +758,38 @@ pub struct Args {
     click: Option<String>,
     #[arg(long, hide = true, requires = "dump")]
     pane: Option<String>,
+}
+
+/// What `st ui` can do without opening the interface.
+#[derive(clap::Subcommand, Debug)]
+pub enum Action {
+    /// Show an agent, a mission or a machine in the person's open terminal interface, in a tab
+    /// or a split. For a seat to use; it opens nothing when no terminal interface is running.
+    ///
+    /// `agent/NAME` opens the conversation. `mission/NAME` and `mission-run/NAME/RUN` open the
+    /// mission view, which stays open and follows the mission from step to step. An item that
+    /// is already open is shown again, never opened twice. The pane takes the person's focus,
+    /// unless they are typing a message or `--keep-focus` says to leave it. The request waits
+    /// for st to know the subject, so an agent made a moment ago can be opened.
+    Open(OpenArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct OpenArgs {
+    /// `agent/NAME`, `mission/NAME`, `mission-run/NAME/RUN` or `machine/NAME`.
+    pub subject: String,
+    /// Open it in a split to the right of the focused one, not in a tab.
+    #[arg(long)]
+    pub split: bool,
+    /// With --split, put the split below the focused one.
+    #[arg(long, requires = "split")]
+    pub below: bool,
+    /// Show it without moving the person's focus to it.
+    #[arg(long)]
+    pub keep_focus: bool,
+    /// Seconds to wait for a terminal interface to show it; 0 queues it and returns at once.
+    #[arg(long, value_name = "SECONDS", default_value_t = 10)]
+    pub wait: u64,
 }
 
 impl Args {
@@ -771,9 +838,71 @@ impl Args {
     }
 }
 
+/// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
+/// say plainly what happened.
+fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
+    use ui::requests::{Answer, Place};
+    let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
+    let person = configured_person()?
+        .filter(|person| person.starts_with("person/") && person.len() > 7)
+        .context("st ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config")?;
+    let dir = ui::requests::dir(&person).context("st ui open needs a state directory: set HOME")?;
+    let place = match (open.split, open.below) {
+        (false, _) => Place::Tab,
+        (true, false) => Place::Right,
+        (true, true) => Place::Below,
+    };
+    let from = std::env::var("ST_AGENT").ok().filter(|from| !from.is_empty());
+    let id = ui::requests::enqueue(&dir, &open.subject, place, open.keep_focus, from)?;
+    if open.wait == 0 {
+        println!(
+            "Queued {}: it opens when {person}'s terminal interface on this machine is running.",
+            pane.key().split_once(':').map_or("", |(_, subject)| subject)
+        );
+        return Ok(());
+    }
+    let wait = Duration::from_secs(open.wait);
+    match ui::requests::wait(&dir, &id, wait) {
+        Some(Answer::Opened { focused }) => {
+            let where_ = match place {
+                Place::Tab => "in a tab",
+                Place::Right => "in a split on the right",
+                Place::Below => "in a split below",
+            };
+            println!(
+                "Opened {} {where_}; {}.",
+                open.subject,
+                if focused {
+                    "the person's focus moved to it"
+                } else {
+                    "the person's focus stayed where it was"
+                }
+            );
+            Ok(())
+        }
+        Some(Answer::NotShown) => anyhow::bail!(
+            "{} was not opened: that terminal interface uses the classic layout, or the person is typing or asked to keep their focus. Ask again without --keep-focus when they are not typing",
+            open.subject
+        ),
+        Some(Answer::NotFound) => anyhow::bail!(
+            "st has no {}: nothing was opened. Check the name with st agents ls or st missions ls",
+            open.subject
+        ),
+        None => anyhow::bail!(
+            "No terminal interface of {person} on this machine showed {} within {} seconds, so nothing was opened. \
+             Nothing was queued either; ask again once they have st open.",
+            open.subject,
+            open.wait
+        ),
+    }
+}
+
 /// Run the TUI before starting a CLI runtime. This owns its runtime and terminal guards,
 /// and sets the client name before any connection can initialize the shared name lock.
-pub fn run(options: Args) -> Result<()> {
+pub fn run(mut options: Args) -> Result<()> {
+    if let Some(Action::Open(open)) = options.action.take() {
+        return open_in_terminal_ui(&open);
+    }
     let process_started = std::time::Instant::now();
     if options.slo {
         ui::slo::print_history();
@@ -875,6 +1004,10 @@ pub fn run(options: Args) -> Result<()> {
         updates,
         command_receiver,
     ));
+    let requests = profile
+        .is_none()
+        .then(|| person.as_deref().and_then(ui::requests::dir))
+        .flatten();
     ui::live::run(ui::live::Context {
         client,
         runtime,
@@ -887,6 +1020,7 @@ pub fn run(options: Args) -> Result<()> {
         open_timing,
         process_started,
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
+        requests,
     })
     .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }
@@ -895,6 +1029,27 @@ pub fn run(options: Args) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_closed_look_that_does_not_hold_never_ends_stui_and_a_hangup_does() {
+        let mut run = 0;
+        // Looks that find the terminal closed now and then, with keys arriving between them,
+        // never add up.
+        for _ in 0..1_000 {
+            for _ in 0..HANGUP_LOOKS - 1 {
+                assert!(!hangup_confirmed(&mut run, true, false));
+            }
+            assert!(!hangup_confirmed(&mut run, false, false));
+        }
+        // One that holds for the whole second ends it.
+        for _ in 0..HANGUP_LOOKS - 1 {
+            assert!(!hangup_confirmed(&mut run, true, false));
+        }
+        assert!(hangup_confirmed(&mut run, true, false));
+        // A hang-up the system reports is not a race and needs no second look.
+        let mut run = 0;
+        assert!(hangup_confirmed(&mut run, true, true));
+    }
 
     #[test]
     fn the_timing_log_starts_with_the_wall_clock_instant_its_times_count_from() {
@@ -1201,6 +1356,7 @@ mission "release" state="ready" {
                 })
                 .unwrap();
             let state = st3::api::AppState {
+                owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,

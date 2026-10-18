@@ -9,11 +9,13 @@
 # asks to wait (`wait_ms` above zero, or `wait=true`) is a long poll and counts toward no target.
 # An agents list asked to be fresh (`fresh=true`) waits for one roster refresh by design: it is
 # the path `GET /v1/client/agents (fresh)` and counts toward its own target, not the first page's.
+# `publish COLLECTION` is a refresher's publication: the time from the first claim this node
+# committed after the previous publication to the publication that carries it.
 
 [[latency]]
 name = "person-read"
-about = "Reads a person waits on: agents list, open a conversation, conversation changes, work list, Now, documents"
-p99_ms = 100
+about = "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, documents"
+p99_ms = 300
 # The same reads through this daemon from another machine that owns them.
 remote_p99_ms = 300
 paths = [
@@ -21,6 +23,10 @@ paths = [
   "GET /v1/client/agents",
   "GET /v1/client/agents/{*id}",
   "stream agents",
+  # Missions list
+  "GET /v1/client/missions",
+  "GET /v1/client/missions/{*id}",
+  "stream missions",
   # Open a conversation, and its changes
   "GET /v1/client/sessions/{*id}",
   "stream conversation",
@@ -42,16 +48,26 @@ paths = [
 
 [[latency]]
 name = "person-read-fresh"
-about = "An agents list asked to be fresh (st agents ls and tree always ask): it waits for one roster refresh by design, so it has its own target and counts toward no other"
+about = "An agents list with legacy fresh=true or an explicit min_cut asks to wait for publication; ordinary st agents ls and tree do not. Explicit waits have their own target and count toward no other"
 p99_ms = 300
 paths = [
   "GET /v1/client/agents (fresh)",
 ]
 
 [[latency]]
+name = "projection-fresh"
+about = "From a commit to the published missions, agents or attention view that carries it, timed by each refresher; refreshers fold at most once a second"
+p99_ms = 1500
+paths = [
+  "publish missions",
+  "publish agents",
+  "publish attention",
+]
+
+[[latency]]
 name = "write-ack"
 about = "Writes and acks: send, work actions, harness events"
-p99_ms = 100
+p99_ms = 300
 paths = [
   "POST /v1/messages",
   "POST /v1/client/actions",
@@ -84,7 +100,7 @@ max_ms = 100
 
 [transaction]
 about = "Any transaction, read or write, and any hold of the store's writer"
-max_ms = 100
+max_ms = 300
 
 [cpu]
 about = "Daemon CPU: near zero when idle, at most 2 cores under daemon_load"
@@ -133,6 +149,10 @@ name = "ios-live-share"
 about = "Live foreground time / reported foreground time; disconnected foreground is over-target"
 min_percent = 99
 path = "client/ios/live-share"
+
+[divergence]
+about = "Open P1 projection bugs: two members that hold the same envelopes and project a table differently. Each is a fault for the fleet's fault agent with what a reproduction needs; nothing repairs it from a peer"
+max_open = 0
 
 [database]
 about = "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run"

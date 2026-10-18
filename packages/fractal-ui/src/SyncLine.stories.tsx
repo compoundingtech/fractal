@@ -9,7 +9,7 @@ import { syncObservations, syncNow } from './assistant-ui/st3-views/sync-fixture
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 interface SyncArgs { scheme: Scheme; sequence: number }
 const surfaces = ['agents', 'conversation', 'terminal', 'missions', 'usage'] as const
 function TransitionPreview({ scheme, sequence, next, retry }: { scheme: Scheme; sequence: number; next: () => void; retry: () => void }) {
@@ -71,7 +71,7 @@ const meta = {
 } satisfies Meta<SyncArgs>
 export default meta
 type Story = StoryObj<SyncArgs>
-export const AllStates: Story = { render: AllStatesStory, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical'], render: AllStatesStory, play: async ({ canvasElement }) => {
   const lines = canvasElement.querySelectorAll<HTMLElement>('[data-testid="sync-line"]')
   if (lines.length === 0) throw new Error('Expected the full synchronization state matrix')
   for (const line of lines) {
@@ -90,9 +90,9 @@ export const LocalFailureZeroCap: Story = { args: { sequence: syncObservations.f
 export const UnknownFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Unknown') } }
 export const ServerFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed') } }
 export const ServerFailureSubscriptionLimit: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
-export const SubscriptionLimitsDark: Story = { render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
-export const SubscriptionLimitsLight: Story = { render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
-export const TransitionSequence: Story = {
+export const SubscriptionLimitsDark: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+export const SubscriptionLimitsLight: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+export const TransitionSequence: Story = { tags: ['critical'],
   render: StoryRender,
   play: async ({ canvasElement }) => {
     const next = canvasElement.querySelector<HTMLButtonElement>('button')!
@@ -150,11 +150,11 @@ export const TransitionSequence: Story = {
     } finally { observer.disconnect() }
   },
 }
-export const TransitionSequenceLight: Story = { args: { scheme: 'light' }, play: TransitionSequence.play }
+export const TransitionSequenceLight: Story = { tags: ['critical'], args: { scheme: 'light' }, play: TransitionSequence.play }
 const styles = stylex.create({
   root: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: s.md, padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, allRoot: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, heading: { display: 'flex', alignItems: 'center', gap: s.lg, minHeight: g.band, flexShrink: 0 },
   stateName: { width: g.tooltipMax, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   surface: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, minWidth: 0, flexShrink: 0 }, band: { height: g.band, display: 'flex', alignItems: 'center', gap: s.lg, paddingInline: s.lg, boxSizing: 'border-box', minWidth: 0 }, surfaceTitle: { width: g.statusWord, flexShrink: 0, textTransform: 'capitalize' }, slot: { flex: '1 1 0', minWidth: 0 }, retained: { height: g.footer, display: 'flex', alignItems: 'center', paddingInline: s.lg, color: ink.fgMuted, backgroundColor: surface.washSubtle }, statusBar: { height: g.footer, display: 'flex', alignItems: 'center', paddingInline: s.lg, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border, flexShrink: 0 },
-  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, schemes: { display: 'grid', gridTemplateColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 48rem)': 'repeat(2, minmax(0, 1fr))' }, gap: s.md, marginTop: s.md }, themeColumn: { minWidth: 0, backgroundColor: surface.canvas, color: ink.fg, padding: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm }, observation: { height: g.controlLg, display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0 },
+  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } }, schemes: { display: 'grid', gridTemplateColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 48rem)': 'repeat(2, minmax(0, 1fr))' }, gap: s.md, marginTop: s.md }, themeColumn: { minWidth: 0, backgroundColor: surface.canvas, color: ink.fg, padding: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm }, observation: { height: g.controlLg, display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0 },
   stateLabel: { width: g.fileMax, flexShrink: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
 })
