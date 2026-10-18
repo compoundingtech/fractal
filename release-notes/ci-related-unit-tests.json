@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Pull requests run only the app unit tests whose imports reach a changed file; merge groups and manual runs still run every test file.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "CI-only change to which unit tests a pull request runs; no application, API or user-visible behavior change." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Reverting runs every app unit test on pull requests again; nothing to recover." }
+}
