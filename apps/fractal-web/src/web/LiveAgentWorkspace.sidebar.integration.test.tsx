@@ -101,6 +101,8 @@ it('nests authoritative children in the same tree, keeps parent filter context a
   const childRow = [...roster().querySelectorAll('[role="row"]')].find(row => row.getAttribute('aria-label')?.includes('Review changes'))!
   expect(childRow.getAttribute('aria-level')).toBe(String(Number(parent.getAttribute('aria-level')) + 1))
   expect(childRow.querySelector('[aria-label="Move Review changes"]')).toBeNull()
+  expect(childRow.getAttribute('draggable')).not.toBe('true')
+  expect(childRow.querySelector<HTMLButtonElement>('button[aria-label="Subagent moves with parent"]')?.disabled).toBe(true)
   expect(childRow.querySelector('[data-status="working"]')).toBeNull()
   expect(childRow.querySelector('time')).toBeNull()
   expect(childRow.textContent).not.toContain('$0')
@@ -108,9 +110,12 @@ it('nests authoritative children in the same tree, keeps parent filter context a
   const previousPath = window.location.pathname
   await act(async () => unavailable.focus())
   await act(async () => unavailable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  await act(async () => unavailable.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
   expect(window.location.pathname).toBe(previousPath)
   await act(async () => (childRow as HTMLElement).focus())
   await act(async () => childRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  // RAC performs a row's Enter action on keyup, after a complete native key press.
+  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
   expect(window.location.pathname).toBe('/w/session/review')
 })
 it('keeps workspace providers and unchanged roster rows out of the one-second clock render', async () => {
