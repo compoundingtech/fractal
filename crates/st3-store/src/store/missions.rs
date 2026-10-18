@@ -217,30 +217,33 @@ impl Store {
     ) -> Result<Vec<(String, u128)>> {
         let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
+        // Seek once per distinct mission, not once per historical run. Latest and live
+        // state are indexed probes; only shallow mission keys reach the final sort.
         let mut statement = connection.prepare(
-            /* sqlite-large-value: allow-for-now lv-h9ce2460afeb1 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH ids AS (
+            /* sqlite-large-value: allow-for-now lv-h9ce2460afeb1 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH RECURSIVE run_missions(mission_id) AS (
+                SELECT MIN(mission_id) FROM mission_runs
+                UNION ALL
+                SELECT (SELECT MIN(mission_id) FROM mission_runs WHERE mission_id>run_missions.mission_id)
+                FROM run_missions WHERE mission_id IS NOT NULL
+             ), ids AS (
                 SELECT mission_id FROM mission_definitions
-                UNION SELECT mission_id FROM mission_runs
-             ), run_states AS (
-                SELECT mission_id, SUM(status='running') AS running, SUM(status='standing') AS standing
-                FROM mission_runs GROUP BY mission_id
-             ), latest AS (
-                SELECT mission_id, status, updated_at_unix_ms,
-                       ROW_NUMBER() OVER (PARTITION BY mission_id ORDER BY created_at_unix_ms DESC, id DESC) AS rank
-                FROM mission_runs
+                UNION SELECT mission_id FROM run_missions WHERE mission_id IS NOT NULL
              )
              SELECT ids.mission_id, COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms,'0')
              FROM ids
              LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
              LEFT JOIN claims published ON published.id=def.claim_id
-             LEFT JOIN run_states ON run_states.mission_id=ids.mission_id
-             LEFT JOIN latest ON latest.mission_id=ids.mission_id AND latest.rank=1
+             LEFT JOIN mission_runs latest ON latest.id=(
+                SELECT id FROM mission_runs WHERE mission_id=ids.mission_id
+                ORDER BY created_at_unix_ms DESC,id DESC LIMIT 1)
+             LEFT JOIN mission_runs live ON live.id=(
+                SELECT id FROM mission_runs WHERE mission_id=ids.mission_id AND status IN ('running','standing')
+                ORDER BY status LIMIT 1)
              WHERE (?5 IS NULL OR CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) < ?5
                  OR (CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) = ?5 AND ids.mission_id > ?6))
                AND (?1 OR ids.mission_id NOT LIKE '__st3/%')
                AND (?1 OR CASE
-                   WHEN COALESCE(run_states.running,0)>0 THEN 'running'
-                   WHEN COALESCE(run_states.standing,0)>0 THEN 'standing'
+                   WHEN live.status IS NOT NULL THEN live.status
                    WHEN def.state='retired' THEN 'retired'
                    WHEN latest.status IS NOT NULL THEN latest.status
                    ELSE def.state END NOT IN ('completed','failed','cancelled','retired')
@@ -249,7 +252,7 @@ impl Store {
                    -- was retired.
                    OR (latest.status IN ('failed','cancelled')
                        AND COALESCE(def.state,'')<>'retired'
-                       AND COALESCE(run_states.running,0)=0 AND COALESCE(run_states.standing,0)=0
+                       AND live.status IS NULL
                        AND CAST(latest.updated_at_unix_ms AS INTEGER)>=?4))
              ORDER BY CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms) AS INTEGER) DESC,
                       ids.mission_id ASC

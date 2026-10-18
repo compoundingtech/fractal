@@ -964,6 +964,12 @@ CREATE TABLE IF NOT EXISTS mission_runs (
     updated_at_unix_ms TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mission_runs_mission_index ON mission_runs(mission_id, created_at_unix_ms);
+-- Additive seek-index migration: schema installation runs for existing stores too.
+-- Distinct mission keys, latest headers and live-state probes never fold run history.
+CREATE INDEX IF NOT EXISTS mission_runs_collection_latest_index
+ON mission_runs(mission_id, created_at_unix_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS mission_runs_collection_live_index
+ON mission_runs(mission_id, status) WHERE status IN ('running','standing');
 CREATE INDEX IF NOT EXISTS mission_runs_root_page_index
 ON mission_runs(root_run_id, created_at_unix_ms, id);
 -- The runs that have not finished, a few of every run a fleet has made. The predicate is
