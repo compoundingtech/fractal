@@ -23,11 +23,25 @@ use crate::replication::InventoryCheckpoint;
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
-/// A trim commits a chunk once it has run this long, so it never holds the writer for long
-/// however slow a row is to record or delete, and writes queued behind it wait about this long.
-/// The commit then writes and syncs the pages the chunk changed, which on a busy disk costs more
-/// than the chunk itself, so this is well under the writer's 100 ms target.
+/// Stop starting new trim steps after this much work. A single step or COMMIT may take longer;
+/// this is not a hard bound on writer hold or foreground request latency.
 pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
+
+// Releasing a writer loan alone does not reserve any disk time: a quiet foreground queue
+// lets a large trim reacquire it immediately, continuously rewriting table/index/WAL pages.
+// Rest outside the loan for at least 100 ms and four times the preceding writer hold
+// (including COMMIT). This limits sustained trim duty to at most one fifth while preserving
+// progress and the existing per-chunk proof/rollback boundary. A slow statement can still
+// exceed the chunk budget; this pacing is not a hard statement or request-latency bound.
+const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn pause_trim_chunk(held: std::time::Duration) {
+    std::thread::sleep(trim_pause_duration(held));
+}
+
+fn trim_pause_duration(held: std::time::Duration) -> std::time::Duration {
+    held.saturating_mul(4).max(TRIM_MIN_PAUSE)
+}
 
 /// A condition a test injects into a trim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,7 +567,8 @@ impl Store {
         self.runtime.checkpoint_preflight()?;
         let mut forgotten = 0;
         loop {
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
             let recording: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE id=?1 AND state='recording')",
@@ -588,11 +603,13 @@ impl Store {
                 break;
             }
             transaction.commit()?;
+            let held = held_since.elapsed();
             drop(connection);
             forgotten += deleted;
             if deleted == 0 {
                 return Ok(forgotten);
             }
+            pause_trim_chunk(held);
         }
     }
 
@@ -738,7 +755,8 @@ impl Store {
                     !envelope_page.is_empty() || !claim_page.is_empty(),
                     "the tombstones of {checkpoint} ended before their count"
                 );
-                let mut connection = self.connection.write();
+                let mut connection = self.connection.write_background();
+                let held_since = std::time::Instant::now();
                 let transaction = connection.transaction()?;
                 let started = std::time::Instant::now();
                 while started.elapsed() < TRIM_CHUNK_BUDGET
@@ -755,9 +773,11 @@ impl Store {
                 }
 
                 transaction.commit()?;
+                let held = held_since.elapsed();
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
+                pause_trim_chunk(held);
             }
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
@@ -772,11 +792,19 @@ impl Store {
 
     /// Delete every row a tombstone stands for, in chunks, then mark the checkpoint trimmed.
     /// Running it again after a crash deletes only what is left. A chunk deletes one envelope at
-    /// a time and commits once it has run for `TRIM_CHUNK_BUDGET`, so it holds the writer for
-    /// tens of milliseconds however slow a row is to delete, and the writes queued behind it run
-    /// before the next chunk takes the writer again. Each chunk checks, inside its own
+    /// a time and stops starting new steps after `TRIM_CHUNK_BUDGET`. Chunks use background
+    /// writer admission and rest outside the loan between commits. Each chunk checks, inside its own
     /// transaction, that the graph did not change; the proof showed it cannot.
     pub /* sqlite-large-value-flow: allow-for-now flow-h3f9bf57da525 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn finish_trim(&self, checkpoint: &str, actions: &mut Vec<CheckpointAction>) -> Result<()> {
+        self.finish_trim_paced(checkpoint, actions, std::thread::sleep)
+    }
+
+    /* sqlite-large-value-flow: allow-for-now flow-h4f2952c50e14 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn finish_trim_paced(
+        &self,
+        checkpoint: &str,
+        actions: &mut Vec<CheckpointAction>,
+        mut pause: impl FnMut(std::time::Duration),
+    ) -> Result<()> {
         let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
         let mut chunks = 0;
@@ -785,7 +813,8 @@ impl Store {
         let mut cursor = TrimCursor::default();
         let delete = crate::profile::span("trim.delete");
         loop {
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             #[cfg(test)]
@@ -809,10 +838,9 @@ impl Store {
             // Only an empty lookup proves exhaustion. Even if transaction setup spent the
             // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
             while steps < most && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET) {
-                let (envelope, envelope_claims) = next_trim_rows(&transaction, &mut cursor)?;
-                if envelope.is_none() && envelope_claims.is_empty() {
+                let Some((envelope, envelope_claims)) = next_trim_rows(&transaction, &mut cursor)? else {
                     break;
-                }
+                };
                 delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)?;
                 self.pause_for_trim_row_cost();
                 envelopes.extend(envelope);
@@ -851,12 +879,18 @@ impl Store {
                 return Ok(());
             }
             transaction.commit()?;
+            let held = held_since.elapsed();
             drop(connection);
-            self.replica_rows_changed();
+            // A cursor-only chunk inspected already-absent rows. All chunks that actually
+            // delete keep the original invalidation; this does not coalesce mutations.
+            if !envelopes.is_empty() || !claims.is_empty() {
+                self.replica_rows_changed();
+            }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
+            pause(trim_pause_duration(held));
         }
         drop(delete);
         self.stop_for_trim_fault(TrimFault::BeforeFinish)?;
@@ -889,8 +923,7 @@ impl Store {
 /// How far the sweep of rows earlier trims left behind has gone: `after:CLAIM_ID`, or `done`.
 pub const TRIMMED_CLAIM_ROWS_SWEPT: &str = "checkpoint_trimmed_claim_rows_swept";
 
-/// How long one sweep transaction deletes before it commits. Its commit then writes and syncs
-/// the pages it changed, so this is well under the writer's 100 ms target.
+/// How long one sweep starts new steps before it commits. A step or COMMIT may take longer.
 pub const SWEEP_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 
 impl Store {
@@ -913,7 +946,8 @@ impl Store {
             .to_owned();
         let mut rows = 0;
         loop {
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             let mut finished = false;
@@ -944,10 +978,12 @@ impl Store {
                 params![TRIMMED_CLAIM_ROWS_SWEPT, progress],
             )?;
             transaction.commit()?;
+            let held = held_since.elapsed();
             drop(connection);
             if finished {
                 return Ok(rows);
             }
+            pause_trim_chunk(held);
         }
     }
 }
@@ -961,13 +997,14 @@ struct TrimCursor {
     claim: String,
 }
 
-/// The next envelope a tombstone stands for that this node still holds, with its claims. Once
-/// none is left, the next claim whose envelope is already gone, left by an older build's trim or
-/// a crash between chunks of another checkpoint. Nothing when the trim is done.
+/// Inspect one indexed tombstone, advancing even when its row is already gone. An empty pair
+/// means progress, not exhaustion; only None proves that both ordered scans have ended.
+/// Keeping the existence probe outside the ordered seek prevents LIMIT 1 from scanning an
+/// arbitrarily long run of already-trimmed tombstones while holding the writer.
 fn next_trim_rows(
     transaction: &Transaction<'_>,
     cursor: &mut TrimCursor,
-) -> Result<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)> {
+) -> Result<Option<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)>> {
     if !cursor.envelopes_done {
         let envelope = transaction
             .prepare_cached(
@@ -976,10 +1013,6 @@ fn next_trim_rows(
                  FROM checkpoint_envelopes AS tombstone
                  WHERE (tombstone.writer, tombstone.sequence, tombstone.envelope_hash)
                        > (?1, ?2, ?3)
-                   AND EXISTS (
-                     SELECT 1 FROM replica_envelopes AS held
-                     WHERE held.writer=tombstone.writer AND held.sequence=tombstone.sequence
-                       AND held.envelope_hash=tombstone.envelope_hash)
                  ORDER BY tombstone.writer, tombstone.sequence, tombstone.envelope_hash
                  LIMIT 1",
             )?
@@ -1001,6 +1034,13 @@ fn next_trim_rows(
                 i64::try_from(envelope.sequence)?,
                 envelope.envelope_hash.clone(),
             );
+            let held: bool = transaction.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM replica_envelopes
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)"
+            )?.query_row(/* sqlite-large-value: allow-for-now lv-h3f0f377d0d3b owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash], |row| row.get(0))?;
+            if !held {
+                return Ok(Some((None, Vec::new())));
+            }
             let claims = transaction
                 .prepare_cached(
                     "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
@@ -1013,7 +1053,7 @@ fn next_trim_rows(
                     |row| Ok(deletable_claim(row.get(0)?, row.get(1)?)),
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            return Ok((Some(envelope), claims));
+            return Ok(Some((Some(envelope), claims)));
         }
         cursor.envelopes_done = true;
     }
@@ -1021,7 +1061,6 @@ fn next_trim_rows(
         .prepare_cached(
             "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
              WHERE tombstone.id > ?1
-               AND EXISTS (SELECT 1 FROM claims WHERE claims.id=tombstone.id)
              ORDER BY tombstone.id LIMIT 1",
         )?
         .query_row(/* sqlite-large-value: allow-for-now lv-h0c032884ac26 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
@@ -1031,9 +1070,11 @@ fn next_trim_rows(
     Ok(match claim {
         Some(claim) => {
             cursor.claim = claim.id.clone();
-            (None, vec![claim])
+            let held: bool = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h12c2aa291add owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get(0))?;
+            Some((None, if held { vec![claim] } else { Vec::new() }))
         }
-        None => (None, Vec::new()),
+        None => None,
     })
 }
 
@@ -1058,3 +1099,5 @@ fn deletable_claim(id: String, operation_id: Option<String>) -> ClaimTombstone {
 mod capture_lifetime_tests;
 #[cfg(test)]
 mod phase_span_tests;
+#[cfg(test)]
+mod pacing_tests;
