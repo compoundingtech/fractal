@@ -12282,6 +12282,15 @@ version 2
         json_request(app.clone(), "/v1/persons/rename", repair.clone()).await;
     assert_eq!(status, StatusCode::OK, "{renamed}");
     assert_eq!(renamed["reassigned_reviews"], json!([run.subject, step.subject]));
+    for request in [&mission_again, &step_request] {
+        assert!(
+            store
+                .human_gate_requests()
+                .unwrap()
+                .iter()
+                .any(|(id, _, reviewer)| id == &request.id && reviewer == "person/robin")
+        );
+    }
     let (status, repeated) =
         json_request(app.clone(), "/v1/persons/rename", repair).await;
     assert_eq!(status, StatusCode::OK, "{repeated}");
