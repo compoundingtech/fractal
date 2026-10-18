@@ -5,7 +5,7 @@ use axum::{Router, body::Body, http::{Request, StatusCode}};
 use http_body_util::BodyExt as _;
 use serde::Serialize;
 use serde_json::{Value, json};
-use st3::{api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
+use st3::{EvidenceStore as _, api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
 use st3_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantMinimalReadMode,
     AssistantPairedSession, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
     Fence, MessageKind, MessageSendParameters, PairingComplete, PersonAnswerInput,

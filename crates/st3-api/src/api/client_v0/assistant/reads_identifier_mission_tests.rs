@@ -176,3 +176,37 @@ async fn identifier_mission_sql_membership_matches_projection_policy() {
         false, 0, ids.len() + 1, None, now,
     ).unwrap(), native, "assistant reads must not rewrite native membership");
 }
+
+#[tokio::test]
+async fn identifier_mission_summary_counts_match_visible_pages_at_the_same_cut() {
+    for only_filtered in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        identifier_missions(&state, only_filtered);
+        state.store.start_agent_roster_refresher().unwrap();
+        crate::api::refresh_agent_roster(&state.store, false).unwrap();
+        state.store.start_attention_list_refresher().unwrap();
+        crate::api::refresh_attention_list(&state.store).unwrap();
+        let cut = state.store.index().unwrap();
+        let admitted = new_client_snapshot(&state);
+        let (page_snapshot, page) = project(
+            &state, &admitted, "missions", &params(&[("limit", "100")]),
+            MAX_RESPONSE_BYTES, "identifier-summary:1",
+        ).await.unwrap();
+        assert_eq!(page_snapshot.store_index, cut);
+        assert_eq!(page["page"]["has_more"], false);
+        let mut expected = BTreeMap::<String, u64>::new();
+        for row in page["items"].as_array().unwrap() {
+            assert!(identifier_allowed(row["id"].as_str().unwrap()));
+            *expected.entry(row["phase"].as_str().unwrap().to_owned()).or_default() += 1;
+        }
+        assert_eq!(expected.values().sum::<u64>(), if only_filtered { 0 } else { 13 });
+        let (summary_snapshot, value) = project(
+            &state, &admitted, "summary", &BTreeMap::new(),
+            MAX_RESPONSE_BYTES, "identifier-summary:1",
+        ).await.unwrap();
+        assert_eq!(summary_snapshot.store_index, cut);
+        assert_eq!(value["counts"]["mission_states"], json!(expected));
+        assert_eq!(state.store.index().unwrap(), cut);
+    }
+}

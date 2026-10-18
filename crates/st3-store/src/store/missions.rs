@@ -5,7 +5,15 @@ use super::*;
 // mission/ contributes eight allowed ASCII bytes; '-' is literal at the GLOB class end.
 // GLOB stops at NUL, so reject it explicitly. API regression tests exercise this SQL
 // against the canonical identifier policy, including every ASCII byte.
-const MISSION_COLLECTION_PAGE_SQL: &str = "WITH RECURSIVE run_missions(mission_id) AS (
+macro_rules! assistant_mission_identifier_sql {
+    () => {
+        "length(CAST(ids.mission_id AS BLOB)) + length('mission/') BETWEEN 1 AND 256
+         AND instr(ids.mission_id,char(0))=0
+         AND ids.mission_id NOT GLOB '*[^a-zA-Z0-9/._:@+=~-]*'"
+    };
+}
+
+const MISSION_COLLECTION_PAGE_SQL: &str = concat!("WITH RECURSIVE run_missions(mission_id) AS (
     SELECT MIN(mission_id) FROM mission_runs
     UNION ALL
     SELECT (SELECT MIN(mission_id) FROM mission_runs WHERE mission_id>run_missions.mission_id)
@@ -24,10 +32,7 @@ const MISSION_COLLECTION_PAGE_SQL: &str = "WITH RECURSIVE run_missions(mission_i
  LEFT JOIN mission_runs live ON live.id=(
     SELECT id FROM mission_runs WHERE mission_id=ids.mission_id AND status IN ('running','standing')
     ORDER BY status LIMIT 1)
- WHERE (NOT ?7 OR (
-       length(CAST(ids.mission_id AS BLOB)) + length('mission/') BETWEEN 1 AND 256
-       AND instr(ids.mission_id,char(0))=0
-       AND ids.mission_id NOT GLOB '*[^a-zA-Z0-9/._:@+=~-]*'))
+ WHERE (NOT ?7 OR (", assistant_mission_identifier_sql!(), "))
    AND (?5 IS NULL OR CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) < ?5
      OR (CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) = ?5 AND ids.mission_id > ?6))
    AND (?1 OR ids.mission_id NOT LIKE '__st3/%')
@@ -43,7 +48,7 @@ const MISSION_COLLECTION_PAGE_SQL: &str = "WITH RECURSIVE run_missions(mission_i
            AND CAST(latest.updated_at_unix_ms AS INTEGER)>=?4))
  ORDER BY CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms) AS INTEGER) DESC,
           ids.mission_id ASC
- LIMIT ?2 OFFSET ?3";
+ LIMIT ?2 OFFSET ?3");
 
 #[cfg(test)]
 mod identifier_query_tests {
@@ -359,7 +364,7 @@ impl Store {
     ) -> Result<BTreeMap<String, u64>> {
         let connection = self.readers.get();
         let sql = canonical_sql(
-            "WITH ids AS (
+            concat!("WITH ids AS (
                 SELECT mission_id FROM mission_definitions UNION SELECT mission_id FROM mission_runs
              ), ranked AS (
                 SELECT mission_id,id,status,updated_at_unix_ms,
@@ -379,7 +384,8 @@ impl Store {
                 LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
                 LEFT JOIN counts ON counts.mission_id=ids.mission_id
                 LEFT JOIN ranked latest ON latest.mission_id=ids.mission_id AND latest.rank=1
-                WHERE ids.mission_id NOT LIKE '__st3/%'
+                WHERE ids.mission_id NOT LIKE '__st3/%' AND (",
+                assistant_mission_identifier_sql!(), ")
              ), visible AS (
                 SELECT * FROM phases
                 WHERE phase NOT IN ('completed','failed','cancelled','retired')
@@ -393,7 +399,7 @@ impl Store {
                          ORDER BY CANONICAL_DESC(claims) LIMIT 1)='faulted'
                 ) THEN 'blocked' ELSE phase END AS state FROM visible
              )
-             SELECT state,COUNT(*) FROM projected GROUP BY state",
+             SELECT state,COUNT(*) FROM projected GROUP BY state"),
         );
         connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he8c8a96f10dc owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?
             .query_map(params![
