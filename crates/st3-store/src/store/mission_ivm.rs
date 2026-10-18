@@ -9,7 +9,7 @@ use super::*;
 use smallclaims::ivm::{Definition, LocalChange, Readiness, View, Views, source_cut};
 
 pub const VIEW: &str = "st3.mission-selection.v1";
-const SOURCE: &str = "st3.mission-selection.changed";
+pub const SOURCE: &str = "st3.mission-selection.changed";
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha75b45aa6e87 owner=st3_store::store::mission_ivm TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_mission_counts (
  mission_id TEXT NOT NULL, status TEXT NOT NULL, count INTEGER NOT NULL CHECK(count>0),

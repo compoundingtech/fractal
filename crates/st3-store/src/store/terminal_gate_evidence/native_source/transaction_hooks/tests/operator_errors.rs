@@ -404,7 +404,7 @@ fn managed_operator_error_old_policy_reopen_refuses_without_apply_or_adoption() 
         let mut writer = store.connection.write();
         let tx = writer.transaction().unwrap();
         let source = NativeSource::attach(&tx, binding()).unwrap();
-        super::super::super::tests::seed_native(&tx, &source.binding);
+        crate::store::terminal_gate_evidence::native_source_tests_shared::seed_native(&tx, &source.binding);
         source.finish(&tx).unwrap();
         assert_eq!(source.doctor_line(&tx)["status"], "warn");
         tx.commit().unwrap();

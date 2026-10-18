@@ -16,7 +16,7 @@ use super::common::*;
 use anyhow::Result;
 use rusqlite::params;
 use smallclaims::store::now_ms;
-use st3_store::store::*;
+use crate::store::*;
 
 
 struct Clock;
