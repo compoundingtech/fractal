@@ -4786,6 +4786,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "notify",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-api",
+ "st3-client",
+ "st3-reconcile",
+ "st3-schema",
+ "st3-ui-model",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "st3-client"
 version = "0.1.0"
 dependencies = [
@@ -4907,10 +4957,15 @@ dependencies = [
  "smallclaims",
  "st-drivers",
  "st-runtime",
+ "st3-api",
  "st3-client",
  "st3-daemon",
+ "st3-github",
  "st3-kernel",
+ "st3-peer",
+ "st3-reconcile",
  "st3-schema",
+ "st3-store",
  "st3-telemetry",
  "st3-terminal-direct",
  "st3-ui-model",
@@ -4926,6 +4981,27 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "st3-delivery-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st3-client",
+ "st3-delivery-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
 ]
 
 [[package]]
@@ -4964,6 +5040,53 @@ dependencies = [
  "st3-conversation-ui",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "st3-github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-github",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "st3-github-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "hex",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-runtime",
+ "st3-github-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "urlencoding",
  "uuid",
 ]
 
@@ -5017,6 +5140,89 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-missions-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "kdl",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-missions-base",
+ "st3-schema",
+ "st3-secrets",
+]
+
+[[package]]
+name = "st3-peer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "hex",
+ "jsonschema",
+ "notify",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-client",
+ "st3-github",
+ "st3-peer",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "st3-reconcile"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "futures-util",
+ "hex",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-client",
+ "st3-peer",
+ "st3-reconcile",
+ "st3-schema",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "st3-schema"
 version = "0.1.0"
 dependencies = [
@@ -5028,6 +5234,118 @@ dependencies = [
  "sha2",
  "st-storage-version",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "st3-seats-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "st-drivers",
+ "st3-client",
+ "st3-seats-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "st3-secrets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "smallclaims",
+ "st-drivers",
+ "st3-client",
+ "st3-kernel",
+ "st3-secrets",
+ "st3-telemetry",
+ "st3-terminal-direct",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "st3-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "flate2",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-client",
+ "st3-delivery-base",
+ "st3-github-base",
+ "st3-kernel",
+ "st3-missions-base",
+ "st3-schema",
+ "st3-seats-base",
+ "st3-secrets",
+ "st3-store",
+ "st3-telemetry",
+ "st3-terminal-direct",
+ "st3-ui-model",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

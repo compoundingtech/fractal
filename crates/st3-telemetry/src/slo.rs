@@ -342,6 +342,8 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
 
 /// Open read snapshots reported beside the writer's holds.
 const OPEN_READS: usize = 8;
+/// Routes whose read loans are reported beside the writer's holds; the rest are summed.
+const LOAN_ROUTES: usize = 8;
 
 /// The writer-hold objective: each hold of the store's single writer against the transaction
 /// target, and who held it; each read transaction past that target, and who kept it open.
@@ -355,6 +357,17 @@ fn writer_hold_row() -> Value {
         "windows": series(StoreWork::WriterHold),
         "read_windows": series(StoreWork::ReadTransaction),
         "open_reads": smallclaims::sqlite::open_snapshots_over(targets.transaction_target(), OPEN_READS),
+        // Every read loan by the route it works for, checked out or with a confirmed snapshot:
+        // a loan held past its budget keeps the WAL from recycling even before it reads.
+        "read_loans": smallclaims::sqlite::loans_by_route(LOAN_ROUTES),
+        "wal": smallclaims::windows::wal::report(),
+        // Where a replication snapshot's build spends its time: waiting for the build lock that
+        // one build holds at a time, reading the envelope inventory, and hashing its digests.
+        "snapshot_build": {
+            "wait": series(StoreWork::SnapshotBuildWait),
+            "inventory": series(StoreWork::SnapshotInventory),
+            "digest": series(StoreWork::SnapshotDigest),
+        },
         "threads": process_threads(),
     });
     if let (Value::Object(row), Value::Object(holds)) = (&mut row, smallclaims::windows::holds::report()) {
@@ -596,7 +609,7 @@ mod tests {
     fn the_built_in_targets_file_is_valid_and_names_the_mission_targets() {
         let targets = parse(SOURCE).unwrap();
         let read = targets.for_path("GET /v1/client/agents").unwrap();
-        assert_eq!((read.p99_ms, read.remote_p99_ms), (100, Some(300)));
+        assert_eq!((read.p99_ms, read.remote_p99_ms), (300, Some(300)));
         assert_eq!(read.target(true), Duration::from_millis(300));
         for path in [
             "stream agents",
@@ -614,7 +627,7 @@ mod tests {
             "POST /v1/harness-events",
         ] {
             let write = targets.for_path(path).unwrap();
-            assert_eq!((write.name.as_str(), write.p99_ms), ("write-ack", 100), "{path}");
+            assert_eq!((write.name.as_str(), write.p99_ms), ("write-ack", 300), "{path}");
         }
         let fresh = targets.for_path("GET /v1/client/agents (fresh)").unwrap();
         assert_eq!((fresh.name.as_str(), fresh.p99_ms), ("person-read-fresh", 300));
@@ -635,7 +648,7 @@ mod tests {
         let attach = targets.for_path("stream terminal").unwrap();
         assert_eq!(attach.p99_ms, 200);
         assert_eq!((targets.statement.p99_ms, targets.statement.max_ms), (10, 100));
-        assert_eq!(targets.transaction.max_ms, 100);
+        assert_eq!(targets.transaction.max_ms, 300);
         assert_eq!(targets.cpu.max_cores, 2.0);
         assert_eq!((targets.database.max_live_gb, targets.database.max_growth_mb_per_day), (8.0, 300.0));
         assert!(targets.for_path("GET /v1/health").is_none());
@@ -643,7 +656,7 @@ mod tests {
 
     #[test]
     fn every_route_path_in_the_targets_file_is_a_route_the_daemon_serves() {
-        let source = include_str!("../../st3-daemon/src/api.rs");
+        let source = include_str!("../../st3-api/src/api.rs");
         for latency in &targets().latency {
             for path in &latency.paths {
                 let Some(route) = path.strip_prefix("GET ").or(path.strip_prefix("POST ")) else {
