@@ -42,4 +42,5 @@ uuid = { version = "1", features = ["v4", "v7"] }
 [dev-dependencies]
 st3_reconcile_self = { package = "st3-reconcile", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
+parking_lot = "0.12"
 tokio = { version = "1", features = ["test-util"] }

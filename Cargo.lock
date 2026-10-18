@@ -5202,6 +5202,7 @@ dependencies = [
  "libc",
  "notify",
  "opentelemetry",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
