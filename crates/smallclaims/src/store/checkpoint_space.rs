@@ -874,6 +874,67 @@ impl SpaceGuard {
     }
 }
 
+/// Test fixture device selection uses the production admission calculation, then keeps
+/// additional room for the convergence world's later stores on the same filesystem.
+#[cfg(feature = "test-support")]
+pub fn checkpoint_test_fixture_headroom(
+    live: &Path,
+    scratch: &Path,
+    fixture_room: u128,
+) -> Result<()> {
+    let guard = SpaceGuard::admit(live, scratch, false)?;
+    let journal = guard
+        .initial_journal_pages
+        .checked_mul(
+            guard
+                .page_size
+                .checked_add(8)
+                .context("fixture journal record overflow")?,
+        )
+        .and_then(|n| n.checked_add(2 * guard.page_size.max(65536)))
+        .context("fixture journal overflow")?;
+    let schema = empty_schema_bytes(guard.page_size, false)?;
+    let fixed = (12 * guard.granule)
+        .checked_add(if guard.temp_device == guard.scratch_device {
+            schema
+        } else {
+            0
+        })
+        .context("fixture fixed floor overflow")?;
+    let minimum = guard
+        .copy_bound
+        .checked_add(journal)
+        .and_then(|n| n.checked_add(fixed))
+        .context("fixture minimum overflow")?;
+    let reserve = if guard.shared_device {
+        guard.reserve
+    } else {
+        0
+    };
+    let required = minimum
+        .checked_add(reserve)
+        .and_then(|n| n.checked_add(REACTION_MARGIN))
+        .and_then(|n| n.checked_add(fixture_room))
+        .context("fixture required size overflow")?;
+    let available = filesystem(scratch)?.available;
+    if available < required {
+        bail!(
+            "convergence scratch device cannot admit checkpoint proof and fixture room: scratch={} available={} required={} deficit={} (copy={} J={} F={} live_reserve={} reaction_margin={} fixture_room={})",
+            scratch.display(),
+            available,
+            required,
+            required - available,
+            guard.copy_bound,
+            journal,
+            fixed,
+            reserve,
+            REACTION_MARGIN,
+            fixture_room
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
