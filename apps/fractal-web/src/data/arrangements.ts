@@ -11,7 +11,7 @@
  * the follow aborts it between pages and cancels its in-flight request.
  */
 import { SIDEBAR_ARRANGEMENT_UUID, St3Client } from '@smalltalk/st3-client'
-import type { Arrangement, ArrangementPage, CollectionSocketFactory, CollectionStream, EnvelopeOf, PageOptions, Snapshot } from '@smalltalk/st3-client'
+import type { Arrangement, CollectionSocketFactory, CollectionStream, Snapshot } from '@smalltalk/st3-client'
 import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@smalltalk/st3-client/schema'
 import { Schema } from 'effect'
 
@@ -27,37 +27,21 @@ const isFrameHeader = Schema.is(Schema.Struct({
 }))
 
 export interface ArrangementInventoryGateway {
-  /** One list page; `signal` cancels the request when the read is abandoned. */
-  readonly arrangementsList: (person: string, options: PageOptions, signal: AbortSignal) => Promise<EnvelopeOf<ArrangementPage>>
+  /** One list page; `requestOptions.signal` cancels the request when the read is abandoned. */
+  readonly arrangementsList: St3Client['arrangementsList']
   readonly collectionStream: St3Client['collectionStream']
 }
 
-/**
- * A generated client per read captures cancellation permanently. Pagination reuses that
- * read's client; discovery and sockets stay shared without sharing a mutable signal slot.
- */
+/** The generated client cancels each request through its own `requestOptions.signal`; discovery stays shared. */
 export const st3InventoryGateway = ({ baseUrl, fetchImpl }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof globalThis.fetch
 }): ArrangementInventoryGateway & Pick<St3Client, 'discover'> => {
   const client = new St3Client({ baseUrl, fetchImpl })
-  const readers = new WeakMap<AbortSignal, St3Client>()
   return {
     discover: () => client.discover(),
     collectionStream: (options) => client.collectionStream(options),
-    arrangementsList: (person, options, read) => {
-      let reader = readers.get(read)
-      if (reader === undefined) {
-        reader = new St3Client({
-          baseUrl,
-          fetchImpl: (input, init) => fetchImpl(input, { ...init, signal: read }),
-        })
-        // Generated GET calls discover on its receiver. Share negotiation, not cancellation.
-        reader.discover = () => client.discover()
-        readers.set(read, reader)
-      }
-      return reader.arrangementsList(person, options)
-    },
+    arrangementsList: (person, options, requestOptions) => client.arrangementsList(person, options, requestOptions),
   }
 }
 
@@ -130,7 +114,7 @@ export const readArrangementInventory = async (
     for (;;) {
       signal.throwIfAborted()
       const options = cursor === undefined ? { limit: inventoryPageLimit } : { cursor, limit: inventoryPageLimit }
-      const response = await Promise.race([gateway.arrangementsList(owner, options, signal), abandoned.promise])
+      const response = await Promise.race([gateway.arrangementsList(owner, options, { signal }), abandoned.promise])
       const page = response.value
       // Continuation pages belong to the initial read, even if a later response has a newer envelope.
       snapshot ??= response.snapshot
