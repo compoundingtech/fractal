@@ -1,5 +1,7 @@
 use smallclaims::fleet::{MemberKey, envelope_signature_message};
 
+type RetainedReplicaRecord = (String, String, u64, String, Vec<u8>, Option<String>);
+
 #[test]
 fn historical_subject_reference_readmission_uses_normal_signed_admission_once_per_schema() {
     for case in ["ack", "invalid-reference", "malformed", "forged", "unsigned", "untrusted", "late-signature"] {
@@ -107,7 +109,7 @@ fn historical_subject_reference_readmission_uses_normal_signed_admission_once_pe
             admit_source();
             older.validate_replication_backlog().unwrap();
         }
-        let retained = |store: &Store| -> Vec<(String, String, u64, String, Vec<u8>, Option<String>)> {
+        let retained = |store: &Store| -> Vec<RetainedReplicaRecord> {
             store.readers.get().prepare(
                 "SELECT record_ref, writer, sequence, envelope_hash, raw, claim_id FROM replica_records ORDER BY record_ref"
             ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))
