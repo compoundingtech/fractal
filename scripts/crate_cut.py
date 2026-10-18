@@ -1123,7 +1123,7 @@ def _resolve_use(segs, base):
     return cur + list(segs[i:])
 
 
-def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="crate", dest=False):
+def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="crate", dest=False, lower_files=None, depth=0):
     shared_names = {tuple(module_path(r2)): {n.name for n in ns if n.name} for (r2, c2), ns in shares.items() if not c2}
     """The `use` items of the file a shared module is cut from, adjusted to where the module sits: dev
     dependencies dropped, child modules named absolutely, modules that only exist for tests replaced by
@@ -1132,6 +1132,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="cr
     children = {it.name for it in items if it.kind == "mod"}
     shared_of = {tuple(module_path(r2)): _shared_path(r2, c2) for (r2, c2) in shares if not c2 and r2 in test_rels}
     out = []
+    extra_uses = []
     for u in uses:
         parsed = use_paths(u)
         if not parsed:
@@ -1170,6 +1171,12 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="cr
                         continue  # not extracted: it stays in the cfg(test) module
                     # deeper than the module (a child module): the path stays as it is
                 if test_only:
+                    if segs[-1] == "*" and lower_files and depth < 6 and not dest:
+                        # the glob served names that module imported itself: take its imports instead
+                        rel2 = next((r for r in lower_files if module_path(r) == list(absolute[:-1])), None)
+                        if rel2 is not None:
+                            items2 = lower_files[rel2][1]
+                            extra_uses.extend(_shared_uses([it.text for it in items2 if it.kind == "use"], rel2, (), items2, shares, dev, pairs, test_rels, root, dest, lower_files, depth + 1))
                     segs = None  # exists only for cfg(test)
             if extra is not None:
                 keep.append((extra, None))
@@ -1183,7 +1190,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="cr
             keep.append((segs, alias))
         if keep:
             out.append(render_use(attrs, vis, keep))
-    return out
+    return out + [u for u in extra_uses if u not in out]
 
 
 def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers, dest_src=None, dest_root=None):
@@ -1233,7 +1240,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                     uses.append("use crate::%s::*;" % "::".join(parts))
                 else:
                     uses.append(re.sub(r"\buse super::", "use crate::%s::" % "::".join(parts), u))
-        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels)
+        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, lower_files=lower_files)
         globs = ["use %s::*;" % "::".join(["crate"] + _shared_path(*mk)) for mk in sorted(share_imports.get((rel, cont), ()))]
         body = []
         for u in sorted(ns, key=lambda n: n.item.start):
