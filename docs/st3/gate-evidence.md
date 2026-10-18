@@ -799,8 +799,18 @@ typescript-client was traced once on 2026-10-17 at main 47fb60d96cb (`nix develo
 (`apps/fractal-web/src/folders/core.mts`, now a `tree_input` and in the skip policy's declared `inputs`, which had the same gap) and 24 absence probes (now
 `absent_paths`); the result after the fix is no uncovered path and no unresolved call. Limits, stated plainly: the trace covers only the paths that ONE
 run took (a branch the run did not execute is not seen); it must be repeated when the lane's command, the dev shell or the test suites change; the
-genie-freshness lane was not traced (its definition paths are wide on purpose); and a lane whose `unresolved_calls` is not 0 is not closed. Until
+genie-freshness lane was traced separately (below; its input is the whole tree); and a lane whose `unresolved_calls` is not 0 is not closed. Until
 every lane a gate relies on has a clean trace, a signed note still must not skip a queue lane on this alone.
+
+genie-freshness was traced on 2026-10-17 at main 7c25ef7e87e (`nix develop .#genie -c bash scripts/ci-genie-freshness`, with `LD_PRELOAD` unset: the signer
+refuses to start with it set; 8 min 55 s under strace, 1.8 GB of log; the lane's own real-strace test skips itself when already traced). Its input is the
+whole tree (`genie --check` regenerates and checks every file, the licence check reads every lockfile, the tests build fixture repositories), so its lane
+entry declares `tree_inputs: ["."]` and the trace tool reports nothing under the root as uncovered; the trace shows 2,353 repository paths opened, 2,513 looked
+for and not found, and no call it could not place. What the whole-tree declaration does NOT cover is the environment outside the repository, which the
+trace did show and no fingerprint records: the user's global git configuration (`~/.gitconfig`, `~/.config/git`, read by every git the lane starts outside
+its fixtures), the bun install cache under `~/.bun`, the user's `PATH` tools (`gh`, `flock`) and `/etc/localtime`. They are not tree content and are not
+bound by `flake.lock`; a host whose global git configuration differs can in principle produce a different result. That is a documented limit of the
+cooperative host signature, not something this control removes.
 
 ### The `signed-tree` shadow job
 

@@ -809,6 +809,16 @@ fn a_trim_never_makes_a_write_wait_long() {
         Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap(),
     );
     store.bind_fleet(FLEET).unwrap();
+    // This test times how long the trim holds the writer. Every commit waits for the disk with
+    // `synchronous=FULL`, and a shared disk makes that wait the whole measurement: a chunk
+    // held 13 ms of CPU and its commit waited 259 ms on hetz2. Without the sync, a write waits
+    // only for the trim's own work. The 500 ms bound is unchanged.
+    store
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("PRAGMA synchronous=OFF")
+        .unwrap();
     write_diagnostics(&store, "daemon/alder", 1_500);
     let cut = now_ms() + 1_000;
     let plan = plan_drops(&store.checkpoint_sealed_set(cut).unwrap());

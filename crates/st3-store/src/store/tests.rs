@@ -7342,7 +7342,7 @@ fn work_nudged_operations_are_incremental_in_opposite_arrival_and_batch_orders()
             let mut view = follower.step_run(&step).unwrap().unwrap();
             enrich_step_nudge_at(&connection, &mut view, latest).unwrap();
             assert_eq!(view.nudged_at_unix_ms, Some(latest));
-            assert_eq!(follower.latest_nudge(&step).unwrap().unwrap().accepted_at_unix_ms, latest);
+            assert_eq!(follower.latest_claim(&step, Some(WORK_NUDGED_KIND)).unwrap().unwrap().accepted_at_unix_ms, latest);
             let rows = nudges.iter().map(|claim| {
                 let (operation, _) = operation_parts(&claim.body).expect("durable operation");
                 let signed: bool = connection.query_row(

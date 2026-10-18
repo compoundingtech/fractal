@@ -1,3 +1,4 @@
+use st3::GitChangesStore;
 use st3::cli_output;
 use st3::{cli_print as print, cli_println as println};
 

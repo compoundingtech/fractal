@@ -1,5 +1,6 @@
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
+use crate::{GithubStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::panic::AssertUnwindSafe;

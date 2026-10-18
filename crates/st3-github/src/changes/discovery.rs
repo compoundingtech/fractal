@@ -182,11 +182,13 @@ impl Owner {
                 let attempted_at = chrono::Utc::now().to_rfc3339();
                 let started = Instant::now();
                 let transport = owner.transport.clone();
-                let result = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("changes.discover", || {
-                    transport
-                        .discover()
-                        .and_then(Observation::from_advertisement)
-                }))
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::task_cpu::blocking("changes.discover", || {
+                        transport
+                            .discover()
+                            .and_then(Observation::from_advertisement)
+                    })
+                })
                 .await;
                 let result = match result {
                     Ok(result) => result,
@@ -247,7 +249,10 @@ impl Owner {
         let owner = self.clone();
         tokio::spawn(crate::task_cpu::account("changes.sync", async move {
             let transport = owner.transport.clone();
-            let result = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("changes.sync", || transport.sync())).await;
+            let result = tokio::task::spawn_blocking(move || {
+                crate::task_cpu::blocking("changes.sync", || transport.sync())
+            })
+            .await;
             owner.state.lock().await.syncing = false;
             let result = match result {
                 Ok(Ok(())) => Ok(()),
