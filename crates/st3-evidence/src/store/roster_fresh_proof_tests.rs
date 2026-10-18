@@ -1,9 +1,10 @@
 #![allow(unused_imports)]
+use crate::SeatsStore;
 use crate::EvidenceStore;
 use super::*;
-use st3_store::store::shared::*;
-use st3_store::store::roster_fresh_proof_tests_shared::*;
-use st3_store::store::roster_fresh_proof_tests_shared::{SUBJECT, unrelated};
+use st3_seats::store::shared::*;
+use st3_seats::store::roster_fresh_proof_tests_shared::*;
+use st3_seats::store::roster_fresh_proof_tests_shared::{SUBJECT, unrelated};
 
 
 fn fixture(history: bool) -> (Store, u64, Arc<Vec<Value>>, u128) {

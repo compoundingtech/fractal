@@ -2,6 +2,7 @@
 //! only allowlisted identifiers, closed enums, counts and timestamps out of it, so titles,
 //! goals, previews, paths and other free text in source rows never reach an assistant.
 //! Content reads return one bounded text range of one exactly named resource.
+use crate::SeatsStore;
 use crate::EvidenceStore;
 use super::*;
 

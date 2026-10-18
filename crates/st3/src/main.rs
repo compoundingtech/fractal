@@ -3,6 +3,9 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::LimitsStore;
+use st3::SeatsStore;
+use st3::StopDeferralStore;
 use st3::PublicationFactsStore;
 use st3::GitChangesStore;
 use st3::cli_output;

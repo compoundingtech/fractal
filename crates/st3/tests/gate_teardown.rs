@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 //! An unreadable adoption observation is not evidence that a gate group stopped.
+use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;

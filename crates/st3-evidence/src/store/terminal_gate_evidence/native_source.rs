@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use st3_store::store::terminal_gate_evidence_shared::*;
+use st3_seats::store::terminal_gate_evidence_shared::*;
 use super::*;
 use crate::model::{DesiredSubject, GateSpec, MemberKind, MissionSpec};
 use smallclaims::ivm::install::{Installer, Limits, Outcome, ScanPage};
