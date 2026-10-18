@@ -1,6 +1,8 @@
 //! Shared bounded windows, never authority. The existing socket feed still publishes frames.
 //! A future graph-watch consumer can replace `revision` with view/frontier invalidations;
 //! authorized row reads and socket snapshot/diff delivery remain the same.
+use crate::SeatsStore;
+use crate::PublishedViewsStore;
 use super::*;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};

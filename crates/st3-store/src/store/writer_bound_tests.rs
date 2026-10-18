@@ -79,7 +79,7 @@ fn a_catch_up_exchange_holds_the_writer_one_page_at_a_time() {
 /// request's part of the tree, not all 200 runs in one hold.
 #[test]
 fn a_late_claim_in_a_large_standing_tree_holds_the_writer_for_its_own_part() {
-    let (controller, worker, _root, children) = super::tests::replicated_run_tree(200);
+    let (controller, worker, _root, children) = crate::store::tests_shared_seats::replicated_run_tree(200);
     let earlier = worker
         .claims_for(&children[0].subject, None)
         .unwrap()
@@ -96,7 +96,7 @@ fn a_late_claim_in_a_large_standing_tree_holds_the_writer_for_its_own_part() {
         .unwrap();
     let inventory = worker.replication_inventory().unwrap();
     let (exchange, _) = stage("bound/standing-tree/export", || {
-        super::tests::exchange_from(&controller, &inventory)
+        crate::store::tests_shared::exchange_from(&controller, &inventory)
     });
     stage("bound/standing-tree/receive", || {
         worker

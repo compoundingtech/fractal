@@ -1,3 +1,12 @@
+use crate::LimitsStore;
+use crate::RosterAdmissionStore;
+use crate::SeatStatusStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
+use crate::SubagentsStore;
+use crate::EvidenceStore;
+use crate::OwnedSetsStore;
+use crate::PublicationFactsStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd as _;
@@ -7147,6 +7156,13 @@ fn doctor_report_with_operation_drift(
             status: "fail".into(),
             message: error.to_string(),
         }),
+    }
+    for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
+        checks.push(DoctorCheck {
+            name: fault.code.clone(),
+            status: if fault.code == "signature-state-corrupt" { "fail" } else { "warn" }.into(),
+            message: format!("{}: {}", fault.subject, fault.detail),
+        });
     }
     match state.store.claim_verdict_counts() {
         Ok(counts) => checks.push(claim_signatures_check(&counts)),

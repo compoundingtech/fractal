@@ -36,9 +36,10 @@ pub use staged::plan_staged;
 /// `runtime.reconcile-decision` of each decision key.
 /// Version 16 preserves exact review binding, withdrawal and author-attempt references.
 /// It ships in the reader release before review-at-head activation.
-/// Version 18 adds harness-question lifecycle retention after #1473's allocated version 17.
-/// Whichever PR lands second must renumber in a plain follow-up commit.
-pub const RULES_VERSION: u32 = 18;
+/// Version 17 included selected rollup costs and complete, single-currency legacy costs in usage proofs (#1473).
+/// Version 18 adds harness-question lifecycle retention. Version 19 is both together: #1473 landed after version 18
+/// and renumbered from its allocated 17 as the version 18 note asked.
+pub const RULES_VERSION: u32 = 19;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -75,6 +76,7 @@ sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
 proof=the-sealed-claims-and-the-blobs-they-reference
 graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
 replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
+reader-usage=rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas,cost-complete-single-currency
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot-but-harness-questions
 carriers=every-rule-but-loop.state-and-harness-questions-keeps-the-newest-carrier-of-each-field

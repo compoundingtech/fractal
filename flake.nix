@@ -255,6 +255,10 @@
           "--exclude"
           "st3-store"
           "--exclude"
+          "st3-seats"
+          "--exclude"
+          "st3-evidence"
+          "--exclude"
           "st3-github"
           "--exclude"
           "st3-peer"
@@ -478,6 +482,10 @@
             "st3-github-base"
             "-p"
             "st3-store"
+            "-p"
+            "st3-seats"
+            "-p"
+            "st3-evidence"
             "-p"
             "st3-github"
             "-p"
@@ -1285,6 +1293,7 @@
             pkgs.git
             pkgs.gnutar
             pkgs.jq
+            pkgs.nodejs
             pkgs.openssh
             pkgs.python3
             pkgs.zstd
@@ -1456,7 +1465,7 @@
         };
         # Configuration generation must not realize the Rust/PTY/collector shell.
         devShells.genie = pkgs.mkShell {
-          packages = [ effect-utils.packages.${system}.genie ];
+          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
           shellHook = ''
             mkdir -p repos
             ln -sfn ${effect-utils} repos/effect-utils

@@ -1,5 +1,6 @@
 //! `st ui open` against the real terminal interface: a seat asks, in a separate process, for an
 //! agent or a mission to be shown in a tab or a split, and the picture in a PTY changes.
+use st3::SeatsStoreCore;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,

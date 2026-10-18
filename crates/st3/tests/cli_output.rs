@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use st3::SeatsStoreCore;
 use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
