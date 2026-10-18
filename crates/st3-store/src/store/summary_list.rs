@@ -71,7 +71,7 @@ pub struct SummaryMachines {
 }
 
 #[derive(Default)]
-struct Selection {
+pub struct Selection {
     /// When a window last read it, in Unix ms.
     read_at: u64,
     row: Option<SummaryRow>,
@@ -80,7 +80,7 @@ struct Selection {
 }
 
 #[derive(Default)]
-struct Lists {
+pub struct Lists {
     selections: HashMap<Option<String>, Selection>,
     shared: Option<(Arc<SummaryShared>, SummaryInputs)>,
     machines: Option<SummaryMachines>,

@@ -25,7 +25,7 @@ impl HookEnv for BTreeMap<String, String> {
         self.get(name).cloned()
     }
     fn var(&self, name: &str) -> Option<String> {
-        self.get(name).filter(|value| !value.is_empty()).cloned()
+        st_drivers::contracts::env_with(name, &|key| self.raw_var(key))
     }
 }
 
@@ -129,9 +129,9 @@ pub fn hook(
     if invocations.is_empty() && logs.is_empty() && code == 0 {
         return code;
     }
-    let subject = env
-        .var("ST3_SUBJECT")
-        .or_else(|| env.var("ST_AGENT"))
+    let subject = (!st_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name)))
+        .then(|| env.var("ST3_SUBJECT").or_else(|| env.var("ST_AGENT")))
+        .flatten()
         .filter(|subject| subject.starts_with("agent/"));
     let incarnation =
         st_drivers::contracts::env_with(st_drivers::claude_session::SESSION_ENV, &|name| {
