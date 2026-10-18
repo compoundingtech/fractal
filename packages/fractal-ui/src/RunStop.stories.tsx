@@ -79,7 +79,11 @@ const stopsOnce = (via: 'press' | 'escape') => async ({ canvasElement, args }: {
   if (via === 'press') await userEvent.click(stop(canvasElement)!)
   else { await userEvent.click(canvas.getByRole('textbox', { name: 'Message' })); await userEvent.keyboard('{Escape}') }
   await waitFor(() => expect(stop(canvasElement)).toHaveAttribute('aria-label', 'Stopping run'))
-  await expect(stop(canvasElement)).toBeDisabled()
+  await expect(stop(canvasElement)).toHaveAttribute('aria-disabled', 'true')
+  await expect(via === 'press' ? stop(canvasElement) : canvas.getByRole('textbox', { name: 'Message' })).toHaveFocus()
+  await userEvent.click(stop(canvasElement)!)
+  await expect(stop(canvasElement)).toHaveFocus()
+  await expect(args.onStopRequest).toHaveBeenCalledTimes(1)
   await waitFor(() => expect(stop(canvasElement)).toBeNull(), { timeout: 4000 })
   await expect(canvasElement.querySelector('[data-tool-status="interrupted"]')).not.toBeNull()
   await expect(args.onStopRequest).toHaveBeenCalledTimes(1)
