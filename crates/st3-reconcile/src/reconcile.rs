@@ -29149,6 +29149,18 @@ mission "orchid/timeout" state="ready" timeout="1ms" {
 
     #[test]
     fn a_cancelled_runs_final_exec_started_but_not_yet_observed_keeps_its_step() {
+        final_exec_during_cancellation(false);
+    }
+
+    #[test]
+    fn a_cancelled_runs_final_exec_that_disappears_without_an_exit_still_ends_its_step() {
+        final_exec_during_cancellation(true);
+    }
+
+    /// A final exec launched during cancellation keeps its step until its end is proven: by an
+    /// observed exit, or, when its process is gone with no exit recorded (a crash or a kill), by
+    /// the vanished observation the member reconciler records for it.
+    fn final_exec_during_cancellation(gone_without_exit: bool) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(
             &store,
@@ -29226,8 +29238,12 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
         }
         assert_eq!(report().status, "working");
         assert!(!runtime.stops.lock().unwrap().contains(&runtime_id), "the final exec was stopped");
-        // Its exit is proof: then the processless shortcut still cancels the step.
-        observe(&runtime_id, "exited");
+        if gone_without_exit {
+            runtime.execs.lock().unwrap().remove(&runtime_id);
+        } else {
+            observe(&runtime_id, "exited");
+        }
+        // Either is proof the process ended: then the processless shortcut still cancels the step.
         for _ in 0..4 {
             reconciler.reconcile_once().unwrap();
         }
