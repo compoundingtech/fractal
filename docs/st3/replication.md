@@ -379,8 +379,10 @@ for replacing a legacy local dial helper.
 With Fabric enabled, the replication worker reconciles signed fleet membership into
 Fabric runtime peers and protocol-scoped grants, owned by `st/fleet/<fleet-id>`.
 It does not rewrite Fabric's static peer configuration or require another daemon.
-Ended members are removed from this owner's desired runtime policy; independently
-configured static peers or grants from other owners can still retain access.
+Removed and conflicted members are removed from this owner's desired runtime
+policy. A signed leave retains only the replication carrier needed to finish
+authenticated confirmation; PTY and gateway grants are withdrawn immediately.
+Independently configured static peers or other owners can still retain access.
 
 The runtime API requires Fabric v0.9.1 or newer (v0.9.0 predates Fabric #324).
 st uses the documented newline-delimited control socket directly; the separate
@@ -396,10 +398,12 @@ reports an error rather than broadening policy.
 Reconciliation runs before a received membership update completes sync, and
 retries every 30 seconds for daemon restarts or policy drift. It reads one
 revision-consistent snapshot and publishes owner-scoped removals, additions,
-and grant replacements in one batch (maximum 128 operations). A lost reply is
-retried with identical request ID and contents; later passes read current
-policy rather than replaying a stale plan. Revocation checks cancellation
-completion and reports static/other-owner residual service access instead of
+and grant replacements in one batch (maximum 128 operations). Before retrying
+a lost reply with the same ID and contents, st revalidates every operation against
+the latest signed membership and exact grants. An obsolete addition is never
+resubmitted: st queries its receipt, then withdraws any committed obsolete rights
+using a fresh snapshot. Later passes never reinstall a stale plan. Revocation
+checks cancellation completion and reports static/other-owner residual access instead of
 claiming complete retirement. The settings lock prevents a retiring worker
 from restoring grants after leave or Fabric transport removal.
 
@@ -411,6 +415,25 @@ missing completion evidence stays an error instead of reinstalling an old plan.
 Retired NodeIDs with residual st grants remain journaled, so a re-key warning
 survives subsequent polling until the residual source is removed.
 
+Online leave uses a durable, single-confirmer handshake so withdrawing its own
+Fabric carrier cannot cut off its last replication response. After exporting,
+the worker checks fresh membership before sending a self-left envelope, and
+persists the selected authenticated member key in `fleet/leave-carriers.json`.
+Only that member receives a direct export of the leave; other members learn it
+through ordinary replication and revoke on the sync that admits it. An ambiguous
+send cannot silently select another confirmer.
+
+The direct receiver records the carrier drain before admitting the leave, whether
+the leave arrives in a push or a pull response. It retains only the fleet
+replication grant until the leaving member returns an authenticated receipt of
+its signed `member-left` proof through `/v1/replication/leave-receipt`. The receiver
+persists the receipt before withdrawing that carrier. The leaving worker reports
+completion only after a signed receipt acknowledgement or an authenticated
+Fabric grant refusal following that signed proof. Generic timeout, reset, or
+offline failure stays pending and is retryable; matching graph digests alone
+do not complete this second stage. Receipt support requires an upgraded
+confirmer. The drain and selected member survive a worker restart.
+
 `st fleet status` and `st replication status` expose the worker's last local result
 as `fabric_reconcile` in JSON, including `state`, `message`, and `policy_revision`.
 Readable output shows the same state and any diagnostic. The source is
@@ -419,8 +442,9 @@ when Fabric is enabled and `disabled` otherwise. An unreadable or malformed resu
 is an `error`, not an assumed successful reconciliation.
 
 `applied` means the runtime policy was applied at the reported revision; it does
-not prove transport connectivity or replication convergence. `pending` means no
-result has been recorded yet; `error` retains the failure for inspection.
+not prove transport connectivity or replication convergence. `leaving` means a
+replication-only carrier is retained for authenticated leave completion.
+`pending` means no result has been recorded yet; `error` retains the failure.
 `runtime_peers_disabled` means Fabric must be restarted with `--runtime-peers`
 before runtime membership can be managed. Existing static peers still work.
 The status reports policy reconciliation separately from each peer's replication

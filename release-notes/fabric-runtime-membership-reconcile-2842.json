@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Fabric-enabled workers manage owner-scoped runtime peers and protocol grants without rewriting static configuration. Existing static peers and independently owned grants remain independent. Status reports pending or error instead of assuming runtime policy success."
+    "detail": "Fabric-enabled workers manage owner-scoped runtime peers and protocol grants without rewriting static configuration. Existing static peers and independently owned grants remain independent. Online leave requires an upgraded confirming member for the authenticated leave-receipt endpoint; unsupported peers cannot falsely complete leave. Status reports pending or error instead of assuming runtime policy success."
   },
   "downtime": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Membership refresh reconciles the owner's desired runtime policy, including ended members. Fleet and replication status read the worker's recorded result and retain failures; applied reports policy application, not connectivity or replication convergence. Other owners or static policy may retain rights after this owner's records are withdrawn."
+    "detail": "Membership refresh reconciles the owner's desired runtime policy, including ended members. Before replaying an uncertain transaction, st revalidates every operation against the latest signed membership and exact grants; obsolete additions are queried but never resubmitted. Leave retains only its replication carrier until authenticated completion, withdrawing PTY and gateway grants immediately. Fleet and replication status retain failures and distinguish leaving from applied. Other owners or static policy may retain rights after this owner's records are withdrawn."
   }
 }

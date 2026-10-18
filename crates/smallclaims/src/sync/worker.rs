@@ -42,6 +42,45 @@ const OVERLOAD_RETRY: Duration = Duration::from_secs(5);
 const MAX_EXCHANGE_JOBS: usize = 4;
 const MAX_OVERLOAD_POLLS: usize = 60;
 
+const LEAVE_RECEIPT_PATH: &str = "/v1/replication/leave-receipt";
+
+/// Proofs and receipts survive worker restarts. Keys, not host names, identify incarnations.
+#[derive(Clone, Default, serde::Deserialize, Serialize)]
+struct LeaveState {
+    confirmer: Option<String>,
+    completed: BTreeSet<String>,
+    awaiting: BTreeSet<String>,
+    pending: BTreeMap<String, LeaveProof>,
+}
+
+#[derive(Clone, serde::Deserialize, Serialize)]
+struct LeaveProof {
+    body: String,
+    headers: BTreeMap<String, String>,
+    request_digest: String,
+}
+
+async fn save_leave_state(fleet: &FleetContext, state: &LeaveState) -> Result<()> {
+    if let Some(directory) = &fleet.state_dir {
+        let directory = directory.clone();
+        let own = fleet.own_key.clone();
+        let bytes = serde_json::to_vec(state)?;
+        tokio::task::spawn_blocking(move || {
+            let _lock = FleetFile::lock_settings(&directory)?;
+            let file = FleetFile::load(&directory)?.context("fleet settings retired")?;
+            if let Some(own) = own {
+                anyhow::ensure!(
+                    MemberKey::load(&file.node_key_path(&directory))?.public() == own,
+                    "fleet incarnation changed while recording leave completion"
+                );
+            }
+            crate::fleet::join::write_private(&directory.join("fleet/leave-carriers.json"), &bytes)
+        })
+        .await??;
+    }
+    Ok(())
+}
+
 struct ExchangeJobs {
     peers: std::sync::Mutex<BTreeMap<String, ExchangeJob>>,
     permits: Arc<tokio::sync::Semaphore>,
@@ -155,6 +194,7 @@ pub struct FleetContext {
     activity: Arc<std::sync::RwLock<BTreeMap<String, tokio::time::Instant>>>,
     activity_changed: watch::Sender<u64>,
     exchange_jobs: Arc<ExchangeJobs>,
+    leave: Arc<tokio::sync::Mutex<LeaveState>>,
 }
 
 impl FleetContext {
@@ -183,6 +223,7 @@ impl FleetContext {
             online: Arc::default(),
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
+            leave: Arc::default(),
             exchange_jobs: Arc::default(),
         }
     }
@@ -219,6 +260,7 @@ impl FleetContext {
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
             exchange_jobs: Arc::default(),
+            leave: Arc::default(),
         }
     }
 
@@ -450,6 +492,12 @@ pub async fn run<B: Backend>(
     } else {
         None
     };
+    let leave_path = config.state_dir.join("fleet/leave-carriers.json");
+    let leave = match tokio::fs::read(&leave_path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("decode leave carrier receipts")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LeaveState::default(),
+        Err(error) => return Err(error).context("read leave carrier receipts"),
+    };
     let fleet = FleetContext {
         view: Arc::default(),
         view_refresh: Arc::default(),
@@ -459,7 +507,10 @@ pub async fn run<B: Backend>(
             fabric: fabric.is_some(),
         })),
         fabric: fabric.clone(),
-        runtime_policy: config.fleet.clone().filter(|_| wants("fabric"))
+        runtime_policy: config
+            .fleet
+            .clone()
+            .filter(|_| wants("fabric"))
             .map(|settings| (config.state_dir.clone(), settings)),
         bootstrap: config.fleet.as_ref().and_then(|file| {
             let sponsor = file.sponsor.clone()?;
@@ -502,25 +553,39 @@ pub async fn run<B: Backend>(
         activity: Arc::default(),
         activity_changed: watch::channel(0).0,
         exchange_jobs: Arc::default(),
+        leave: Arc::new(tokio::sync::Mutex::new(leave)),
     };
-    tokio::spawn(crate::task_cpu::account("replication.connectivity", keep_connectivity_current(fleet.clone())));
+    tokio::spawn(crate::task_cpu::account(
+        "replication.connectivity",
+        keep_connectivity_current(fleet.clone()),
+    ));
     if let Some(fabric) = fabric.clone() {
-        tokio::spawn(crate::task_cpu::account("replication.fabric_presence", keep_fabric_presence_current(fabric, fleet.clone())));
+        tokio::spawn(crate::task_cpu::account(
+            "replication.fabric_presence",
+            keep_fabric_presence_current(fabric, fleet.clone()),
+        ));
     }
     backend.ready().await;
     let notify = wake;
     refresh_fleet_view(&backend, &fleet).await;
-    if let (Some(settings), Some(own)) = (config.fleet.clone().filter(|_| wants("fabric")), member_key.as_ref()) {
+    if let (Some(settings), Some(own)) = (
+        config.fleet.clone().filter(|_| wants("fabric")),
+        member_key.as_ref(),
+    ) {
         tokio::spawn(crate::task_cpu::account(
             "replication.fabric_policy",
-            keep_fabric_policy_current(config.state_dir.clone(), settings, own.public().to_owned(), fleet.clone()),
+            keep_fabric_policy_current(
+                config.state_dir.clone(),
+                settings,
+                own.public().to_owned(),
+                fleet.clone(),
+            ),
         ));
     }
-    tokio::spawn(crate::task_cpu::account("replication.fleet_view", keep_fleet_view_current(
-        backend.clone(),
-        fleet.clone(),
-        notify.subscribe(),
-    )));
+    tokio::spawn(crate::task_cpu::account(
+        "replication.fleet_view",
+        keep_fleet_view_current(backend.clone(), fleet.clone(), notify.subscribe()),
+    ));
     let state = PeerState {
         backend: backend.clone(),
         node: config.node.clone(),
@@ -533,15 +598,18 @@ pub async fn run<B: Backend>(
     for peer in config.peers.iter().filter(|peer| peer.url.is_empty()) {
         let backend = backend.clone();
         let name = peer.name.clone();
-        tokio::spawn(crate::task_cpu::account("replication.peer_failure", async move {
-            loop {
-                tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
-                super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
-                let _ = backend
-                    .record_failure(&name, "down", "no recent inbound exchange", None)
-                    .await;
-            }
-        }));
+        tokio::spawn(crate::task_cpu::account(
+            "replication.peer_failure",
+            async move {
+                loop {
+                    tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
+                    super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
+                    let _ = backend
+                        .record_failure(&name, "down", "no recent inbound exchange", None)
+                        .await;
+                }
+            },
+        ));
     }
     start_outbound(
         backend.clone(),
@@ -578,38 +646,47 @@ pub async fn run<B: Backend>(
             endpoints.update(|set| set.tailscale = vec![address]);
         }
         if let Some(tailscale) = tailscale {
-            tokio::spawn(crate::task_cpu::account("replication.tailnet", keep_tailnet_current(
-                tailscale,
-                bound_address.map(|address| (address.port(), app.clone())),
-                tailnet.map(|address| address.ip()),
-                endpoints.clone(),
-                fleet_transports,
-                notify_for_transports,
-                fleet.connectivity_changed.subscribe(),
-            )));
+            tokio::spawn(crate::task_cpu::account(
+                "replication.tailnet",
+                keep_tailnet_current(
+                    tailscale,
+                    bound_address.map(|address| (address.port(), app.clone())),
+                    tailnet.map(|address| address.ip()),
+                    endpoints.clone(),
+                    fleet_transports,
+                    notify_for_transports,
+                    fleet.connectivity_changed.subscribe(),
+                ),
+            ));
         }
         if let (Some(fabric), Some(address)) = (fabric, loopback) {
             let protocol = file
                 .fabric_protocol
                 .clone()
                 .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
-            settings_tasks.spawn(crate::task_cpu::account("replication.fabric_exposure", keep_fabric_exposed(
-                fabric,
-                protocol,
-                address,
+            settings_tasks.spawn(crate::task_cpu::account(
+                "replication.fabric_exposure",
+                keep_fabric_exposed(
+                    fabric,
+                    protocol,
+                    address,
+                    endpoints.clone(),
+                    fleet.connectivity_changed.subscribe(),
+                    config.state_dir.clone(),
+                    file.clone(),
+                ),
+            ));
+        }
+        settings_tasks.spawn(crate::task_cpu::account(
+            "replication.publish_endpoints",
+            keep_endpoints_published(
+                backend,
+                file.mode.as_str(),
                 endpoints.clone(),
-                fleet.connectivity_changed.subscribe(),
                 config.state_dir.clone(),
                 file.clone(),
-            )));
-        }
-        settings_tasks.spawn(crate::task_cpu::account("replication.publish_endpoints", keep_endpoints_published(
-            backend,
-            file.mode.as_str(),
-            endpoints.clone(),
-            config.state_dir.clone(),
-            file.clone(),
-        )));
+            ),
+        ));
     }
     let serving = async move {
         // A dial-out member accepts no connections, but still supervises publication.
@@ -881,19 +958,43 @@ async fn keep_fabric_presence_current(fabric: Fabric, fleet: FleetContext) {
 
 async fn refresh_fleet_view<B: Backend>(backend: &B, fleet: &FleetContext) {
     let _refresh = fleet.view_refresh.lock().await;
+    refresh_fleet_view_locked(backend, fleet).await;
+}
+
+async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext) {
     if let Ok(view) = backend.fleet_view().await {
+        {
+            let mut leave = fleet.leave.lock().await;
+            let mut updated = leave.clone();
+            updated.awaiting.retain(|key| {
+                view.members.iter().any(|member| {
+                    member.member_key == *key
+                        && member.state == "ended"
+                        && member.ended.as_deref() == Some("left")
+                })
+            });
+            if updated.awaiting != leave.awaiting {
+                if let Err(error) = save_leave_state(fleet, &updated).await {
+                    eprintln!("cannot retire completed exchange carrier: {error:#}");
+                }
+                *leave = updated;
+            }
+        }
         let changed = {
             let mut current = fleet.view.write().expect("fleet view lock poisoned");
             if *current == view {
                 false
             } else {
                 *current = view;
-                fleet.view_changed.send_modify(|generation| *generation = generation.wrapping_add(1));
+                fleet
+                    .view_changed
+                    .send_modify(|generation| *generation = generation.wrapping_add(1));
                 true
             }
         };
         if changed
-            && let (Some((state_dir, settings)), Some(own_key)) = (&fleet.runtime_policy, &fleet.own_key)
+            && let (Some((state_dir, settings)), Some(own_key)) =
+                (&fleet.runtime_policy, &fleet.own_key)
             && let Err(error) = reconcile_fabric_policy(state_dir, settings, own_key, fleet).await
         {
             eprintln!("Fabric runtime policy status could not be persisted: {error:#}");
@@ -935,10 +1036,12 @@ async fn lock_current_settings(
 ) -> Result<Option<std::fs::File>> {
     let state_dir = state_dir.to_path_buf();
     let settings = settings.clone();
-    tokio::task::spawn_blocking(move || crate::task_cpu::blocking("replication.settings", || {
-        let lock = FleetFile::lock_settings(&state_dir)?;
-        Ok((FleetFile::load(&state_dir)?.as_ref() == Some(&settings)).then_some(lock))
-    }))
+    tokio::task::spawn_blocking(move || {
+        crate::task_cpu::blocking("replication.settings", || {
+            let lock = FleetFile::lock_settings(&state_dir)?;
+            Ok((FleetFile::load(&state_dir)?.as_ref() == Some(&settings)).then_some(lock))
+        })
+    })
     .await?
 }
 
@@ -981,6 +1084,218 @@ pub fn dial_targets(
     targets
 }
 
+/// Select one authenticated identity after export, before any self-left payload is sent.
+/// A timeout cannot move the selector: the first peer may already have admitted the leave.
+async fn select_leave_confirmer<B: Backend>(
+    backend: &B,
+    fleet: &FleetContext,
+    peer: &str,
+) -> Result<()> {
+    let Some(own) = &fleet.own_key else {
+        return Ok(());
+    };
+    let view = backend.fleet_view().await?;
+    if !view.members.iter().any(|member| {
+        member.member_key == *own
+            && member.state == "ended"
+            && member.ended.as_deref() == Some("left")
+    }) {
+        return Ok(());
+    }
+    let peer_key = view
+        .members
+        .iter()
+        .find(|member| member.name == peer && member.state == "current")
+        .map(|member| member.member_key.clone())
+        .context("leave needs a current authenticated confirmer")?;
+    let mut leave = fleet.leave.lock().await;
+    if let Some(selected) = &leave.confirmer {
+        anyhow::ensure!(
+            *selected == peer_key,
+            "leave confirmation pending with another member identity; retry the selected member or leave offline"
+        );
+    } else {
+        let mut updated = leave.clone();
+        updated.confirmer = Some(peer_key);
+        save_leave_state(fleet, &updated).await?;
+        *leave = updated;
+    }
+    Ok(())
+}
+
+/// Conservative pre-admission filter, not an authorization decision. CBOR text strings
+/// contain their UTF-8 bytes verbatim; false positives only protect until the signed
+/// membership fold below proves whether the sender actually left.
+fn may_carry_direct_leave(exchange: &ReplicationExchange, key: &str) -> bool {
+    // A signature can admit a previously held, unsealed leave payload as well.
+    if exchange
+        .signatures
+        .iter()
+        .any(|signature| signature.member_key == key)
+    {
+        return true;
+    }
+    let marker = b"fleet.member-left";
+    exchange.envelopes.iter().any(|envelope| {
+        envelope.member_key.as_deref() == Some(key)
+            && envelope
+                .payload
+                .bytes()
+                .is_ok_and(|bytes| bytes.windows(marker.len()).any(|part| part == marker))
+    })
+}
+
+async fn receive_from_peer<B: Backend>(
+    backend: &B,
+    fleet: &FleetContext,
+    peer: &str,
+    fleet_id: &str,
+    exchange: &ReplicationExchange,
+    round_trip: Option<Duration>,
+    carrier: crate::replication::ReplicationCarrier,
+) -> Result<crate::replication::ReplicationReceiveResponse> {
+    let _refresh = fleet.view_refresh.lock().await;
+    let protect = fleet
+        .view
+        .read()
+        .expect("fleet view lock poisoned")
+        .members
+        .iter()
+        .find(|member| {
+            member.name == peer
+                && member.state == "current"
+                && may_carry_direct_leave(exchange, &member.member_key)
+        })
+        .map(|member| member.member_key.clone());
+    if let Some(key) = &protect {
+        let mut leave = fleet.leave.lock().await;
+        let mut updated = leave.clone();
+        updated.awaiting.insert(key.clone());
+        save_leave_state(fleet, &updated).await?;
+        *leave = updated;
+    }
+    let received = backend
+        .receive(peer, fleet_id, exchange, round_trip, carrier)
+        .await?;
+    if received.changed {
+        backend.changed().await;
+    }
+    if received.changed || protect.is_some() {
+        refresh_fleet_view_locked(backend, fleet).await;
+    }
+    Ok(received)
+}
+
+/// Application authority ends immediately; carrier retirement waits for a receipt.
+fn retained_leave_members(view: &FleetView, own_key: &str, leave: &LeaveState) -> BTreeSet<String> {
+    view.members
+        .iter()
+        .filter(|member| {
+            member.state == "ended"
+                && member.ended.as_deref() == Some("left")
+                && (member.member_key == own_key
+                    || (leave.awaiting.contains(&member.member_key)
+                        && !leave.completed.contains(&member.member_key)))
+        })
+        .map(|member| member.member_key.clone())
+        .collect()
+}
+
+/// An ended member may acknowledge our signed refusal, never exchange ordinary data.
+async fn receive_leave_receipt<B: Backend>(
+    State(state): State<PeerState<B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let result = async {
+        let sender =
+            state
+                .auth
+                .verify_sender(&headers, "POST", LEAVE_RECEIPT_PATH, &body, None, None)?;
+        anyhow::ensure!(
+            sender.member_signature_valid,
+            "leave receipt needs a member signature"
+        );
+        let key = sender
+            .member_key
+            .as_deref()
+            .context("leave receipt has no member key")?;
+        {
+            let view = state.fleet.view.read().expect("fleet view lock poisoned");
+            anyhow::ensure!(
+                view.members.iter().any(|member| {
+                    member.name == sender.name
+                        && member.member_key == key
+                        && member.state == "ended"
+                        && member.ended.as_deref() == Some("left")
+                }),
+                "leave receipt is not from the exact left member"
+            );
+        }
+        let proof: LeaveProof = serde_json::from_slice(&body)?;
+        let proof_headers =
+            proof
+                .headers
+                .iter()
+                .try_fold(HeaderMap::new(), |mut headers, (name, value)| {
+                    headers.insert(
+                        name.parse::<axum::http::HeaderName>()?,
+                        value.parse::<HeaderValue>()?,
+                    );
+                    Ok::<_, anyhow::Error>(headers)
+                })?;
+        let issuer = state.auth.verify_sender(
+            &proof_headers,
+            "RESPONSE",
+            EXCHANGE_PATH,
+            proof.body.as_bytes(),
+            Some(&state.node),
+            Some(&proof.request_digest),
+        )?;
+        anyhow::ensure!(
+            issuer.member_signature_valid && issuer.member_key == state.fleet.own_key,
+            "leave proof was not issued by this member"
+        );
+        let proof: PeerResponse<Value> = serde_json::from_str(&proof.body)?;
+        anyhow::ensure!(
+            proof.value["code"] == "member-left" && proof.value["member_key"] == key,
+            "receipt does not acknowledge this member's leave"
+        );
+        {
+            let mut leave = state.fleet.leave.lock().await;
+            let mut updated = leave.clone();
+            updated.completed.insert(key.to_owned());
+            updated.awaiting.remove(key);
+            save_leave_state(&state.fleet, &updated).await?;
+            *leave = updated;
+        }
+        let response = signed_response_for(
+            &state,
+            LEAVE_RECEIPT_PATH,
+            &FleetAuth::body_digest(&body),
+            0,
+            serde_json::json!({"acknowledged": key}),
+        )?;
+        // The enclosed proof already reached the requester. Revocation may cut this
+        // response, but cannot cut the member-left acknowledgement it proves delivered.
+        if let (Some((directory, settings)), Some(own)) =
+            (&state.fleet.runtime_policy, &state.fleet.own_key)
+        {
+            let _refresh = state.fleet.view_refresh.lock().await;
+            reconcile_fabric_policy(directory, settings, own, &state.fleet).await?;
+        }
+        Ok::<_, anyhow::Error>(response)
+    }
+    .await;
+    result.unwrap_or_else(|error| {
+        (
+            StatusCode::FORBIDDEN,
+            format!("leave receipt refused: {error:#}"),
+        )
+            .into_response()
+    })
+}
+
 /// Policy follows the same signed membership generation as replication. Serialize with
 /// CLI retirement so an old worker cannot restore grants after leave removes settings.
 async fn reconcile_fabric_policy(
@@ -989,14 +1304,22 @@ async fn reconcile_fabric_policy(
     own_key: &str,
     fleet: &FleetContext,
 ) -> Result<bool> {
+    let view = fleet.view.read().expect("fleet view lock poisoned").clone();
+    let retained = retained_leave_members(&view, own_key, &fleet.leave.lock().await);
     let Some(_lock) = lock_current_settings(state_dir, settings).await? else {
         return Ok(false);
     };
-    let view = fleet.view.read().expect("fleet view lock poisoned").clone();
     let status = match crate::fleet::fabric_reconcile::control_socket() {
         Ok(socket) => match crate::fleet::fabric_reconcile::reconcile(
-            state_dir, &socket, &settings.fleet_id, own_key, &view,
-        ).await {
+            state_dir,
+            &socket,
+            &settings.fleet_id,
+            own_key,
+            &view,
+            &retained,
+        )
+        .await
+        {
             Ok(status) => status,
             Err(error) => crate::fleet::fabric_reconcile::error_status(&error),
         },
@@ -1008,7 +1331,8 @@ async fn reconcile_fabric_policy(
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, bytes)?;
         std::fs::rename(temporary, path)
-    }).await??;
+    })
+    .await??;
     Ok(true)
 }
 
@@ -1020,10 +1344,13 @@ async fn keep_fabric_policy_current(
 ) {
     loop {
         tokio::time::sleep(worker_interval(Duration::from_secs(30))).await;
+        let _refresh = fleet.view_refresh.lock().await;
         match reconcile_fabric_policy(&state_dir, &settings, &own_key, &fleet).await {
             Ok(false) => return,
             Ok(true) => {}
-            Err(error) => eprintln!("Fabric runtime policy status could not be persisted: {error:#}"),
+            Err(error) => {
+                eprintln!("Fabric runtime policy status could not be persisted: {error:#}")
+            }
         }
     }
 }
@@ -1052,6 +1379,10 @@ pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>
     Router::new()
         .route(EXCHANGE_PATH, post(receive_exchange))
         .route(
+            LEAVE_RECEIPT_PATH,
+            post(receive_leave_receipt).layer(DefaultBodyLimit::max(16_384)),
+        )
+        .route(
             CHECKPOINT_PATH,
             post(receive_checkpoint_request).layer(DefaultBodyLimit::max(16_384)),
         )
@@ -1077,62 +1408,68 @@ fn start_outbound<B: Backend>(
 ) {
     // One dialer per target. Targets follow membership: a new listening member gets a dialer,
     // and a member that ends or turns dial-out loses its dialer.
-    tokio::spawn(crate::task_cpu::account("replication.outbound", async move {
-        let mut view_changes = fleet.view_changed.subscribe();
-        let mut dialers: BTreeMap<String, Dialer> = BTreeMap::new();
-        let mut transport_changes = notify.subscribe();
-        loop {
-            let targets = {
-                let view = fleet.view.read().expect("fleet view lock poisoned");
-                let local = *fleet.transports.read().expect("transport lock poisoned");
-                let mut targets = dial_targets(&view, &node, &config_peers, local);
-                // Until membership names the sponsor, dial it the way the join reached it.
-                if let Some((sponsor, routes)) = &fleet.bootstrap
-                    && view.members.iter().all(|member| member.name != *sponsor)
-                {
+    tokio::spawn(crate::task_cpu::account(
+        "replication.outbound",
+        async move {
+            let mut view_changes = fleet.view_changed.subscribe();
+            let mut dialers: BTreeMap<String, Dialer> = BTreeMap::new();
+            let mut transport_changes = notify.subscribe();
+            loop {
+                let targets = {
+                    let view = fleet.view.read().expect("fleet view lock poisoned");
+                    let local = *fleet.transports.read().expect("transport lock poisoned");
+                    let mut targets = dial_targets(&view, &node, &config_peers, local);
+                    // Until membership names the sponsor, dial it the way the join reached it.
+                    if let Some((sponsor, routes)) = &fleet.bootstrap
+                        && view.members.iter().all(|member| member.name != *sponsor)
+                    {
+                        targets
+                            .entry(sponsor.clone())
+                            .or_insert_with(|| routes.clone());
+                    }
                     targets
-                        .entry(sponsor.clone())
-                        .or_insert_with(|| routes.clone());
-                }
-                targets
-            };
-            dialers.retain(|name, (_, task)| {
-                let keep = targets.contains_key(name);
-                if !keep {
-                    task.abort();
-                }
-                keep
-            });
-            for (name, routes) in targets {
-                if let Some((current, _)) = dialers.get(&name) {
-                    if *current.borrow() != routes {
-                        current.send_replace(routes);
+                };
+                dialers.retain(|name, (_, task)| {
+                    let keep = targets.contains_key(name);
+                    if !keep {
+                        task.abort();
                     }
-                    continue;
-                }
-                let (routes, route_changes) = watch::channel(routes);
-                let task = tokio::spawn(crate::task_cpu::account("replication.dial_peer", dial_peer(
-                    backend.clone(),
-                    node.clone(),
-                    name.clone(),
-                    route_changes,
-                    auth.clone(),
-                    fleet.clone(),
-                    notify.subscribe(),
-                )));
-                dialers.insert(name, (routes, task));
-            }
-            tokio::select! {
-                changed = view_changes.changed() => {
-                    if changed.is_err() {
-                        return;
+                    keep
+                });
+                for (name, routes) in targets {
+                    if let Some((current, _)) = dialers.get(&name) {
+                        if *current.borrow() != routes {
+                            current.send_replace(routes);
+                        }
+                        continue;
                     }
+                    let (routes, route_changes) = watch::channel(routes);
+                    let task = tokio::spawn(crate::task_cpu::account(
+                        "replication.dial_peer",
+                        dial_peer(
+                            backend.clone(),
+                            node.clone(),
+                            name.clone(),
+                            route_changes,
+                            auth.clone(),
+                            fleet.clone(),
+                            notify.subscribe(),
+                        ),
+                    ));
+                    dialers.insert(name, (routes, task));
                 }
-                _ = transport_changes.changed() => {}
-                _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
+                tokio::select! {
+                    changed = view_changes.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                    _ = transport_changes.changed() => {}
+                    _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
+                }
             }
-        }
-    }));
+        },
+    ));
 }
 
 /// Exchange with one peer for as long as it stays a target, trying its routes in order.
@@ -1203,9 +1540,7 @@ async fn dial_peer<B: Backend>(
                     .get(&name)
                     .cloned();
                 if let Some(offered) = offered
-                    && let Ok(current) = backend
-                        .guard_summary(auth.fleet_id())
-                        .await
+                    && let Ok(current) = backend.guard_summary(auth.fleet_id()).await
                 {
                     // The other side already knows this inventory and is draining both
                     // queues. Notifications from that exchange must not trigger a reverse
@@ -1298,12 +1633,16 @@ async fn dial_peer<B: Backend>(
                         Ok(address) => Some(format!("http://{address}")),
                         Err(error) => {
                             if error.is::<FabricGrantRefusal>() {
+                                if confirm_retired_leave(&fleet, &name, node, protocol).await {
+                                    return;
+                                }
                                 refused.push((
                                     selected,
                                     tokio::time::Instant::now() + fabric_refusal_delay(),
                                 ));
                                 super::telemetry::record_error(
-                                    &name, super::telemetry::ErrorReason::Refused,
+                                    &name,
+                                    super::telemetry::ErrorReason::Refused,
                                 );
                                 let _ = backend
                                     .record_failure(
@@ -1317,7 +1656,8 @@ async fn dial_peer<B: Backend>(
                                 continue;
                             }
                             super::telemetry::record_error(
-                                &name, super::telemetry::ErrorReason::Down,
+                                &name,
+                                super::telemetry::ErrorReason::Down,
                             );
                             let _ = backend
                                 .record_failure(&name, "down", &error.to_string(), Some(carrier))
@@ -1434,17 +1774,15 @@ async fn dial_peer<B: Backend>(
                     && let Route::Fabric { node, protocol } = fabric_route
                     && let Some(refusal) = fabric.refusal(node, protocol).await
                 {
+                    if confirm_retired_leave(&fleet, &peer.name, node, protocol).await {
+                        return;
+                    }
                     refused.push((
                         fabric_route.clone(),
                         tokio::time::Instant::now() + fabric_refusal_delay(),
                     ));
                     let _ = backend
-                        .record_failure(
-                            &peer.name,
-                            "refused",
-                            &refusal.to_string(),
-                            Some(carrier),
-                        )
+                        .record_failure(&peer.name, "refused", &refusal.to_string(), Some(carrier))
                         .await;
                     continue;
                 }
@@ -1831,12 +2169,14 @@ async fn receive_exchange<B: Backend>(
             );
             let state = state.clone();
             let relay = relay.clone();
-            tokio::spawn(crate::task_cpu::account("replication.exchange", async move {
-                let _permit = permit;
-                let result = async {
-                    let received = state
-                        .backend
-                        .receive(
+            tokio::spawn(crate::task_cpu::account(
+                "replication.exchange",
+                async move {
+                    let _permit = permit;
+                    let result = async {
+                        let received = receive_from_peer(
+                            &state.backend,
+                            &state.fleet,
                             &relay,
                             state.auth.fleet_id(),
                             &request,
@@ -1844,31 +2184,29 @@ async fn receive_exchange<B: Backend>(
                             Default::default(),
                         )
                         .await?;
-                    if received.changed {
-                        state.backend.changed().await;
-                        refresh_fleet_view(&state.backend, &state.fleet).await;
-                    }
-                    if received.receipt.received != 0 {
-                        state
-                            .outbound_notify
-                            .send_modify(|generation| *generation = generation.saturating_add(1));
-                    }
-                    let response = state
-                        .backend
-                        .export(
-                            state.auth.fleet_id(),
-                            &request.inventory,
-                            false,
-                            &request.signature_requests,
-                        )
-                        .await?;
+                        if received.receipt.received != 0 {
+                            state.outbound_notify.send_modify(|generation| {
+                                *generation = generation.saturating_add(1)
+                            });
+                        }
+                        let response = state
+                            .backend
+                            .export(
+                                state.auth.fleet_id(),
+                                &request.inventory,
+                                false,
+                                &request.signature_requests,
+                            )
+                            .await?;
+                        select_leave_confirmer(&state.backend, &state.fleet, &relay).await?;
 
-                    Ok::<_, anyhow::Error>(response)
-                }
-                .await
-                .map_err(|error| format!("replication request failed: {error:#}"));
-                done.send_replace(Some(result));
-            }));
+                        Ok::<_, anyhow::Error>(response)
+                    }
+                    .await
+                    .map_err(|error| format!("replication request failed: {error:#}"));
+                    done.send_replace(Some(result));
+                },
+            ));
         }
         jobs.get(&relay).unwrap().answer.clone()
     };
@@ -2322,6 +2660,96 @@ pub async fn exchange<B: Backend>(
     exchange_via(http, backend, node, peer, auth, fleet, Default::default()).await
 }
 
+async fn finish_leave_receipt(
+    http: &reqwest::Client,
+    peer: &PeerConfig,
+    node: &str,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+) -> Result<()> {
+    let proof = fleet
+        .leave
+        .lock()
+        .await
+        .pending
+        .get(&peer.name)
+        .cloned()
+        .context("member-left response has no durable receipt proof")?;
+    let (ack, _): (Value, bool) = post_signed_to(
+        http,
+        peer,
+        node,
+        auth,
+        fleet,
+        LEAVE_RECEIPT_PATH,
+        &proof,
+        false,
+    )
+    .await
+    .context("leave receipt is still pending; retain settings and retry")?;
+    anyhow::ensure!(
+        ack["acknowledged"].as_str() == fleet.own_key.as_deref(),
+        "leave receipt acknowledgement names another identity"
+    );
+    Ok(())
+}
+
+/// Only an exact service refusal after a verified, durably saved leave proof can
+/// substitute for a receipt response severed by the receiver's carrier revocation.
+async fn confirm_retired_leave(
+    fleet: &FleetContext,
+    peer: &str,
+    node: &str,
+    protocol: &str,
+) -> bool {
+    let (pending, selected) = {
+        let leave = fleet.leave.lock().await;
+        (leave.pending.get(peer).cloned(), leave.confirmer.clone())
+    };
+    let Some(proof) = pending else { return false };
+    let Ok(proof) = serde_json::from_str::<PeerResponse<Value>>(&proof.body) else {
+        return false;
+    };
+    if proof.value["member_key"].as_str() != fleet.own_key.as_deref() {
+        return false;
+    }
+    let Some((_, settings)) = &fleet.runtime_policy else {
+        return false;
+    };
+    if protocol != default_fabric_protocol(&settings.fleet_id) {
+        return false;
+    }
+    let exact_endpoint = fleet
+        .view
+        .read()
+        .expect("fleet view lock poisoned")
+        .members
+        .iter()
+        .filter(|member| {
+            member.name == peer
+                && member.state == "current"
+                && Some(member.member_key.as_str()) == selected.as_deref()
+        })
+        .flat_map(|member| &member.endpoints)
+        .any(|endpoint| {
+            endpoint["transport"] == "fabric"
+                && endpoint["node"] == node
+                && endpoint["protocol"] == protocol
+        });
+    if !exact_endpoint {
+        return false;
+    }
+    fleet.mark_removed(
+        peer,
+        &RemovedFromFleet {
+            code: "member-left".into(),
+            message: "signed leave proof received and exact Fabric service retirement confirmed"
+                .into(),
+        },
+    );
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn exchange_via<B: Backend>(
     http: &reqwest::Client,
@@ -2332,6 +2760,14 @@ async fn exchange_via<B: Backend>(
     fleet: &FleetContext,
     carrier: crate::replication::ReplicationCarrier,
 ) -> Result<bool> {
+    if fleet.leave.lock().await.pending.contains_key(&peer.name) {
+        finish_leave_receipt(http, peer, node, auth, fleet).await?;
+        return Err(RemovedFromFleet {
+            code: "member-left".into(),
+            message: "leave receipt confirmed".into(),
+        }
+        .into());
+    }
     let mut telemetry = super::telemetry::Round::new(&peer.name);
     let result = exchange_inner(
         http,
@@ -2344,6 +2780,14 @@ async fn exchange_via<B: Backend>(
         carrier,
     )
     .await;
+    if result
+        .as_ref()
+        .err()
+        .and_then(|error| error.downcast_ref::<RemovedFromFleet>())
+        .is_some_and(|removed| removed.code == "member-left")
+    {
+        finish_leave_receipt(http, peer, node, auth, fleet).await?;
+    }
     telemetry.finish(&result);
     result
 }
@@ -2378,23 +2822,20 @@ async fn exchange_inner<B: Backend>(
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
     let round_trip = started.elapsed();
     let different = remote.inventory.digest != query.inventory.digest;
-    let received = backend
-        .receive(
-            &peer.name,
-            auth.fleet_id(),
-            &remote,
-            Some(round_trip),
-            carrier,
-        )
-        .await?;
+    let received = receive_from_peer(
+        backend,
+        fleet,
+        &peer.name,
+        auth.fleet_id(),
+        &remote,
+        Some(round_trip),
+        carrier,
+    )
+    .await?;
     telemetry.pull(received.receipt.received);
     // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
     // or keeps being sent, envelopes that are never stored must not keep the worker busy.
     let pulled = received.receipt.received != 0;
-    if received.changed {
-        backend.changed().await;
-        refresh_fleet_view(backend, fleet).await;
-    }
     let mut pushed = false;
     let mut pulled_follow_up = false;
     // A follow-up also carries the signatures the peer asked for, even when both sides hold
@@ -2415,24 +2856,20 @@ async fn exchange_inner<B: Backend>(
             post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
         let round_trip = started.elapsed();
         // The peer stores a push before it answers, so its inventory moved if the push landed.
-        pushed =
-            !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
+        pushed = !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
         telemetry.push(push.envelopes.len(), pushed);
-        let received = backend
-            .receive(
-                &peer.name,
-                auth.fleet_id(),
-                &response,
-                Some(round_trip),
-                carrier,
-            )
-            .await?;
+        let received = receive_from_peer(
+            backend,
+            fleet,
+            &peer.name,
+            auth.fleet_id(),
+            &response,
+            Some(round_trip),
+            carrier,
+        )
+        .await?;
         telemetry.pull(received.receipt.received);
         pulled_follow_up = received.receipt.received != 0;
-        if received.changed {
-            backend.changed().await;
-            refresh_fleet_view(backend, fleet).await;
-        }
     }
     let adopted = match &remote.inventory.checkpoint {
         Some(advertised) => {
@@ -2567,6 +3004,9 @@ async fn post_signed<B: Backend>(
     exchange: &ReplicationExchange,
     compress: bool,
 ) -> Result<(ReplicationExchange, bool)> {
+    if !exchange.envelopes.is_empty() || !exchange.signatures.is_empty() {
+        select_leave_confirmer(backend, fleet, &peer.name).await?;
+    }
     let deadline = tokio::time::Instant::now() + EXCHANGE_POLL_BUDGET;
     let attempted = crate::store::now_ms();
     for _ in 0..MAX_OVERLOAD_POLLS {
@@ -2647,7 +3087,9 @@ fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
             .then_some("the request body is larger than it accepts")
     });
     match reason {
-        Some(reason) => format!("peer {peer} refused the exchange with an unsigned {status}: {reason}"),
+        Some(reason) => {
+            format!("peer {peer} refused the exchange with an unsigned {status}: {reason}")
+        }
         None => format!(
             "peer {peer} answered an unsigned {status} ({} body bytes, not shown)",
             body.len()
@@ -2711,8 +3153,8 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
     // Both signature names require authentication, including refusals. Switch senders only
     // after every member accepts aliases; sunset 60 days after the first shipping release.
-    let unsigned = !headers.contains_key(HEADER_SIGNATURE)
-        && !headers.contains_key("x-fractal-signature");
+    let unsigned =
+        !headers.contains_key(HEADER_SIGNATURE) && !headers.contains_key("x-fractal-signature");
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     // A build older than a path answers an unsigned 404.
     if status == StatusCode::NOT_FOUND && unsigned {
@@ -2725,7 +3167,10 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
         anyhow::bail!(unsigned_refusal(&peer.name, status, &bytes));
     }
     let bytes = if deflated(&headers) {
-        inflate(&bytes, &format!("the answer to `{path}` from peer {}", peer.name))?
+        inflate(
+            &bytes,
+            &format!("the answer to `{path}` from peer {}", peer.name),
+        )?
     } else {
         bytes
     };
@@ -2777,7 +3222,37 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
             .as_ref()
             .and_then(|value| value["member_key"].as_str())
             .is_some_and(|key| Some(key) == fleet.own_key.as_deref());
-        if matches!(code, "member-removed" | "member-left") && about_us {
+        if path == EXCHANGE_PATH && matches!(code, "member-removed" | "member-left") && about_us {
+            if code == "member-left" && path == EXCHANGE_PATH {
+                let proof = LeaveProof {
+                    body: String::from_utf8(bytes)?,
+                    headers: headers
+                        .iter()
+                        .map(|(name, value)| Ok((name.to_string(), value.to_str()?.to_owned())))
+                        .collect::<Result<_>>()?,
+                    request_digest,
+                };
+                let mut leave = fleet.leave.lock().await;
+                let responder_key = responder
+                    .member_key
+                    .as_ref()
+                    .context("leave proof needs a member key")?;
+                anyhow::ensure!(
+                    responder.member_signature_valid,
+                    "leave proof needs a member signature"
+                );
+                if let Some(selected) = &leave.confirmer {
+                    anyhow::ensure!(
+                        selected == responder_key,
+                        "leave acknowledgement came from a different member than the selected confirmer"
+                    );
+                }
+                let mut updated = leave.clone();
+                updated.confirmer = Some(responder_key.clone());
+                updated.pending.insert(peer.name.clone(), proof);
+                save_leave_state(fleet, &updated).await?;
+                *leave = updated;
+            }
             let message = refusal
                 .as_ref()
                 .and_then(|value| value["message"].as_str())

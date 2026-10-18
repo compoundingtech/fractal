@@ -112,7 +112,10 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
                 };
                 let query: ReplicationExchange = serde_json::from_slice(&decoded).unwrap();
                 assert!(query.envelopes.len() <= crate::store::REPLICATION_PAGE_LIMIT as usize);
-                assert!(!query.inventory.digest.is_empty(), "a request keeps its digest");
+                assert!(
+                    !query.inventory.digest.is_empty(),
+                    "a request keeps its digest"
+                );
                 observed.lock().unwrap().push((
                     query.inventory.buckets.is_empty(),
                     query.inventory.envelopes.len(),
@@ -147,7 +150,9 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
             "one compact round, never a full-inventory round or an unbounded retry"
         );
         assert!(
-            requests.iter().all(|(bare, listed, _)| !bare && *listed <= 512),
+            requests
+                .iter()
+                .all(|(bare, listed, _)| !bare && *listed <= 512),
             "every request carries range digests and a bounded listing: {requests:?}"
         );
     }
@@ -468,9 +473,12 @@ fn exchange_bodies_deflate_and_refuse_a_body_that_inflates_too_far() {
 
     let bomb = deflate(&vec![0_u8; MAX_EXCHANGE_BYTES + 1]).unwrap();
     assert!(bomb.len() < 1024 * 1024);
-    let refused = inflate(&bomb, "the answer to `/v1/peer/exchange` from peer invented-peer")
-        .unwrap_err()
-        .to_string();
+    let refused = inflate(
+        &bomb,
+        "the answer to `/v1/peer/exchange` from peer invented-peer",
+    )
+    .unwrap_err()
+    .to_string();
     assert_eq!(
         refused,
         format!(
@@ -1068,6 +1076,698 @@ async fn members_exchange_with_signatures_and_a_removed_member_is_refused() {
         .unwrap_err();
         assert!(error.to_string().contains("403"), "{error:#}");
     }
+    server.abort();
+}
+
+/// The HTTP tunnel below is the scoped Fabric boundary: there is no static peer
+/// fallback, and its availability is derived solely from runtime desired policy.
+struct LeaveFixture {
+    receiver: PeerState<Local<Store>>,
+    leaving: Arc<Store>,
+    leaving_fleet: FleetContext,
+    leaving_auth: FleetAuth,
+    key: Arc<MemberKey>,
+    key_bytes: Vec<u8>,
+    other_key: Arc<MemberKey>,
+}
+
+fn leave_fixture() -> LeaveFixture {
+    let fleet = "3b241101-e2bb-4255-8caf-4136c566a962";
+    let anchor = Arc::new(MemberKey::generate().unwrap().0);
+    let (member, key_bytes) = MemberKey::generate().unwrap();
+    let key = Arc::new(member);
+    let other_key = Arc::new(MemberKey::generate().unwrap().0);
+    let a = Arc::new(plain_memory("a").unwrap());
+    let b = Arc::new(plain_memory("b").unwrap());
+    for (store, key) in [(&a, &anchor), (&b, &key)] {
+        store.bind_fleet(fleet).unwrap();
+        store.pin_fleet_anchor(anchor.public()).unwrap();
+        store.set_member_key(Some(key.clone())).unwrap();
+    }
+    for (name, member, via) in [
+        ("a", &anchor, "anchor"),
+        ("b", &key, "invite"),
+        ("c", &other_key, "invite"),
+    ] {
+        fleet_claim(
+            &a,
+            "fleet.member-admitted",
+            &format!("host/{name}"),
+            serde_json::json!({"fleet_id": fleet, "member_key": member.public(),
+                "via": via, "mode": "listening"}),
+        );
+    }
+    fleet_claim(
+        &a,
+        "fleet.member-endpoints",
+        "host/a",
+        serde_json::json!({"member_key": anchor.public(), "mode": "listening",
+            "endpoints": [{"transport": "fabric", "node": "fabric-a",
+                "protocol": default_fabric_protocol(fleet)}]}),
+    );
+    let shared = a
+        .export_replication_exchange(fleet, &ReplicationInventory::default())
+        .unwrap();
+    b.receive_replication_exchange("a", fleet, &shared).unwrap();
+    fleet_claim(
+        &b,
+        "fleet.member-endpoints",
+        "host/b",
+        serde_json::json!({"member_key": key.public(), "mode": "listening",
+            "endpoints": [{"transport": "fabric", "node": "fabric-b",
+                "protocol": default_fabric_protocol(fleet)}]}),
+    );
+    let advertised = b
+        .export_replication_exchange(fleet, &ReplicationInventory::default())
+        .unwrap();
+    a.receive_replication_exchange("b", fleet, &advertised)
+        .unwrap();
+    b.leave_fleet("person/test").unwrap();
+    LeaveFixture {
+        receiver: PeerState::new(
+            Local(a.clone()),
+            "a".into(),
+            FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(anchor.clone())),
+            member_context(&a, &anchor, &[], &[], false),
+        ),
+        leaving_fleet: member_context(&b, &key, &[], &[], false),
+        leaving_auth: FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(key.clone())),
+        leaving: b,
+        key,
+        key_bytes,
+        other_key,
+    }
+}
+
+async fn retained_for_test(fleet: &FleetContext) -> BTreeSet<String> {
+    let leave = fleet.leave.lock().await;
+    retained_leave_members(
+        &fleet.view.read().unwrap(),
+        fleet.own_key.as_deref().unwrap(),
+        &leave,
+    )
+}
+
+#[tokio::test]
+async fn runtime_only_leave_keeps_both_carriers_until_signed_proof_receipt() {
+    let fixture = leave_fixture();
+    let receiver = fixture.receiver.clone();
+    let receiver_fleet = receiver.fleet.clone();
+    let leaving_fleet = fixture.leaving_fleet.clone();
+    let key = fixture.key.public().to_owned();
+    let observed_key = key.clone();
+    let router = peer_router(receiver, Router::new()).layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let receiver = receiver_fleet.clone();
+            let leaving = leaving_fleet.clone();
+            let key = observed_key.clone();
+            async move {
+                let view = receiver.view.read().unwrap().clone();
+                let retained = retained_leave_members(
+                    &view,
+                    receiver.own_key.as_deref().unwrap(),
+                    &receiver.leave.lock().await,
+                );
+                let current = view
+                    .members
+                    .iter()
+                    .any(|member| member.member_key == key && member.state == "current");
+                assert!(
+                    current || retained.contains(&key),
+                    "runtime-only tunnel was retired before request"
+                );
+                if request.uri().path() == LEAVE_RECEIPT_PATH {
+                    assert!(
+                        leaving.leave.lock().await.pending.contains_key("a"),
+                        "receipt must follow delivery and authentication of the signed-left proof"
+                    );
+                    assert!(!receiver.leave.lock().await.completed.contains(&key));
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "a".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let http = replication_http_client();
+    exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap();
+    assert!(
+        retained_for_test(&fixture.receiver.fleet)
+            .await
+            .contains(&key),
+        "receiving the signed leave must not revoke before exporting the response"
+    );
+    let error = exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<RemovedFromFleet>().unwrap().code,
+        "member-left"
+    );
+    assert!(
+        fixture
+            .receiver
+            .fleet
+            .leave
+            .lock()
+            .await
+            .completed
+            .contains(&key)
+    );
+    assert!(
+        !retained_for_test(&fixture.receiver.fleet)
+            .await
+            .contains(&key)
+    );
+    assert!(
+        retained_for_test(&fixture.leaving_fleet)
+            .await
+            .contains(&key),
+        "only CLI cleanup retires the leaving node's carrier"
+    );
+    assert!(
+        fixture
+            .receiver
+            .fleet
+            .accept(&Sender {
+                name: "b".into(),
+                member_key: Some(key),
+                member_signature_valid: true
+            })
+            .is_err(),
+        "receipts do not reopen ordinary replication"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn lost_leave_receipt_keeps_proof_and_carrier_for_retry() {
+    let mut fixture = leave_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let settings = FleetFile {
+        fleet_id: fixture.leaving_auth.fleet_id().into(),
+        node: Some("b".into()),
+        ..FleetFile::default()
+    };
+    settings.save(root.path()).unwrap();
+    crate::fleet::join::write_private(&settings.node_key_path(root.path()), &fixture.key_bytes)
+        .unwrap();
+    fixture.leaving_fleet.state_dir = Some(root.path().to_path_buf());
+    let receiver_fleet = fixture.receiver.fleet.clone();
+    let lose_receipt = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let lose = lose_receipt.clone();
+    let router =
+        peer_router(fixture.receiver.clone(), Router::new()).layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let lose = lose.clone();
+                async move {
+                    if request.uri().path() == LEAVE_RECEIPT_PATH
+                        && lose.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return StatusCode::BAD_GATEWAY.into_response();
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "a".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let http = replication_http_client();
+    exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap();
+    let error = exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.downcast_ref::<RemovedFromFleet>().is_none(),
+        "generic receipt loss is not completion"
+    );
+    assert!(!fixture.leaving_fleet.is_removed());
+    assert!(
+        fixture
+            .leaving_fleet
+            .leave
+            .lock()
+            .await
+            .pending
+            .contains_key("a")
+    );
+    assert!(receiver_fleet.leave.lock().await.completed.is_empty());
+    let persisted = fs::read(root.path().join("fleet/leave-carriers.json")).unwrap();
+    *fixture.leaving_fleet.leave.lock().await = serde_json::from_slice(&persisted).unwrap();
+    assert_eq!(
+        fixture
+            .leaving_fleet
+            .leave
+            .lock()
+            .await
+            .confirmer
+            .as_deref(),
+        fixture.receiver.fleet.own_key.as_deref(),
+        "restart must keep the exact confirmer incarnation"
+    );
+    lose_receipt.store(false, std::sync::atomic::Ordering::Relaxed);
+    let mut forged = fixture.leaving_fleet.leave.lock().await.pending["a"].clone();
+    forged.body.push(' ');
+    let refused = post_signed_to::<_, Value>(
+        &http,
+        &peer,
+        "b",
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+        LEAVE_RECEIPT_PATH,
+        &forged,
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.to_string().contains("403"), "{refused:#}");
+    assert!(
+        receiver_fleet.leave.lock().await.completed.is_empty(),
+        "an ended member cannot invent or tamper with a receipt proof"
+    );
+    let error = exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<RemovedFromFleet>().unwrap().code,
+        "member-left"
+    );
+    assert!(
+        receiver_fleet
+            .leave
+            .lock()
+            .await
+            .completed
+            .contains(fixture.key.public())
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn cut_receipt_response_needs_exact_fabric_retirement_after_signed_proof() {
+    let mut fixture = leave_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let settings = FleetFile {
+        fleet_id: fixture.leaving_auth.fleet_id().into(),
+        ..FleetFile::default()
+    };
+    fixture.leaving_fleet.runtime_policy = Some((root.path().to_path_buf(), settings.clone()));
+    assert!(
+        !confirm_retired_leave(
+            &fixture.leaving_fleet,
+            "a",
+            "fabric-a",
+            &default_fabric_protocol(&settings.fleet_id)
+        )
+        .await,
+        "refusal without proof cannot finish leave"
+    );
+    let receiver_fleet = fixture.receiver.fleet.clone();
+    let router =
+        peer_router(fixture.receiver.clone(), Router::new()).layer(axum::middleware::from_fn(
+            |request: Request<Body>, next: axum::middleware::Next| async move {
+                let receipt = request.uri().path() == LEAVE_RECEIPT_PATH;
+                let response = next.run(request).await;
+                if receipt {
+                    StatusCode::BAD_GATEWAY.into_response()
+                } else {
+                    response
+                }
+            },
+        ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "a".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let http = replication_http_client();
+    exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap();
+    let error = exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.downcast_ref::<RemovedFromFleet>().is_none());
+    assert!(
+        receiver_fleet
+            .leave
+            .lock()
+            .await
+            .completed
+            .contains(fixture.key.public())
+    );
+    assert!(
+        !confirm_retired_leave(
+            &fixture.leaving_fleet,
+            "a",
+            "other-node",
+            &default_fabric_protocol(&settings.fleet_id)
+        )
+        .await
+    );
+    assert!(!confirm_retired_leave(&fixture.leaving_fleet, "a", "fabric-a", "st3/pty").await);
+    assert!(
+        confirm_retired_leave(
+            &fixture.leaving_fleet,
+            "a",
+            "fabric-a",
+            &default_fabric_protocol(&settings.fleet_id)
+        )
+        .await
+    );
+    assert!(fixture.leaving_fleet.is_removed());
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_durable_confirmer_fences_competing_push_and_pull_exports_even_with_a_stale_view() {
+    let fixture = leave_fixture();
+    let backend = Local(fixture.leaving.clone());
+    // The payload was exported before checking the fresh membership generation.
+    let payload = fixture
+        .leaving
+        .export_replication_exchange(
+            fixture.leaving_auth.fleet_id(),
+            &ReplicationInventory::default(),
+        )
+        .unwrap();
+    select_leave_confirmer(&backend, &fixture.leaving_fleet, "a")
+        .await
+        .unwrap();
+    let persisted = serde_json::to_vec(&*fixture.leaving_fleet.leave.lock().await).unwrap();
+    *fixture.leaving_fleet.leave.lock().await = serde_json::from_slice(&persisted).unwrap();
+    // Deliberately stale worker view: selector authority is the backend's signed view.
+    *fixture.leaving_fleet.view.write().unwrap() =
+        fixture.receiver.fleet.view.read().unwrap().clone();
+    let other = PeerConfig {
+        name: "c".into(),
+        url: "http://127.0.0.1:1".into(),
+    };
+    let error = post_signed(
+        &replication_http_client(),
+        &backend,
+        &other,
+        "b",
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+        &payload,
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("selected member"), "{error:#}");
+
+    let c = Arc::new(plain_memory("c").unwrap());
+    c.bind_fleet(fixture.leaving_auth.fleet_id()).unwrap();
+    c.pin_fleet_anchor(fixture.receiver.fleet.own_key.as_deref().unwrap())
+        .unwrap();
+    c.set_member_key(Some(fixture.other_key.clone())).unwrap();
+    let shared = fixture
+        .receiver
+        .backend
+        .0
+        .export_replication_exchange(
+            fixture.leaving_auth.fleet_id(),
+            &ReplicationInventory::default(),
+        )
+        .unwrap();
+    c.receive_replication_exchange("a", fixture.leaving_auth.fleet_id(), &shared)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "b".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let router = peer_router(
+        PeerState::new(
+            backend,
+            "b".into(),
+            fixture.leaving_auth.clone(),
+            fixture.leaving_fleet.clone(),
+        ),
+        Router::new(),
+    );
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let error = exchange(
+        &replication_http_client(),
+        &Local(c.clone()),
+        "c",
+        &peer,
+        &FleetAuth::test(fixture.leaving_auth.fleet_id(), &[9; 32])
+            .with_member_key(Some(fixture.other_key.clone())),
+        &member_context(&c, &fixture.other_key, &[], &[], false),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("selected member"), "{error:#}");
+    assert!(
+        c.fleet_view()
+            .unwrap()
+            .members
+            .iter()
+            .any(|member| member.name == "b" && member.state == "current"),
+        "the competing pull must never receive the self-left payload"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn pulling_the_selected_members_leave_retains_only_its_direct_carrier() {
+    let fixture = leave_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "b".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let router = peer_router(
+        PeerState::new(
+            Local(fixture.leaving.clone()),
+            "b".into(),
+            fixture.leaving_auth.clone(),
+            fixture.leaving_fleet.clone(),
+        ),
+        Router::new(),
+    );
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    // A normal follow-up may refuse the now-ended responder, but the direct receive
+    // itself must retain its runtime-only carrier for the subsequent leave proof.
+    let _ = exchange(
+        &replication_http_client(),
+        &fixture.receiver.backend,
+        "a",
+        &peer,
+        &fixture.receiver.auth,
+        &fixture.receiver.fleet,
+    )
+    .await;
+    assert!(
+        fixture
+            .receiver
+            .fleet
+            .leave
+            .lock()
+            .await
+            .awaiting
+            .contains(fixture.key.public())
+    );
+    assert!(
+        retained_for_test(&fixture.receiver.fleet)
+            .await
+            .contains(fixture.key.public())
+    );
+    assert_eq!(
+        fixture
+            .leaving_fleet
+            .leave
+            .lock()
+            .await
+            .confirmer
+            .as_deref(),
+        fixture.receiver.fleet.own_key.as_deref()
+    );
+    // A third-party relay does not acquire a direct leave-confirmation carrier.
+    let relay = Arc::new(plain_memory("c").unwrap());
+    relay.bind_fleet(fixture.leaving_auth.fleet_id()).unwrap();
+    relay
+        .pin_fleet_anchor(fixture.receiver.fleet.own_key.as_deref().unwrap())
+        .unwrap();
+    relay
+        .set_member_key(Some(fixture.other_key.clone()))
+        .unwrap();
+    let before = fixture
+        .receiver
+        .backend
+        .0
+        .export_replication_exchange(
+            fixture.leaving_auth.fleet_id(),
+            &ReplicationInventory::default(),
+        )
+        .unwrap();
+    relay
+        .receive_replication_exchange("a", fixture.leaving_auth.fleet_id(), &before)
+        .unwrap();
+    let relayed_context = member_context(&relay, &fixture.other_key, &[], &[], false);
+    assert!(
+        !retained_for_test(&relayed_context)
+            .await
+            .contains(fixture.key.public())
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn lost_leave_exchange_response_keeps_the_selected_receiver_retryable() {
+    let fixture = leave_fixture();
+    let receiver_fleet = fixture.receiver.fleet.clone();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drop_once = dropped.clone();
+    let router =
+        peer_router(fixture.receiver.clone(), Router::new()).layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let receiver = receiver_fleet.clone();
+                let dropped = drop_once.clone();
+                async move {
+                    let exchange = request.uri().path() == EXCHANGE_PATH;
+                    let response = next.run(request).await;
+                    let admitted_leave =
+                        receiver.view.read().unwrap().members.iter().any(|member| {
+                            member.name == "b" && member.ended.as_deref() == Some("left")
+                        });
+                    if exchange
+                        && admitted_leave
+                        && !dropped.swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return StatusCode::BAD_GATEWAY.into_response();
+                    }
+                    response
+                }
+            },
+        ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "a".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let http = replication_http_client();
+    let error = exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap_err();
+    assert!(dropped.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(error.downcast_ref::<RemovedFromFleet>().is_none());
+    assert!(
+        fixture
+            .receiver
+            .fleet
+            .leave
+            .lock()
+            .await
+            .awaiting
+            .contains(fixture.key.public())
+    );
+    assert!(
+        fixture.leaving_fleet.leave.lock().await.pending.is_empty(),
+        "a lost initial response is not yet an authenticated leave proof"
+    );
+    assert!(
+        select_leave_confirmer(&Local(fixture.leaving.clone()), &fixture.leaving_fleet, "c")
+            .await
+            .is_err(),
+        "an ambiguous send cannot switch confirmers and strand the original receiver"
+    );
+    let error = exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<RemovedFromFleet>().unwrap().code,
+        "member-left"
+    );
+    assert!(
+        fixture
+            .receiver
+            .fleet
+            .leave
+            .lock()
+            .await
+            .completed
+            .contains(fixture.key.public())
+    );
     server.abort();
 }
 
@@ -1848,7 +2548,11 @@ mod retry_tests {
                 .last_failed_exchange
                 .as_ref()
                 .expect("the closed Fabric tunnel records its attempted carrier");
-            assert_eq!(failed.carrier, crate::replication::ReplicationCarrier::Fabric, "{probe}");
+            assert_eq!(
+                failed.carrier,
+                crate::replication::ReplicationCarrier::Fabric,
+                "{probe}"
+            );
             assert_eq!(failed.fabric_route.as_deref(), Some("unknown"), "{probe}");
             assert!(peer.last_successful_exchange.is_none(), "{probe}");
             if refused {

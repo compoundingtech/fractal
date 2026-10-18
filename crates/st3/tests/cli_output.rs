@@ -133,8 +133,10 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
         .unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let observed = cancelled.clone();
+        let worker_state = state_dir.clone();
         let app = axum::Router::new().fallback(move |axum::extract::OriginalUri(uri): axum::extract::OriginalUri| {
             let observed = observed.clone();
+            let worker_state = worker_state.clone();
             async move {
                 let value = match uri.path() {
                     "/v1/client/machines" => json!({"items": []}),
@@ -147,11 +149,21 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
                         "unhealthy_projections": 0,
                         "peers": [{"peer": "orchid-peer", "status": "reachable", "authority_digest": "same"}],
                     }),
-                    "/v1/internal/fleet/leave/claim" => json!({
-                        "id": "claim/leave", "store_index": 1, "batch_id": "batch/leave",
-                        "subject": "fleet-member/orchid", "kind": "fleet.member-left", "origin": "orchid",
-                        "actor": "person/avery", "body": {}, "predecessors": [], "accepted_at_unix_ms": 0,
-                    }),
+                    "/v1/internal/fleet/leave/claim" => {
+                        // The scoped worker boundary completes the authenticated leave
+                        // receipt before publishing the durable confirmation to the CLI.
+                        let mut settings = st3::config::FleetFile::load(&worker_state).unwrap().unwrap();
+                        settings.removed = Some(st3::config::FleetRemoval {
+                            reported_by: "orchid-peer".into(),
+                            code: "member-left".into(),
+                        });
+                        settings.save(&worker_state).unwrap();
+                        json!({
+                            "id": "claim/leave", "store_index": 1, "batch_id": "batch/leave",
+                            "subject": "fleet-member/orchid", "kind": "fleet.member-left", "origin": "orchid",
+                            "actor": "person/avery", "body": {}, "predecessors": [], "accepted_at_unix_ms": 0,
+                        })
+                    },
                     "/v1/internal/fleet/leave/cancel" => {
                         observed.store(true, Ordering::Relaxed);
                         json!({})
@@ -305,7 +317,13 @@ mission "orchid" state="ready" {
 async fn offline_leave_requires_confirmed_fabric_withdrawal_before_local_cleanup() {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
-    for outcome in ["unavailable", "disabled", "residual", "applied", "prior_transport"] {
+    for outcome in [
+        "unavailable",
+        "disabled",
+        "residual",
+        "applied",
+        "prior_transport",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let state_dir = root.path().join("state");
         st3::fleet::join::standalone_node_key(&state_dir).unwrap();
@@ -419,9 +437,16 @@ async fn offline_leave_requires_confirmed_fabric_withdrawal_before_local_cleanup
             .env("FABRIC_HOME", &fabric_home)
             .env("TMPDIR", root.path())
             .args([
-                "--endpoint", root.path().join("absent.sock").to_str().unwrap(),
-                "--daemon-wait", "0", "fleet", "leave", "--offline", "--no-service",
-                "--as", "person/avery",
+                "--endpoint",
+                root.path().join("absent.sock").to_str().unwrap(),
+                "--daemon-wait",
+                "0",
+                "fleet",
+                "leave",
+                "--offline",
+                "--no-service",
+                "--as",
+                "person/avery",
             ])
             .output()
             .await
@@ -440,7 +465,10 @@ async fn offline_leave_requires_confirmed_fabric_withdrawal_before_local_cleanup
         );
         match outcome {
             "unavailable" => assert!(diagnostic.contains("withdraw this fleet"), "{diagnostic}"),
-            "disabled" => assert!(diagnostic.contains("runtime_peers_disabled"), "{diagnostic}"),
+            "disabled" => assert!(
+                diagnostic.contains("runtime_peers_disabled"),
+                "{diagnostic}"
+            ),
             "residual" => assert!(diagnostic.contains("residual_access"), "{diagnostic}"),
             _ => {}
         }

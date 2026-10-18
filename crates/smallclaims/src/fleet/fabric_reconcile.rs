@@ -222,7 +222,18 @@ fn grants(fleet_id: &str) -> BTreeSet<String> {
     .into()
 }
 
-fn desired(view: &FleetView, own_key: &str, fleet_id: &str) -> Result<BTreeSet<String>> {
+fn desired(
+    view: &FleetView,
+    own_key: &str,
+    fleet_id: &str,
+    retained_member_keys: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let eligible = |member: &super::MemberView| {
+        member.state == "current"
+            || (member.state == "ended"
+                && member.ended.as_deref() == Some("left")
+                && retained_member_keys.contains(&member.member_key))
+    };
     ensure!(
         view.anchor.is_some(),
         "signed fleet membership is not available; no Fabric policy changes made"
@@ -230,7 +241,7 @@ fn desired(view: &FleetView, own_key: &str, fleet_id: &str) -> Result<BTreeSet<S
     if !view
         .members
         .iter()
-        .any(|member| member.member_key == own_key && member.state == "current")
+        .any(|member| member.member_key == own_key && eligible(member))
     {
         return Ok(BTreeSet::new());
     }
@@ -238,7 +249,7 @@ fn desired(view: &FleetView, own_key: &str, fleet_id: &str) -> Result<BTreeSet<S
     for member in view
         .members
         .iter()
-        .filter(|member| member.state == "current" && member.member_key != own_key)
+        .filter(|member| eligible(member) && member.member_key != own_key)
     {
         for endpoint in &member.endpoints {
             if endpoint["transport"] != "fabric" {
@@ -260,12 +271,9 @@ fn desired(view: &FleetView, own_key: &str, fleet_id: &str) -> Result<BTreeSet<S
     Ok(nodes)
 }
 
-fn plan(
-    snapshot: &Snapshot,
-    owner: &str,
-    desired: &BTreeSet<String>,
-    grants: &BTreeSet<String>,
-) -> Vec<Value> {
+type DesiredPolicy = BTreeMap<String, BTreeSet<String>>;
+
+fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy) -> Vec<Value> {
     let owned = snapshot
         .peers
         .iter()
@@ -278,10 +286,10 @@ fn plan(
         .collect::<BTreeMap<_, _>>();
     let mut operations = Vec::new();
     // Withdraw first, in the same atomic publication as additions (including re-key).
-    for node in owned.keys().filter(|node| !desired.contains(**node)) {
+    for node in owned.keys().filter(|node| !desired.contains_key(**node)) {
         operations.push(json!({"op":"remove_peer", "node_id":node}));
     }
-    for node in desired {
+    for (node, grants) in desired {
         if let Some(peer) = owned.get(node.as_str()) {
             let actual = peer
                 .services
@@ -301,18 +309,18 @@ fn plan(
     operations
 }
 
-fn residual(
-    peers: &[Peer],
-    desired: &BTreeSet<String>,
-    grants: &BTreeSet<String>,
-) -> Option<String> {
+fn residual(peers: &[Peer], desired: &DesiredPolicy, grants: &BTreeSet<String>) -> Option<String> {
     let remaining = peers
         .iter()
-        .filter(|peer| !desired.contains(&peer.node_id))
         .flat_map(|peer| {
             peer.services
                 .iter()
-                .filter(|(service, _)| grants.contains(*service))
+                .filter(|(service, _)| {
+                    grants.contains(*service)
+                        && !desired
+                            .get(&peer.node_id)
+                            .is_some_and(|expected| expected.contains(*service))
+                })
                 .map(|(service, sources)| {
                     format!(
                         "{} {service}: {}",
@@ -384,12 +392,46 @@ async fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
     .await?
 }
 
-async fn complete_pending(socket: &Path, pending: &Pending) -> Result<Mutation> {
+fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
+    pending.request["operations"]
+        .as_array()
+        .is_some_and(|operations| {
+            operations.iter().all(|operation| {
+                let Some(node) = operation["node_id"].as_str() else {
+                    return false;
+                };
+                match operation["op"].as_str() {
+                    Some("add_peer") => desired.contains_key(node),
+                    Some("remove_peer") => !desired.contains_key(node),
+                    Some("set_grants") => desired.get(node).is_some_and(|grants| {
+                        operation["grants"].as_array().is_some_and(|services| {
+                            services.len() == grants.len()
+                                && grants.iter().all(|grant| {
+                                    services
+                                        .iter()
+                                        .any(|service| service.as_str() == Some(grant.as_str()))
+                                })
+                        })
+                    }),
+                    _ => false,
+                }
+            })
+        })
+}
+
+async fn complete_pending(
+    socket: &Path,
+    pending: &Pending,
+    replay_allowed: bool,
+) -> Result<Mutation> {
     let request_id = pending.request["request_id"]
         .as_str()
         .context("pending Fabric transaction has no request ID")?;
-    let reply = if now_ms().saturating_sub(pending.created_unix_ms) >= 24 * 60 * 60 * 1000 {
-        // Beyond guaranteed retention, query only: never reinstall an expired plan.
+    let reply = if !replay_allowed
+        || now_ms().saturating_sub(pending.created_unix_ms) >= 24 * 60 * 60 * 1000
+    {
+        // Changed membership and expired plans are receipt queries only. Never
+        // create obsolete rights merely to find out whether an old write committed.
         send(
             socket,
             &json!({"operation":"cancellation", "request_id":request_id}),
@@ -423,17 +465,32 @@ async fn resolve_pending(
     state_dir: &Path,
     socket: &Path,
     journal: &mut Journal,
+    desired: &DesiredPolicy,
 ) -> Result<Option<Mutation>> {
     let Some(pending) = &journal.pending else {
         return Ok(None);
     };
-    match complete_pending(socket, pending).await {
+    let replay_allowed = pending_matches_desired(pending, desired);
+    match complete_pending(socket, pending, replay_allowed).await {
         Ok(mutation) => {
             journal.pending = None;
             save_journal(state_dir, journal).await?;
             Ok(Some(mutation))
         }
         Err(error) => {
+            // A well-formed receipt query reports invalid_argument only for a
+            // missing/expired ID. Inside guaranteed retention, an obsolete request
+            // with no receipt must be discarded, not submitted as a fresh add.
+            if !replay_allowed
+                && now_ms().saturating_sub(pending.created_unix_ms) < 24 * 60 * 60 * 1000
+                && error
+                    .downcast_ref::<PolicyError>()
+                    .is_some_and(|error| error.code == "invalid_argument")
+            {
+                journal.pending = None;
+                save_journal(state_dir, journal).await?;
+                return Ok(None);
+            }
             // Within the guaranteed receipt-retention window a coded refusal means
             // this exact transaction was rejected, not an uncertain lost commit.
             // Revision conflicts are noncommitting even though Fabric classes them as
@@ -460,20 +517,20 @@ async fn apply(
     state_dir: &Path,
     socket: &Path,
     fleet_id: &str,
-    desired: BTreeSet<String>,
+    desired: DesiredPolicy,
     ended: BTreeSet<String>,
     withdrawing: bool,
 ) -> Result<ReconcileStatus> {
     let owner = format!("st/fleet/{fleet_id}");
     let grants = grants(fleet_id);
     let mut journal = load_journal(state_dir).await?;
-    resolve_pending(state_dir, socket, &mut journal).await?;
+    resolve_pending(state_dir, socket, &mut journal, &desired).await?;
     let mut journal_changed = false;
     for node in ended {
         journal_changed |= journal.retired.insert(node);
     }
     let mut current = snapshot(socket).await?;
-    let operations = plan(&current, &owner, &desired, &grants);
+    let operations = plan(&current, &owner, &desired);
     ensure!(
         operations.len() <= 128,
         "Fabric reconciliation requires {} operations (limit 128); no partial policy was installed",
@@ -505,7 +562,7 @@ async fn apply(
         // Durable before sending: restarting st must not forget an uncertain commit
         // or replace a pending/timed-out cancellation with an empty-diff success.
         save_journal(state_dir, &journal).await?;
-        let mutation = resolve_pending(state_dir, socket, &mut journal)
+        let mutation = resolve_pending(state_dir, socket, &mut journal, &desired)
             .await?
             .expect("pending transaction");
         journal_changed = false;
@@ -517,7 +574,7 @@ async fn apply(
     }
     let retired_count = journal.retired.len();
     journal.retired.retain(|node| {
-        !desired.contains(node)
+        !desired.contains_key(node)
             && current.peers.iter().any(|peer| {
                 peer.node_id == *node
                     && peer.services.keys().any(|service| grants.contains(service))
@@ -529,7 +586,13 @@ async fn apply(
     let relevant = current
         .peers
         .into_iter()
-        .filter(|peer| withdrawing || journal.retired.contains(&peer.node_id))
+        .filter(|peer| {
+            withdrawing
+                || journal.retired.contains(&peer.node_id)
+                || desired
+                    .get(&peer.node_id)
+                    .is_some_and(|expected| expected.len() < grants.len())
+        })
         .collect::<Vec<_>>();
     let message = residual(&relevant, &desired, &grants);
     Ok(ReconcileStatus {
@@ -551,8 +614,30 @@ pub async fn reconcile(
     fleet_id: &str,
     own_key: &str,
     view: &FleetView,
+    retained_member_keys: &BTreeSet<String>,
 ) -> Result<ReconcileStatus> {
-    let desired = desired(view, own_key, fleet_id)?;
+    let desired = desired(view, own_key, fleet_id, retained_member_keys)?;
+    let own_current = view
+        .members
+        .iter()
+        .any(|member| member.member_key == own_key && member.state == "current");
+    let desired = desired
+        .into_iter()
+        .map(|node| {
+            let peer_current = view.members.iter().any(|member| {
+                member.state == "current"
+                    && member.endpoints.iter().any(|endpoint| {
+                        endpoint["transport"] == "fabric" && endpoint["node"] == node
+                    })
+            });
+            let services = if own_current && peer_current {
+                grants(fleet_id)
+            } else {
+                BTreeSet::from([format!("st3/fleet/{fleet_id}")])
+            };
+            (node, services)
+        })
+        .collect();
     let ended = view
         .members
         .iter()
@@ -561,7 +646,18 @@ pub async fn reconcile(
         .filter(|endpoint| endpoint["transport"] == "fabric")
         .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
         .collect();
-    apply(state_dir, socket, fleet_id, desired, ended, false).await
+    let mut status = apply(state_dir, socket, fleet_id, desired, ended, false).await?;
+    if status.state == "applied"
+        && view.members.iter().any(|member| {
+            member.state == "ended"
+                && member.ended.as_deref() == Some("left")
+                && retained_member_keys.contains(&member.member_key)
+        })
+    {
+        status.state = "leaving".into();
+        status.message = Some("Fabric carrier retained until authenticated leave receipt completes; ordinary replication still refuses ended members".into());
+    }
+    Ok(status)
 }
 
 /// Revoke this fleet's runtime records before local fleet settings are deleted.
@@ -571,7 +667,7 @@ pub async fn withdraw(state_dir: &Path, socket: &Path, fleet_id: &str) -> Result
         state_dir,
         socket,
         fleet_id,
-        BTreeSet::new(),
+        DesiredPolicy::new(),
         BTreeSet::new(),
         true,
     )

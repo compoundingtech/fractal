@@ -94,13 +94,17 @@ fn signed_current_members_only_and_local_retirement_withdraws_everything() {
         "conflicted",
     ));
     assert_eq!(
-        desired(&view, "own-key", FLEET).unwrap(),
+        desired(&view, "own-key", FLEET, &BTreeSet::new()).unwrap(),
         BTreeSet::from(["peer-node".into()])
     );
     view.members[0].state = "ended".into();
-    assert!(desired(&view, "own-key", FLEET).unwrap().is_empty());
+    assert!(
+        desired(&view, "own-key", FLEET, &BTreeSet::new())
+            .unwrap()
+            .is_empty()
+    );
     view.anchor = None;
-    assert!(desired(&view, "own-key", FLEET).is_err());
+    assert!(desired(&view, "own-key", FLEET, &BTreeSet::new()).is_err());
 }
 
 #[test]
@@ -108,7 +112,7 @@ fn endpoint_protocol_cannot_inject_non_st_grants() {
     let mut view = view();
     view.members[1].endpoints[0]["protocol"] = json!("exec");
     assert!(
-        desired(&view, "own-key", FLEET)
+        desired(&view, "own-key", FLEET, &BTreeSet::new())
             .unwrap_err()
             .to_string()
             .contains("nonstandard")
@@ -134,9 +138,16 @@ async fn adds_peer_and_replaces_exact_grants_in_one_atomic_batch() {
             Some(list(vec![], 8)),
         ],
     );
-    let status = reconcile(root.path(), &socket, FLEET, "own-key", &view())
-        .await
-        .unwrap();
+    let status = reconcile(
+        root.path(),
+        &socket,
+        FLEET,
+        "own-key",
+        &view(),
+        &BTreeSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(status.state, "applied");
     assert_eq!(status.policy_revision, Some(8));
     let requests = server.await.unwrap();
@@ -165,9 +176,16 @@ async fn rekey_removes_old_identity_and_adds_new_in_same_transaction() {
             Some(list(vec![], 8)),
         ],
     );
-    reconcile(root.path(), &socket, FLEET, "own-key", &view())
-        .await
-        .unwrap();
+    reconcile(
+        root.path(),
+        &socket,
+        FLEET,
+        "own-key",
+        &view(),
+        &BTreeSet::new(),
+    )
+    .await
+    .unwrap();
     let requests = server.await.unwrap();
     let operations = requests[1]["request"]["operations"].as_array().unwrap();
     assert_eq!(
@@ -195,9 +213,16 @@ async fn existing_owner_grants_are_replaced_without_touching_other_owners() {
             Some(list(vec![], 8)),
         ],
     );
-    reconcile(root.path(), &socket, FLEET, "own-key", &view())
-        .await
-        .unwrap();
+    reconcile(
+        root.path(),
+        &socket,
+        FLEET,
+        "own-key",
+        &view(),
+        &BTreeSet::new(),
+    )
+    .await
+    .unwrap();
     let requests = server.await.unwrap();
     let operations = requests[1]["request"]["operations"].as_array().unwrap();
     assert_eq!(operations.len(), 1);
@@ -224,10 +249,17 @@ async fn already_exact_policy_needs_no_mutation() {
     );
     let (socket, server) = serve(root.path(), vec![Some(list(vec![exact], 7))]);
     assert_eq!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .unwrap()
-            .policy_revision,
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new()
+        )
+        .await
+        .unwrap()
+        .policy_revision,
         Some(7)
     );
     assert_eq!(server.await.unwrap().len(), 1);
@@ -245,9 +277,16 @@ async fn lost_reply_retries_identical_request_id_revision_and_contents() {
             Some(list(vec![], 8)),
         ],
     );
-    reconcile(root.path(), &socket, FLEET, "own-key", &view())
-        .await
-        .unwrap();
+    reconcile(
+        root.path(),
+        &socket,
+        FLEET,
+        "own-key",
+        &view(),
+        &BTreeSet::new(),
+    )
+    .await
+    .unwrap();
     let requests = server.await.unwrap();
     assert_eq!(requests[1], requests[2]);
 }
@@ -258,9 +297,16 @@ async fn runtime_disabled_is_clear_and_does_not_write_policy_or_fallback_files()
     let static_path = root.path().join("peers.toml");
     std::fs::write(&static_path, "static policy").unwrap();
     let (socket, server) = serve(root.path(), vec![Some(refusal("runtime_peers_disabled"))]);
-    let error = reconcile(root.path(), &socket, FLEET, "own-key", &view())
-        .await
-        .unwrap_err();
+    let error = reconcile(
+        root.path(),
+        &socket,
+        FLEET,
+        "own-key",
+        &view(),
+        &BTreeSet::new(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error_status(&error).state, "runtime_peers_disabled");
     assert!(error.to_string().contains("--runtime-peers"));
     assert_eq!(
@@ -279,9 +325,16 @@ async fn stale_revision_and_cancellation_timeout_never_report_applied() {
         let root = tempfile::tempdir().unwrap();
         let (socket, server) = serve(root.path(), vec![Some(list(vec![], 7)), Some(reply)]);
         assert!(
-            reconcile(root.path(), &socket, FLEET, "own-key", &view())
-                .await
-                .is_err()
+            reconcile(
+                root.path(),
+                &socket,
+                FLEET,
+                "own-key",
+                &view(),
+                &BTreeSet::new()
+            )
+            .await
+            .is_err()
         );
         server.await.unwrap();
     }
@@ -294,9 +347,16 @@ async fn removal_reports_residual_static_access_even_after_previous_owner_remova
     let root = tempfile::tempdir().unwrap();
     let retained = peer("peer-node", "static", &["st3/fleet/test-fleet"]);
     let (socket, server) = serve(root.path(), vec![Some(list(vec![retained.clone()], 7))]);
-    let status = reconcile(root.path(), &socket, FLEET, "own-key", &view)
-        .await
-        .unwrap();
+    let status = reconcile(
+        root.path(),
+        &socket,
+        FLEET,
+        "own-key",
+        &view,
+        &BTreeSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(status.state, "residual_access");
     assert!(status.message.unwrap().contains("/config/peers.toml"));
     server.await.unwrap();
@@ -322,11 +382,18 @@ async fn pagination_never_combines_policy_generations() {
         json!({"instance":"instance-a", "revision":7, "after_node":"a"});
     let (socket, server) = serve(root.path(), vec![Some(first), Some(list(vec![], 8))]);
     assert!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("pagination")
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new()
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("pagination")
     );
     server.await.unwrap();
 }
@@ -345,11 +412,18 @@ async fn too_large_atomic_change_is_refused_without_partial_mutation() {
     }
     let (socket, server) = serve(root.path(), vec![Some(list(vec![], 7))]);
     assert!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("limit 128")
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view,
+            &BTreeSet::new()
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("limit 128")
     );
     assert_eq!(server.await.unwrap().len(), 1);
 }
@@ -359,9 +433,16 @@ async fn restart_resolves_lost_commit_before_accepting_an_empty_diff() {
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve(root.path(), vec![Some(list(vec![], 7)), None, None]);
     assert!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .is_err()
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new()
+        )
+        .await
+        .is_err()
     );
     let original = server.await.unwrap();
     let journal = load_journal(root.path()).await.unwrap();
@@ -387,10 +468,17 @@ async fn restart_resolves_lost_commit_before_accepting_an_empty_diff() {
         ],
     );
     assert_eq!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .unwrap()
-            .state,
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new()
+        )
+        .await
+        .unwrap()
+        .state,
         "applied"
     );
     let resumed = server.await.unwrap();
@@ -407,9 +495,16 @@ async fn timed_out_cancellation_survives_restart_and_never_becomes_noop_success(
         vec![Some(list(vec![], 7)), Some(mutation(vec![], "timed_out"))],
     );
     assert!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .is_err()
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new()
+        )
+        .await
+        .is_err()
     );
     let original = server.await.unwrap();
     std::fs::remove_file(&socket).unwrap();
@@ -421,7 +516,12 @@ async fn timed_out_cancellation_survives_restart_and_never_becomes_noop_success(
             .to_string()
             .contains("retained transaction")
     );
-    assert_eq!(server.await.unwrap()[0], original[1]);
+    let resumed = server.await.unwrap();
+    assert_eq!(resumed[0]["request"]["operation"], "cancellation");
+    assert_eq!(
+        resumed[0]["request"]["request_id"],
+        original[1]["request"]["request_id"]
+    );
     assert!(load_journal(root.path()).await.unwrap().pending.is_some());
 }
 
@@ -451,9 +551,16 @@ async fn rekey_residual_warning_survives_later_polling_and_restart() {
         ],
     );
     for _ in 0..2 {
-        let status = reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .unwrap();
+        let status = reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(status.state, "residual_access");
         assert!(status.message.unwrap().contains("old-node"));
     }
@@ -483,20 +590,300 @@ async fn real_fault_class_revision_conflict_allows_fresh_reconciliation() {
         ],
     );
     assert!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .is_err()
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new()
+        )
+        .await
+        .is_err()
     );
     assert!(load_journal(root.path()).await.unwrap().pending.is_none());
     assert_eq!(
-        reconcile(root.path(), &socket, FLEET, "own-key", &view())
-            .await
-            .unwrap()
-            .state,
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view(),
+            &BTreeSet::new()
+        )
+        .await
+        .unwrap()
+        .state,
         "applied"
     );
     let requests = server.await.unwrap();
     assert_eq!(requests[1]["request"]["expected_revision"], 7);
     assert_eq!(requests[2]["request"]["operation"], "list");
     assert_eq!(requests[3]["request"]["expected_revision"], 8);
+}
+
+fn missing_receipt() -> Value {
+    let mut reply = refusal("invalid_argument");
+    reply["reply"]["error"]["class"] = json!("usage");
+    reply["reply"]["error"]["message"] = json!("unknown or expired runtime request_id");
+    reply
+}
+
+fn uncertain_add() -> Pending {
+    Pending {
+        request: json!({
+            "operation":"batch", "owner":OWNER, "request_id":"uncertain-add", "expected_revision":7,
+            "operations":[
+                {"op":"add_peer","node_id":"peer-node"},
+                {"op":"set_grants","node_id":"peer-node","grants":grants(FLEET)},
+            ],
+        }),
+        created_unix_ms: now_ms(),
+    }
+}
+
+#[tokio::test]
+async fn removed_member_never_replays_an_unreceived_addition() {
+    let root = tempfile::tempdir().unwrap();
+    save_journal(
+        root.path(),
+        &Journal {
+            pending: Some(uncertain_add()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut view = view();
+    view.members[1].state = "ended".into();
+    view.members[1].ended = Some("removed".into());
+    let (socket, server) = serve(
+        root.path(),
+        vec![Some(missing_receipt()), Some(list(vec![], 7))],
+    );
+    assert_eq!(
+        reconcile(
+            root.path(),
+            &socket,
+            FLEET,
+            "own-key",
+            &view,
+            &BTreeSet::new()
+        )
+        .await
+        .unwrap()
+        .state,
+        "applied"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0]["request"],
+        json!({"operation":"cancellation","request_id":"uncertain-add"})
+    );
+    assert_eq!(requests[1]["request"]["operation"], "list");
+    assert!(load_journal(root.path()).await.unwrap().pending.is_none());
+}
+
+#[tokio::test]
+async fn leaving_node_queries_obsolete_addition_without_granting_it() {
+    let root = tempfile::tempdir().unwrap();
+    save_journal(
+        root.path(),
+        &Journal {
+            pending: Some(uncertain_add()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (socket, server) = serve(
+        root.path(),
+        vec![Some(missing_receipt()), Some(list(vec![], 7))],
+    );
+    assert_eq!(
+        withdraw(root.path(), &socket, FLEET).await.unwrap().state,
+        "applied"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests[0]["request"]["operation"], "cancellation");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["request"]["operation"] != "batch")
+    );
+}
+
+#[tokio::test]
+async fn committed_obsolete_addition_is_queried_then_revoked_never_replayed() {
+    let root = tempfile::tempdir().unwrap();
+    save_journal(
+        root.path(),
+        &Journal {
+            pending: Some(uncertain_add()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (socket, server) = serve(
+        root.path(),
+        vec![
+            Some(mutation(vec![], "complete")),
+            Some(list(
+                vec![peer("peer-node", OWNER, &["st3/fleet/test-fleet"])],
+                8,
+            )),
+            Some(mutation(vec![], "complete")),
+            Some(list(vec![], 8)),
+        ],
+    );
+    assert_eq!(
+        withdraw(root.path(), &socket, FLEET).await.unwrap().state,
+        "applied"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests[0]["request"]["operation"], "cancellation");
+    assert_eq!(
+        requests[2]["request"]["operations"],
+        json!([{"op":"remove_peer","node_id":"peer-node"}])
+    );
+}
+
+#[test]
+fn retained_leave_carriers_require_exact_signed_left_membership() {
+    let mut view = view();
+    let retained = BTreeSet::from(["own-key".into(), "peer-key".into()]);
+    view.members[0].state = "ended".into();
+    view.members[0].ended = Some("left".into());
+    assert_eq!(
+        desired(&view, "own-key", FLEET, &retained).unwrap(),
+        BTreeSet::from(["peer-node".into()])
+    );
+    view.members[1].state = "ended".into();
+    view.members[1].ended = Some("left".into());
+    assert_eq!(
+        desired(&view, "own-key", FLEET, &retained).unwrap(),
+        BTreeSet::from(["peer-node".into()])
+    );
+    view.members[1].ended = Some("removed".into());
+    assert!(
+        desired(&view, "own-key", FLEET, &retained)
+            .unwrap()
+            .is_empty()
+    );
+    view.members[0].ended = Some("removed".into());
+    assert!(
+        desired(&view, "own-key", FLEET, &retained)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn local_and_remote_leave_keep_only_replication_carrier_until_receipt() {
+    for leaving_index in [0, 1] {
+        let root = tempfile::tempdir().unwrap();
+        let mut view = view();
+        view.members[leaving_index].state = "ended".into();
+        view.members[leaving_index].ended = Some("left".into());
+        let retained = BTreeSet::from([view.members[leaving_index].member_key.clone()]);
+        let exact = peer(
+            "peer-node",
+            OWNER,
+            &[
+                "st3-client-v0",
+                "st3/fleet/test-fleet",
+                "st3/pty/test-fleet",
+            ],
+        );
+        let carrier = peer("peer-node", OWNER, &["st3/fleet/test-fleet"]);
+        let (socket, server) = serve(
+            root.path(),
+            vec![
+                Some(list(vec![exact], 7)),
+                Some(mutation(vec![], "complete")),
+                Some(list(vec![carrier.clone()], 8)),
+                Some(list(vec![carrier], 8)),
+                Some(mutation(vec![], "complete")),
+                Some(list(vec![], 8)),
+            ],
+        );
+        assert_eq!(
+            reconcile(root.path(), &socket, FLEET, "own-key", &view, &retained)
+                .await
+                .unwrap()
+                .state,
+            "leaving"
+        );
+        assert_eq!(
+            reconcile(
+                root.path(),
+                &socket,
+                FLEET,
+                "own-key",
+                &view,
+                &BTreeSet::new()
+            )
+            .await
+            .unwrap()
+            .state,
+            "applied"
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(
+            requests[1]["request"]["operations"],
+            json!([{"op":"set_grants","node_id":"peer-node","grants":["st3/fleet/test-fleet"]}])
+        );
+        assert_eq!(
+            requests[4]["request"]["operations"],
+            json!([{"op":"remove_peer","node_id":"peer-node"}])
+        );
+    }
+}
+
+#[tokio::test]
+async fn leave_drain_never_replays_full_service_grants() {
+    let root = tempfile::tempdir().unwrap();
+    save_journal(
+        root.path(),
+        &Journal {
+            pending: Some(uncertain_add()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut view = view();
+    view.members[1].state = "ended".into();
+    view.members[1].ended = Some("left".into());
+    let retained = BTreeSet::from(["peer-key".into()]);
+    let (socket, server) = serve(
+        root.path(),
+        vec![
+            Some(missing_receipt()),
+            Some(list(vec![], 7)),
+            Some(mutation(vec![], "complete")),
+            Some(list(
+                vec![peer("peer-node", OWNER, &["st3/fleet/test-fleet"])],
+                8,
+            )),
+        ],
+    );
+    assert_eq!(
+        reconcile(root.path(), &socket, FLEET, "own-key", &view, &retained)
+            .await
+            .unwrap()
+            .state,
+        "leaving"
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests[0]["request"]["operation"], "cancellation");
+    assert_eq!(
+        requests[2]["request"]["operations"],
+        json!([
+            {"op":"add_peer","node_id":"peer-node"},
+            {"op":"set_grants","node_id":"peer-node","grants":["st3/fleet/test-fleet"]},
+        ])
+    );
 }
