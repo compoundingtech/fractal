@@ -14200,6 +14200,183 @@ fn a_local_timeline_observation_stays_on_the_node_that_made_it() {
 }
 
 #[test]
+
+fn agent_usage_rollups_include_latest_slot_cost_without_double_counting() {
+
+    let rows = [
+
+        json!({"semantics":"response","incarnation_id":"inc-one","total_tokens":10,"cost":99.0,"currency":"USD"}),
+
+        json!({"semantics":"session_cumulative","incarnation_id":"inc-one","total_tokens":10,"cost":99.0,"currency":"USD"}),
+
+        json!({"semantics":"response_rollup","incarnation_id":"inc-one","model":"first","total_tokens":10,"unpriced_tokens":10}),
+
+        json!({"semantics":"response_rollup","incarnation_id":"inc-one","model":"first","total_tokens":20,"cost_microusd":6_338_109,"reported_cost_microusd":6_338_109,"unpriced_tokens":0}),
+
+        json!({"semantics":"response_rollup","incarnation_id":"inc-one","model":"second","total_tokens":30,"cost_microusd":500_000,"unpriced_tokens":0}),
+
+        json!({"semantics":"response_rollup","incarnation_id":"inc-two","model":"first","total_tokens":40,"cost_microusd":0,"unpriced_tokens":0}),
+
+    ];
+
+    let rows = rows.into_iter().enumerate().map(|(index, fields)| {
+
+        Ok((index as u64, json!({"fields":fields}).to_string(), "0".into()))
+
+    });
+
+    let summary = Store::usage_summary_from_rows(rows, None).unwrap().unwrap();
+
+    assert_eq!(summary.total_tokens, 90);
+
+    assert_eq!(summary.cost, Some(6.838109));
+
+    assert_eq!(summary.currency.as_deref(), Some("USD"));
+
+}
+
+
+#[test]
+
+fn agent_usage_rollup_missing_or_unpriced_cost_stays_unknown() {
+
+    for cost_fields in [
+
+        json!({}),
+
+        json!({"cost_microusd":0,"unpriced_tokens":10}),
+
+        json!({"cost_microusd":500_000,"unpriced_tokens":1}),
+
+    ] {
+
+        let mut fields = json!({"semantics":"response_rollup","incarnation_id":"inc-one","model":"unknown","total_tokens":10});
+
+        fields
+
+            .as_object_mut()
+
+            .unwrap()
+
+            .extend(cost_fields.as_object().unwrap().clone());
+
+        let known = json!({"semantics":"response_rollup","incarnation_id":"inc-one","model":"known","total_tokens":20,"cost_microusd":1_000_000,"unpriced_tokens":0});
+
+        let rows = [known, fields].into_iter().enumerate().map(|(index, fields)| {
+
+            Ok((index as u64, json!({"fields":fields}).to_string(), "0".into()))
+
+        });
+
+        let summary = Store::usage_summary_from_rows(rows, None).unwrap().unwrap();
+
+        assert_eq!(summary.total_tokens, 30);
+
+        assert_eq!(summary.cost, None);
+
+        assert_eq!(summary.currency, None);
+
+    }
+
+}
+
+
+#[test]
+
+fn agent_usage_rollup_and_legacy_cost_require_complete_matching_currency() {
+
+    for semantics in ["session_cumulative", "response"] {
+
+        for (legacy_cost, currency, expected) in [
+
+            (None, Some("USD"), None),
+
+            (Some(2.0), Some("USD"), Some(3.0)),
+
+            (Some(2.0), Some("EUR"), None),
+
+            (Some(2.0), None, None),
+
+        ] {
+
+            for legacy_incarnation in ["a-legacy", "z-legacy"] {
+
+                let rows = [
+
+                    json!({"semantics":"response_rollup","incarnation_id":"m-rollup","total_tokens":20,"cost_microusd":1_000_000,"unpriced_tokens":0}),
+
+                    json!({"semantics":semantics,"incarnation_id":legacy_incarnation,"total_tokens":10,"cost":legacy_cost,"currency":currency}),
+
+                ];
+
+                let rows = rows.into_iter().enumerate().map(|(index, fields)| {
+
+                    Ok((index as u64, json!({"fields":fields}).to_string(), "0".into()))
+
+                });
+
+                let summary = Store::usage_summary_from_rows(rows, None).unwrap().unwrap();
+
+                assert_eq!(summary.total_tokens, 30);
+
+                assert_eq!(summary.cost, expected);
+
+                assert_eq!(summary.currency.as_deref(), expected.map(|_| "USD"));
+
+            }
+
+        }
+
+    }
+
+}
+
+
+#[test]
+
+fn agent_usage_legacy_response_cost_requires_every_delta_priced_in_one_currency() {
+
+    for second in [
+
+        json!({"total_tokens":10}),
+
+        json!({"total_tokens":10,"cost":2.0,"currency":"EUR"}),
+
+    ] {
+
+        let mut second = second;
+
+        second["semantics"] = json!("response");
+
+        second["incarnation_id"] = json!("legacy");
+
+        let rows = [
+
+            json!({"semantics":"response","incarnation_id":"legacy","total_tokens":20,"cost":1.0,"currency":"USD"}),
+
+            second,
+
+        ];
+
+        let rows = rows.into_iter().enumerate().map(|(index, fields)| {
+
+            Ok((index as u64, json!({"fields":fields}).to_string(), "0".into()))
+
+        });
+
+        let summary = Store::usage_summary_from_rows(rows, None).unwrap().unwrap();
+
+        assert_eq!(summary.total_tokens, 30);
+
+        assert_eq!(summary.cost, None);
+
+        assert_eq!(summary.currency, None);
+
+    }
+
+}
+
+#[test]
 fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
     let store = Store::open_memory("host-one").unwrap();
     let subject = "agent/example.worker";
@@ -21085,6 +21262,7 @@ fn batched_usage_preserves_canonical_ties_and_snapshot_bound() {
                     ),
                     ("total_tokens".into(), json!(100)),
                     ("cost".into(), json!(i as f64)),
+                    ("currency".into(), json!("USD")),
                     ("context_used_tokens".into(), json!(i)),
                     ("model".into(), json!("fixture-model-".repeat(320))),
                 ]),

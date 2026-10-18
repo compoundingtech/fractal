@@ -314,17 +314,29 @@ pub mod projection_digest {
 
 pub type CumulativeUsage = (u64, u64, u64, u64, Option<f64>, Option<String>);
 
+/// The latest rollup snapshot of one series, with its cost when every token in it was priced.
+#[derive(Clone)]
+struct RollupSpend {
+    total: u64,
+    input: u64,
+    output: u64,
+    writes: u64,
+    reads: u64,
+    cost_microusd: Option<u64>,
+}
+
 /// One incarnation's spend as its usage claims fold, in canonical claim order.
 #[derive(Clone, Default)]
 pub struct UsageSpend {
     cumulative: Option<CumulativeUsage>,
-    rollups: BTreeMap<String, (u64, u64, u64, u64, u64)>,
+    rollups: BTreeMap<String, RollupSpend>,
     response_total: u64,
     response_input: u64,
     response_output: u64,
     response_cached: u64,
     response_cost: f64,
     response_has_cost: bool,
+    response_unknown_cost: bool,
     response_currency: Option<String>,
 }
 
@@ -466,28 +478,38 @@ impl UsageFold {
                     .join("\0");
                 group.rollups.insert(
                     key,
-                    (
-                        fields
+                    RollupSpend {
+                        total: fields
                             .get("total_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        input: fields
                             .get("input_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        output: fields
                             .get("output_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        writes: fields
                             .get("cache_write_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        reads: fields
                             .get("cached_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                    ),
+                        cost_microusd: fields
+                            .get("cost_microusd")
+                            .and_then(Value::as_u64)
+                            .filter(|_| {
+                                fields
+                                    .get("unpriced_tokens")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                                    == 0
+                            }),
+                    },
                 );
             }
             Some("response") => {
@@ -517,9 +539,20 @@ impl UsageFold {
                 if let Some(cost) = fields.get("cost").and_then(Value::as_f64) {
                     group.response_cost += cost;
                     group.response_has_cost = true;
-                }
-                if let Some(currency) = fields.get("currency").and_then(Value::as_str) {
-                    group.response_currency = Some(currency.to_owned());
+                    if let Some(currency) = fields.get("currency").and_then(Value::as_str) {
+                        if group
+                            .response_currency
+                            .as_deref()
+                            .is_some_and(|current| current != currency)
+                        {
+                            group.response_unknown_cost = true;
+                        }
+                        group.response_currency = Some(currency.to_owned());
+                    } else {
+                        group.response_unknown_cost = true;
+                    }
+                } else if total > 0 {
+                    group.response_unknown_cost = true;
                 }
             }
             _ => {}
@@ -543,15 +576,32 @@ impl UsageFold {
         };
         let mut cost = 0.0;
         let mut has_cost = false;
+        let mut rollup_cost_microusd = 0_u128;
+        let mut unknown_cost = false;
         for group in self.spend.values().cloned() {
             summary.incarnation_count += 1;
             if !group.rollups.is_empty() {
-                for (total, input, output, writes, reads) in group.rollups.into_values() {
-                    summary.total_tokens = summary.total_tokens.saturating_add(total);
-                    summary.input_tokens = summary.input_tokens.saturating_add(input);
-                    summary.output_tokens = summary.output_tokens.saturating_add(output);
-                    summary.cache_write_tokens = summary.cache_write_tokens.saturating_add(writes);
-                    summary.cached_tokens = summary.cached_tokens.saturating_add(reads);
+                for rollup in group.rollups.into_values() {
+                    summary.total_tokens = summary.total_tokens.saturating_add(rollup.total);
+                    summary.input_tokens = summary.input_tokens.saturating_add(rollup.input);
+                    summary.output_tokens = summary.output_tokens.saturating_add(rollup.output);
+                    summary.cache_write_tokens =
+                        summary.cache_write_tokens.saturating_add(rollup.writes);
+                    summary.cached_tokens = summary.cached_tokens.saturating_add(rollup.reads);
+                    if let Some(value) = rollup.cost_microusd {
+                        rollup_cost_microusd = rollup_cost_microusd.saturating_add(u128::from(value));
+                        has_cost = true;
+                        if summary
+                            .currency
+                            .as_deref()
+                            .is_some_and(|currency| currency != "USD")
+                        {
+                            unknown_cost = true;
+                        }
+                        summary.currency.get_or_insert_with(|| "USD".into());
+                    } else if rollup.total > 0 {
+                        unknown_cost = true;
+                    }
                 }
             } else if let Some((total, input, output, cached, group_cost, currency)) =
                 group.cumulative
@@ -563,8 +613,19 @@ impl UsageFold {
                 if let Some(value) = group_cost {
                     cost += value;
                     has_cost = true;
+                    if currency.is_none()
+                        || summary
+                            .currency
+                            .as_ref()
+                            .zip(currency.as_ref())
+                            .is_some_and(|(current, candidate)| current != candidate)
+                    {
+                        unknown_cost = true;
+                    }
+                    summary.currency = summary.currency.or(currency);
+                } else if total > 0 {
+                    unknown_cost = true;
                 }
-                summary.currency = summary.currency.or(currency);
             } else {
                 summary.total_tokens = summary.total_tokens.saturating_add(group.response_total);
                 summary.input_tokens = summary.input_tokens.saturating_add(group.response_input);
@@ -573,11 +634,25 @@ impl UsageFold {
                 if group.response_has_cost {
                     cost += group.response_cost;
                     has_cost = true;
+                    if group.response_currency.is_none()
+                        || summary
+                            .currency
+                            .as_ref()
+                            .zip(group.response_currency.as_ref())
+                            .is_some_and(|(current, candidate)| current != candidate)
+                    {
+                        unknown_cost = true;
+                    }
+                    summary.currency = summary.currency.or(group.response_currency);
                 }
-                summary.currency = summary.currency.or(group.response_currency);
+                unknown_cost |= group.response_unknown_cost;
             }
         }
-        summary.cost = has_cost.then_some(cost);
+        if unknown_cost {
+            summary.currency = None;
+        } else {
+            summary.cost = has_cost.then_some(cost + rollup_cost_microusd as f64 / 1_000_000.0);
+        }
         Some(summary)
     }
 }
@@ -2056,14 +2131,7 @@ pub fn stale_pull_request_request_tx(
 
 fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0
-        || version == 13
-        || version == 14
-        || version == 15
-        || version == 16
-        || version == 17
-        || version == 18
-        || version == smallclaims::store::CURRENT_SCHEMA_VERSION
+    if version == 0 || (13..=st3_schema::STORAGE_VERSION).contains(&version)
     {
         return Ok(());
     }
@@ -5753,6 +5821,7 @@ impl Store {
                 .filter(|item| !item.person.starts_with("person/")),
         );
         items.extend(self.checkpoint_attention_items(None, as_of)?);
+        items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
         self.current_attention(items, as_of)?
             .into_iter()
@@ -5763,6 +5832,37 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    fn signature_attention_items(&self) -> Result<Vec<AttentionItemView>> {
+        let mut items = Vec::new();
+        for fault in self.signature_state_faults()? {
+            items.push(AttentionItemView {
+                episode: format!("{}:{}", fault.code, fault.subject),
+                priority: "high".into(),
+                kind: "fault".into(),
+                review_mode: None,
+                subject: fault.subject,
+                person: String::new(),
+                requester_id: None,
+                launch_id: None,
+                variant_id: None,
+                message_id: None,
+                prompt_call: None,
+                conversation: None,
+                answers: Vec::new(),
+                title: fault.code,
+                detail: fault.detail,
+                request: None,
+                mission: None,
+                mission_run: None,
+                step: None,
+                targets: vec![format!("host/{}", self.origin)],
+                requested_at_unix_ms: 0,
+                actions: vec![attention_action("inspect signature state", &["st", "doctor"])],
+            });
+        }
+        Ok(items)
     }
 
     pub fn selected_desired_token(&self, subject: &str) -> Result<Option<String>> {

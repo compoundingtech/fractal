@@ -97,7 +97,9 @@ test('a run over its wall-time budget fails after running every case', { timeout
 })
 
 test('invalid options fail before any case runs', { timeout: 60000 }, async () => {
-  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_MAX_SECONDS: '-1' }, { KIT_PLAY_MAX_SECONDS: 'soon' }]) {
+  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_MAX_SECONDS: '-1' }, { KIT_PLAY_MAX_SECONDS: 'soon' },
+    // Only the full set is sharded.
+    { KIT_PLAY_SET: 'commit', KIT_PLAY_SHARD_COUNT: '2' }, { KIT_PLAY_SET: 'critical', KIT_PLAY_SHARD_INDEX: '1', KIT_PLAY_SHARD_COUNT: '2' }]) {
     await assert.rejects(() => runGate({ env }), /ENOENT/)
   }
 })
