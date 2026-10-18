@@ -16,7 +16,7 @@ use super::common::*;
 use anyhow::Result;
 use rusqlite::params;
 use smallclaims::store::now_ms;
-use st3_store::store::*;
+use crate::store::*;
 use smallclaims::store::checkpoint::checkpoint_name;
 use smallclaims::store::checkpoint_agreement::SealTerms;
 

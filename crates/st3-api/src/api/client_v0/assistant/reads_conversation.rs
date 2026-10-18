@@ -19,19 +19,34 @@ pub(super) async fn project(
     project_bound(state, snapshot, projection, parameters, max_bytes, "conversation-test-binding").await
 }
 
-/// Assistant discovery, timeline and search continuations are scoped to one grant policy.
+#[cfg(test)]
 pub(super) async fn project_bound(
+    state: &AppState, snapshot: &ClientSnapshot, projection: &str,
+    parameters: &BTreeMap<String, String>, max_bytes: usize, binding: &str,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    let context = response_body::Context {
+        state: state.clone(), client_request: true, observation_report: false,
+        request_id: "request/00000000-0000-0000-0000-000000000000".into(),
+        client_snapshot: Some(snapshot.clone()), server: None, roster: false,
+    };
+    project_bound_with_context(state, snapshot, projection, parameters, max_bytes, binding, &context).await
+}
+
+/// The envelope identity comes from the gateway; continuation authority remains the grant binding.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn project_bound_with_context(
     state: &AppState,
     snapshot: &ClientSnapshot,
     projection: &str,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
     binding: &str,
+    context: &response_body::Context,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     // Even cached discovery pages require a configured owner.
     let person = owner(state)?;
     match projection {
-        "conversations" => discovery::page(state, snapshot, "conversations", parameters, max_bytes, binding).await,
+        "conversations" => discovery::page(state, snapshot, "conversations", parameters, max_bytes, binding, context).await,
         "conversation-detail" => {
             allow(parameters, &["agent_id", "max_response_bytes"], max_bytes)?;
             timeline(state, snapshot, &person, parameters, (DEFAULT_LIMIT, max_bytes), true, binding).await

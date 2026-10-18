@@ -1,3 +1,5 @@
+use crate::EvidenceStore;
+use crate::PublishedViewsStore;
 use super::*;
 use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
@@ -144,7 +146,6 @@ mod agents_window_tests;
 const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
 const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
 const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
-const TERMINAL_CAPABILITY_PROTOCOL_PREFIX: &str = "st3.cap.";
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 
 pub async fn request_latency(
@@ -342,14 +343,12 @@ pub async fn collection_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [COLLECTION_SUBPROTOCOL] {
-        return Err(validation(
-            "the collection WebSocket requires exactly st3.client.collections.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, COLLECTION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the collection WebSocket requires exactly one supported collections protocol"))?
+        .to_owned();
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     Ok(websocket
-        .protocols([COLLECTION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
 }
 
@@ -8124,11 +8123,9 @@ pub async fn conversation_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [CONVERSATION_SUBPROTOCOL] {
-        return Err(validation(
-            "the conversation WebSocket requires exactly st3.client.conversation.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, CONVERSATION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the conversation WebSocket requires exactly one supported conversation protocol"))?
+        .to_owned();
     let session_id = conversation_session_id(&state, &id)?;
     let snapshot = new_client_snapshot(&state);
     let remote = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
@@ -8155,7 +8152,7 @@ pub async fn conversation_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("conversation", format!("conversation:{id}"));
     Ok(websocket
-        .protocols([CONVERSATION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             conversation_stream_socket(socket, state, session, session_id, query.after, remote, (upgrade, first_frame)).await
@@ -8712,7 +8709,7 @@ pub async fn pairing_begin(
             "the pairing person must match the authenticated Unix person",
         ));
     }
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || request.device_name.trim().is_empty()
         || request.device_name.len() > 120
         || !request.person_id.starts_with("person/")
@@ -8900,7 +8897,7 @@ pub async fn pairing_complete(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PairingComplete>,
 ) -> Result<Json<Value>, ApiError> {
-    if request.api_version != CLIENT_API_VERSION || request.device_public_key.len() < 32 {
+    if !super::wire_names::api_version(&request.api_version) || request.device_public_key.len() < 32 {
         return Err(validation(
             "the pairing completion has an invalid version or public key",
         ));
@@ -9425,29 +9422,14 @@ pub async fn terminal_stream(
         .map(str::trim)
         .filter(|protocol| !protocol.is_empty())
         .collect::<Vec<_>>();
-    let normative_count = protocols
-        .iter()
-        .filter(|protocol| **protocol == TERMINAL_SUBPROTOCOL)
-        .count();
-    let secondary = protocols
-        .iter()
-        .filter(|protocol| **protocol != TERMINAL_SUBPROTOCOL)
-        .copied()
-        .collect::<Vec<_>>();
-    let stream_capability = secondary
-        .first()
-        .and_then(|protocol| protocol.strip_prefix(TERMINAL_CAPABILITY_PROTOCOL_PREFIX))
-        .filter(|capability| !capability.is_empty());
-    if normative_count != 1 || secondary.len() != 1 || stream_capability.is_none() {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "validation-failed".into(),
-            message: format!(
-                "the terminal WebSocket must request exactly `{TERMINAL_SUBPROTOCOL}` plus one `st3.cap.*` capability protocol"
-            ),
-            details: Box::default(),
-        });
-    }
+    let (selected, stream_capability) =
+        super::wire_names::terminal_protocol(&protocols, TERMINAL_SUBPROTOCOL, false)
+            .ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "validation-failed".into(),
+                message: "the terminal WebSocket requires one supported terminal protocol plus one capability protocol".into(),
+                details: Box::default(),
+            })?;
     let follow = prepare_terminal_follow(
         &state,
         &session,
@@ -9458,7 +9440,7 @@ pub async fn terminal_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("terminal", format!("terminal:{id}"));
     Ok(websocket
-        .protocols([TERMINAL_SUBPROTOCOL])
+        .protocols([selected.to_owned()])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             follow.run(state, TerminalSink::Socket(Box::new(socket)), upgrade, first_frame).await
@@ -12231,7 +12213,7 @@ fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
 ) -> Result<(), ApiError> {
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
     {

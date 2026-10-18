@@ -280,7 +280,7 @@ fn seat_runtime(connection: &Connection, seat: &str) -> Result<Option<(String, O
 
 /// What the sweep needs to know about a parent seat: its declaration's kind and its newest
 /// runtime status and incarnation.
-struct Seat {
+pub struct Seat {
     declared: Option<String>,
     runtime: Option<(String, Option<String>)>,
 }

@@ -147,7 +147,7 @@ impl Adapter {
             [],
         )?;
         if seed {
-            super::tests::seed_native(&tx, &self.source.get().unwrap().binding);
+            crate::store::terminal_gate_evidence::native_source_tests_shared::seed_native(&tx, &self.source.get().unwrap().binding);
         }
         tx.commit()?;
         Ok(())

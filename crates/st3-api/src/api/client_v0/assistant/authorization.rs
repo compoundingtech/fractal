@@ -241,11 +241,8 @@ fn verify(state: &AppState, session: &ClientSession, path: &str, parameters: &BT
 
 pub async fn read(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                                Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
-                               request_id: Option<Extension<crate::api::response_body::RequestId>>,
-                               headers: HeaderMap) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
-    let request_id = request_id.map_or_else(String::new, |Extension(id)| id.0);
-    let result=super::reads::RESPONSE_REQUEST_ID.scope(request_id,
-        read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers)).await;
+                               headers: HeaderMap, Extension(context): Extension<response_body::Context>) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+    let result=read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers, &context).await;
     if result.is_err() {
         let granted=session.pairing_grant.as_deref().map(|subject| latest(&state,subject,GRANTED)).transpose()?.flatten();
         let grant_id=granted.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")).and_then(Value::as_str);
@@ -256,7 +253,7 @@ pub async fn read(State(state): State<AppState>, Extension(session): Extension<C
 
 async fn read_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                         Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
-                        headers: HeaderMap) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+                        headers: HeaderMap, context: &response_body::Context) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
     let grant_subject = session.pairing_grant.as_deref().ok_or_else(|| forbidden("assistant grant absent"))?;
     let granted = latest(&state, grant_subject, GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
     let policy = effective(&state, &granted)?;
@@ -283,7 +280,7 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
             grant_subject:grant_subject.into(), actor:current.actor, transport:session.transport,
             policy_revision:fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
             proof_expiry:fields(&policy)?["expires_at_unix_ms"].as_u64().unwrap_or(0), max_response_bytes:requested };
-        let (snapshot,value) = super::reads::project(&state,&snapshot,projection,&parameters,requested,&binding).await?;
+        let (snapshot,value) = super::reads::project_with_context(&state,&snapshot,projection,&parameters,requested,&binding,context).await?;
         return Ok((Extension(receipt),Extension(snapshot),Json(value)));
     }
     let authorization = proof(&headers)?;
@@ -301,7 +298,7 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
     }),None).map_err(|error| if error.code=="stale-subject" {
         forbidden("the SCG read approval has already been consumed") } else {error})?;
     receipt.consumed_claim=consumed.id.clone();
-    let (snapshot,value) = match super::reads::project(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding).await {
+    let (snapshot,value) = match super::reads::project_with_context(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding,context).await {
         Ok(result) => result,
         Err(error) => {
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,

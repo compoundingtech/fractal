@@ -8,14 +8,14 @@ use tokio::sync::watch;
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum Dependency {
+pub enum Dependency {
     Subject(String),
     Recipient(String),
     Owner(String, String),
 }
 
 #[derive(Default)]
-struct Registry {
+pub struct Registry {
     next: u64,
     subscribers: HashMap<Dependency, HashMap<u64, watch::Sender<u64>>>,
 }

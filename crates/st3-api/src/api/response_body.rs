@@ -3,12 +3,22 @@
 use super::*;
 use axum::body::{Bytes, HttpBody};
 
-/// The server-selected request identifier used by the response envelope.
-#[derive(Clone)]
-pub(crate) struct RequestId(pub String);
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use std::convert::Infallible;
 
+pub(super) fn json_size(value: &Value) -> Result<usize, ApiError> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(ApiError::internal)?;
+    Ok(counter.0)
+}
 #[derive(Clone)]
 pub struct Context {
     pub state: AppState,
@@ -36,6 +46,21 @@ pub fn is_json(response: &Response) -> bool {
 }
 
 impl Context {
+    /// Exact framing cost for a page with an empty items array. The page packer adds
+    /// each item's encoded size and its separating comma without re-encoding payloads.
+    pub(super) fn page_envelope_size(
+        &self,
+        snapshot: &ClientSnapshot,
+        page: &ClientResourcePage,
+    ) -> Result<usize, ApiError> {
+        self.value_envelope_size(snapshot, page)
+    }
+
+    /// Exact framing for any assistant projection, using the same codec as delivery.
+    pub(super) fn value_envelope_size<T: serde::Serialize>(&self, snapshot: &ClientSnapshot, value: &T) -> Result<usize, ApiError> {
+        let bytes = serde_json::to_vec(value).map_err(ApiError::internal)?;
+        Ok(self.encode(StatusCode::OK, Some(snapshot.clone()), Ok(bytes.into())).len)
+    }
     pub async fn wrap(&self, response: Response) -> Result<Response, ApiError> {
         self.wrap_inner(response, None).await
     }
