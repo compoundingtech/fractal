@@ -75,8 +75,8 @@ impl Store {
     ) -> Result<()> {
         let connection = self.readers.get();
         let metadata: Option<(u64, i64, bool)> = connection
-            .prepare_cached(SNAPSHOT_METADATA_SQL)?
-            .query_row([index], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hfbbe985f45ee owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ SNAPSHOT_METADATA_SQL)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h47acb8be27c0 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .optional()?;
         if let Some((position, bytes, valid)) = metadata {
             valid_metadata(valid)?;
@@ -85,7 +85,7 @@ impl Store {
             smallclaims::read_budget::check()?;
             connection
                 .prepare_cached("SELECT accepted_at_unix_ms FROM claims WHERE store_index=?1")?
-                .query_row([position], |row| decode_time(row.get(0)?, 0))
+                .query_row(/* sqlite-large-value: allow-for-now lv-h11dc6b83ced5 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [position], |row| decode_time(row.get(0)?, 0))
                 .map_err(detail_read_error)?;
         }
         Ok(())
@@ -103,8 +103,8 @@ impl Store {
         // an ordinary OP_Column comparison can fetch an oversized wrong-kind value.
         // All phases share the caller's pinned cut and cumulative raw/fallback budget.
         let kind_metadata: Option<(i64, bool)> = connection
-            .prepare_cached(DECLARATION_KIND_METADATA_SQL)?
-            .query_row([subject], |row| Ok((row.get(0)?, row.get(1)?)))
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h982c082065e4 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ DECLARATION_KIND_METADATA_SQL)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h6d80fc7c4dbe owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
         let Some((kind_bytes, kind_valid)) = kind_metadata else {
             return Ok(None);
@@ -114,7 +114,7 @@ impl Store {
         smallclaims::read_budget::check()?;
         let stored_kind: String = connection
             .prepare_cached("SELECT kind FROM desired WHERE subject=?1")?
-            .query_row([subject], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h0ed79309c589 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))
             .map_err(detail_read_error)?;
         // Ordinary wrong kinds remain absent without reading the rest of the row.
         // Stops retain the existing subject-prefix admission rule.
@@ -124,8 +124,8 @@ impl Store {
             return Ok(None);
         }
         let metadata: Option<(i64, bool)> = connection
-            .prepare_cached(DECLARATION_METADATA_SQL)?
-            .query_row([subject], |row| Ok((row.get(0)?, row.get(1)?)))
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d97b323eb3d owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ DECLARATION_METADATA_SQL)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h950ccdb5266e owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
         let Some((bytes, valid)) = metadata else {
             return Ok(None);
@@ -138,7 +138,7 @@ impl Store {
                 "SELECT revision, body, owner_run, owner_generation, owner_step
              FROM desired WHERE subject=?1",
             )?
-            .query_row([subject], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-hd13e85123f57 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [subject], |row| {
                 let body = row.get::<_, String>(1)?;
                 Ok(DetailDeclaration {
                     desired: DesiredSubject {
@@ -169,8 +169,8 @@ impl Store {
         // An inclusive bound is the old exclusive (index + 1) bound without overflow.
         // The full index order needs no correlated subquery or temporary sort.
         let metadata: Option<(u64, i64, bool)> = connection
-            .prepare_cached(STATE_METADATA_SQL)?
-            .query_row(params![subject, kind, index], |row| {
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha6a19a5ab2ba owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ STATE_METADATA_SQL)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h8c65bdd86397 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ params![subject, kind, index], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
             .optional()?;
@@ -183,7 +183,7 @@ impl Store {
         // Ignore unrelated claim metadata and predecessors, which the renderer never uses.
         connection
             .prepare_cached("SELECT body, accepted_at_unix_ms FROM claims WHERE store_index=?1")?
-            .query_row([position], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h78d8ff547884 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [position], |row| {
                 let body = row.get::<_, String>(0)?;
                 let accepted = row.get::<_, String>(1)?;
                 Ok((decode_body(&body, 0)?, decode_time(accepted, 1)?))

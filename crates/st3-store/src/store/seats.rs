@@ -155,7 +155,7 @@ impl Store {
         // every agent, run and generation claim the store holds and sorts them.
         let connection = self.readers.get();
         Ok(connection
-            .query_row(AGENT_STATUS_INDEX_QUERY, [snapshot_index], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h69dd4be22526 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ AGENT_STATUS_INDEX_QUERY, [snapshot_index], |row| row.get(0))
             .optional()?
             .unwrap_or_default())
     }
@@ -287,7 +287,7 @@ impl Store {
             return Ok((changed > bound).then(|| "cards changed".to_owned()));
         }
         let connection = self.readers.get();
-        let names = connection.prepare_cached(RANGE_SUBJECTS)?
+        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h47d832d68747 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         let names = if history { names } else {
@@ -626,7 +626,7 @@ impl Store {
                 if delta.membership {
                     crate::otel::roster_phase("membership", || -> Result<()> {
                     let connection = self.readers.get();
-                    let names = connection.prepare_cached(RANGE_SUBJECTS)?
+                    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h33072374f786 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                         .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
@@ -666,7 +666,7 @@ impl Store {
                     }
                     (Some(covered), None) => {
                         let connection = self.readers.get();
-                        let names = connection.prepare_cached(RANGE_SUBJECTS)?
+                        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h34134c873b67 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                         let names = if history { names } else {
@@ -1090,7 +1090,7 @@ impl Store {
         loop {
             let connection = self.connection.write_background();
             let removed = connection.execute(
-                "DELETE FROM local_usage_responses WHERE rowid IN (
+                /* sqlite-large-value: allow-for-now lv-h6f30f2bfb800 owner=st3_store::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_usage_responses WHERE rowid IN (
                     SELECT rowid FROM local_usage_responses WHERE observed_at_unix_ms < ?1 LIMIT ?2
                  )",
                 params![older_than_unix_ms.min(i64::MAX as u128) as i64, chunk],
@@ -1151,7 +1151,7 @@ impl Store {
         let mut names = match owner {
             Some(owner) => BTreeSet::from([owner.to_owned()]),
             None => connection
-                .prepare_cached(RUNTIME_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h15df084b217b owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
                 .query_map([index], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
@@ -1215,7 +1215,7 @@ impl Store {
 
     pub fn agent_declaration_revisions(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc4eed90eb9f7 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.id FROM claims WHERE claims.subject=?1 AND claims.kind='intent.desired'
              ORDER BY {CANONICAL_ORDER_DESC}"
         ))?;
@@ -1343,7 +1343,7 @@ impl Store {
     /// generation is no longer current. They must not observe, deliver, or start work.
     pub fn retired_owned_intake_subjects(&self) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(RETIRED_OWNED_INTAKE_SUBJECTS)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc58f8bca0077 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RETIRED_OWNED_INTAKE_SUBJECTS)?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<BTreeSet<_>, _>>()
@@ -1395,7 +1395,7 @@ impl Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            "DELETE FROM desired
+            /* sqlite-large-value: allow-for-now lv-h4614ccc7d8b8 owner=st3_store::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
              WHERE owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
@@ -1429,7 +1429,7 @@ impl Store {
             return Ok(BTreeMap::new());
         }
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hcc34789d3047 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM json_each(?1) subjects
              CROSS JOIN (
                  SELECT 'harness.todo.observed' AS kind
@@ -1517,7 +1517,7 @@ impl Store {
             }
             if current.claim_id != expected { return Err(St3Error::new("stale-fence", "seat declaration changed during transfer")); }
             let latest: String = transaction.query_row(
-                &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                /* sqlite-large-value: allow-for-now lv-h735adf06726c owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                 [subject], |row| row.get(0)).map_err(internal)?;
             if latest != operation { return Err(St3Error::new("stale-fence", "another suspension request replaced this move")); }
             let mut desired: DesiredSubject = serde_json::from_value(current_claim.body.clone()).map_err(internal)?;
@@ -1847,7 +1847,7 @@ impl Store {
                    AND json_extract(body, '$.fields.capability_hash')=?1
                  ORDER BY store_index DESC LIMIT 1",
             )?
-            .query_row([digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h1c6cebdfd830 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
             .optional()?)
     }
 
@@ -1867,7 +1867,7 @@ impl Store {
                    AND json_extract(body, '$.fields.incarnation_id')=?2
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                    AND after_store_index<=?3 ORDER BY id DESC LIMIT 1")?.query_row(
-                params![agent, incarnation, snapshot_index], |row| row.get(0),
+                /* sqlite-large-value: allow-for-now lv-h0089217fcd70 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             if let Some(time) = local {
                 times.push(time.max(0) as u128);
@@ -1879,7 +1879,7 @@ impl Store {
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                    AND store_index<=?3
                  ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1")?.query_row(
-                params![agent, incarnation, snapshot_index], |row| row.get(0),
+                /* sqlite-large-value: allow-for-now lv-ha21e429f8e30 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             times.extend(replicated.and_then(|time| time.parse::<u128>().ok()));
         }
@@ -1891,8 +1891,8 @@ impl Store {
             "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_to_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
         ] {
             let time: Option<String> = connection
-                .prepare_cached(query)?
-                .query_row(params![agent, snapshot_index], |row| row.get(0))
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd00f988e95f2 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ query)?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h81aea6ba2165 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, snapshot_index], |row| row.get(0))
                 .optional()?;
             times.extend(time.and_then(|time| time.parse::<u128>().ok()));
         }
@@ -1928,14 +1928,14 @@ impl Store {
         };
         self.readers
             .get()
-            .prepare_cached(&canonical_sql(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h64da96f27b95 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
                 "SELECT accepted_at_unix_ms, store_index
              FROM claims INDEXED BY claims_incarnation_accepted_index
              WHERE subject=?1 AND {INCARNATION_OF_CLAIM}=?2
              ORDER BY CANONICAL_ASC(claims)
              LIMIT 1"
             )))?
-            .query_row(params![subject, incarnation], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h5853cbd5b306 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![subject, incarnation], |row| {
                 let time: String = row.get(0)?;
                 Ok((time.parse::<u128>().unwrap_or(u128::MAX), row.get(1)?))
             })
@@ -2000,7 +2000,7 @@ impl Store {
     ) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        let id: Option<String> = connection.query_row(&canonical_sql(
+        let id: Option<String> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hbbd95e9e69f8 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id FROM claims INDEXED BY claims_harness_auth_diagnostic_index
              WHERE subject=?1 AND kind='harness.diagnostic'
                AND json_extract(body, '$.fields.incarnation_id')=?2

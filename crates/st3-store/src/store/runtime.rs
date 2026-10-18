@@ -11,7 +11,9 @@ pub struct SmalltalkRuntime {
     /// Committed launch-source invalidation, independent of append frontiers.
     pub publication_cache_epoch: Mutex<Option<(i64, bool)>>,
     pub publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
-    pub git_change_registry: std::sync::OnceLock<Arc<crate::changes::service::Registry>>,
+    /// State a domain owns, keyed by its type, so a domain's caches and handles live with the
+    /// domain rather than as fields here. See [`Extensions`].
+    pub extensions: Extensions,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher
@@ -101,6 +103,26 @@ pub struct SmalltalkRuntime {
     pub last_seats_read: std::sync::Mutex<BTreeSet<String>>,
 }
 
+/// A type-keyed map of domain state, created empty at open. Each domain defines one `Default`
+/// struct for its caches and handles and reaches it with `store.extension::<ThatStruct>()`; the
+/// first use creates it, and every later use returns the same one.
+#[derive(Default)]
+pub struct Extensions {
+    map: std::sync::RwLock<HashMap<std::any::TypeId, Arc<dyn std::any::Any + Send + Sync>>>,
+}
+
+impl Extensions {
+    pub fn get<T: std::any::Any + Send + Sync + Default>(&self) -> Arc<T> {
+        let id = std::any::TypeId::of::<T>();
+        let found = self.map.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned();
+        let any = found.unwrap_or_else(|| {
+            let mut map = self.map.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+            map.entry(id).or_insert_with(|| Arc::new(T::default())).clone()
+        });
+        any.downcast::<T>().unwrap_or_else(|_| unreachable!("an extension is stored under its own type"))
+    }
+}
+
 #[derive(Default)]
 pub struct AgentRosterFaultRetries {
     pub due: [BTreeSet<String>; 2],
@@ -121,11 +143,18 @@ pub struct AgentResourcesEntry {
     pub published_at_unix_ms: u128,
 }
 
+impl Store {
+    /// The domain state of type `T` kept on this store, created empty on first use.
+    pub fn extension<T: std::any::Any + Send + Sync + Default>(&self) -> Arc<T> {
+        self.smalltalk.extensions.get::<T>()
+    }
+}
+
 impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
-        connection.execute_batch(git_changes::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5eb5665e9ea owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
         retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
@@ -307,11 +336,11 @@ impl Runtime for SmalltalkRuntime {
         if !upgraded {
             replay_graph_from_nothing_tx(transaction)?;
             transaction.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version',?1)",
+                /* sqlite-large-value: allow-for-now lv-h0f8067adfa16 owner=st3_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version',?1)",
                 [DERIVED_TABLES_VERSION],
             )?;
             transaction.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2')",
+                /* sqlite-large-value: allow-for-now lv-hfe8506d44696 owner=st3_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2')",
                 [],
             )?;
             if !work_extension_roots_tx(transaction)?.1 {
@@ -563,16 +592,16 @@ pub fn compatibility_digest(registry_digest: &str) -> String {
 fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
     if fresh {
         let transaction = connection.unchecked_transaction()?;
-        transaction.execute_batch(SCHEMA)?;
-        transaction.execute_batch(&RUNTIME_ID_INDEX)?;
-        transaction.execute_batch(arrangements::SCHEMA)?;
-        transaction.execute_batch(retirements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h91f299ff7936 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hac7a83f4ed08 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h48e515fb40e9 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hd3489deb9c17 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.commit()?;
     } else {
-        connection.execute_batch(SCHEMA)?;
-        connection.execute_batch(&RUNTIME_ID_INDEX)?;
-        connection.execute_batch(arrangements::SCHEMA)?;
-        connection.execute_batch(retirements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4b6bb56a214a owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3d9dce1a3af5 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hacb85aef8915 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h01ed68d36a12 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
     }
     Ok(())
 }
@@ -1111,5 +1140,25 @@ mod ivm_attachment_tests {
             current.availability.readiness,
             Readiness::Ready(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct First(std::sync::atomic::AtomicUsize);
+    #[derive(Default)]
+    struct Second(Mutex<Vec<u8>>);
+
+    #[test]
+    fn an_extension_is_created_once_per_type_and_shared() {
+        let store = Store::open_memory("fixture").unwrap();
+        store.extension::<First>().0.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
+        store.extension::<Second>().0.lock().unwrap().push(7);
+        assert_eq!(store.extension::<First>().0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(*store.extension::<Second>().0.lock().unwrap(), vec![7]);
+        assert!(Arc::ptr_eq(&store.extension::<First>(), &store.extension::<First>()));
     }
 }
