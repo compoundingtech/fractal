@@ -325,7 +325,7 @@ impl Store {
         connection.prepare_cached(&sql)?
             .query_map(params![
                 at_unix_ms.saturating_sub(RECENTLY_ENDED_MS) as i64,
-                crate::reconcile::FIRST_READINESS_FAULT_SCOPE
+                crate::model::FIRST_READINESS_FAULT_SCOPE
             ], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
