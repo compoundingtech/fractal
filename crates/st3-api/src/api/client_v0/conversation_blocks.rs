@@ -2218,6 +2218,7 @@ mod tests {
                                 state,
                                 session,
                                 None,
+                                super::super::no_trace(),
                                 |state, session, request, permit| async move {
                                     super::super::collection_items(
                                         &state, &session, &request, permit,

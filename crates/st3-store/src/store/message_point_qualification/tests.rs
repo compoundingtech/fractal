@@ -7,7 +7,7 @@ use std::time::Duration;
 
 fn batch(db: &Connection, id: &str, sequence: u64) {
     db.execute(
-        "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h8c5a3d69f466 owner=st3_store::store::message_point_qualification::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
          VALUES(?1,'host/fixture',?2,'fixture-hash','1')",
         params![id, sequence],
     )
@@ -24,7 +24,7 @@ fn claim(
     time: &str,
 ) {
     db.execute(
-        "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hbc57d0f5bbe7 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
          VALUES(?1,?2,?3,?4,'host/fixture',NULL,?5,'[]',?6)",
         params![id, batch, subject, kind, body.to_string(), time],
     ).unwrap();
@@ -53,7 +53,7 @@ fn fixture() -> Store {
 
 fn replica(db: &Connection, claim: &str, ordinal: usize) {
     db.execute(
-        "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h428764ad0c70 owner=st3_store::store::message_point_qualification::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
          VALUES(?1,'host/writer',1,?2,?3,X'00','valid',?4,'1')",
         params![format!("{claim}/record/{ordinal}"), format!("{claim}/envelope"), ordinal, claim],
     ).unwrap();
@@ -124,7 +124,7 @@ fn point_core_reuses_real_canonical_fold_and_claim_edges_with_sparse_null_and_re
             "40",
         );
         db.execute(
-            "INSERT INTO projection_digest_repaired_claims(id) VALUES('repaired')",
+            /* sqlite-large-value: allow-for-now lv-hc325238f983d owner=st3_store::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES('repaired')",
             [],
         )
         .unwrap();
@@ -236,7 +236,7 @@ fn point_domains_match_actual_page_candidates_without_requiring_the_global_prefi
                 json!({"fixture":"canonical seed"}),
                 "13",
             );
-            db.execute("INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES(?1,?2,'fixture',?3,?4)",
+            db.execute(/* sqlite-large-value: allow-for-now lv-h63d5d8f9748a owner=st3_store::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES(?1,?2,'fixture',?3,?4)",
                 params![subject, kind, id, declaration.to_string()]).unwrap();
         }
     }
@@ -275,7 +275,7 @@ fn subject_eligibility_is_not_a_reminder_winner_or_superseded_proof() {
     {
         let db = store.connection.write();
         db.execute(
-            "UPDATE claims SET body=?1 WHERE id='sent'",
+            /* sqlite-large-value: allow-for-now lv-h397ca145e9d9 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
             [sent("worker", "first", &["reminder:shared", "version:+1"]).to_string()],
         )
         .unwrap();
@@ -591,7 +591,7 @@ fn auxiliary_cap_is_cumulative_across_distinct_keys_and_repaired_membership() {
         .connection
         .write()
         .execute(
-            "INSERT INTO projection_digest_repaired_claims(id) VALUES('claim-0')",
+            /* sqlite-large-value: allow-for-now lv-h7cef320e175f owner=st3_store::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES('claim-0')",
             [],
         )
         .unwrap();
@@ -607,17 +607,17 @@ fn auxiliary_cap_is_cumulative_across_distinct_keys_and_repaired_membership() {
 #[test]
 fn malformed_types_encoding_and_payload_errors_keep_their_causes_without_a_point() {
     for (column, sql) in [
-        ("kind", "UPDATE claims SET kind=X'00' WHERE id='sent'"),
-        ("body", "UPDATE claims SET body=X'7B7D' WHERE id='sent'"),
+        ("kind", /* sqlite-large-value: allow-for-now lv-he3030c9d2b3b owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=X'00' WHERE id='sent'"),
+        ("body", /* sqlite-large-value: allow-for-now lv-h4ba30db6bec7 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=X'7B7D' WHERE id='sent'"),
         (
             "encoding",
             // Unlike body, predecessors has no JSON expression index. Invalid UTF-8
             // can reach the canonical history reader without changing the schema.
-            "UPDATE claims SET predecessors=CAST(X'FF' AS TEXT) WHERE id='sent'",
+            /* sqlite-large-value: allow-for-now lv-h7587ccddd670 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET predecessors=CAST(X'FF' AS TEXT) WHERE id='sent'",
         ),
     ] {
         let store = fixture();
-        store.connection.write().execute(sql, []).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h0a292b95fc34 owner=st3_store::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
         let error = capture_point(&store, "message/selected").unwrap_err();
         match column {
             "kind" | "body" => assert!(matches!(error, Cause::InvalidSource("text column type"))),
@@ -633,11 +633,11 @@ fn malformed_types_encoding_and_payload_errors_keep_their_causes_without_a_point
     // JSON expression indexes reject them during UPDATE, before capture can run.
     // Do not drop indexes or claim to have exercised a corrupt body in capture.
     for sql in [
-        "UPDATE claims SET body=CAST(X'FF' AS TEXT) WHERE id='sent'",
-        "UPDATE claims SET body='{' WHERE id='sent'",
+        /* sqlite-large-value: allow-for-now lv-ha4b1d75f2ec4 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=CAST(X'FF' AS TEXT) WHERE id='sent'",
+        /* sqlite-large-value: allow-for-now lv-h66608617f2ad owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{' WHERE id='sent'",
     ] {
         let store = fixture();
-        let error = store.connection.write().execute(sql, []).unwrap_err();
+        let error = store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h52659410846f owner=st3_store::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap_err();
         assert!(matches!(
             error,
             rusqlite::Error::SqliteFailure(_, Some(ref message))
@@ -658,20 +658,20 @@ fn too_wide_source_kind_desired_and_body_refuse_before_canonical_materialization
             match column {
                 "kind" => {
                     db.execute(
-                        "UPDATE claims SET kind=?1 WHERE id='sent'",
+                        /* sqlite-large-value: allow-for-now lv-h411b7aca7340 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=?1 WHERE id='sent'",
                         ["k".repeat(KEY_BYTES + 1)],
                     )
                     .unwrap();
                 }
                 "body" => {
                     db.execute(
-                        "UPDATE claims SET body=?1 WHERE id='sent'",
+                        /* sqlite-large-value: allow-for-now lv-hd06dd9ef7bf0 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
                         [sent("worker", &"x".repeat(100 * 1024), &[]).to_string()],
                     )
                     .unwrap();
                 }
                 _ => {
-                    db.execute("INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('message/selected','message','r','sent',?1)", [" ".repeat(SOURCE_BYTES + 1)]).unwrap();
+                    db.execute(/* sqlite-large-value: allow-for-now lv-h32f97a2aee86 owner=st3_store::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('message/selected','message','r','sent',?1)", [" ".repeat(SOURCE_BYTES + 1)]).unwrap();
                 }
             }
         }
@@ -693,20 +693,20 @@ fn malformed_auxiliary_types_and_oversized_desired_owner_refuse_before_the_fold(
             let db = store.connection.write();
             match column {
                 "batch-origin" => {
-                    db.execute("UPDATE batches SET origin=X'FF' WHERE id='selected'", [])
+                    db.execute(/* sqlite-large-value: allow-for-now lv-hdecb42553cb7 owner=st3_store::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin=X'FF' WHERE id='selected'", [])
                         .unwrap();
                 }
                 "replica-position" => {
                     replica(&db, "sent", 0);
                     db.execute(
-                        "UPDATE replica_records SET position=X'FF' WHERE claim_id='sent'",
+                        /* sqlite-large-value: allow-for-now lv-h9ae46f37c9fa owner=st3_store::store::message_point_qualification::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET position=X'FF' WHERE claim_id='sent'",
                         [],
                     )
                     .unwrap();
                 }
                 _ => {
                     db.execute(
-                        "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run)
+                        /* sqlite-large-value: allow-for-now lv-ha4d5b4910533 owner=st3_store::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run)
                         VALUES('message/selected','message','r','sent','{}',?1)",
                         ["x".repeat(KEY_BYTES + 1)],
                     )
@@ -739,7 +739,7 @@ fn missing_required_index_retains_sql_error_and_never_switches_to_a_scan() {
         store
             .connection
             .write()
-            .execute_batch(&format!("DROP INDEX {index}"))
+            .execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hbee1a789b5bb owner=st3_store::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX {index}"))
             .unwrap();
         let error = capture_point(&store, "message/selected").unwrap_err();
         assert!(error.to_string().contains(index), "{index}: {error}");
@@ -810,7 +810,7 @@ fn same_snapshot_survives_a_wal_commit_but_is_not_an_owner_lifetime_certificate(
                         db.busy_timeout(Duration::ZERO).unwrap();
                         let changed = db
                             .execute(
-                                "UPDATE claims SET body=?1 WHERE id='sent'",
+                                /* sqlite-large-value: allow-for-now lv-h0d2892eb9887 owner=st3_store::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
                                 [sent("worker", "new", &[]).to_string()],
                             )
                             .expect("the independent WAL write must not wait for the reader");
@@ -979,7 +979,7 @@ fn metadata_opcodes_admit_every_variable_column_before_payload() {
         )
         .unwrap();
     let sql = own_headers_sql();
-    let mut statement = db.prepare(&format!("EXPLAIN {sql}")).unwrap();
+    let mut statement = db.prepare(/* sqlite-large-value: allow-for-now lv-h8a6342079294 owner=st3_store::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN {sql}")).unwrap();
     let mut rows = statement.raw_query();
     let mut roots = BTreeMap::new();
     let mut columns = 0;

@@ -17,7 +17,6 @@ use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use futures_util::future::{BoxFuture, FutureExt as _, Shared};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::Instant;
@@ -41,81 +40,7 @@ const HISTORY_TTL: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy)]
 pub(super) struct RelayResponse;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientWebConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub static_dir: Option<PathBuf>,
-    #[serde(default = "default_mount")]
-    pub mount: String,
-    /// Collector base URL; exports are sent to its `/v1/traces` path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub otlp_endpoint: Option<String>,
-}
-
-fn default_mount() -> String {
-    "/app".into()
-}
-
-impl Default for ClientWebConfig {
-    fn default() -> Self {
-        Self {
-            static_dir: None,
-            mount: default_mount(),
-            otlp_endpoint: None,
-        }
-    }
-}
-
-impl ClientWebConfig {
-    pub fn validate(&self) -> Result<()> {
-        let mount = &self.mount;
-        anyhow::ensure!(
-            mount.starts_with('/')
-                && mount.len() > 1
-                && !mount.ends_with('/')
-                && mount != "/v1"
-                && !mount.starts_with("/v1/")
-                && mount[1..].split('/').all(|part| {
-                    !part.is_empty()
-                        && part != "."
-                        && part != ".."
-                        && !part.contains(['\\', '%', '?', '#'])
-                        && !part.chars().any(char::is_control)
-                }),
-            "client_web.mount must be an absolute path like `/app` outside `/v1`"
-        );
-        if let Some(endpoint) = &self.otlp_endpoint {
-            validate_endpoint(endpoint, "client_web.otlp_endpoint")?;
-        }
-        Ok(())
-    }
-}
-
-/// The independent `[usage]` upstream, available even when no bundle is configured.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct UsageConfig {
-    pub endpoint: String,
-}
-
-impl UsageConfig {
-    pub fn validate(&self) -> Result<()> {
-        validate_endpoint(&self.endpoint, "usage.endpoint")
-    }
-}
-
-fn validate_endpoint(endpoint: &str, field: &str) -> Result<()> {
-    let url = reqwest::Url::parse(endpoint).with_context(|| format!("parse {field}"))?;
-    anyhow::ensure!(
-        matches!(url.scheme(), "http" | "https")
-            && url.host_str().is_some()
-            && url.query().is_none()
-            && url.fragment().is_none(),
-        "{field} must be an HTTP(S) base URL without a query or fragment"
-    );
-    Ok(())
-}
+pub use st3_kernel::config::{ClientWebConfig, UsageConfig};
 
 #[derive(Clone)]
 struct UsageAnswer {

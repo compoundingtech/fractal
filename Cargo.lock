@@ -4980,6 +4980,7 @@ dependencies = [
  "st-runtime",
  "st3-api",
  "st3-client",
+ "st3-kernel",
  "st3-reconcile",
  "st3-schema",
  "st3-ui-model",
@@ -4991,6 +4992,7 @@ dependencies = [
  "tracing-opentelemetry",
  "urlencoding",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -5118,6 +5120,7 @@ dependencies = [
  "st3-api",
  "st3-client",
  "st3-daemon",
+ "st3-github",
  "st3-kernel",
  "st3-peer",
  "st3-reconcile",
@@ -5138,6 +5141,27 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "st3-delivery-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st3-client",
+ "st3-delivery-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
 ]
 
 [[package]]
@@ -5176,6 +5200,53 @@ dependencies = [
  "st3-conversation-ui",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "st3-github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-github",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "st3-github-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "hex",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-runtime",
+ "st3-github-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "urlencoding",
  "uuid",
 ]
 
@@ -5229,6 +5300,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-missions-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "kdl",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-missions-base",
+ "st3-schema",
+ "st3-secrets",
+]
+
+[[package]]
 name = "st3-peer"
 version = "0.1.0"
 dependencies = [
@@ -5248,8 +5336,8 @@ dependencies = [
  "sha2",
  "smallclaims",
  "st3-client",
+ "st3-github",
  "st3-peer",
- "st3-store",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.27.0",
@@ -5306,6 +5394,28 @@ dependencies = [
  "sha2",
  "st-storage-version",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "st3-seats-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "st-drivers",
+ "st3-client",
+ "st3-seats-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5375,8 +5485,12 @@ dependencies = [
  "st-drivers",
  "st-runtime",
  "st3-client",
+ "st3-delivery-base",
+ "st3-github-base",
  "st3-kernel",
+ "st3-missions-base",
  "st3-schema",
+ "st3-seats-base",
  "st3-secrets",
  "st3-store",
  "st3-telemetry",

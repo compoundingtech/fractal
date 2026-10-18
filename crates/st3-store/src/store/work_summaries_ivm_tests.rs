@@ -469,7 +469,7 @@ fn irrelevant_older_and_identical_claims_do_not_rewrite_public_rows() {
         json!({"attempt":1,"summary":"current"}),
     );
     change(&tx, &views, None, Some(&latest), "cedar", 1, 0);
-    tx.execute_batch("CREATE TEMP TABLE summary_writes(key TEXT); CREATE TEMP TRIGGER summary_insert AFTER INSERT ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_update AFTER UPDATE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_delete AFTER DELETE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(OLD.key); END;").unwrap();
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h9523336527fa owner=st3_store::store::work_summaries_ivm_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE summary_writes(key TEXT); CREATE TEMP TRIGGER summary_insert AFTER INSERT ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_update AFTER UPDATE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_delete AFTER DELETE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(OLD.key); END;").unwrap();
     let older = synthetic(
         "older",
         &latest.subject,
@@ -608,7 +608,7 @@ fn full_u128_clock_and_real_maintenance_query_plans() {
     for query in [WINNER, NEXT] {
         let sql = format!("EXPLAIN QUERY PLAN {query}");
         let plan = tx
-            .prepare(&sql)
+            .prepare(/* sqlite-large-value: allow-for-now lv-hcef376db2b04 owner=st3_store::store::work_summaries_ivm_tests TODO=trace-statement-and-value-representation */ &sql)
             .unwrap()
             .query_map(
                 params![
@@ -628,7 +628,7 @@ fn full_u128_clock_and_real_maintenance_query_plans() {
     }
     let sql = format!("EXPLAIN QUERY PLAN {DUE}");
     let plan = tx
-        .prepare(&sql)
+        .prepare(/* sqlite-large-value: allow-for-now lv-h749b8acfcbe7 owner=st3_store::store::work_summaries_ivm_tests TODO=trace-statement-and-value-representation */ &sql)
         .unwrap()
         .query_map(params![u128::MAX.to_be_bytes().as_slice(), 1], |r| {
             r.get::<_, String>(3)
@@ -722,7 +722,7 @@ fn reopen_preserves_rows_pending_appends_and_source_edits_fence() {
     reopened
         .connection
         .write()
-        .execute("UPDATE claims SET body='{}' WHERE id=?1", [claim.id])
+        .execute(/* sqlite-large-value: allow-for-now lv-h42f3085c49f1 owner=st3_store::store::work_summaries_ivm_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{}' WHERE id=?1", [claim.id])
         .unwrap();
     assert_eq!(
         views.readiness(&reopened.readers.get(), VIEW, 1).unwrap(),

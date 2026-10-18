@@ -1,4 +1,5 @@
 //! Host repository suggestions from declarations and replicated workspace observations.
+use crate::GithubStore;
 use anyhow::Result;
 use st3_client::{AgentRepository, HostRepositories};
 use std::collections::{BTreeMap, BTreeSet};

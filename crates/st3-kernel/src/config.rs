@@ -63,10 +63,10 @@ pub struct Config {
     pub limits: LimitsConfig,
     /// Optional browser bundle and relays on the paired client gateway.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_web: Option<crate::api::client_web::ClientWebConfig>,
+    pub client_web: Option<ClientWebConfig>,
     /// Allowlisted paired-client reads from an OMP Usage endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<crate::api::client_web::UsageConfig>,
+    pub usage: Option<UsageConfig>,
     /// Maximum subscriptions per collection WebSocket.
     #[serde(skip_serializing_if = "is_default_client_subscription_limit")]
     pub client_subscription_limit: usize,
@@ -85,7 +85,87 @@ pub struct Config {
 }
 
 fn is_default_client_subscription_limit(limit: &usize) -> bool {
-    *limit == crate::api::ClientSubscriptionLimit::default().0
+    *limit == DEFAULT_CLIENT_SUBSCRIPTION_LIMIT
+}
+
+/// Maximum simultaneous subscriptions held by one collection WebSocket unless configured.
+pub const DEFAULT_CLIENT_SUBSCRIPTION_LIMIT: usize = 64;
+
+/// Optional same-origin bundle and paired-client relays on the client gateway.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientWebConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_dir: Option<PathBuf>,
+    #[serde(default = "default_mount")]
+    pub mount: String,
+    /// Collector base URL; exports are sent to its `/v1/traces` path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otlp_endpoint: Option<String>,
+}
+
+fn default_mount() -> String {
+    "/app".into()
+}
+
+impl Default for ClientWebConfig {
+    fn default() -> Self {
+        Self {
+            static_dir: None,
+            mount: default_mount(),
+            otlp_endpoint: None,
+        }
+    }
+}
+
+impl ClientWebConfig {
+    pub fn validate(&self) -> Result<()> {
+        let mount = &self.mount;
+        anyhow::ensure!(
+            mount.starts_with('/')
+                && mount.len() > 1
+                && !mount.ends_with('/')
+                && mount != "/v1"
+                && !mount.starts_with("/v1/")
+                && mount[1..].split('/').all(|part| {
+                    !part.is_empty()
+                        && part != "."
+                        && part != ".."
+                        && !part.contains(['\\', '%', '?', '#'])
+                        && !part.chars().any(char::is_control)
+                }),
+            "client_web.mount must be an absolute path like `/app` outside `/v1`"
+        );
+        if let Some(endpoint) = &self.otlp_endpoint {
+            validate_endpoint(endpoint, "client_web.otlp_endpoint")?;
+        }
+        Ok(())
+    }
+}
+
+/// The independent `[usage]` upstream, available even when no bundle is configured.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    pub endpoint: String,
+}
+
+impl UsageConfig {
+    pub fn validate(&self) -> Result<()> {
+        validate_endpoint(&self.endpoint, "usage.endpoint")
+    }
+}
+
+fn validate_endpoint(endpoint: &str, field: &str) -> Result<()> {
+    let url = reqwest::Url::parse(endpoint).with_context(|| format!("parse {field}"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "{field} must be an HTTP(S) base URL without a query or fragment"
+    );
+    Ok(())
 }
 
 /// `[github]`: an explicit token file, or gateway-authorized requests with a sekrets profile.
@@ -493,7 +573,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             client_web: None,
             usage: None,
-            client_subscription_limit: crate::api::ClientSubscriptionLimit::default().0,
+            client_subscription_limit: DEFAULT_CLIENT_SUBSCRIPTION_LIMIT,
             reconcile: ReconcileConfig::default(),
             codex_work_without_asking: None,
             fleet: None,

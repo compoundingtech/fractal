@@ -76,13 +76,13 @@ mod gateway_tests {
         let Json(challenge) = pairing_begin(
             State(state.clone()),
             Extension(ClientSession::local(Some("person/alex")).unwrap()),
-            Json(PairingBegin {
+            Json(PairingBeginRequest::Person(PairingBegin {
                 api_version: CLIENT_API_VERSION.into(),
                 device_name: "Browser".into(),
                 person_id: "person/alex".into(),
                 full_control: None,
                 scopes: None,
-            }),
+            })),
         )
         .await
         .unwrap();
