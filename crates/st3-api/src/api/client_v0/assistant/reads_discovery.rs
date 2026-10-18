@@ -18,16 +18,15 @@ pub(super) async fn page(
         let payload = conversation_reads::timeline_cursor(value, &wrapper)?;
         decode_client_cursor(&payload)
     }).transpose()?;
-    if let Some(cursor) = &cursor {
-        if cursor.collection != collection
+    if let Some(cursor) = &cursor
+        && (cursor.collection != collection
             || cursor.snapshot.host_id != client_host_id(&state.node)
             || cursor.expires_at_unix_ms < client_now_ms()
             || !(1..=50).contains(&cursor.limit)
             || requested_limit.is_some_and(|limit| limit != cursor.limit)
-            || cursor.items_digest != "assistant-source-keyset-v1"
-        {
-            return Err(client_page_expired("the discovery cursor does not match its collection, grant, policy or snapshot"));
-        }
+            || cursor.items_digest != "assistant-source-keyset-v1")
+    {
+        return Err(client_page_expired("the discovery cursor does not match its collection, grant, policy or snapshot"));
     }
     let snapshot = cursor.as_ref().map_or(snapshot, |cursor| &cursor.snapshot);
     let limit = cursor.as_ref().map_or(requested_limit.unwrap_or(10), |cursor| cursor.limit);
