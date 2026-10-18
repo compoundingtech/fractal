@@ -58,7 +58,7 @@ fn adoption_epoch(connection: &Connection, origin: &str, spec: &crate::model::Sc
         }
     }
     // A membership mutation not yet signed must not enable against yesterday's members.
-    let pending: bool = connection.query_row(&format!(
+    let pending: bool = connection.query_row(/* sqlite-large-value: allow-for-now lv-heba9b7104ad1 owner=st3_store::store::schedule_standby TODO=trace-statement-and-value-representation */ &format!(
         "SELECT EXISTS(SELECT 1 FROM claims c JOIN batches b ON b.id=c.batch_id
          LEFT JOIN replica_envelopes e ON e.batch_id=b.id
          WHERE c.origin=?1 AND c.kind IN ({})
@@ -72,7 +72,7 @@ fn adoption_epoch(connection: &Connection, origin: &str, spec: &crate::model::Sc
         if !matches!(membership.state(&member.name), crate::fleet::MemberState::Current(_)) {
             return Err(refused("fleet membership is ambiguous"));
         }
-        let advertisement: Option<(String, Option<bool>)> = connection.query_row(&canonical_sql(
+        let advertisement: Option<(String, Option<bool>)> = connection.query_row(/* sqlite-large-value: allow-for-now lv-h2951b63fad0d owner=st3_store::store::schedule_standby TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT claims.id, json_extract(claims.body,'$.fields.features.schedule_standby')=1
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
@@ -87,8 +87,8 @@ fn adoption_epoch(connection: &Connection, origin: &str, spec: &crate::model::Sc
     let fenced = membership.legacy_removed_names().collect::<BTreeSet<_>>();
     for (table, column) in WRITER_TABLES {
         let mut previous = String::new();
-        let mut statement = connection.prepare(&writer_seek(table, column)).map_err(internal)?;
-        while let Some(writer) = statement.query_row([&previous], |row| row.get::<_, String>(0)).optional().map_err(internal)? {
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9ebcd2b4e1c2 owner=st3_store::store::schedule_standby TODO=trace-statement-and-value-representation */ &writer_seek(table, column)).map_err(internal)?;
+        while let Some(writer) = statement.query_row(/* sqlite-large-value: allow-for-now lv-h2160e42d5ec7 owner=st3_store::store::schedule_standby TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0)).optional().map_err(internal)? {
             if !membership.is_keyed_writer(&writer) && !fenced.contains(&writer) {
                 return Err(refused("unfenced legacy writer prevents standby adoption"));
             }
