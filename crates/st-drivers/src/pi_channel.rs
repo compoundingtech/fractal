@@ -1219,6 +1219,7 @@ mod tests {
         let start = serde_json::json!({"type":"subagent","event":"start","id":"0-Review","name":"task"});
         observer.observe(&start).unwrap();
         assert!(crate::subagents::read(root.path()).running.is_empty());
+        observer.observe(&serde_json::json!({"type":"session","sessionId":"native-a"})).unwrap();
         observer.observe(&serde_json::json!({"type":"ready","sessionId":"native-a"})).unwrap();
         observer.observe(&start).unwrap();
         let ledger = crate::subagents::read(root.path());
