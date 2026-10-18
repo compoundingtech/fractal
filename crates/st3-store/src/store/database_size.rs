@@ -265,6 +265,15 @@ mod tests {
         store.readers.get().query_row(&format!("PRAGMA {name}"), [], |row| row.get(0)).unwrap()
     }
 
+    /// The file's pages less its pointer maps. An incremental auto-vacuum file keeps a pointer
+    /// map at page 2 and then every `page_size / 5 + 1` pages, and drops any that a truncation
+    /// leaves past the end, so the file can shrink by one page more than it gave back.
+    fn content_pages(store: &Store) -> u64 {
+        let pages = pragma(store, "page_count");
+        let mapped = pragma(store, "page_size") / 5 + 1;
+        pages - if pages < 2 { 0 } else { (pages - 2) / mapped + 1 }
+    }
+
     /// Delete rows the way a trim does, leaving their pages free; return how many.
     fn free_some_pages(store: &Store) -> u64 {
         store
@@ -287,11 +296,11 @@ mod tests {
         let store = Store::open(&path, "alder").unwrap();
         assert_eq!(pragma(&store, "auto_vacuum"), 2, "incremental");
         let free = free_some_pages(&store);
-        let pages = pragma(&store, "page_count");
+        let pages = content_pages(&store);
         assert!(free > 1_000, "{free} free pages");
         assert_eq!(store.release_free_pages().unwrap(), FREE_PAGE_CHUNK);
         assert_eq!(
-            (pragma(&store, "page_count"), pragma(&store, "freelist_count")),
+            (content_pages(&store), pragma(&store, "freelist_count")),
             (pages - FREE_PAGE_CHUNK, free - FREE_PAGE_CHUNK)
         );
         let mut released = FREE_PAGE_CHUNK;
@@ -303,8 +312,7 @@ mod tests {
         }
         assert_eq!(released, free);
         assert_eq!(pragma(&store, "freelist_count"), 0);
-        // The file loses the freed pages, and any pointer-map page they no longer need.
-        assert!(pragma(&store, "page_count") <= pages - free);
+        assert_eq!(content_pages(&store), pages - free);
         drop(store);
 
         // A store from before incremental auto-vacuum keeps its free pages. One VACUUM, run
