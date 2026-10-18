@@ -29,6 +29,8 @@ it('writes Show menu choices into the query, ANDs them with typed facets, counts
   const item = (name: string) => document.body.querySelector<HTMLElement>(`[role="menuitemcheckbox"][aria-label="${name}"]`)
   try {
     await act(async () => render())
+    const search = host.querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
+    expect(search.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use is:asking for agents waiting for an answer, repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
     expect(host.querySelector('button[aria-label="Filter agents · 2 active"]')).not.toBeNull()
     const trigger = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('Show'))!
     expect(trigger.textContent).toContain(', 2 active')
@@ -41,13 +43,13 @@ it('writes Show menu choices into the query, ANDs them with typed facets, counts
 
     await act(async () => item('host-b, 1')!.click())
     expect(filters.query).toBe('machine:host-a,host,host-b compiler')
-    expect(matchesRow({ row, filters, context: '' })).toBe(true)
+    expect(matchesRow({ row, filters })).toBe(true)
     expect(item('Waiting for answer, 1')).not.toBeNull()
 
     await act(async () => item('Waiting for answer, 1')!.click())
     expect(filters.query).toBe('is:asking machine:host-a,host,host-b compiler')
-    expect(matchesRow({ row, filters, context: '' })).toBe(false)
-    expect(matchesRow({ row: { ...row, asking: true }, filters, context: '' })).toBe(true)
+    expect(matchesRow({ row, filters })).toBe(false)
+    expect(matchesRow({ row: { ...row, asking: true }, filters })).toBe(true)
     expect(host.querySelector('button[aria-label="Filter agents · 2 active"]')).not.toBeNull()
 
     await act(async () => item('Waiting for answer, 1')!.click())

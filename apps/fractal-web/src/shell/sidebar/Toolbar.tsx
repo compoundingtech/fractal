@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
-import { DialogTrigger, Dialog, Popover } from 'react-aria-components'
+import { DialogTrigger, Dialog, Popover, ToggleButton } from 'react-aria-components'
 import { compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
 
 import {
@@ -28,18 +28,25 @@ const subscribeScheme = (notify: () => void) => {
   return () => observer.disconnect()
 }
 
+/** Inputs of the shared sidebar toolbar. */
+export interface SidebarToolbarProps {
+  readonly filters: SidebarFilters
+  readonly update: (value: SidebarFilters) => void
+  readonly hosts: readonly string[]
+  readonly showRows: readonly ShowRow[]
+  readonly onEnterResults?: () => void
+  /** Host surface override for the search field, e.g. a fill that stands apart from its sidebar. */
+  readonly searchStyle?: stylex.StyleXStyles
+}
 /** Sidebar search, Show, visibility, status and view-only ordering controls. */
 export const SidebarToolbar = ({
   filters,
   update,
   hosts,
   showRows,
-}: {
-  readonly filters: SidebarFilters
-  readonly update: (value: SidebarFilters) => void
-  readonly hosts: readonly string[]
-  readonly showRows: readonly ShowRow[]
-}) => {
+  onEnterResults,
+  searchStyle,
+}: SidebarToolbarProps) => {
   const light = React.useSyncExternalStore(subscribeScheme, readLightScheme, () => true)
   const search = React.useRef<HTMLDivElement>(null)
   const shortcut = React.useCallback((node: HTMLDivElement | null) => {
@@ -67,6 +74,7 @@ export const SidebarToolbar = ({
     Number(filters.hideRetired) +
     Number(parsedQuery.asking) +
     parsedQuery.machines.length +
+    parsedQuery.facets.length +
     filters.statuses.length
   return (
     <div ref={shortcut} {...stylex.props(styles.toolbar)}>
@@ -78,6 +86,14 @@ export const SidebarToolbar = ({
           hosts={hosts}
           {...(light ? { popoverTheme: compositionLightTheme } : {})}
         />
+        <ToggleButton
+          aria-label="Show finished agents"
+          isSelected={!filters.hideEnded && !filters.hideRetired}
+          onChange={(show) => update({ ...filters, hideEnded: !show, hideRetired: !show })}
+          {...stylex.props(styles.toggle)}
+        >
+          Finished
+        </ToggleButton>
         <div {...stylex.props(styles.menus)}>
           <DialogTrigger>
             <IconButton
@@ -123,7 +139,7 @@ export const SidebarToolbar = ({
                   size="sm"
                   variant="secondary"
                   onPress={() =>
-                    update({ ...defaultFilters, query: parseSidebarQuery(filters.query).query, sort: filters.sort })
+                    update({ ...defaultFilters, query: parsedQuery.text, sort: filters.sort })
                   }
                 >
                   Reset filters
@@ -162,15 +178,17 @@ export const SidebarToolbar = ({
       </div>
       <div ref={search}>
         <Input
-          aria-label="Search agents and folders"
-          aria-description="Use is:asking for agents waiting for an answer, and machine:synthetic-138/1 or host:synthetic-138/1,synthetic-138/2 to filter by host; combine with search text."
-          placeholder="Search agents…  /"
+          aria-label="Search agents"
+          aria-description="Free text matches agent names and IDs. Use is:asking for agents waiting for an answer, repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match."
+          placeholder="Search… repo: state: tool:  /"
           size="sm"
           value={filters.query}
           onChange={(query) => update({ ...filters, query })}
           onKeyDown={(event) => {
             if (event.key === 'Escape') update({ ...filters, query: '' })
+            if (event.key === 'ArrowDown' && onEnterResults !== undefined) { event.preventDefault(); onEnterResults() }
           }}
+          stylexStyle={searchStyle}
         />
       </div>
     </div>
@@ -219,6 +237,21 @@ const styles = stylex.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: scale.space2,
+  },
+  toggle: {
+    border: 0,
+    borderRadius: scale.radiusSm,
+    padding: '5px 8px',
+    backgroundColor: {
+      default: 'transparent',
+      ':hover': tokens['--ds-gray-alpha-100'],
+      ':is([data-selected])': tokens['--ds-gray-alpha-200'],
+    },
+    color: tokens['--ds-gray-1000'],
+    fontSize: '0.75rem',
+    cursor: 'pointer',
+    outlineColor: tokens['--ds-focus-color'],
+    whiteSpace: 'nowrap',
   },
   popover: {
     backgroundColor: tokens['--ds-background-100'],

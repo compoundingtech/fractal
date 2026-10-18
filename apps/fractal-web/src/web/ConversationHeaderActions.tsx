@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
@@ -21,6 +22,11 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
   const source = useDataSource()
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
   const [resourcesOpen, setResourcesOpen] = React.useState(false)
+  const changeResourcesOpen = (open: boolean) => {
+    if (open) markStart('resources_panel', { key: agentRef })
+    else cancelMeasure('resources_panel')
+    setResourcesOpen(open)
+  }
   // A closed inspector has no read demand. Otherwise each switch starts discovery plus a
   // resource read and keeps its 15-second poll alive despite showing no resources.
   const resources = useAtomValue(source.resources === undefined ? unsupportedResources
@@ -31,12 +37,12 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
       : resources.reason === 'unsupported' ? 'This connection does not support agent resources.' : undefined
     : undefined
   return <div {...stylex.props(styles.actions)}>
-    <Aria.DialogTrigger isOpen={resourcesOpen} onOpenChange={setResourcesOpen}>
+    <Aria.DialogTrigger isOpen={resourcesOpen} onOpenChange={changeResourcesOpen}>
       <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button)}><CompositionIcon name="folder" />Resources</Aria.Button>
       <Aria.ModalOverlay isDismissable {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>
           <Aria.Dialog aria-label="Agent resources" {...stylex.props(styles.dialog)}>
-            <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => setResourcesOpen(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
+            <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => changeResourcesOpen(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
             <ResourceContents agentRef={agentRef} resources={resources} />
           </Aria.Dialog>
         </Aria.Modal>
@@ -61,6 +67,10 @@ const ResourceContents = ({ agentRef, resources }: {
   const source = useDataSource()
   const queue = useAtomValue(source.subjectReads.agentQueue.feed(agentRef))
   const now = useNow()
+  const settled = queue._tag === 'Observed' && resources._tag === 'Observed' && !resources.value.loadingMore
+  React.useLayoutEffect(() => {
+    if (settled) return measureEnd('resources_panel', agentRef)
+  }, [agentRef, settled])
   return <div {...stylex.props(styles.contents)}>
     <section aria-label="Agent queue">
       <h2 {...stylex.props(styles.sectionTitle)}>Agent queue</h2>
@@ -112,5 +122,5 @@ const styles = stylex.create({
   resourceMetadata: { display: 'flex', justifyContent: 'space-between', gap: s.md, fontSize: t.metaSize, color: c.fgMuted },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   menu: { padding: s.xs, outline: 'none' },
-  menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-selected])': { color: c.primary } },
+  menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 }, ':is([data-selected])': { color: c.primary } },
 })

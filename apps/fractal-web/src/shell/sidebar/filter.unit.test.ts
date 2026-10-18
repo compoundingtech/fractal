@@ -108,8 +108,22 @@ describe('sidebar machine query', () => {
     ['IS:Asking compiler', 'compiler', true, []],
     ['is:asking is:asking machine:host-a', '', true, [['host-a']]],
     ['is:askingx is:', 'is:askingx is:', false, []],
-  ] as const)('parses %j without highlighting facets', (input, query, asking, machines) => {
-    expect(parseSidebarQuery(input)).toEqual({ query, asking, machines })
+  ] as const)('parses %j without highlighting facets', (input, text, asking, machines) => {
+    expect(parseSidebarQuery(input)).toEqual({ text, tokens: text === '' ? [] : text.split(' '), asking, facets: [], machines })
+  })
+
+  it('separates repo:, state: and tool: facets from free text', () => {
+    expect(parseSidebarQuery('Repo:Example/Product compiler TOOL:omp state:')).toEqual({
+      text: 'compiler', tokens: ['compiler'], asking: false, facets: [{ field: 'repo', value: 'example/product' }, { field: 'tool', value: 'omp' }, { field: 'state', value: '' }], machines: [],
+    })
+  })
+
+  it('matches free text against names and IDs, never the host', () => {
+    const candidate = row('agent/compiler', 'Compiler', 'idle', 'host/synthetic-138/1', 0)
+    expect(matchesRow({ row: candidate, filters: { ...defaultFilters, query: 'compiler' } })).toBe(true)
+    expect(matchesRow({ row: candidate, filters: { ...defaultFilters, query: 'agent/comp' } })).toBe(true)
+    expect(matchesRow({ row: candidate, filters: { ...defaultFilters, query: 'synthetic-138/1' } })).toBe(false)
+    expect(matchesRow({ row: candidate, filters: { ...defaultFilters, query: 'machine:synthetic-138/1' } })).toBe(true)
   })
 
   it('shares row host namespace stripping without rewriting query values', () => {
@@ -141,14 +155,14 @@ describe('sidebar machine query', () => {
     ['is:asking machine:host-b,laptop', []],
   ] as const)('matches %j: Show filters AND, machines OR within a token', (query, expected) => {
     expect(machineRows.filter((candidate) =>
-      matchesRow({ row: candidate, filters: { ...defaultFilters, query }, context: '' }),
+      matchesRow({ row: candidate, filters: { ...defaultFilters, query } }),
     ).map((candidate) => candidate.workspace.id)).toEqual(expected)
   })
 
   it('requires the asking signal itself, not a waiting status (negative control)', () => {
     const parsedQuery = parseSidebarQuery('is:asking')
     expect(matchesShow({ host: 'host-a', asking: false, parsedQuery })).toBe(false)
-    expect(matchesRow({ row: { ...row('w', 'Waiting', 'waiting', 'host-a', 0), asking: false }, filters: { ...defaultFilters, query: 'is:asking' }, context: '' })).toBe(false)
+    expect(matchesRow({ row: { ...row('w', 'Waiting', 'waiting', 'host-a', 0), asking: false }, filters: { ...defaultFilters, query: 'is:asking' } })).toBe(false)
     expect(matchesShow({ host: 'host-a', asking: true, parsedQuery })).toBe(true)
   })
 
@@ -159,7 +173,8 @@ describe('sidebar machine query', () => {
       fc.array(fc.array(word, { minLength: 1, maxLength: 3 }), { maxLength: 3 }),
       fc.array(word, { maxLength: 3 }),
       (asking, machines, words) => {
-        const parsed = { query: words.join(' '), asking, machines }
+        const text = words.join(' ')
+        const parsed = { text, tokens: text === '' ? [] : text.split(' '), asking, facets: [], machines }
         const printed = printSidebarQuery(parsed)
         expect(parseSidebarQuery(printed)).toEqual(parsed)
         expect(printSidebarQuery(parseSidebarQuery(printed))).toBe(printed)
@@ -177,8 +192,8 @@ describe('sidebar machine query', () => {
         const candidate = row('generated', 'Compiler', 'idle', `host/${host}`, 0)
         for (const key of ['machine', 'HOST']) {
           const query = `${key}:${prefix.toUpperCase()},,`
-          expect(parseSidebarQuery(query)).toEqual({ query: '', asking: false, machines: [[prefix]] })
-          expect(matchesRow({ row: candidate, filters: { ...defaultFilters, query }, context: '' })).toBe(true)
+          expect(parseSidebarQuery(query)).toEqual({ text: '', tokens: [], asking: false, facets: [], machines: [[prefix]] })
+          expect(matchesRow({ row: candidate, filters: { ...defaultFilters, query } })).toBe(true)
         }
       },
     ))

@@ -32,7 +32,7 @@ export const withShowKeys = ({
   const machines = [...keys].flatMap((key) => (key.startsWith('machine:') ? [key.slice('machine:'.length)] : []))
   const unchanged = sameMachines(machines, selectedMachines(parsedQuery))
   return {
-    query: parsedQuery.query,
+    ...parsedQuery,
     asking: keys.has(askingToken),
     machines: unchanged ? parsedQuery.machines : machines.length === 0 ? [] : [machines],
   }
