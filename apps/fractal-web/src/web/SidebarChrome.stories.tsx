@@ -9,13 +9,12 @@ import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
-import { SidebarChromeFooter, SidebarConnectedStatus } from './SidebarChromeFooter.tsx'
+import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
 
-const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark', connected = true }: {
+const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark' }: {
   readonly width?: number
   readonly viewport?: number
   readonly initialScheme?: 'dark' | 'light'
-  readonly connected?: boolean
 }) => {
   const [filters, setFilters] = React.useState(defaultFilters)
   const [scheme, setScheme] = React.useState(initialScheme)
@@ -25,7 +24,7 @@ const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'd
     <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}>
       <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} />
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>Builder session</nav>
-      <SidebarChromeFooter onToggleScheme={() => setScheme(value => value === 'dark' ? 'light' : 'dark')}>{connected ? <SidebarConnectedStatus /> : null}</SidebarChromeFooter>
+      <SidebarChromeFooter onToggleScheme={() => setScheme(value => value === 'dark' ? 'light' : 'dark')} />
     </ResponsiveAgentSidebar>
     <section {...stylex.props(styles.thread)}><Aria.Button onPress={() => { setCollapsed(false); setDrawerOpen(true) }}>Open agents</Aria.Button></section>
   </main>
@@ -34,7 +33,7 @@ const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'd
 /** Browser geometry, not just authored CSS: detects padding and content-box regressions. */
 const assertChrome = (sidebar: HTMLElement): void => {
   const canvas = within(sidebar)
-  const search = canvas.getByRole('textbox', { name: 'Search agents and folders' })
+  const search = canvas.getByRole('textbox', { name: 'Search agents' })
   const bounds = sidebar.getBoundingClientRect()
   const field = search.getBoundingClientRect()
   if (Math.abs(field.left - bounds.left - 8) > 0.1 || Math.abs(bounds.right - field.right - 8) > 0.1) throw new Error('Search must have two 8px insets')
@@ -46,10 +45,7 @@ const assertChrome = (sidebar: HTMLElement): void => {
     const icon = button.querySelector('svg')
     if (icon?.getAttribute('stroke') !== 'currentColor' || icon.getAttribute('fill') !== 'none' || icon.getAttribute('aria-hidden') !== 'true') throw new Error('Chrome controls must use decorative stroke icons')
   }
-  const dot = sidebar.querySelector<HTMLElement>('[data-sidebar-connection-dot]')!
-  if (dot.getBoundingClientRect().width !== 8 || dot.getBoundingClientRect().height !== 8) throw new Error('Connected dot must be 8px')
-  if (getComputedStyle(dot).borderRadius !== '50%') throw new Error('Connected dot must be round')
-  if (canvas.getByRole('status').textContent?.trim() !== 'Connected') throw new Error('Footer must only show Connected')
+  if (canvas.queryByRole('status') !== null) throw new Error('The sidebar chrome must not carry connection status')
 }
 
 const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
@@ -57,15 +53,13 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   if (canvas.queryByRole('complementary', { name: 'Agents' }) === null) await userEvent.click(canvas.getByRole('button', { name: 'Open agents' }))
   const sidebar = canvas.getByRole('complementary', { name: 'Agents' })
   assertChrome(sidebar)
-  const field = within(sidebar).getByRole('textbox', { name: 'Search agents and folders' })
+  const field = within(sidebar).getByRole('textbox', { name: 'Search agents' })
   const wordmark = sidebar.querySelector<HTMLElement>('header strong')!
-  const dot = sidebar.querySelector<HTMLElement>('[data-sidebar-connection-dot]')!
   // Inject the reported failures into the real rendered nodes; the same criterion must reject each.
   for (const control of [
     { node: field, style: 'margin-left: -8px', error: 'Search must have two 8px insets' },
     { node: field, style: 'border-radius: 2px', error: 'Search radius must be 6px' },
     { node: wordmark, style: 'font-weight: 700', error: 'Wordmark weight must be 500' },
-    { node: dot, style: 'width: 4px', error: 'Connected dot must be 8px' },
   ]) {
     const original = control.node.getAttribute('style')
     control.node.setAttribute('style', control.style)
@@ -89,19 +83,14 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   assertChrome(sidebar)
 }
 
-const meta = { title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. Only a live connection gets the 8px Connected dot; the chrome footer itself adds no status or reconnect action, so degraded connection wording comes only from the workspace status the host places in it. Play rejects injected full-bleed, small-radius, bold-wordmark, Unicode-icon and small-dot regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
+const meta = { title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. The chrome footer adds no status or reconnect action; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 export const At256: Story = { args: { width: 256 }, play: chromePlay }
 export const At320: Story = { args: { width: 320 }, play: chromePlay }
 export const Light: Story = { args: { initialScheme: 'light' }, play: chromePlay }
 export const NarrowDrawer: Story = { args: { width: 240, viewport: 440 }, play: chromePlay }
-export const Disconnected: Story = { args: { connected: false }, play: async ({ canvasElement }) => {
-  const sidebar = within(canvasElement).getByRole('complementary', { name: 'Agents' })
-  await expect(within(sidebar).queryByRole('status')).toBeNull()
-  await expect(within(sidebar).queryByRole('button', { name: /Reconnect/ })).toBeNull()
-} }
-export const AllStates: Story = { render: () => <div>{[256, 320].map(width => <SidebarChromeSurface key={width} width={width} viewport={900} />)}<SidebarChromeSurface viewport={1440} connected={false} /></div> }
+export const AllStates: Story = { render: () => <div>{[256, 320].map(width => <SidebarChromeSurface key={width} width={width} viewport={900} />)}<SidebarChromeSurface viewport={1440} /></div> }
 
 const styles = stylex.create({
   root: { display: 'flex', height: 480, maxWidth: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },

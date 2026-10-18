@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
-import { SidebarChromeFooter, SidebarConnectedStatus } from './SidebarChromeFooter.tsx'
+import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { ResizableSplit } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { defaultFilters } from '../shell/sidebar/state.ts'
@@ -17,7 +17,7 @@ vi.mock('@stylexjs/stylex', () => ({
   createTheme: () => ({}),
   keyframes: () => 'animation',
   props: (...styles: unknown[]) => {
-    const merged = Object.assign({}, ...styles.filter(style => typeof style === 'object' && style !== null))
+    const merged = Object.assign({}, ...styles.flat(Infinity).filter(style => typeof style === 'object' && style !== null))
     return { style: Object.fromEntries(Object.entries(merged).filter(([key, value]) => !key.startsWith(':') && !key.startsWith('@') && (typeof value === 'string' || typeof value === 'number'))) }
   },
 }))
@@ -37,16 +37,15 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-const ChromeFixture = ({ width, onCollapse, onTheme, connected = true }: {
+const ChromeFixture = ({ width, onCollapse, onTheme }: {
   readonly width: number
   readonly onCollapse: () => void
   readonly onTheme: () => void
-  readonly connected?: boolean
 }) => {
   const [filters, setFilters] = React.useState(defaultFilters)
   return <ResponsiveAgentSidebar viewport={1440} width={width} maxWidth={440} collapsed={false} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={onCollapse} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}>
     <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} />
-    <SidebarChromeFooter onToggleScheme={onTheme}>{connected ? <SidebarConnectedStatus /> : null}</SidebarChromeFooter>
+    <SidebarChromeFooter onToggleScheme={onTheme} />
   </ResponsiveAgentSidebar>
 }
 
@@ -69,16 +68,13 @@ describe.each([240, 256, 320, 440])('sidebar chrome at %ipx', width => {
       expect(button.textContent).not.toMatch(/[«☀☾◌]/u)
     }
     expect(sidebar.querySelector<HTMLElement>('header strong')!.style.fontWeight).toBe('500')
-    expect(within(sidebar).getByRole('status').textContent?.trim()).toBe('Connected')
-    const dot = sidebar.querySelector<HTMLElement>('[data-sidebar-connection-dot]')!
-    expect(dot.style.width).toBe('8px')
-    expect(dot.style.height).toBe('8px')
-    expect(dot.getAttribute('aria-hidden')).toBe('true')
+    // The connection lives in the workspace band under the thread header, never in the sidebar.
+    expect(within(sidebar).queryByRole('status')).toBeNull()
   })
 
   it('uses equal 8px search insets and border-box sizing at every supported dock width', async () => {
     await act(async () => root.render(<ChromeFixture width={width} onCollapse={() => undefined} onTheme={() => undefined} />))
-    const field = within(host).getByRole('textbox', { name: 'Search agents and folders' })
+    const field = within(host).getByRole('textbox', { name: 'Search agents' })
     const toolbar = field.parentElement!.parentElement!
     expect(toolbar.style.paddingInline).toBe('8px')
     expect(field.style.width).toBe('100%')
@@ -93,7 +89,7 @@ describe.each([240, 256, 320, 440])('sidebar chrome at %ipx', width => {
 })
 
 it('chrome footer adds no status or action of its own beyond the theme toggle', async () => {
-  await act(async () => root.render(<ChromeFixture width={256} connected={false} onCollapse={() => undefined} onTheme={() => undefined} />))
+  await act(async () => root.render(<ChromeFixture width={256} onCollapse={() => undefined} onTheme={() => undefined} />))
   const footer = host.querySelector('footer')!
   expect(within(footer).queryByRole('status')).toBeNull()
   expect(within(footer).getAllByRole('button')).toHaveLength(1)

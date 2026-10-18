@@ -3,10 +3,9 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentFoldersProps, SidebarNode } from '../folders/sidebarContract.ts'
-import { expect as expectA11y, within } from 'storybook/test'
-import { SidebarAgentRow, SidebarTreeLevel } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, sidebarRowAccessibleName } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import * as sidebarKit from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { sidebarRow } from '../web/sidebarRow.ts'
-import { sidebarTreeRowName } from '../web/sidebarTreeRowName.ts'
 import { fleetFromAgents } from '../data/projections.ts'
 import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 
@@ -27,6 +26,7 @@ globalThis.ResizeObserver = ViewportObserver
 Element.prototype.getBoundingClientRect = function (this: Element) { return DOMRect.fromRect(this.tagName === 'SPAN' ? {} : viewport) }
 Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() })
 Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
+vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
 vi.stubGlobal('CSS', { escape: (value: string) => value.replaceAll('/', '\\/') })
 const fixture: readonly SidebarNode[] = [
   { _tag: 'Folder', id: 'alpha', label: 'Alpha', collapsed: false, children: [
@@ -39,7 +39,6 @@ const fixture: readonly SidebarNode[] = [
     { _tag: 'Agent', id: 'agent/two', subject: 'agent/two', label: 'Two' },
   ] },
 ]
-const LevelProbe = ({ label }: { readonly label: string }) => <span data-sidebar-level={React.useContext(SidebarTreeLevel)}>{label}</span>
 const mount = async () => {
   const host = document.createElement('div')
   document.body.append(host)
@@ -51,26 +50,22 @@ const mount = async () => {
     const props: AgentFoldersProps = {
       tree: apply(fixture), canDrop: () => ({ ok: true }), onMove: () => {}, onCreateFolder: () => {}, onRenameFolder: () => {}, onDeleteFolder: () => {},
       onToggleCollapsed: change => { toggles.push(change); setCollapsed(previous => { const next = new Set(previous); if (change.collapsed) next.add(change.id); else next.delete(change.id); return next }) },
-      renderAgent: node => <LevelProbe label={node.label} />,
+      renderAgent: node => <span>{node.label}</span>,
     }
     return <AgentFolders {...props} />
   }
   await React.act(async () => { root.render(<Harness />) })
-  const row = (label: string): HTMLElement => within(host).getByRole('row', { name: label })
+  const row = (label: string): HTMLElement => host.querySelector<HTMLElement>(`[role="row"][aria-label="${label}"]`)!
   return { host, row, toggles, dispose: async () => { await React.act(async () => root.unmount()); host.remove() } }
 }
 describe('bound live folder tree', () => {
-  it('supplies RAC levels to inner content without shifting full-width rows; the browser story proves the 16px step', async () => {
+  it('derives levels from RAC hierarchy, including folder members and Unfiled', async () => {
     const view = await mount()
     try {
       for (const [label, level] of [['Alpha', 1], ['Beta', 2], ['Gamma', 3], ['One', 2], ['Two', 2]] as const) {
         const row = view.row(label)
         expect(row, label).toBeDefined()
         expect(row.getAttribute('aria-level'), label).toBe(String(level))
-        expect(row.style.getPropertyValue('--tree-item-level'), label).toBe(String(level))
-        expect(row.querySelector<HTMLElement>('[data-sidebar-content]')?.style.marginInlineStart, label).toBe('')
-        const probe = row.querySelector<HTMLElement>('[data-sidebar-level]')
-        if (probe !== null) expect(probe.dataset.sidebarLevel, label).toBe(String(level))
       }
     } finally { await view.dispose() }
   })
@@ -91,79 +86,66 @@ describe('bound live folder tree', () => {
       expect(view.toggles).toContainEqual({ id: 'alpha', collapsed: false })
     } finally { await view.dispose() }
   })
-  const atlasItem = () => {
-    const projected = fleetFromAgents([decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/host-1', driver: 'codex', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })]).agents[0]!
-    return {
-      ...sidebarRow({ agent: projected, stale: false, now: 5000 }),
-      context: { _tag: 'Known', usedTokens: 36_000, windowTokens: 200_000, usedPercent: 18, observedAt: 4000 },
-      spend: {
-        last24h: { _tag: 'Known', usd: 1.25, since: 0, until: 4000, observedAt: 4000 },
-        last7d: { _tag: 'Known', usd: 7.5, since: 0, until: 4000, observedAt: 4000 },
-      },
-    } as const
-  }
-  const expectFacts = async (row: HTMLElement, title: string, status: RegExp) => {
-    await expectA11y(row).toHaveAccessibleName(new RegExp(`^${title}, `))
-    await expectA11y(row).toHaveAccessibleName(status)
-    await expectA11y(row).toHaveAccessibleName(/main-session context: 18%; 36,000 used tokens; 200,000 token window/)
-    await expectA11y(row).toHaveAccessibleName(/24h API-equivalent spend including subagents: \$1\.25/)
-    await expectA11y(row).toHaveAccessibleName(/7d API-equivalent spend including subagents: \$7\.5/)
-  }
-  it('keeps reported facts in the owning row name after RAC repositions memoized content', async () => {
+  it('retains sibling RAC item identities when one accessible status or roster label changes', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    const one: SidebarNode = { _tag: 'Agent', id: 'agent/one', subject: 'agent/one', label: 'One' }
+    const two: SidebarNode = { _tag: 'Agent', id: 'agent/two', subject: 'agent/two', label: 'Two' }
+    const props: Omit<AgentFoldersProps, 'tree' | 'accessibleNames'> = {
+      canDrop: () => ({ ok: true }), onMove: () => {}, onCreateFolder: () => {}, onRenameFolder: () => {}, onDeleteFolder: () => {}, onToggleCollapsed: () => {},
+      renderAgent: node => <span>{node.label}</span>,
+    }
+    const tree = vi.spyOn(sidebarKit, 'SidebarTree')
+    const items = () => tree.mock.calls.at(-1)![0].items
+    try {
+      await React.act(async () => root.render(<AgentFolders {...props} tree={[one, two]} accessibleNames={new Map([[one.id, 'One, idle'], [two.id, 'Two, idle']])} />))
+      const before = items()
+      await React.act(async () => root.render(<AgentFolders {...props} tree={[one, two]} accessibleNames={new Map([[one.id, 'One, working'], [two.id, 'Two, idle']])} />))
+      const status = items()
+      expect(status[0]).not.toBe(before[0])
+      expect(status[1]).toBe(before[1])
+      expect(host.querySelector('[role="row"][aria-label="One, working"]')).not.toBeNull()
+      await React.act(async () => root.render(<AgentFolders {...props} tree={[{ ...one, label: 'Renamed One' }, { ...two }]} accessibleNames={new Map([[one.id, 'Renamed One, working'], [two.id, 'Two, idle']])} />))
+      expect(items()[0]).not.toBe(status[0])
+      expect(items()[1]).toBe(before[1])
+      expect(host.querySelector('[role="row"][aria-label="Renamed One, working"]')).not.toBeNull()
+    } finally {
+      tree.mockRestore()
+      await React.act(async () => root.unmount())
+      host.remove()
+    }
+  })
+  it('retains the native owning row name after RAC repositions memoized content', async () => {
     const host = document.createElement('div')
     document.body.append(host)
     const root = createRoot(host)
     const agent: SidebarNode = { _tag: 'Agent', id: 'agent/atlas', subject: 'agent/atlas', label: 'Atlas Builder' }
-    const item = atlasItem()
+    const projected = fleetFromAgents([decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/host-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })]).agents[0]!
+    const item = sidebarRow({ agent: projected, stale: false })
     const renders = vi.fn()
-    const MemoContent = React.memo(() => { renders(); return <SidebarAgentRow inTree item={item} now={5000} layout="SR2-B" extraSignals={['X-model']} /> })
+    const MemoContent = React.memo(() => { renders(); return <SidebarAgentRow inTree item={item} now={5000} /> })
     const content = <MemoContent />
     const props: Omit<AgentFoldersProps, 'tree'> = {
-      canDrop: () => ({ ok: true }), onMove: () => {}, onCreateFolder: () => {}, onRenameFolder: () => {}, onDeleteFolder: () => {}, onToggleCollapsed: () => {},
-      renderAgent: () => content, agentAccessibleName: () => sidebarTreeRowName(item),
+      canDrop: () => ({ ok: true }), onMove: () => {}, onCreateFolder: () => {}, onRenameFolder: () => {}, onDeleteFolder: () => {}, onToggleCollapsed: () => {}, renderAgent: () => content,
+      accessibleNames: new Map([[agent.id, sidebarRowAccessibleName(item)]]),
     }
     try {
       await React.act(async () => { root.render(<AgentFolders {...props} tree={[agent]} />) })
-      const row = within(host).getByRole('row', { name: /^Atlas Builder, / })
-      await expectFacts(row, 'Atlas Builder', /^Atlas Builder, idle\. .*Status: idle;/)
+      const named = () => [...host.querySelectorAll<HTMLElement>('[role="row"]')].filter(element => element.getAttribute('aria-label') === 'Atlas Builder, idle')
+      const row = named()[0]!
+      expect(named()).toHaveLength(1)
       expect(renders).toHaveBeenCalledTimes(1)
-      await React.act(async () => { root.render(<AgentFolders {...props} tree={[{ _tag: 'Folder', id: 'before', label: 'Before', collapsed: false, children: [] }, agent]} />) })
-      expect(within(host).getByRole('row', { name: /^Atlas Builder, / })).toBe(row)
-      await expectFacts(row, 'Atlas Builder', /^Atlas Builder, idle\. .*Status: idle;/)
+      await React.act(async () => {
+        // RAC may refresh aria props when the same row moves, without rerendering its content.
+        row.removeAttribute('aria-labelledby')
+        root.render(<AgentFolders {...props} tree={[{ _tag: 'Folder', id: 'before', label: 'Before', collapsed: false, children: [] }, agent]} />)
+      })
+      await vi.waitFor(() => expect(named()).toEqual([row]))
       expect(renders).toHaveBeenCalledTimes(1)
     } finally {
       await React.act(async () => root.unmount())
       host.remove()
     }
-  })
-  describe.each(['root', 'folder', 'unfiled'] as const)('visible agent identity in %s', location => {
-    it.each([undefined, 3])('names the owning tree row with its reported facts with unread=%s', async unread => {
-      const host = document.createElement('div')
-      document.body.append(host)
-      const root = createRoot(host)
-      const agent: SidebarNode = { _tag: 'Agent', id: 'agent/atlas', subject: 'agent/atlas', label: 'Atlas Builder' }
-      const tree: readonly SidebarNode[] = location === 'root' ? [agent] : [{ _tag: location === 'folder' ? 'Folder' : 'Group', id: location, label: location === 'folder' ? 'Workshop' : 'Unfiled', collapsed: false, children: [agent] }]
-      const item = { ...atlasItem(), unread }
-      const view = (nodes: readonly SidebarNode[], row: typeof item) => <AgentFolders tree={nodes} canDrop={() => ({ ok: true })} onMove={() => {}} onCreateFolder={() => {}} onRenameFolder={() => {}} onDeleteFolder={() => {}} onToggleCollapsed={() => {}} agentAccessibleName={() => sidebarTreeRowName(row)} renderAgent={() => <SidebarAgentRow inTree item={row} now={5000} layout="SR2-B" extraSignals={['X-model']} />} />
-      try {
-        await React.act(async () => { root.render(view(tree, item)) })
-        const row = within(host).getByRole('row', { name: /^Atlas Builder, / })
-        await expectFacts(row, 'Atlas Builder', /^Atlas Builder, idle\. .*Status: idle;/)
-        await expectA11y(row).not.toHaveAccessibleName(/unknown/i)
-        if (unread === undefined) await expectA11y(row).not.toHaveAccessibleName(/unread/i)
-        else await expectA11y(row).toHaveAccessibleName(/Unread: 3/)
-        const nextAgent = { ...agent, label: 'Orion Builder' }
-        const nextTree = tree.map(node => node._tag === 'Agent' ? nextAgent : { ...node, children: [nextAgent] })
-        const nextItem = { ...item, title: 'Orion Builder', status: 'working' as const, statusLabel: 'Working', unread: 4 }
-        await React.act(async () => { root.render(view(nextTree, nextItem)) })
-        const updatedRow = within(host).getByRole('row', { name: /^Orion Builder, / })
-        expect(updatedRow).toBe(row)
-        await expectFacts(updatedRow, 'Orion Builder', /^Orion Builder, Working\. .*Status: Working;/)
-        await expectA11y(updatedRow).toHaveAccessibleName(/Unread: 4/)
-      } finally {
-        await React.act(async () => root.unmount())
-        host.remove()
-      }
-    })
   })
 })

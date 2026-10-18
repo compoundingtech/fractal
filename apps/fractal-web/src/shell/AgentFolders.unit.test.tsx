@@ -34,6 +34,7 @@ vi.mock('@stylexjs/stylex', async () => {
 })
 
 import { fixtureSource } from '../data/fixtureSource.ts'
+import { fleetFromAgents } from '../data/projections.ts'
 import { DataSourceProvider, useSubjectList } from '../data/react.tsx'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import type { ArrangementRefusal, SidebarOperation } from '../folders/edit.ts'
@@ -121,7 +122,7 @@ const FolderTree = ({ query }: { readonly query: string }) => {
   )
 }
 
-const mountTree = ({ query }: { readonly query: string }) => {
+const mountTree = ({ query, collapsed = [] }: { readonly query: string; readonly collapsed?: readonly string[] }) => {
   const registry = AtomRegistry.make()
   const source = fixtureSource({ world: fixtureProjections })
   registry.get(fixtureFolders).edit(folderOps(fixtureProjections.agents.map((a) => a.id)))
@@ -129,6 +130,7 @@ const mountTree = ({ query }: { readonly query: string }) => {
     ...defaultFilters,
     query,
   })
+  registry.set(fixtureSidebarState(source.gateway ?? source.mode).collapsed, collapsed)
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
@@ -167,6 +169,19 @@ describe('AgentFolders row styling', () => {
       const notice = tree.container.querySelector('[role="status"]')
       expect(notice).not.toBeNull()
       expect(notice!.classList.contains('stylex:notice')).toBe(true)
+    } finally {
+      tree.unmount()
+    }
+  })
+
+  it('reveals a saved-collapsed folder for a facet-only search without highlighting facet text', async () => {
+    const placed = fleetFromAgents(fixtureProjections.agents).agents[0]!
+    const tree = mountTree({ query: `state:${placed.state}`, collapsed: ['product'] })
+    try {
+      await vi.waitFor(() =>
+        expect(tree.container.querySelector(`[role="row"] [data-wf-agent-ref="${placed.ref}"]`)).not.toBeNull(),
+      )
+      expect(tree.container.querySelectorAll('mark')).toHaveLength(0)
     } finally {
       tree.unmount()
     }

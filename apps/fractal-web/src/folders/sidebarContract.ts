@@ -33,10 +33,13 @@ export type AgentFoldersProps = {
   readonly treeStatus?: React.ReactNode
   readonly unavailable?: React.ReactNode
   readonly selectedId?: string
+  /** Search changes request a selected-row reveal without treating clock ticks as navigation. */
+  readonly revealKey?: string
+  /** Native RAC item name; the host supplies displayed title and observed status. */
+  readonly accessibleNames?: ReadonlyMap<string, string>
   readonly onSelect?: (id: string) => void
   readonly renderAgent?: (agent: SidebarAgent) => React.ReactNode
-  /** Accessible name of the owning tree row (RAC TreeItem aria-label); textValue stays the label for typeahead. */
-  readonly agentAccessibleName?: (agent: SidebarAgent) => string
+  readonly renderFolderSignal?: (folder: SidebarFolder | SidebarGroup) => React.ReactNode
   readonly ariaLabel?: string
   readonly style?: StyleXStyles
 }

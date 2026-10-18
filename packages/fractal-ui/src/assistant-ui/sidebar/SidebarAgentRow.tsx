@@ -2,14 +2,14 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Icon } from '../composition/Icons'
-import { Button, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Popover, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { matchPositions, type SidebarActions, type SidebarAgentRow as Row, type SidebarWindowSpend } from './model'
 import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './SidebarStatus'
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
 import { SidebarRowSignals, attachSidebarLine1Fit } from './SidebarRowSignals'
-import { SidebarTreeLevel } from './SidebarTreeLevel'
 
 export type RowVariant = 'SR-1' | 'SR-2' | 'SR-3'
 export type RowLayout = 'SR2-A' | 'SR2-B' | 'SR2-C'
@@ -28,6 +28,7 @@ export type SidebarAgentRowProps = SidebarClock & {
   readonly extraSignals?: readonly ExtraSignal[]
   readonly discRefinement?: DiscRefinement
   readonly active?: boolean
+  /** Overrides `SidebarQueryContext` for this row and its nested rows. A per-row prop re-renders every row on each keystroke; prefer the context. */
   readonly query?: string
   readonly actions?: SidebarActions
   readonly onOpen?: (row: Row) => void
@@ -40,9 +41,15 @@ export type SidebarAgentRowProps = SidebarClock & {
   /** Nested navigation can spend its first line on the title without discarding time. */
   readonly timePlacement?: 'column' | 'subtitle'
 }
-/** Fuzzy highlighting uses the upstream matcher, not a second search implementation. */
-export function Highlight({ value, query = '' }: { readonly value: string; readonly query?: string }) {
-  const matched = matchPositions({ query, text: value })
+/**
+ * The host's sidebar search query. Only `Highlight` reads it, so a keystroke re-renders the
+ * highlighted titles while memoized rows with unchanged props skip rendering.
+ */
+export const SidebarQueryContext = React.createContext('')
+/** Fuzzy highlighting uses the upstream matcher, not a second search implementation. An explicit `query` takes precedence over `SidebarQueryContext`. */
+export function Highlight({ value, query }: { readonly value: string; readonly query?: string }) {
+  const contextQuery = React.useContext(SidebarQueryContext)
+  const matched = matchPositions({ query: query ?? contextQuery, text: value })
   if (matched.size === 0) return <>{value}</>
   return <>{Array.from(value, (letter, index) => matched.has(index) ? <mark key={index} {...stylex.props(styles.mark)}>{letter}</mark> : letter)}</>
 }
@@ -137,8 +144,7 @@ export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & Sideba
     </dl>
   </div>
 }
-export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', metricLayout, glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', active = false, query = '', now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded, expandedRefs, timePlacement = 'column' }: SidebarAgentRowProps) {
-  const treeLevel = React.useContext(SidebarTreeLevel)
+export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', metricLayout, glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', active = false, query, now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded, expandedRefs, timePlacement = 'column' }: SidebarAgentRowProps) {
   const title = sidebarRowTitle(item)
   const host = item.host
   const metadata = React.useMemo(() => sidebarRowDescription(item), [item])
@@ -203,7 +209,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   </>
   const rowStyle = stylex.props(styles.row)
   return <div ref={hoverLifetime} data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') { clearTimeout(hoverTimer.current); setHoverOpen(false) }; if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() } }}>
-    <div ref={rowAnchor} data-testid="taste-agent-row" data-time-placement={subtitleTime ? 'subtitle' : 'column'} data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} {...stylex.props(styles.rowWrap, styles.treeIndent(treeLevel), variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, subtitleTime && (item.children.length === 0 ? styles.rowWrapSubtitleTime : styles.rowWrapParentSubtitleTime), styles[variant], active && styles.active)}>
+    <div ref={rowAnchor} data-testid="taste-agent-row" data-time-placement={subtitleTime ? 'subtitle' : 'column'} data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} {...stylex.props(styles.rowWrap, variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, subtitleTime && (item.children.length === 0 ? styles.rowWrapSubtitleTime : styles.rowWrapParentSubtitleTime), styles[variant], active && styles.active)}>
       <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}>{metricLayout !== undefined && <ContextRing context={item.context} />}<SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly /></span>
       <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
       {!subtitleTime && <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{metricLayout === 'expanded' ? null : metricLayout === 'compact' ? <><PeriodSpend field="last-24h-usd" value={item.spend?.last24h} />{activityField}</> : rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>}
@@ -213,22 +219,22 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       <VisuallyHidden><span id={descriptionId} data-row-description>{metadata}</span></VisuallyHidden>
       <div {...stylex.props(styles.actions)}>
         <DialogTrigger><TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}><VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={() => setHoverOpen(false)} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden><Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard, styles.passiveHovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger><Popover triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={item} {...clock} /></Dialog></Popover></DialogTrigger>
-        <MenuTrigger><Button ref={menuTrigger} data-agent-menu="true" aria-label={`Actions for ${title}`} className={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle).className ?? ''}><Icon name="gear" /></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Menu aria-label={`Actions for ${title}`} {...stylex.props(styles.menu)}>
-          <MenuItem id="open" isDisabled={!canOpen} onAction={open} {...stylex.props(styles.menuItem)}>Open conversation</MenuItem>
-          {callbacks?.split !== undefined && <MenuItem id="split-right" onAction={() => callbacks.split?.(item.ref, 'right')} {...stylex.props(styles.menuItem)}>Open in split right</MenuItem>}
-          {callbacks?.split !== undefined && <MenuItem id="split-below" onAction={() => callbacks.split?.(item.ref, 'below')} {...stylex.props(styles.menuItem)}>Open in split below</MenuItem>}
-          <MenuItem id="reported-details" onAction={() => { requestAnimationFrame(() => detailsTrigger.current?.click()) }} {...stylex.props(styles.menuItem)}>Reported agent details</MenuItem>
-          {callbacks?.details !== undefined && <MenuItem id="details" onAction={() => callbacks.details?.(item.ref)} {...stylex.props(styles.menuItem)}>Agent details</MenuItem>}
-          {(callbacks?.terminal !== undefined || callbacks?.resource !== undefined) && item.terminal !== undefined && <MenuItem id="terminal" onAction={() => callbacks?.terminal !== undefined ? callbacks.terminal(item.terminal!, ownerId) : callbacks?.resource?.(item.terminal!, ownerId)} {...stylex.props(styles.menuItem)}>Open terminal</MenuItem>}
-          {callbacks?.resource !== undefined && item.mission !== undefined && <MenuItem id="mission" onAction={() => callbacks.resource?.(item.mission!, ownerId)} {...stylex.props(styles.menuItem)}>Open mission</MenuItem>}
-          {callbacks?.resource !== undefined && item.worktree !== undefined && <MenuItem id="worktree" onAction={() => callbacks.resource?.(item.worktree!, ownerId)} {...stylex.props(styles.menuItem)}>Open worktree</MenuItem>}
-          {callbacks?.resource !== undefined && item.pullRequest !== undefined && <MenuItem id="pr" onAction={() => callbacks.resource?.(item.pullRequest!.ref, ownerId)} {...stylex.props(styles.menuItem)}>Open pull request</MenuItem>}
-          {(item.unread ?? 0) > 0 && onMarkRead !== undefined && <MenuItem id="read" onAction={() => onMarkRead?.(item.ref)} {...stylex.props(styles.menuItem)}>Mark read</MenuItem>}
-        </Menu></Popover></MenuTrigger>
+        <MenuTrigger><Button ref={menuTrigger} data-agent-menu="true" aria-label={`Actions for ${title}`} className={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle).className ?? ''}><Icon name="gear" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
+          <MenuItem id="open" isDisabled={!canOpen} onAction={open} style={styles.menuItemFocus}>Open conversation</MenuItem>
+          {callbacks?.split !== undefined && <MenuItem id="split-right" onAction={() => callbacks.split?.(item.ref, 'right')} style={styles.menuItemFocus}>Open in split right</MenuItem>}
+          {callbacks?.split !== undefined && <MenuItem id="split-below" onAction={() => callbacks.split?.(item.ref, 'below')} style={styles.menuItemFocus}>Open in split below</MenuItem>}
+          <MenuItem id="reported-details" onAction={() => { requestAnimationFrame(() => detailsTrigger.current?.click()) }} style={styles.menuItemFocus}>Reported agent details</MenuItem>
+          {callbacks?.details !== undefined && <MenuItem id="details" onAction={() => callbacks.details?.(item.ref)} style={styles.menuItemFocus}>Agent details</MenuItem>}
+          {(callbacks?.terminal !== undefined || callbacks?.resource !== undefined) && item.terminal !== undefined && <MenuItem id="terminal" onAction={() => callbacks?.terminal !== undefined ? callbacks.terminal(item.terminal!, ownerId) : callbacks?.resource?.(item.terminal!, ownerId)} style={styles.menuItemFocus}>Open terminal</MenuItem>}
+          {callbacks?.resource !== undefined && item.mission !== undefined && <MenuItem id="mission" onAction={() => callbacks.resource?.(item.mission!, ownerId)} style={styles.menuItemFocus}>Open mission</MenuItem>}
+          {callbacks?.resource !== undefined && item.worktree !== undefined && <MenuItem id="worktree" onAction={() => callbacks.resource?.(item.worktree!, ownerId)} style={styles.menuItemFocus}>Open worktree</MenuItem>}
+          {callbacks?.resource !== undefined && item.pullRequest !== undefined && <MenuItem id="pr" onAction={() => callbacks.resource?.(item.pullRequest!.ref, ownerId)} style={styles.menuItemFocus}>Open pull request</MenuItem>}
+          {(item.unread ?? 0) > 0 && onMarkRead !== undefined && <MenuItem id="read" onAction={() => onMarkRead?.(item.ref)} style={styles.menuItemFocus}>Mark read</MenuItem>}
+        </Menu></MenuPopover></MenuTrigger>
         {item.children.length > 0 && <Button data-row-column="children" slot={inTree ? 'chevron' : undefined} isDisabled={!inTree && onToggleChildren === undefined} aria-labelledby="" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${item.children.length} subagents`} aria-expanded={expanded} onPress={inTree ? undefined : () => onToggleChildren?.(item.ref)} {...stylex.props(styles.iconButton, styles.childrenToggle, variant === 'SR-2' && styles.childrenTop, variant === 'SR-1' && styles.childrenSingle)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} />{extraSignals.includes('X-subs') && <span data-row-signal="X-subs" data-line1-drop="subs">{item.children.length}</span>}</Button>}
       </div>
     </div>
-    {!inTree && expanded && item.children.length > 0 && <SidebarTreeLevel value={treeLevel + 1}>{item.children.map(child => <SidebarAgentRow key={child.ref} item={child} variant={variant} layout={layout} metricLayout={metricLayout} glyph={glyph} extraSignals={extraSignals} discRefinement={discRefinement} query={query} {...clock} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} onToggleChildren={onToggleChildren} expandedRefs={expandedRefs} />)}</SidebarTreeLevel>}
+    {!inTree && expanded && item.children.length > 0 && <div {...stylex.props(styles.children)}>{item.children.map(child => <SidebarAgentRow key={child.ref} item={child} variant={variant} layout={layout} metricLayout={metricLayout} glyph={glyph} extraSignals={extraSignals} discRefinement={discRefinement} query={query} {...clock} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} onToggleChildren={onToggleChildren} expandedRefs={expandedRefs} />)}</div>}
   </div>
 })
 /** Unreported windows are omitted; the row description carries each reported window's bounds. */
@@ -249,12 +255,11 @@ const styles = stylex.create({
   // Preserve the grid/chevron/signal slots; only the otherwise empty time track disappears.
   rowWrapSubtitleTime: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) 0px 0px max-content` },
   rowWrapParentSubtitleTime: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.icon} 0px max-content` },
-  // Hierarchy level owns indentation; the row highlight stays full width.
-  treeIndent: (level: number) => ({ paddingInlineStart: `calc(${s.sm} + ${level - 1} * var(--sidebar-tree-step, 16px))` }),
   // The row is the containing block for its visually hidden details trigger; without it the
   // absolutely positioned trigger escapes every scroll clip and extends the document.
   rowWrap: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.controlSm} var(--sidebar-metric-track, ${g.sidebarMetric}) max-content`, alignContent: 'center', alignItems: 'center', columnGap: s.xs2, rowGap: s.xs2, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg, ':hover': { backgroundColor: surface.rowHover } },
-  row: { display: 'grid', gridColumn: '2 / -1', gridRow: '1 / -1', gridTemplateColumns: 'subgrid', gridTemplateRows: 'subgrid', alignItems: 'center', minWidth: 0, width: '100%', height: '100%', padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
+  // Rows and menu items show keyboard focus with the neutral fgMuted ring, never the accent: an accent ring reads as a selection state.
+  row: { display: 'grid', gridColumn: '2 / -1', gridRow: '1 / -1', gridTemplateColumns: 'subgrid', gridTemplateRows: 'subgrid', alignItems: 'center', minWidth: 0, width: '100%', height: '100%', padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   'SR-1': { height: g.controlLg, gridTemplateRows: '1fr' }, 'SR-2': { height: g.sidebarRow, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, rowGap: s.zero }, 'SR-3': { height: g.sidebarThree, gridTemplateRows: `${t.uiLeading} ${g.controlSm} ${t.metaLeading}` },
   active: { backgroundColor: surface.rowActive },
   glyph: { position: 'relative', gridColumn: '1', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' },
@@ -289,7 +294,6 @@ const styles = stylex.create({
   cardChildren: { margin: s.zero, padding: s.zero, listStyleType: 'none', color: ink.fgSoft },
   detailLabel: { margin: s.zero, color: ink.fgSoft },
   detailValue: { margin: s.zero, minWidth: 0, color: ink.fg },
-  popover: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.sm, minWidth: g.menuMin, boxShadow: elevation.popover, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 30 },
-  menu: { outline: 'none' }, menuItem: { display: 'flex', alignItems: 'center', minHeight: g.menuRow, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outline: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
-  mark: { backgroundColor: surface.rowActive, color: ink.fg, fontWeight: t.weightSemibold },
+  menuItemFocus: { outlineColor: { ':is([data-focus-visible])': ink.fgMuted } },
+  mark: { backgroundColor: surface.rowActive, color: ink.fg, fontWeight: t.weightSemibold }, children: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.border },
 })
