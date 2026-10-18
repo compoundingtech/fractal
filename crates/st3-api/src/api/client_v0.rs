@@ -208,6 +208,8 @@ struct CollectionSubscription {
     cursor: Option<collection_ivm::Delivered>,
     order: Vec<String>,
     has_more: bool,
+    /// Same-snapshot owner projection counter; only owner-wide arrangements use it.
+    owner_revision: Option<u64>,
     /// The roster publication revision when this window's last read began. An agents window
     /// rereads once a later roster is published, even at the same graph index.
     roster_revision: u64,
@@ -435,7 +437,7 @@ pub async fn collection_items(
     session: &ClientSession,
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<(ClientSnapshot, Vec<Value>, bool), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
     collection_items_with_windows(state, session, request, read_permit, None).await
 }
 
@@ -445,7 +447,7 @@ async fn collection_items_with_windows(
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
     windows: Option<Arc<collection_windows::Windows>>,
-) -> Result<(ClientSnapshot, Vec<Value>, bool), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
     if !matches!(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary"
@@ -545,7 +547,7 @@ async fn collection_items_with_windows(
     let traced = matches!(collection.as_str(), "agents" | "summary") && first_frame_current();
     let roster_telemetry = matches!(collection.as_str(), "agents" | "summary") && crate::otel::export_enabled();
     let mut roster_attributes = None;
-    let (snapshot, mut items, mut has_more) = loop {
+    let (snapshot, mut items, mut has_more, owner_revision) = loop {
         // Summary reads the published roster once a refresher keeps one; only a store without
         // one folds it here, behind the shared admission.
         gates.admit(&state.store, prepared.as_ref(),
@@ -770,6 +772,14 @@ async fn collection_items_with_windows(
                     None => client_snapshot_at(&state, index),
                 };
                 let at = snapshot.created_at.clone();
+                // Inventory invalidation is owner-scoped, independent of truncation and
+                // cached prefix equality. Read its projection counter under this same fence.
+                let owner_revision = if collection == "arrangements" && subject.is_none() {
+                    Some(store.arrangement_inventory_revision(
+                        person.as_deref().expect("explicit arrangement owner"))?)
+                } else {
+                    None
+                };
                 // Share one bounded fleet projection across subscriber window sizes.
                 // Uncached reads retain the same bounded cut as the shared projection.
                 let projection_limit = if matches!(collection.as_str(), "missions" | "attention") {
@@ -918,7 +928,7 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
-                Ok(Ok(Some((snapshot, items, has_more))))
+                Ok(Ok(Some((snapshot, items, has_more, owner_revision))))
             });
             Ok::<_, anyhow::Error>((result?, read_permit, admission))
             })??;
@@ -942,7 +952,7 @@ async fn collection_items_with_windows(
         has_more |= end < items.len();
         items.truncate(end);
     }
-    Ok((snapshot, items, has_more))
+    Ok((snapshot, items, has_more, owner_revision))
 }
 
 /// Membership and display order come from the existing shallow page refs. The next
@@ -1060,10 +1070,10 @@ enum Refreshed {
 async fn deliver_collection(
     socket: &mut WebSocket,
     subscription: &mut CollectionSubscription,
-    read: Result<(ClientSnapshot, Vec<Value>, bool), ApiError>,
+    read: Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>,
 ) -> Refreshed {
     let request = &subscription.request;
-    let (snapshot, mut items, has_more) = match read {
+    let (snapshot, mut items, has_more, owner_revision) = match read {
         Ok(read) => read,
         Err(error) => {
             let retryable = client_error_retryable(error.status, Some(&error.code));
@@ -1123,6 +1133,7 @@ async fn deliver_collection(
             && removes.is_empty()
             && order == subscription.order
             && has_more == subscription.has_more
+            && owner_revision == subscription.owner_revision
         {
             true
         } else {
@@ -1139,11 +1150,12 @@ async fn deliver_collection(
     subscription.previous = Arc::new(current);
     subscription.order = order;
     subscription.has_more = has_more;
+    subscription.owner_revision = owner_revision;
     Refreshed::Current
 }
 
 enum CollectionRead {
-    Legacy(Result<(ClientSnapshot, Vec<Value>, bool), ApiError>),
+    Legacy(Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>),
     Ivm(Box<Result<collection_ivm::Candidate, ApiError>>),
 }
 
@@ -1162,7 +1174,7 @@ async fn deliver_ivm_collection(
         Output::Window(window) => {
             let delivered = subscription.delivered;
             if candidate.replace { subscription.delivered = false; }
-            let result = deliver_collection(socket, subscription, Ok(window)).await;
+            let result = deliver_collection(socket, subscription, Ok((window.0, window.1, window.2, None))).await;
             if !matches!(result, Refreshed::Current) { subscription.delivered = delivered; }
             result
         }
@@ -1773,7 +1785,7 @@ pub async fn collection_stream_socket_with_reader<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, None, None, read).await;
 }
@@ -1791,7 +1803,7 @@ pub async fn collection_stream_socket_with_sources<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, sources, None, read).await;
 }
@@ -1809,7 +1821,7 @@ async fn collection_stream_socket_with_context<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
 {
     collection_stream_socket_with_admission(
         socket, state, session, presence, (sources, upgrade), read, open_conversation_subscription,
@@ -1826,7 +1838,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     admit: A,
 ) where
     F: Fn(AppState, ClientSession, CollectionSubscribe, tokio::sync::OwnedSemaphorePermit) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
     A: Fn(AppState, ClientSession, CollectionSubscribe, ConversationAdmissionPermits) -> Admission + Clone + Send + 'static,
     Admission: Future<Output = Result<(String, Option<String>), ApiError>> + Send + 'static,
 {
@@ -2015,7 +2027,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         refresh.push(request.id.clone());
                         // Collection results and conversation frames share the same generation fence.
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -13166,7 +13178,7 @@ mission "queue-parity" state="ready" {
         assert_eq!(terminal_error_close_code("stale-incarnation"), 1008);
     }
 
-    fn assert_collection_frame_conforms(frame: &Value) {
+    pub(super) fn assert_collection_frame_conforms(frame: &Value) {
         let mut schema: Value = serde_json::from_str(include_str!(
             "../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
         ))
@@ -13215,7 +13227,7 @@ mission "queue-parity" state="ready" {
             "kind":"subscribe","id":"details","collection":"agents","agent":"agent/z","limit":1,
         })).unwrap();
         let before = state.store.agent_resources_refolded_cards_for_test();
-        let (_, selected, more) = collection_items_with_windows(&state, &session, &request,
+        let (_, selected, more, _) = collection_items_with_windows(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0]["id"], "agent/z");
@@ -13227,11 +13239,11 @@ mission "queue-parity" state="ready" {
         assert_eq!(detail, selected[0]);
         assert_eq!(state.store.agent_resources_refolded_cards_for_test(), before + 1);
         request.agent = Some("agent/a".into());
-        let (_, other, _) = collection_items_with_windows(&state, &session, &request,
+        let (_, other, _, _) = collection_items_with_windows(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert_eq!(other[0]["id"], "agent/a");
         request.agent = None;
-        let (_, fleet, more) = collection_items_with_windows(&state, &session, &request,
+        let (_, fleet, more, _) = collection_items_with_windows(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert_eq!(fleet[0]["id"], "agent/a");
         assert!(more);
@@ -13240,25 +13252,25 @@ mission "queue-parity" state="ready" {
         agent_selector_observe(&state, "agent/a", "harness.observed",
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));
         request.agent = Some("agent/z".into());
-        let (_, unchanged, more) = collection_items_with_windows(&state, &session, &request,
+        let (_, unchanged, more, _) = collection_items_with_windows(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert_eq!(unchanged, selected);
         assert!(!more);
         assert_eq!(state.store.agent_resources_refolded_cards_for_test(), folded);
         assert_eq!(state.store.agent_resources_builds_for_test(), builds);
         request.status = selected[0]["state"].as_str().map(str::to_owned);
-        let (_, matching, more) = collection_items_with_windows(&state, &session, &request,
+        let (_, matching, more, _) = collection_items_with_windows(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert_eq!(matching, selected);
         assert!(!more);
         request.status = Some("stopped".into());
-        let (_, filtered, more) = collection_items_with_windows(&state, &session, &request,
+        let (_, filtered, more, _) = collection_items_with_windows(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert!(filtered.is_empty());
         assert!(!more);
         request.status = None;
         request.agent = Some("agent/absent".into());
-        let (_, absent, more) = collection_items_with_windows(&state, &session, &request,
+        let (_, absent, more, _) = collection_items_with_windows(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert!(absent.is_empty());
         assert!(!more);
@@ -13360,7 +13372,7 @@ mission "differential" state="ready" {
             })).unwrap();
             let (state, session, slots, windows) = (state.clone(), session.clone(), slots.clone(), windows.clone());
             async move {
-                let (_, items, more) = collection_items_with_windows(&state, &session, &request,
+                let (_, items, more, _) = collection_items_with_windows(&state, &session, &request,
                     slots.acquire_owned().await.unwrap(), windows).await.unwrap();
                 assert!(!more);
                 items
@@ -13407,7 +13419,7 @@ mission "differential" state="ready" {
         })).unwrap();
         let longest = format!("agent/{}", "a".repeat(MAX_AGENT_SELECTOR_BYTES - "agent/".len()));
         request.agent = Some(longest.clone());
-        let (_, absent, more) = collection_items(&state, &session, &request,
+        let (_, absent, more, _) = collection_items(&state, &session, &request,
             slots.clone().acquire_owned().await.unwrap()).await.unwrap();
         assert!(absent.is_empty());
         assert!(!more);
@@ -13608,12 +13620,12 @@ mission "differential" state="ready" {
         let session = ClientSession::local(None).unwrap();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let windows = collection_windows::Windows::attach(&state.store);
-        let (_, expected, _) = collection_items_with_windows(&state, &session, &request,
+        let (_, expected, _, _) = collection_items_with_windows(&state, &session, &request,
             semaphore.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         let builds = state.store.agent_resources_builds_for_test();
         let _cold_builder = state.store.admit_agent_resources("other").await;
         let start = std::time::Instant::now();
-        let (_, actual, _) = tokio::time::timeout(std::time::Duration::from_secs(1),
+        let (_, actual, _, _) = tokio::time::timeout(std::time::Duration::from_secs(1),
             collection_items_with_windows(&state, &session, &request,
                 semaphore.acquire_owned().await.unwrap(), windows)).await
             .expect("warm WS roster must not wait for a cold builder").unwrap();
@@ -13686,7 +13698,7 @@ mission "differential" state="ready" {
             assert_eq!(body["value"]["answer"], 42);
             drop(held_window);
             drop(held_roster);
-            let (_, rows, _) = tokio::time::timeout(Duration::from_secs(5), read).await
+            let (_, rows, _, _) = tokio::time::timeout(Duration::from_secs(5), read).await
                 .expect("the collection must complete after its gate is released").unwrap();
             if gate == "roster" {
                 assert_eq!(rows[0]["kind"], "summary");
@@ -13763,7 +13775,7 @@ mission "differential" state="ready" {
         let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["value"]["items"][0]["id"], "agent/cycle-roster");
-        let (_, rows, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
+        let (_, rows, _, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
             .expect("collection work must complete after the cold HTTP page").unwrap();
         assert_eq!(rows[0]["kind"], "summary");
         assert_eq!(state.store.agent_resources_builds_for_test(), 1);
@@ -13810,7 +13822,7 @@ mission "differential" state="ready" {
             )).await.expect("an unrelated API query must run during the agents miss retry").unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         drop(roster);
-        let (_, rows, has_more) = tokio::time::timeout(Duration::from_secs(5), collection).await
+        let (_, rows, has_more, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
             .expect("the agents retry must consume the released roster admission").unwrap();
         let (_, Json(page)) = client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default())).await.unwrap();
@@ -13862,7 +13874,7 @@ mission "differential" state="ready" {
             assert!(!task.is_finished());
             drop(next_socket);
             drop(held_reader);
-            let (_, rows, has_more) = tokio::time::timeout(Duration::from_secs(5), task).await
+            let (_, rows, has_more, _) = tokio::time::timeout(Duration::from_secs(5), task).await
                 .expect("paired authority preparation must finish after reader capacity is returned")
                 .unwrap().unwrap();
             assert!(rows.is_empty());
@@ -13886,7 +13898,7 @@ mission "differential" state="ready" {
         })).unwrap();
         let socket = Arc::new(tokio::sync::Semaphore::new(1));
         let windows = collection_windows::Windows::attach(&state.store);
-        let (_, expected, expected_more) = collection_items_with_windows(
+        let (_, expected, expected_more, _) = collection_items_with_windows(
             &state, &session, &request, socket.clone().acquire_owned().await.unwrap(), windows.clone(),
         ).await.unwrap();
         let held_reader = state.store.readers.try_admit_read().unwrap();
@@ -13900,7 +13912,7 @@ mission "differential" state="ready" {
         drop(held_reader);
         // Keep the later waiter queued throughout the collection's physical query.
         // Discarding the FIFO grant assigns it to that unpolled waiter and deadlocks here.
-        let (_, actual, actual_more) = tokio::time::timeout(Duration::from_secs(5), collection).await
+        let (_, actual, actual_more, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
             .expect("the collection must use its FIFO turn before the later queued read").unwrap();
         assert_eq!(actual, expected);
         assert_eq!(actual_more, expected_more);
@@ -13951,7 +13963,7 @@ mission "differential" state="ready" {
             drop(held_socket);
             drop(held_window);
             drop(held_roster);
-            let (_, rows, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
+            let (_, rows, _, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
                 .expect("the granted-reader retry must complete once its gate is free").unwrap();
             assert_eq!(rows[0]["kind"], "summary");
         }
@@ -13981,7 +13993,7 @@ mission "differential" state="ready" {
                     windows,
                 )
             });
-        let (_, expected, _) = collection_items_with_windows(&state, &session, &request,
+        let (_, expected, _, _) = collection_items_with_windows(&state, &session, &request,
             semaphore.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         // Saturate the single reader slot from a plain thread, as an escaped long reader would.
         let (release, held) = std::sync::mpsc::channel::<()>();
@@ -14006,7 +14018,7 @@ mission "differential" state="ready" {
             "the socket gate must be free while the collection waits for its reader");
         drop(release);
         holder.join().unwrap().unwrap();
-        let (_, actual, _) = tokio::time::timeout(std::time::Duration::from_secs(10), task).await
+        let (_, actual, _, _) = tokio::time::timeout(std::time::Duration::from_secs(10), task).await
             .expect("the collection completes once the reader frees")
             .unwrap();
         assert_eq!(actual, expected);
@@ -14045,7 +14057,7 @@ mission "differential" state="ready" {
             }
             let mut expected = None;
             for reader in readers {
-                let (snapshot, items, has_more) = reader.await.unwrap();
+                let (snapshot, items, has_more, _) = reader.await.unwrap();
                 assert_eq!(snapshot.store_index, state.store.index().unwrap());
                 assert!(!has_more);
                 assert_eq!(items.len(), 1);
@@ -14653,7 +14665,7 @@ mission "differential" state="ready" {
             "kind":"subscribe", "id":"summary", "collection":"summary",
         })).unwrap();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        let (_, items, _) = tokio::time::timeout(Duration::from_secs(2),
+        let (_, items, _, _) = tokio::time::timeout(Duration::from_secs(2),
             collection_items_with_windows(&state, &ClientSession::local(None).unwrap(), &request,
                 semaphore.acquire_owned().await.unwrap(),
                 collection_windows::Windows::attach(&state.store)))
