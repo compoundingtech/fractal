@@ -26,11 +26,39 @@ pub fn phase_spans_enabled() -> bool {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Origin(OriginLabel);
 
-static TASK_ORIGINS: [&str; 15] = [
+static TASK_ORIGINS: &[&str] = &[
     "other", "task checkpoint", "task migrate-event-payloads", "task expire-completed-responses",
     "task coordination-counts-catch-up", "task account-limits-catch-up",
     "task enforce-account-limits", "task trim-local-observations", "task mailbox-wake-dispatch",
     "task reconcile-pass", "task reconcile-deadline",
+    "reconcile", "reconcile.timer", "reconcile.gate_poll",
+    "published_list.agents", "published_list.missions", "published_list.work",
+    "publication.attention", "publication.summary", "publication.advance_evidence",
+    "replication.activate", "replication.retry_projection", "replication.export",
+    "replication.receive", "replication.exchange", "replication.outbound",
+    "startup.open_store", "startup.judge_claims", "startup.validate_replication_backlog",
+    "startup.apply_replication_repairs", "startup.settle_runs",
+    "startup.project_replication_backlog", "startup.warmup", "startup.isolation",
+    "account_limits.enforce", "account_limits.catch_up", "maintenance.checkpoint",
+    "maintenance.envelope_payloads", "maintenance.event_payloads",
+    "maintenance.coordination_counts", "maintenance.stop_deferral_history",
+    "maintenance.response_expiry", "maintenance.wal_checkpoint",
+    "observations.trim", "observations.trim_usage_responses", "observations.database_size",
+    "observations.export", "operations.repair_drift", "recorder.receipts",
+    "mailbox.wake_dispatch", "mailbox.own_post", "mailbox.write", "mailbox.subscription",
+    "message_body.reconcile", "seat.snapshot_transfer",
+    "runtime.start", "sekrets.import", "changes.discover", "changes.sync",
+    "account_limits.ready", "allocator.trim", "config.reload_policies",
+    "github.auth", "github.request", "maintenance.malloc_relief",
+    "maintenance.response_expiry_clock", "maintenance.response_expiry_deadline",
+    "peer.raw_lease", "profile.runtime_lag", "publication.evidence",
+    "publication.evidence_ready", "reconcile.supervise", "replication.connectivity",
+    "replication.dial_peer", "replication.fabric_exposure", "replication.fabric_presence",
+    "replication.fleet_view", "replication.peer_failure", "replication.publish_endpoints",
+    "replication.settings", "replication.tailnet", "replication.worker",
+    "slo.export", "slo.history", "terminal.socket", "terminal.tunnel",
+    "terminal.view_dispatch", "terminal.view_watch", "tile.endpoint", "tile.endpoints",
+    "writer.batch.setup", "writer.batch.job", "writer.batch.commit",
     "task replication-projection-retry", "startup validate-replication-backlog",
     "startup apply-replication-repairs", "startup project-replication-backlog",
 ];
@@ -49,6 +77,13 @@ impl Origin {
         match &self.0 {
             OriginLabel::Static(label) => KeyValue::new(key, **label),
             OriginLabel::Route(label) => KeyValue::new(key, label.to_string()),
+        }
+    }
+
+    pub(super) fn label(&self) -> &str {
+        match &self.0 {
+            OriginLabel::Static(label) => label,
+            OriginLabel::Route(label) => label,
         }
     }
 }
@@ -302,6 +337,7 @@ pub(super) struct Instruments {
     read_wait: Histogram<f64>,
     pub readers_opened: Counter<u64>,
     checkpoint: Histogram<f64>,
+    deferred: Counter<u64>,
 }
 
 fn duration(meter: &Meter, name: &'static str) -> Histogram<f64> {
@@ -349,6 +385,8 @@ impl Instruments {
                 .with_unit("{connection}")
                 .build(),
             checkpoint: duration(meter, "st.db.wal.checkpoint.duration"),
+            deferred: meter.u64_counter("st.db.wal.checkpoint.deferred")
+                .with_unit("{attempt}").build(),
         }
     }
 }
@@ -429,6 +467,9 @@ struct PoolObservation {
     counts: std::sync::Weak<super::ReaderCounts>,
     idle: std::sync::Weak<std::sync::Mutex<Vec<super::ReadConnection>>>,
     wal: Option<std::path::PathBuf>,
+    id: u64,
+    lag: u64,
+    deferred_since: Option<std::time::Instant>,
 }
 
 static POOLS: std::sync::Mutex<Vec<PoolObservation>> = std::sync::Mutex::new(Vec::new());
@@ -447,10 +488,54 @@ pub(super) fn register_pool(pool: &super::ReadPool) {
         counts: Arc::downgrade(&pool.counts),
         idle: Arc::downgrade(&pool.idle),
         wal,
+        id: pool.diagnostic_id,
+        lag: 0,
+        deferred_since: None,
     });
 }
 
+/// Called once for every physical checkpoint attempt. Errors leave the last known lag and
+/// deferral start intact; they are not evidence that a pinned WAL recovered.
+pub fn wal_checkpoint_observed(pool: &super::ReadPool, report: Option<&super::WalCheckpointReport>) {
+    let Some(report) = report else { return };
+    let deferred = report.frames > 0 && !report.recycled;
+    if deferred {
+        METRICS.deferred.add(1, SQLITE.as_slice());
+    }
+    let mut pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(state) = pools.iter_mut().find(|state| state.id == pool.diagnostic_id) {
+        state.lag = u64::try_from(report.frames.saturating_sub(report.backfilled)).unwrap_or(0);
+        if deferred {
+            state.deferred_since.get_or_insert_with(std::time::Instant::now);
+        } else {
+            state.deferred_since = None;
+        }
+    }
+}
+
 fn register_gauges(meter: &Meter) {
+    meter.f64_observable_gauge("st.db.read.loan.oldest_age").with_unit("s")
+        .with_callback(|observer| {
+            for (origin, age) in super::read_lifetime::oldest_loans() {
+                observer.observe(age.as_secs_f64(), &[
+                    KeyValue::new("db.system.name", "sqlite"), origin.attribute("origin"),
+                ]);
+            }
+        }).build();
+    meter.u64_observable_gauge("st.db.wal.checkpoint.lag").with_unit("{frame}")
+        .with_callback(|observer| {
+            let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            observer.observe(pools.iter().filter(|pool| pool.counts.strong_count() > 0)
+                .map(|pool| pool.lag).sum(), SQLITE.as_slice());
+        }).build();
+    meter.f64_observable_gauge("st.db.wal.checkpoint.deferred_age").with_unit("s")
+        .with_callback(|observer| {
+            let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let age = pools.iter().filter(|pool| pool.counts.strong_count() > 0)
+                .filter_map(|pool| pool.deferred_since).map(|since| since.elapsed())
+                .max().unwrap_or_default();
+            observer.observe(age.as_secs_f64(), SQLITE.as_slice());
+        }).build();
     meter.f64_observable_gauge("st.db.writer.current_hold")
         .with_unit("s")
         .with_callback(|observer| {
@@ -557,6 +642,9 @@ mod tests {
             "task coordination-counts-catch-up", "task account-limits-catch-up",
             "task enforce-account-limits", "task trim-local-observations",
             "task mailbox-wake-dispatch", "task reconcile-pass", "task reconcile-deadline",
+            "reconcile", "published_list.agents", "published_list.missions",
+            "published_list.work", "replication.export", "replication.receive",
+            "startup.warmup", "maintenance.wal_checkpoint",
             "task replication-projection-retry", "startup validate-replication-backlog",
             "startup apply-replication-repairs", "startup project-replication-backlog",
         ] {

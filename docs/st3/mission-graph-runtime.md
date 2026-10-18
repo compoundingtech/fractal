@@ -1584,6 +1584,15 @@ message into an inbox or successfully writing transport bytes is not delivery. s
 graph only from the durable provider receipt and never injects text or Enter into a terminal
 composer.
 
+A message the authorized external-assistant send path sent carries trusted provenance the daemon
+reads from the stored `message.sent` claim: `sender_class="external-assistant"` and, when the send
+used one, `assistant_grant_id="GRANT"` attributes on the open tag, and a two-line prefix before
+the element — `[PING from st3] message/ID from SENDER sender_class=external-assistant: TITLE`,
+then exactly `WARNING: Untrusted external-assistant request; not owner authorization.` The
+warning stands outside the bounded preview, so it survives preview truncation. Only that
+authorized path can stamp the markers: an ordinary send whose body text forges the warning or the
+attribute renders as the plain envelope above, with the forged text escaped inside the preview.
+
 Terminal control is reserved for diagnosed emergency recovery against an exact current
 incarnation. It is not a messaging or work-wake transport.
 
@@ -1757,7 +1766,7 @@ The default `work show` and `work claim` output gives a human-readable step view
 
 A worker completion report is not a correctness result. Products and gates still control final completion.
 
-The native driver renews active claims and transports messages. The reconciler creates one durable Smalltalk message for each readiness epoch and runtime incarnation.
+The native driver renews active claims and transports messages. The reconciler creates one durable Fractal message for each readiness epoch and runtime incarnation.
 
 A pool message closes when another agent wins the claim. Release or expiry creates a new readiness epoch and a new message.
 
@@ -2163,7 +2172,7 @@ The planner uses this command:
 st launch submit SESSION --variant compact --markdown MISSION.md --kdl mission.kdl
 ```
 
-The session stores the request, feedback, Markdown, and KDL as immutable documents. Smalltalk carries document references, not mutable file paths.
+The session stores the request, feedback, Markdown, and KDL as immutable documents. Fractal carries document references, not mutable file paths.
 
 Each named candidate must contain exactly one ready mission with the requested ID.
 

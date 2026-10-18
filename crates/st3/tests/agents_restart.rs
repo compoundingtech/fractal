@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use st3::WatchesStore;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -265,6 +266,7 @@ impl Fixture {
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
         let state = AppState {
+            owning_person: None,
             store: store.clone(),
             notify,
             event_notify: watch::channel(0).0,
