@@ -19,14 +19,17 @@ const POLICY: &str = "custom.client.assistant.v1.policy";
 
 async fn mcp_call(app: &Router, name: &str, arguments: Value) -> (bool, Value) {
     let response = app.clone().oneshot(Request::builder().method("POST").uri("/mcp")
+        .header("host", "localhost")
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
         .header("mcp-protocol-version", "2025-03-26")
         .body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":name,"arguments":arguments}}).to_string())).unwrap()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::OK, "MCP {name}: {}", String::from_utf8_lossy(&bytes));
+    let result: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| panic!("MCP {name} returned invalid JSON: {error}: {}", String::from_utf8_lossy(&bytes)));
     assert!(result.get("error").is_none(), "{result}");
     let tool = &result["result"];
     let output = serde_json::from_str(tool["content"][0]["text"].as_str().unwrap()).unwrap();
