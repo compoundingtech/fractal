@@ -1226,7 +1226,11 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             otext = Path(opath).read_text()
             pos = _insert_position(otext, cont)
             if pos is not None:
-                line = '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::*;\n' % "::".join(_shared_path(rel, cont))
+                spath = "::".join(_shared_path(rel, cont))
+                line = '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::*;\n' % spath
+                named = sorted({x for u in ns for x in (u.names if u.kind == "macro_call" else ([u.name] if u.name else [])) if u.kind != "impl"})
+                for k in range(0, len(named), 10):
+                    line += '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::{%s};\n' % (spath, ", ".join(named[k : k + 10]))
                 Path(opath).write_text(otext[:pos] + line + otext[pos:])
     for parent, decls in added_decls.items():
         ppath = os.path.join(src_dir, parent)
