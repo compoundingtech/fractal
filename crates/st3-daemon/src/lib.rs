@@ -19,6 +19,7 @@ pub use st3_store::blobs;
 pub use st3_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
 pub use st3_github::changes;
+pub use st3_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
 pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use st3_api::claude_channel;
 pub use st3_store::client;
@@ -101,7 +102,7 @@ pub use st3_telemetry::slo;
 pub use st3_telemetry::slo_history;
 pub use st3_store::startup;
 pub use st3_telemetry::startup_telemetry;
-pub use st3_store::store;
+pub use st3_evidence::store;
 pub mod subagents;
 /// Suspends a quiet seat and resumes its own native session.
 pub use st3_store::suspension;

@@ -4403,7 +4403,7 @@ fn namespaced(namespace: &str, value: &str) -> String {
     }
 }
 
-fn runtime_id(subject: &str) -> String {
+pub fn runtime_id(subject: &str) -> String {
     subject.replace('/', ".")
 }
 

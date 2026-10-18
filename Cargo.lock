@@ -4960,6 +4960,7 @@ dependencies = [
  "st3-api",
  "st3-client",
  "st3-daemon",
+ "st3-evidence",
  "st3-github",
  "st3-kernel",
  "st3-peer",
@@ -5030,6 +5031,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-evidence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-evidence",
+ "st3-kernel",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "st3-feed"
 version = "0.1.0"
 dependencies = [
@@ -5058,8 +5077,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "st3-evidence",
  "st3-github",
- "st3-store",
  "tempfile",
  "tokio",
  "tracing",
