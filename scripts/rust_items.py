@@ -144,7 +144,18 @@ def _leading_meta(s, i, n):
             # a plain or doc block comment in front of an item belongs to it
             i = _skip_block_comment(s, j)
             continue
-        if s.startswith("#[", j) or s.startswith("#![", j):
+        if s.startswith("#![", j):
+            # an inner attribute belongs to the module, not to the next item: what came before it does not either
+            e = _match_delim(s, s.index("[", j))
+            start = e
+            attrs = []
+            i = e
+            while i < n and s[i] in " \t":
+                i += 1
+            if i < n and s[i] == "\n":
+                i += 1
+            continue
+        if s.startswith("#[", j):
             k = s.index("[", j)
             e = _match_delim(s, k)
             attrs.append(s[j:e])

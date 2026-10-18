@@ -673,6 +673,7 @@ def remove_spans(text, spans):
 
 def use_paths(text):
     """The `use` item as (is_pub_prefix_text, [(segments, alias)]) or None if it is not a plain use."""
+    text = re.sub(r"\A(?:\s*//[^\n]*\n|\s*/\*.*?\*/)+", "", text, flags=re.S)
     m = re.match(r"((?:#\[[^\]]*\]\s*)*)(pub(?:\([^)]*\))?\s+)?use\s+(.*?);\s*$", text.strip(), re.S)
     if not m:
         return None
@@ -1045,6 +1046,7 @@ def _resolve_use(segs, base):
 
 
 def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
+    shared_names = {tuple(module_path(r2)): {n.name for n in ns if n.name} for (r2, c2), ns in shares.items() if not c2}
     """The `use` items of the file a shared module is cut from, adjusted to where the module sits: dev
     dependencies dropped, child modules named absolutely, modules that only exist for tests replaced by
     their shared module (or dropped), and names that moved away pruned."""
@@ -1057,6 +1059,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
         if not parsed:
             continue
         attrs, vis, paths = parsed
+        attrs = re.sub(r"#\[cfg\(test\)\]\s*", "", attrs)
         keep = []
         for segs, alias in paths:
             if segs[0] in dev:
@@ -1073,6 +1076,9 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
                         hit = (k, shared_of[tuple(absolute[:k])])
                         break
                 if hit is not None:
+                    leaf = segs[-1]
+                    if leaf != "*" and leaf not in shared_names.get(tuple(absolute[: hit[0]]), set()):
+                        continue  # not extracted: it stays in the cfg(test) module
                     segs = ["crate"] + hit[1] + absolute[hit[0]:]
                 elif any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1]):
                     continue  # exists only for cfg(test)
@@ -1126,7 +1132,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             otext = Path(opath).read_text()
             pos = _insert_position(otext, cont)
             if pos is not None:
-                line = "pub use crate::%s::*;\n" % "::".join(_shared_path(rel, cont))
+                line = '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::*;\n' % "::".join(_shared_path(rel, cont))
                 Path(opath).write_text(otext[:pos] + line + otext[pos:])
     for parent, decls in added_decls.items():
         ppath = os.path.join(src_dir, parent)
