@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Transcript press stories reveal deferred messages before asserting that the full history is mounted. Product tail-first rendering and press-stability assertions are unchanged.",
+  "replay": { "status": "none", "detail": "Story setup only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and fleet coordination are unchanged." },
+  "compatibility": { "status": "none", "detail": "No product, protocol, harness contract, or persisted-state changes." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No manual steps." },
+  "recovery": { "status": "none", "detail": "No persisted-state changes or recovery procedure." }
+}
