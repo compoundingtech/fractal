@@ -63,7 +63,7 @@ impl Store {
             &format!("WHERE mission_runs.mission_id IN ({placeholders}) ORDER BY mission_runs.created_at_unix_ms, mission_runs.id"),
         )).unwrap_or_else(|| MISSION_RUN_HEADER_SELECT.to_owned());
         let mut headers = connection
-            .prepare(&sql)?
+            .prepare(/* sqlite-large-value: allow-for-now lv-h23b95298631d owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &sql)?
             .query_map(
                 rusqlite::params_from_iter(
                     ids.into_iter()
@@ -85,7 +85,7 @@ impl Store {
              FROM step_runs {} ORDER BY created_at_unix_ms, step_path",
             placeholders.as_ref().map(|p| format!("WHERE generation_id IN (SELECT current_generation_id FROM mission_runs WHERE mission_id IN ({p}))")).unwrap_or_default(),
         );
-        let mut steps = connection.prepare(&steps_sql)?;
+        let mut steps = connection.prepare(/* sqlite-large-value: allow-for-now lv-h5408b74c22ee owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &steps_sql)?;
         for row in steps.query_map(
             rusqlite::params_from_iter(
                 ids.into_iter()
@@ -118,7 +118,7 @@ impl Store {
         let index = selected_index(current_index(&connection)?, Some(index)).map_err(anyhow::Error::new)?;
         let names = match names {
             Some(names) => names.clone(),
-            None => connection.prepare_cached(RANGE_SUBJECTS)?
+            None => connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h38a0aa38048b owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                 .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
@@ -158,7 +158,7 @@ impl Store {
     pub fn discard_desired_owned_by(&self, owner_run: &str) -> Result<usize> {
         let connection = self.connection.write();
         connection
-            .execute("DELETE FROM desired WHERE owner_run=?1", [owner_run])
+            .execute(/* sqlite-large-value: allow-for-now lv-hbd2926fa2f28 owner=st3_store::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1", [owner_run])
             .map_err(Into::into)
     }
 
@@ -490,7 +490,7 @@ impl Store {
         include_resolved: bool,
     ) -> Result<Vec<AttentionRequestView>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h5bc319a738ba owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT DISTINCT subject FROM claims
              WHERE kind='attention.requested'
                AND (?1 IS NULL OR json_extract(body, '$.fields.reviewer')=?1)
@@ -516,7 +516,7 @@ impl Store {
         origin: &str,
     ) -> Result<Vec<AttentionRequestView>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h76874e833d7f owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT request.subject FROM claims request
              WHERE request.kind='attention.requested'
                AND request.actor=?1
@@ -735,7 +735,7 @@ impl Store {
             if item.episode.is_empty() {
                 item.episode = connection
                     .query_row(
-                        &canonical_sql(
+                        /* sqlite-large-value: allow-for-now lv-hc25a6bfb7d4a owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                             "SELECT id FROM claims WHERE subject=?1
                     ORDER BY CANONICAL_DESC(claims) LIMIT 1",
                         ),
@@ -777,7 +777,7 @@ impl Store {
     ) -> Result<Option<UsageSummary>> {
         let connection = self.readers.get();
         let at_index = at_index.unwrap_or(i64::MAX as u64);
-        let mut statement = connection.prepare(&canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h48e52025d201 owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT store_index, body, accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND kind='harness.usage' AND store_index<=?2
              ORDER BY CANONICAL_ASC(claims)",
@@ -851,7 +851,7 @@ impl Store {
                  ORDER BY subject, length(accepted_at_unix_ms), accepted_at_unix_ms",
                 at_index.unwrap_or(i64::MAX as u64)
             );
-            let mut statement = connection.prepare(&sql)?;
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h3df94f99fd99 owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(chunk), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1039,7 +1039,7 @@ impl Store {
 fn human_review_refusal_tx(connection: &Connection, owner: &str) -> Result<String> {
     let request = connection
         .query_row(
-            &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-hc6f25cba3edd owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT request.id, request.store_index, request.batch_id, request.subject,
                         request.kind, request.origin, request.actor, request.body,
                         request.predecessors, request.accepted_at_unix_ms
@@ -1152,7 +1152,7 @@ fn attention_closing_step(
 fn attention_target_state_tx(connection: &Connection, target: &str) -> Result<Option<TargetState>> {
     let row = |sql: &str, id: &str| -> Result<Option<TargetState>> {
         connection
-            .query_row(sql, [id], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h9963f9f25bfc owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ sql, [id], |row| {
                 let since = row.get::<_, String>(1)?;
                 Ok((row.get::<_, String>(0)?, since.parse().ok()))
             })
@@ -1461,7 +1461,7 @@ fn pending_human_reviews_tx(
     reviewer: Option<&str>,
 ) -> Result<Vec<HumanReviewView>> {
     let requests = {
-        let mut statement = connection.prepare(&canonical_sql(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4073ad76bfec owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT request.id, request.store_index, request.batch_id, request.subject,
                     request.kind, request.origin, request.actor, request.body,
                     request.predecessors, request.accepted_at_unix_ms
@@ -1509,7 +1509,7 @@ fn attention_request_view_tx(
 ) -> Result<Option<AttentionRequestView>> {
     let requested = connection
         .query_row(
-            &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-h4726b2e3970a owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
                     predecessors, accepted_at_unix_ms
              FROM claims WHERE subject=?1 AND kind='attention.requested'
@@ -1524,7 +1524,7 @@ fn attention_request_view_tx(
     };
     let resolved = connection
         .query_row(
-            &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-h276083b6dae1 owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
                     predecessors, accepted_at_unix_ms
              FROM claims WHERE subject=?1 AND kind='attention.resolved'
@@ -1639,7 +1639,7 @@ fn pull_request_state_tx(connection: &Connection, target: &str) -> Result<Option
     }
     let observed = connection
         .query_row(
-            &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-h0dbfd66abdd8 owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND kind='resource.observed'
              ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",

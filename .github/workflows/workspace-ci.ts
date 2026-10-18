@@ -527,16 +527,30 @@ export const fractalWebStoreCache = {
   key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
 } as const
 
+/**
+ * The web lane's devShell closure and `print-dev-env` script (scripts/ci-web-shell), so the job
+ * neither fetches and evaluates the flake's inputs nor builds the shell's local tools. The key names
+ * every file `.#web` is built from; main upkeep fills it and a pull request that misses fills its own.
+ */
+export const fractalWebShellEnv = { CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell' } as const
+export const fractalWebShellCache = {
+  path: fractalWebShellEnv.CI_WEB_SHELL_DIR,
+  key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}",
+} as const
+
 const embeddedPython = (script: string) =>
   `python3 - <<'PY'\n${readFileSync(new URL(`../../scripts/${script}`, import.meta.url), 'utf8')}\nPY`
 
-// SHA-256(story ID) modulo this count; increasing it does not depend on index order.
+// SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
+// full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
+// per-commit set unsharded on shard 0.
 const kitShardCount = 2
+const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
 
 /**
  * The path-sensitive fractal-web gate always runs on GitHub-hosted capacity. Detection
- * needs no checkout; the gate checks out only to aggregate kit receipts. Execution runs
- * after generated files are fresh. Workflow path filters would leave required checks pending.
+ * needs no checkout; the gate checks out only to aggregate sharded kit receipts. Execution
+ * runs after generated files are fresh. Workflow path filters would leave checks pending.
  */
 export const fractalWebJobs = {
   'fractal-web-changes': {
@@ -566,7 +580,7 @@ export const fractalWebJobs = {
     name: 'fractal-web-execution',
     strategy: {
       'fail-fast': false,
-      matrix: `\${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
+      matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness'],
     if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
@@ -578,19 +592,28 @@ export const fractalWebJobs = {
       { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
+      { name: 'Restore the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: fractalWebShellCache },
       {
-        ...nixDevelopStep({ name: 'Run the fractal-web lanes and dependency license check', flake: '.#web', command: ['bash', 'scripts/ci-fractal-web'] }),
+        name: 'Run the fractal-web lanes and dependency license check',
+        shell: 'bash',
+        // Falls back to `nix develop .#web` when the closure is not cached.
+        run: 'bash scripts/ci-web-shell run bash scripts/ci-fractal-web',
         env: {
           ...pnpmStoreEnv,
+          ...fractalWebShellEnv,
           KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
           KIT_SHARD_INDEX: '${{ matrix.shard }}',
-          KIT_SHARD_COUNT: String(kitShardCount),
+          KIT_SHARD_COUNT: `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`,
           KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
-          // Pull requests run the stories tagged critical without axe, within the 7-minute budget;
-          // merge groups (observed and signed) and manual runs keep every story with axe.
-          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'critical' || 'all' }}",
+          // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
+          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
+          // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
+          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}",
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
-          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '420' || '' }}",
+          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
+          // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
+          // placed in the import graph); merge groups and manual runs run every test file.
+          APP_TEST_SET: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
@@ -605,6 +628,11 @@ export const fractalWebJobs = {
           'if-no-files-found': 'ignore',
         },
       },
+      // Only a pull request can read what it saves; merge groups wait for main upkeep's entry.
+      ...[
+        { name: 'Fill the web shell closure', shell: 'bash', run: 'bash scripts/ci-web-shell fill', env: fractalWebShellEnv },
+        { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
+      ].map((step) => ({ ...step, 'continue-on-error': true, if: "${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}" })),
     ],
   },
   'fractal-web': {
@@ -628,18 +656,18 @@ export const fractalWebJobs = {
       // A successful matrix result alone cannot prove all expected shards ran.
       {
         uses: 'actions/checkout@v4',
-        if: "needs.fractal-web-changes.outputs.kit-inputs == 'true' && needs.fractal-web-changes.outputs.relevant == 'true'",
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
         with: { 'persist-credentials': false },
       },
       {
         uses: 'actions/download-artifact@v4',
-        if: "needs.fractal-web-changes.outputs.kit-inputs == 'true' && needs.fractal-web-changes.outputs.relevant == 'true'",
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
         // Include older attempts only from this exact run/head, for rerun-failed-jobs.
         with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
       },
       {
         name: 'Require every kit shard and exact full-index coverage',
-        if: "needs.fractal-web-changes.outputs.kit-inputs == 'true' && needs.fractal-web-changes.outputs.relevant == 'true'",
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
         run: `node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" ${kitShardCount}`,
       },
     ],

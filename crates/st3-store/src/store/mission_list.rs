@@ -257,7 +257,7 @@ impl Store {
     ) -> Result<HashMap<String, MissionKey>> {
         let ended_since = now.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&mission_keys_sql(selected.is_some()))?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb17b2c8443e1 owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ &mission_keys_sql(selected.is_some()))?;
         let read = |row: &rusqlite::Row<'_>| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -323,7 +323,7 @@ impl Store {
         let mut requesters = BTreeSet::new();
         let mut every_ask = false;
         let mut tree_roots = BTreeSet::new();
-        let mut statement = connection.prepare_cached(published_list::CLAIMS_SINCE)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he2b1a24ddc2b owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ published_list::CLAIMS_SINCE)?;
         let claims = statement
             .query_map(params![after, through], |row| {
                 Ok((
@@ -347,7 +347,7 @@ impl Store {
             } else if let Some(generation) = subject.strip_prefix("run-generation/") {
                 let mut owner = connection
                     .prepare_cached("SELECT run_id FROM run_generations WHERE id=?1")?;
-                if let Some(run) = owner.query_row([generation], |row| row.get::<_, String>(0)).optional()? {
+                if let Some(run) = owner.query_row(/* sqlite-large-value: allow-for-now lv-h226206199753 owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ [generation], |row| row.get::<_, String>(0)).optional()? {
                     runs.insert(run);
                 }
             } else if let Some(proposal) = subject.strip_prefix("revision-proposal/") {
@@ -386,7 +386,7 @@ impl Store {
         if !steps.is_empty() {
             let mut owner = connection.prepare_cached("SELECT run_id FROM step_runs WHERE subject=?1")?;
             for step in &steps {
-                if let Some(run) = owner.query_row([step], |row| row.get::<_, String>(0)).optional()? {
+                if let Some(run) = owner.query_row(/* sqlite-large-value: allow-for-now lv-hedd2b83f61ba owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ [step], |row| row.get::<_, String>(0)).optional()? {
                     runs.insert(run);
                 }
             }
@@ -394,7 +394,7 @@ impl Store {
         if !runs.is_empty() {
             let mut owner = connection.prepare_cached("SELECT mission_id FROM mission_runs WHERE id=?1")?;
             for run in &runs {
-                if let Some(mission) = owner.query_row([run], |row| row.get::<_, String>(0)).optional()? {
+                if let Some(mission) = owner.query_row(/* sqlite-large-value: allow-for-now lv-h77a1790a7941 owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ [run], |row| row.get::<_, String>(0)).optional()? {
                     changes.missions.insert(format!("mission/{mission}"));
                 }
             }
@@ -443,7 +443,7 @@ impl Store {
                 "SELECT MIN(CAST(lease_expires_at_unix_ms AS INTEGER)) FROM step_runs INDEXED BY step_runs_lease_index
                  WHERE lease_owner IS NOT NULL AND CAST(lease_expires_at_unix_ms AS INTEGER)>?1",
             )?
-            .query_row([now.min(i64::MAX as u128) as i64], |row| row.get::<_, Option<i64>>(0))?;
+            .query_row(/* sqlite-large-value: allow-for-now lv-hfdf5fd056a6c owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ [now.min(i64::MAX as u128) as i64], |row| row.get::<_, Option<i64>>(0))?;
         Ok(end.map(|end| end.max(0) as u128))
     }
 
@@ -458,7 +458,7 @@ impl Store {
         )?;
         let mut missions = BTreeSet::new();
         for step in steps {
-            if let Some(mission) = owner.query_row([step], |row| row.get::<_, String>(0)).optional()? {
+            if let Some(mission) = owner.query_row(/* sqlite-large-value: allow-for-now lv-h9ff02b48dea5 owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ [step], |row| row.get::<_, String>(0)).optional()? {
                 missions.insert(format!("mission/{mission}"));
             }
         }
@@ -476,7 +476,7 @@ impl Store {
         let mut missions = BTreeSet::new();
         for run in runs {
             let run = run.strip_prefix("mission-run/").unwrap_or(run);
-            if let Some(mission) = owner.query_row([run], |row| row.get::<_, String>(0)).optional()? {
+            if let Some(mission) = owner.query_row(/* sqlite-large-value: allow-for-now lv-hf5402e29c8ec owner=st3_store::store::mission_list TODO=trace-statement-and-value-representation */ [run], |row| row.get::<_, String>(0)).optional()? {
                 missions.insert(format!("mission/{mission}"));
             }
         }

@@ -3,7 +3,7 @@ use super::*;
 
 const VERSION: &str = "2";
 const PENDING_TRIGGER_VERSION: &str = "1";
-const SCHEMA: &str = r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2dcde0d09444 owner=st3_store::store::resources TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS resource_observations (
     subject TEXT PRIMARY KEY,
     claim_id TEXT NOT NULL,
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS local_resource_projection_pending (subject TEXT PRIMA
 
 // The existence probes use the pending subject primary key. Avoiding the duplicate INSERT
 // entirely also works when the statement firing a trigger has its own conflict policy.
-const PENDING_TRIGGERS: &str = r#"
+const PENDING_TRIGGERS: &str = /* sqlite-large-value: allow-for-now lv-h30d37eb1beba owner=st3_store::store::resources TODO=chunk-or-reference-exact-wire-values */ r#"
 CREATE TRIGGER IF NOT EXISTS resource_observations_insert AFTER INSERT ON claims
 WHEN NEW.kind='resource.observed' BEGIN
     INSERT INTO local_resource_projection_pending(subject)
@@ -56,21 +56,21 @@ END;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection
-        .execute_batch(SCHEMA)
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h779f237a93cd owner=st3_store::store::resources TODO=trace-statement-and-value-representation */ SCHEMA)
         .context("creating resource observation projection")?;
     connection
-        .execute_batch(PENDING_TRIGGERS)
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h94554c54e1a7 owner=st3_store::store::resources TODO=trace-statement-and-value-representation */ PENDING_TRIGGERS)
         .context("creating resource observation pending triggers")
 }
 
 fn replace_pending_triggers(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
-        "DROP TRIGGER IF EXISTS resource_observations_insert;
+        /* sqlite-large-value: allow-for-now lv-h88d24c2f2330 owner=st3_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS resource_observations_insert;
          DROP TRIGGER IF EXISTS resource_observations_delete;
          DROP TRIGGER IF EXISTS resource_observations_record_insert;
          DROP TRIGGER IF EXISTS resource_observations_record_update;",
     )?;
-    transaction.execute_batch(PENDING_TRIGGERS)?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h56f713ec4b70 owner=st3_store::store::resources TODO=trace-statement-and-value-representation */ PENDING_TRIGGERS)?;
     Ok(())
 }
 
@@ -87,7 +87,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
         // Replace all four with their marker in the same opening transaction.
         replace_pending_triggers(transaction)?;
         transaction.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_pending_trigger_version',?1)",
+            /* sqlite-large-value: allow-for-now lv-h320204d8830c owner=st3_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_pending_trigger_version',?1)",
             [PENDING_TRIGGER_VERSION],
         )?;
     }
@@ -101,7 +101,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     if version.as_deref() != Some(VERSION) {
         rebuild(transaction)?;
         transaction.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_observations_version',?1)",
+            /* sqlite-large-value: allow-for-now lv-h6d0d9c02a140 owner=st3_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_observations_version',?1)",
             [VERSION],
         )?;
     } else {
@@ -111,8 +111,8 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute("DELETE FROM resource_observations", [])?;
-    transaction.execute("INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h9e09207b7cab owner=st3_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_observations", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h604b83586d9a owner=st3_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'", [])?;
     flush(transaction)
 }
 
@@ -189,7 +189,7 @@ pub fn merge_observation(
 }
 
 pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
-    let claim = transaction.query_row(&canonical_sql(
+    let claim = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h19d5fdaeb0fe owner=st3_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id, body, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed'
          AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"), [subject],
@@ -204,7 +204,7 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         let mut facts = resource_facts(&fields).map_err(anyhow::Error::new)?;
         if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener) {
             let first_opener = transaction.query_row(
-                &format!("SELECT body FROM claims WHERE subject=?1 AND kind='resource.observed'
+                /* sqlite-large-value: allow-for-now lv-h78a3305910ae owner=st3_store::store::resources TODO=trace-statement-and-value-representation */ &format!("SELECT body FROM claims WHERE subject=?1 AND kind='resource.observed'
                     AND (COALESCE(json_extract(body, '$.fields.facts.opened_by'), json_extract(body, '$.fields.opened_by')) IS NOT NULL
                          OR COALESCE(json_extract(body, '$.fields.facts.opened_by_run'), json_extract(body, '$.fields.opened_by_run')) IS NOT NULL)
                     AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
@@ -234,7 +234,7 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
             .context("resource observation timestamp outside supported range")?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         transaction.execute(
-            "INSERT INTO resource_observations(subject,claim_id,kind,facts,observed_at,opened_by,opened_by_run)
+            /* sqlite-large-value: allow-for-now lv-ha66d2e9c66c1 owner=st3_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_observations(subject,claim_id,kind,facts,observed_at,opened_by,opened_by_run)
              VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(subject) DO UPDATE SET
              claim_id=excluded.claim_id,kind=excluded.kind,facts=excluded.facts,observed_at=excluded.observed_at,
              opened_by=excluded.opened_by,opened_by_run=excluded.opened_by_run",
@@ -243,12 +243,12 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         )?;
     } else {
         transaction.execute(
-            "DELETE FROM resource_observations WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-hab99d1dd32e1 owner=st3_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_observations WHERE subject=?1",
             [subject],
         )?;
     }
     transaction.execute(
-        "DELETE FROM local_resource_projection_pending WHERE subject=?1",
+        /* sqlite-large-value: allow-for-now lv-h02cdef560612 owner=st3_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_projection_pending WHERE subject=?1",
         [subject],
     )?;
     Ok(())
@@ -364,7 +364,7 @@ impl Store {
         values.push(i64::try_from(limit)?.into());
         let connection = self.readers.get();
         connection
-            .prepare(&query)?
+            .prepare(/* sqlite-large-value: allow-for-now lv-h76ffb43e0289 owner=st3_store::store::resources TODO=trace-statement-and-value-representation */ &query)?
             .query_map(rusqlite::params_from_iter(values), |row| {
                 Ok((
                     row.get::<_, String>(0)?,

@@ -86,7 +86,7 @@ pub fn add_evidence(
 }
 
 fn message_sent(connection: &Connection, subject: &str) -> Result<ClaimRecord, St3Error> {
-    connection.query_row(&canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='message.sent' ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [subject], claim_from_row)
+    connection.query_row(/* sqlite-large-value: allow-for-now lv-he814e59cf457 owner=st3_store::store::delegation TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='message.sent' ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [subject], claim_from_row)
         .optional().map_err(internal)?.ok_or_else(|| denied("instruction and target messages need an original sent claim"))
 }
 
@@ -134,7 +134,7 @@ pub fn validate_write(
             "a delegated action records an agent actor and the person acted for",
         ));
     }
-    let policy = tx.query_row(&canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='person.delegation-set' ORDER BY CANONICAL_DESC(claims) LIMIT 1"), [&proof.person], claim_from_row)
+    let policy = tx.query_row(/* sqlite-large-value: allow-for-now lv-h743ec088d6c1 owner=st3_store::store::delegation TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='person.delegation-set' ORDER BY CANONICAL_DESC(claims) LIMIT 1"), [&proof.person], claim_from_row)
         .optional().map_err(internal)?.ok_or_else(|| denied("the person has no delegation policy"))?;
     if policy.id != proof.policy || policy.actor.as_deref() != Some(&proof.person) {
         return Err(denied(
