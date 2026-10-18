@@ -2059,57 +2059,81 @@ def cmd_inventory(args):
 
 
 def _unused_imports(cmd, crate):
-    """{(file, start, end)} of the `unused_imports` warnings one compilation of `crate` reports."""
+    """({lib}, {test}) sets of (file, start, end) for the `unused_imports` warnings one `cargo test --no-run`
+    of `crate` reports, split by the unit that reported them. The library is built the way its tests build
+    it (with the test-support feature), which is also how the workspace builds it. A unit's messages come
+    just before its artifact, whose profile says whether it is the test unit."""
     out = subprocess.run(cmd, capture_output=True, text=True).stdout
-    found = set()
+    lib, test, pending = set(), set(), set()
     for line in out.split("\n"):
         try:
             m = json.loads(line)
         except ValueError:
             continue
-        if m.get("reason") != "compiler-message":
+        if crate not in m.get("package_id", "").replace("#", "/"):
             continue
-        d = m["message"]
-        if (d.get("code") or {}).get("code") != "unused_imports" or crate not in m.get("package_id", "").replace("#", "/"):
-            continue
-        for sp in d["spans"]:
-            if sp["is_primary"]:
-                found.add((sp["file_name"], sp["byte_start"], sp["byte_end"]))
-    return found
+        if m.get("reason") == "compiler-message":
+            d = m["message"]
+            if (d.get("code") or {}).get("code") == "unused_imports":
+                for sp in d["spans"]:
+                    if sp["is_primary"]:
+                        pending.add((sp["file_name"], sp["byte_start"], sp["byte_end"]))
+        elif m.get("reason") == "compiler-artifact" and m["target"]["kind"] == ["lib"]:
+            (test if m["profile"]["test"] else lib).update(pending)
+            pending = set()
+    return lib, test
+
+
+def _uses_with_context(text, items, in_test):
+    """Every `use` item of a file, nested inline modules included, with whether it sits in test-only code."""
+    for it in items:
+        if it.kind == "use":
+            yield it, in_test
+        elif it.kind == "mod" and it.body:
+            yield from _uses_with_context(text, ri.parse_items(text, it.body[0], it.body[1]), in_test or it.cfg_test)
 
 
 def cmd_imports(args):
     """Remove the imports nothing uses. `cargo fix` removes an import that only test code uses (the library
-    build has no use for it); this removes what both the library and its test build leave unused, and gates
-    with `#[cfg(test)]` what only the library build does."""
+    build has no use for it); this removes what both the library and its test build leave unused, gates
+    with `#[cfg(test)]` what only the library build does, and removes what the test build leaves unused in
+    code the library never compiles (test-only files and `#[cfg(test)]` modules)."""
     for crate in [c for c in args.crates.split(",") if c]:
-        lib = _unused_imports(["cargo", "check", "-p", crate, "--lib", "--message-format=json"], crate.replace("-", "_") if False else crate)
-        test = _unused_imports(["cargo", "test", "-p", crate, "--lib", "--no-run", "--message-format=json"], crate)
+        lib, test = _unused_imports(["cargo", "test", "-p", crate, "--lib", "--no-run", "--message-format=json"], crate)
+        src = "crates/%s/src" % crate
+        parsed = {os.path.join(src, rel): (open(os.path.join(src, rel)).read(),) for rel in module_files(src)}
+        parsed = {f: (t[0], ri.parse(t[0])) for f, t in parsed.items()}
+        test_files = {os.path.join(src, rel) for rel in test_file_set({os.path.relpath(f, src): v for f, v in parsed.items()})}
         remove = lib & test
         gate = lib - test
-        by_file = collections.defaultdict(lambda: ([], []))
+        by_file = collections.defaultdict(lambda: ([], [], []))
         for f, a, b in remove:
             by_file[f][0].append((a, b))
         for f, a, b in gate:
             by_file[f][1].append((a, b))
-        for f, (rem, gat) in by_file.items():
+        for f, a, b in test - lib:
+            by_file[f][2].append((a, b))
+        removed = gated_total = 0
+        for f, (rem, gat, tonly) in by_file.items():
             raw = Path(f).read_bytes()
             text = raw.decode()
             def cspan(a, b):
                 return len(raw[:a].decode()), len(raw[:b].decode())
             rem_c = [cspan(a, b) for a, b in rem]
             gat_c = [cspan(a, b) for a, b in gat]
+            tonly_c = [cspan(a, b) for a, b in tonly]
+            file_in_test = f in test_files or bool(TEST_FILE.search(f))
             edits = []
-            for it in ri.parse(text):
-                if it.kind != "use":
+            for it, in_test in _uses_with_context(text, ri.parse(text), file_in_test):
+                parsed_use = use_paths(it.text)
+                if not parsed_use:
                     continue
-                parsed = use_paths(it.text)
-                if not parsed:
-                    continue
-                attrs, vis, paths = parsed
+                attrs, vis, paths = parsed_use
                 code = ri._leading_meta(text, it.start, len(text))[1]
                 inside = lambda spans: [(a, b) for a, b in spans if it.start <= a and b <= it.end]
                 r, g = inside(rem_c), inside(gat_c)
+                if in_test:
+                    r += inside(tonly_c)
                 if not r and not g:
                     continue
 
@@ -2123,16 +2147,20 @@ def cmd_imports(args):
                 keep, gated = [], []
                 for segs, alias in paths:
                     if flagged(segs, alias, r):
-                        continue
-                    (gated if flagged(segs, alias, g) else keep).append((segs, alias))
+                        removed += 1
+                    elif flagged(segs, alias, g):
+                        gated.append((segs, alias))
+                    else:
+                        keep.append((segs, alias))
                 new = render_use(attrs, vis, keep) if keep else ""
                 if gated:
                     new = (new + "\n" if new else "") + render_use("#[cfg(test)]\n" + attrs, vis, gated)
+                    gated_total += len(gated)
                 edits.append((code, it.end, new))
             for a, b, rep in sorted(edits, reverse=True):
                 text = text[:a] + rep + text[b:]
             Path(f).write_text(text)
-        print("%s: removed %d, gated %d unused imports" % (crate, len(remove), len(gate)))
+        print("%s: removed %d, gated %d unused imports" % (crate, removed, gated_total))
     return 0
 
 
