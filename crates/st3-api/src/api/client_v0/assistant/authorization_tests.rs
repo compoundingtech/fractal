@@ -262,9 +262,13 @@ async fn assistant_final_delivery_denials_leave_durable_receipts() {
         let payload=fixture.payload("summary","");
         let mut headers=HeaderMap::new();
         headers.insert(HEADER,fixture.header(&payload,&fixture.attestor).parse().unwrap());
+        let context = response_body::Context {
+            state: fixture.state.clone(), client_request: true, observation_report: false,
+            request_id: "request/test".into(), client_snapshot: None, server: None, roster: false,
+        };
         let (Extension(mut receipt),_,Json(value))=read_inner(State(fixture.state.clone()),
             Extension(fixture.session()),Extension(new_client_snapshot(&fixture.state)),
-            OriginalUri("/v1/client/assistant/summary".parse().unwrap()),headers).await.unwrap();
+            OriginalUri("/v1/client/assistant/summary".parse().unwrap()),headers,&context).await.unwrap();
         match reason {
             "expiry"=>receipt.proof_expiry=1,
             "policy"=>{let _=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
@@ -551,4 +555,77 @@ async fn assistant_rich_cursors_cannot_disclose_content_through_another_grants_m
 #[tokio::test]
 async fn assistant_rich_cursors_cannot_disclose_content_after_read_mode_change() {
     projection_cursor_isolation(true).await;
+}
+
+#[tokio::test]
+async fn assistant_alert_pages_fit_the_envelope_for_default_and_explicit_limits() {
+    for budget in [DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES] {
+        let mut fixture = fixture(SCOPES, true).await;
+        let intent = crate::graph::parse_internal_intent(
+            r#"version 2
+agent "worker" { workspace "/tmp"; command "true"; restart always; }
+"#, "budget-fixture").unwrap();
+        fixture.state.store.apply_internal(&intent, "budget-fixture").unwrap();
+        for index in 0..6 {
+            fixture.state.store.ask_person(&serde_json::from_value(json!({
+                "person":OWNER, "actor":"agent/budget-fixture.worker",
+                "title":format!("alert {index}: {}", "a".repeat(if budget == DEFAULT_RESPONSE_BYTES { 600 + index * 40 } else { 2400 + index * 100 })),
+                "reason":"b".repeat(if budget == DEFAULT_RESPONSE_BYTES { 300 } else { 1000 }), "new_run":format!("budget-{index}"),
+                "idempotency_key":format!("budget-{index}")
+            })).unwrap()).unwrap();
+        }
+        for mode in ["approval-once", "caller-bound-allow"] {
+            projection_read_mode(&mut fixture, mode).await;
+            let first_query = "?max_response_bytes=16384&limit=1";
+            let payload = fixture.payload("attention-rich", first_query);
+            let header = fixture.header(&payload, &fixture.attestor);
+            let (status, first, _) = fixture.request(
+                &format!("/v1/client/assistant/attention-rich{first_query}"),
+                (mode == "approval-once").then_some(header.as_str()),
+            ).await;
+            assert_eq!(status, StatusCode::OK, "{first}");
+            let cursor = decode_client_cursor(first["value"]["page"]["next_cursor"].as_str().unwrap()).unwrap();
+            for (limit, offset) in [
+                (0, 1), (CLIENT_MAX_PAGE_ITEMS + 1, 1), (usize::MAX, 1),
+                (1, 6), (1, 7), (1, usize::MAX), (usize::MAX, usize::MAX),
+            ] {
+                let mut invalid = cursor.clone();
+                invalid.limit = limit;
+                invalid.offset = offset;
+                let encoded = encode_client_cursor(&invalid).unwrap();
+                let query = format!("?max_response_bytes=1024&cursor={}", urlencoding::encode(&encoded));
+                let payload = fixture.payload("attention-rich", &query);
+                let header = fixture.header(&payload, &fixture.attestor);
+                let (status, value, _) = fixture.request(
+                    &format!("/v1/client/assistant/attention-rich{query}"),
+                    (mode == "approval-once").then_some(header.as_str()),
+                ).await;
+                assert_eq!(status, StatusCode::GONE, "{mode}, limit={limit}, offset={offset}: {value}");
+                assert_eq!(value["code"], "page-cursor-expired", "{value}");
+                assert!(value.get("value").is_none(), "{value}");
+            }
+            for limit in ["", "&limit=5", "&limit=20"] {
+                let mut query = format!("?max_response_bytes={budget}{limit}");
+                let mut ids = BTreeSet::new();
+                loop {
+                    let payload = fixture.payload("attention-rich", &query);
+                    let header = fixture.header(&payload, &fixture.attestor);
+                    let (status, value, bytes) = fixture.request(
+                        &format!("/v1/client/assistant/attention-rich{query}"),
+                        (mode == "approval-once").then_some(header.as_str()),
+                    ).await;
+                    assert_eq!(status, StatusCode::OK, "{mode}, {budget}, {limit}: {value}");
+                    assert!(bytes <= budget, "{bytes} > {budget}");
+                    let items = value["value"]["items"].as_array().unwrap();
+                    assert!(!items.is_empty());
+                    for item in items {
+                        assert!(ids.insert(item["id"].as_str().unwrap().to_owned()), "duplicate: {item}");
+                    }
+                    let Some(cursor) = value["value"]["page"]["next_cursor"].as_str() else { break };
+                    query = format!("?max_response_bytes={budget}&cursor={}", urlencoding::encode(cursor));
+                }
+                assert_eq!(ids.len(), 6, "{mode}, {budget}, {limit}");
+            }
+        }
+    }
 }

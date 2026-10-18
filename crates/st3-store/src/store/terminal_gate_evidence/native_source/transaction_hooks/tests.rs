@@ -12,7 +12,7 @@ type Saved = (Root, (i64, bool, Option<String>, bool), String, String);
 
 struct Fixture {
     adapter: Arc<Adapter>,
-    store: Store,
+    pub store: Store,
     dir: tempfile::TempDir,
 }
 fn binding() -> Binding {
