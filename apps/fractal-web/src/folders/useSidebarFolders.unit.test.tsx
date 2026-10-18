@@ -48,7 +48,7 @@ const mount = async ({ items: startingItems = [initial()], editable = true }: { 
     collectionStream: async (options) => {
       streamOptions = options
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
     },
     actions: {
       snapshot: Effect.sync(() => `snapshot/fresh/${++snapshots}`),
@@ -95,6 +95,20 @@ const mount = async ({ items: startingItems = [initial()], editable = true }: { 
     close: () => { flushSync(() => root.unmount()); registry.dispose(); container.remove(); expect(closes).toBe(1) },
   }
 }
+
+it('retains arrangement and binding identity on unrelated renders, but observes changed inputs', async () => {
+  const h = await mount()
+  try {
+    const before = h.binding()
+    h.updateRoster(seats)
+    expect(h.binding()).toBe(before)
+    expect(h.binding().orderingTree).toBe(before.orderingTree)
+    h.query('example')
+    expect(h.binding().orderingTree).toBe(before.orderingTree)
+    h.updateRoster([...seats, { id: 'gamma.other', subject: 'agent/other', host: 'gamma', label: 'Other' }])
+    expect(h.binding().orderingTree).not.toBe(before.orderingTree)
+  } finally { h.close() }
+})
 
 it('Optimistic move rolls back with fixed refusal reasons on every seat row', async () => {
   const h = await mount()
@@ -316,6 +330,9 @@ it('Hook rename, delete, collapse and search callbacks work without the kit or d
     expect(h.requests).toHaveLength(0)
     h.query('Example')
     expect(h.binding().tree).toHaveLength(1)
+    expect(h.binding().tree[0]).toMatchObject({ collapsed: false })
+    flushSync(() => h.binding().onToggleCollapsed({ id: a, collapsed: false }))
+    expect(h.binding().orderingTree[0]).toMatchObject({ collapsed: true })
     flushSync(() => h.binding().onRenameFolder({ id: a, name: 'Renamed' }))
     await vi.waitFor(() => expect(h.registry.get(h.source).doc.folders[a]?.name?.value).toBe('Renamed'))
     await vi.waitFor(() => expect(h.registry.get(h.source).phase).toBe('synced'))
@@ -323,9 +340,10 @@ it('Hook rename, delete, collapse and search callbacks work without the kit or d
     await vi.waitFor(() => expect(h.registry.get(h.source).doc.folders[a]?.deleted).toBeDefined())
     await vi.waitFor(() => expect(h.registry.get(h.source).phase).toBe('synced'))
     expect(h.registry.get(h.source).doc.placements['agent/example']?.folder).toBe(a)
-    expect(h.binding().tree.map((node) => node.id)).toEqual(['host:alpha', 'host:beta'])
-    flushSync(() => h.binding().onToggleCollapsed({ id: 'host:alpha', collapsed: true }))
-    expect(h.binding().tree[0]).toMatchObject({ collapsed: true })
+    expect(h.binding().tree.map((node) => node.id)).toEqual(['wf/unfiled'])
+    h.query('')
+    flushSync(() => h.binding().onToggleCollapsed({ id: 'wf/unfiled', collapsed: true }))
+    expect(h.binding().tree.find(node => node.id === 'wf/unfiled')).toMatchObject({ collapsed: true })
     expect(storage).not.toHaveBeenCalled()
     storage.mockRestore()
   } finally { h.close() }
