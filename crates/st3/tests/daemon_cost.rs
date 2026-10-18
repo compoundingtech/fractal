@@ -36,6 +36,7 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+use st3::{GitChangesStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -199,6 +200,25 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     // Pairing and fleet membership change who may talk to the daemon; their tests cover them.
     ("POST /v1/client/pairings", "pairs a device"),
     ("POST /v1/client/pairings/{id}/complete", "pairs a device"),
+    ("GET /v1/client/assistant/grants/{id}", "requires trusted-local owner provenance and an issued grant; assistant tests cover indexed grant inspection"),
+    ("POST /v1/client/assistant/grants/{id}/policy", "changes owner-issued assistant permissions; assistant tests cover policy history and consent"),
+    ("POST /v1/client/assistant/grants/{id}/revoke", "revokes owner-issued assistant permissions; assistant tests cover exact revocation"),
+    ("POST /v1/client/assistant/grants/{id}/read-trust", "changes owner-issued per-read approval policy; assistant authorization tests cover consent and revocation"),
+    ("GET /v1/client/assistant/grants/assistant-grant/{id}", "prefixed-ID alias of trusted-local owner grant inspection; requires an issued grant"),
+    ("POST /v1/client/assistant/grants/assistant-grant/{id}/policy", "prefixed-ID alias of low-frequency trusted-local owner policy administration"),
+    ("POST /v1/client/assistant/grants/assistant-grant/{id}/revoke", "prefixed-ID alias of low-frequency trusted-local owner grant revocation"),
+    ("POST /v1/client/assistant/grants/assistant-grant/{id}/read-trust", "prefixed-ID alias of low-frequency trusted-local owner read-trust administration"),
+    ("POST /v1/client/assistant/propose", "requires a paired assistant, a current grant and an owner-approved native action; assistant_native tests cover transactional authorization"),
+    ("GET /v1/client/assistant/attention-content", "requires a paired assistant and an exact owner alert; assistant_native tests cover bounded disclosure"),
+    ("GET /v1/client/assistant/attention-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
+    ("GET /v1/client/assistant/missions-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
+    ("GET /v1/client/assistant/agents-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
+    ("GET /v1/client/assistant/summary", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/attention", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/conversation-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
+    ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
     ("POST /v1/internal/fleet/redeem", "fleet membership"),
@@ -638,6 +658,8 @@ const PROBES: &[Probe] = &[
         "/v1/client/attention/{attention}",
     ),
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
+    get("GET /v1/client/slo", "/v1/client/slo"),
+    get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
     post("POST /v1/messages/cleanup", "/v1/messages/cleanup", |_, _| {
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
@@ -764,6 +786,11 @@ const PROBES: &[Probe] = &[
     get("GET /v1/delivery/hold", "/v1/delivery/hold?subject={seat}"),
     get("GET /v1/claims", "/v1/claims?limit=100"),
     get("GET /v1/claims/by-id/{id}", "/v1/claims/by-id/{claim}"),
+    // A Claude hook's poll for the answer to the prompt or denial it raised.
+    get(
+        "GET /v1/harness-prompts/answer",
+        "/v1/harness-prompts/answer?agent={seat}&episode={seat_claim}",
+    ),
     get("GET /v1/usage", "/v1/usage?since_ms={usage_since}&until_ms={usage_until}"),
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
@@ -1390,6 +1417,7 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = st3::api::router(AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -1669,7 +1697,7 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
 /// Every route `api.rs` declares is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let declared = declared_routes(include_str!("../src/api.rs"));
+    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
         .iter()
@@ -1828,7 +1856,7 @@ fn declared_routes(source: &str) -> BTreeSet<String> {
 
 #[test]
 fn the_cost_route_inventory_resolves_the_client_read_forward_constant() {
-    let declared = declared_routes(include_str!("../src/api.rs"));
+    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
     assert!(declared.contains("POST /v1/internal/client-read/forward"));
 }
 
@@ -2059,6 +2087,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -2570,6 +2599,18 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         .and_then(|page| first_string(&page, "id"))
         .unwrap_or_else(|| "bench-missing-claim".into());
     items.insert("claim", claim);
+    // A claim of the probed seat, so the prompt-answer poll reads past its subject check to the
+    // answer lookup, as a hook's poll for its own prompt does.
+    let seat_claim = client
+        .get::<Value>(&format!(
+            "/v1/claims?subject={}&limit=1",
+            urlencoding::encode(&subjects.seats[0])
+        ))
+        .await
+        .ok()
+        .and_then(|page| first_string(&page, "id"))
+        .expect("the probed seat has a claim");
+    items.insert("seat_claim", urlencoding::encode(&seat_claim).into_owned());
     let record = client
         .get::<Value>("/v1/replication/records")
         .await

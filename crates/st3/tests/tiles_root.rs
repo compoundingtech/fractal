@@ -8,9 +8,10 @@
 //!
 //! It needs passwordless `sudo -n`, systemd as PID 1, cgroups v2 and `python3` on a Nix host,
 //! whose closure it binds into each tile for the probes. Without `ST_TILES_ROOT_TEST=1` every
-//! test returns at once. Each test creates its own disposable system users, registry and state
-//! directory under `/var/lib/st-tiles-test-*`, and removes all of them, and any unit left
-//! running, when it ends. It never reads or changes a real login, key or running seat.
+//! test returns at once. Each test creates its own registry and state directory under
+//! `/var/lib/st-tiles-test-*`, whose tiles the launcher gives user IDs from a test range that no
+//! account holds, and removes them all with `st tiles remove`, and any unit left running, when it
+//! ends. It never reads or changes a real login, key or running seat.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
@@ -18,7 +19,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 
-use st3::tiles::registry::{self, Registry};
+use st3::tile_registry::{self as registry, Registry};
 
 fn enabled() -> bool {
     if std::env::var_os("ST_TILES_ROOT_TEST").as_deref() != Some("1".as_ref()) {
@@ -55,18 +56,67 @@ fn text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// The prefix of everything this test makes, so a later run can remove what a killed run left.
-const PREFIX: &str = "sttfx";
+/// The prefix of the account a test makes, so a later run can remove what a killed run left. A
+/// host may declare its own fixture users (hetz2 has `sttfx1`..`sttfx32`), so it is not theirs.
+const PREFIX: &str = "sttiletest";
 
-struct TileUser {
-    name: String,
-    user: String,
-    uid: u32,
-    gid: u32,
+/// Whether the account `name` with user ID `uid` is one these tests made: a user ID in the test
+/// range, and a name that is the prefix and exactly that ID, as `format!` writes it.
+fn ours(name: &str, uid: u32) -> bool {
+    (90_000..98_000).contains(&uid) && name.strip_prefix(PREFIX) == Some(uid.to_string().as_str())
 }
 
-/// These tests add and remove users, which `useradd` locks `/etc/passwd` for, and the first one
-/// sweeps what a killed run left: they run one at a time.
+#[test]
+fn the_sweep_takes_only_its_own_accounts() {
+    for i in 1..=32 {
+        assert!(!ours(&format!("sttfx{i}"), 61_000 + i));
+    }
+    assert!(!ours("sttfx90001", 90_001));
+    assert!(ours("sttiletest90000", 90_000));
+    assert!(ours("sttiletest97999", 97_999));
+    assert!(!ours("sttiletest89999", 89_999));
+    assert!(!ours("sttiletest98000", 98_000));
+    assert!(!ours("sttiletest", 90_001));
+    assert!(!ours("sttiletest+90001", 90_001));
+    assert!(!ours("sttiletest090001", 90_001));
+    assert!(!ours("sttiletest90001x", 90_001));
+    // A name that claims an ID the account does not have is someone else's.
+    assert!(!ours("sttiletest95000", 61_001));
+    assert!(!ours("sttiletest95000", 95_001));
+}
+
+/// A tile and the user ID the launcher gave it, which is also its group ID.
+struct TileUser {
+    name: String,
+    uid: u32,
+}
+
+/// The user IDs a test host's launcher allocates from: above any account on a test host, outside
+/// systemd's ranges and the usual subordinate ranges, apart from the production default.
+fn test_range() -> (u32, u32) {
+    let first = 90_000 + (std::process::id() % 80) * 100;
+    (first, first + 99)
+}
+
+/// Run `args` as root under user ID `uid` with no groups, on the host, outside any tile. The ID
+/// belongs to no account, so `sudo -u` cannot name it.
+fn as_uid<S: AsRef<std::ffi::OsStr>>(uid: u32, args: &[S]) -> Output {
+    let ids = [
+        format!("--reuid={uid}"),
+        format!("--regid={uid}"),
+        "--clear-groups".to_owned(),
+    ];
+    sudo(
+        std::iter::once(std::ffi::OsStr::new("setpriv"))
+            .chain(ids.iter().map(std::ffi::OsStr::new))
+            .chain(std::iter::once(std::ffi::OsStr::new("--")))
+            .chain(args.iter().map(AsRef::as_ref)),
+    )
+}
+
+/// These tests share the host's tiles slice and, in one test, add and remove an account, which
+/// `useradd` locks `/etc/passwd` for, and the first one sweeps what a killed run left: they run
+/// one at a time.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SWEPT: std::sync::Once = std::sync::Once::new();
 
@@ -134,35 +184,10 @@ impl Host {
             st,
             tiles: Vec::new(),
         };
-        for suffix in tiles {
-            let user = format!("{PREFIX}{tag}{suffix}");
-            ok(sudo([
-                "useradd",
-                "--system",
-                "--no-create-home",
-                "--home-dir",
-                "/nonexistent",
-                "--shell",
-                "/run/current-system/sw/bin/nologin",
-                "--user-group",
-                &user,
-            ]));
-            let id = |flag: &str| -> u32 {
-                text(&ok(Command::new("id")
-                    .args([flag, &user])
-                    .output()
-                    .unwrap()))
-                .trim()
-                .parse()
-                .unwrap()
-            };
-            host.tiles.push(TileUser {
-                name: format!("t{tag}{suffix}"),
-                uid: id("-u"),
-                gid: id("-g"),
-                user,
-            });
-        }
+        let names: Vec<String> = tiles
+            .iter()
+            .map(|suffix| format!("t{tag}{suffix}"))
+            .collect();
         let python = std::fs::canonicalize(which("python3")).unwrap();
         let mut roots = vec![python.clone()];
         let mut path = vec![python.parent().unwrap().to_path_buf()];
@@ -185,8 +210,9 @@ impl Host {
         read_only.extend(closure.lines().map(str::to_owned));
         read_only.sort();
         read_only.dedup();
+        let (first, last) = test_range();
         let mut registry = format!(
-            "state_root = \"{dir}/state\"\nruntime_root = \"{dir}/run\"\nread_only = [{read_only}]\npath = [{path}]\n{head}",
+            "state_root = \"{dir}/state\"\nruntime_root = \"{dir}/run\"\nuids = {{ first = {first}, last = {last} }}\nread_only = [{read_only}]\npath = [{path}]\n{head}",
             dir = host.dir.display(),
             read_only = read_only
                 .iter()
@@ -199,12 +225,9 @@ impl Host {
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        for tile in &host.tiles {
+        for name in &names {
             registry.push_str(&format!(
-                "\n[tiles.{name}]\nuid = {uid}\ngid = {gid}\nagent = \"agent/fleet/fixture-example/{name}\"\nperson = \"person/example\"\nsupervisor_uid = {me}\ntasks_max = {tasks_max}\nmemory_max = \"256M\"\n",
-                name = tile.name,
-                uid = tile.uid,
-                gid = tile.gid,
+                "\n[tiles.{name}]\nagent = \"agent/fleet/fixture-example/{name}\"\nperson = \"person/example\"\nsupervisor_uid = {me}\ntasks_max = {tasks_max}\nmemory_max = \"256M\"\n",
                 me = unsafe { libc::getuid() },
             ));
         }
@@ -226,7 +249,29 @@ impl Host {
             "0644".as_ref(),
             host.registry.as_os_str(),
         ]));
+        // The launcher gives each tile its user ID the first time it prepares or runs it.
+        for name in names {
+            host.prepare(&name);
+            let uid = host.registry().uid(&name).expect("allocated");
+            host.tiles.push(TileUser { name, uid });
+        }
         host
+    }
+
+    fn st(&self, args: &[&str]) -> Output {
+        let mut command = Command::new("sudo");
+        command.arg("-n").arg(&self.st).arg("tiles");
+        let (verb, rest) = args.split_first().unwrap();
+        command
+            .arg(verb)
+            .arg("--registry")
+            .arg(&self.registry)
+            .args(rest);
+        command.output().unwrap()
+    }
+
+    fn prepare(&self, name: &str) -> Output {
+        ok(self.st(&["prepare", name]))
     }
 
     fn tile(&self, suffix: &str) -> &TileUser {
@@ -303,14 +348,14 @@ impl Host {
 impl Drop for Host {
     fn drop(&mut self) {
         for tile in &self.tiles {
+            // `remove` stops the tile, removes its state and gives its user ID back.
+            let _ = self.st(&["remove", &tile.name]);
             let _ = sudo([
                 "systemctl",
                 "stop",
                 &registry::tools_unit(&tile.name),
                 &registry::slice_unit(&tile.name),
             ]);
-            let _ = sudo(["userdel", &tile.user]);
-            let _ = sudo(["groupdel", &tile.user]);
         }
         let _ = sudo([
             "rm".as_ref(),
@@ -337,11 +382,12 @@ impl Drop for Host {
 /// Remove what an earlier, killed run of these tests left: only this test's own prefix.
 fn sweep() {
     let passwd = std::fs::read_to_string("/etc/passwd").unwrap();
-    for user in passwd
-        .lines()
-        .filter_map(|line| line.split(':').next())
-        .filter(|user| user.starts_with(PREFIX))
-    {
+    for user in passwd.lines().filter_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let uid = fields.nth(1)?.parse().ok()?;
+        ours(name, uid).then_some(name)
+    }) {
         let _ = sudo(["pkill", "-KILL", "-u", user]);
         let _ = sudo(["userdel", user]);
         let _ = sudo(["groupdel", user]);
@@ -454,7 +500,7 @@ fn a_tile_runs_as_its_own_user_seeing_nothing_of_the_host() {
     );
     let seen = json(&output);
     assert_eq!(seen["uid"], a.uid);
-    assert_eq!(seen["gid"], a.gid);
+    assert_eq!(seen["gid"], a.uid, "a tile's group ID is its user ID");
     assert_eq!(seen["groups"], serde_json::json!([]));
     // PID 1 is the tile's own reaper; the command is the only other process.
     assert_eq!(seen["pid"], 2);
@@ -589,21 +635,11 @@ fn sibling_tiles_cannot_reach_each_other_or_the_host() {
 
     // Outside its namespaces, b's Unix user still cannot read a's private state.
     let a_home = host.registry().tile_state(&a.name).join("home");
-    let as_b = sudo([
-        "-u".as_ref(),
-        format!("#{}", b.uid).as_ref(),
-        "cat".as_ref(),
-        a_home.join("secret").as_os_str(),
-    ]);
+    let as_b = as_uid(b.uid, &["cat".as_ref(), a_home.join("secret").as_os_str()]);
     assert!(!as_b.status.success());
     assert!(String::from_utf8_lossy(&as_b.stderr).contains("Permission denied"));
     // Not even through its own user: only root and the tile, inside its namespaces, reach it.
-    let as_a = sudo([
-        "-u".as_ref(),
-        format!("#{}", a.uid).as_ref(),
-        "cat".as_ref(),
-        a_home.join("secret").as_os_str(),
-    ]);
+    let as_a = as_uid(a.uid, &["cat".as_ref(), a_home.join("secret").as_os_str()]);
     assert!(!as_a.status.success());
     let as_root = ok(sudo(["cat".as_ref(), a_home.join("secret").as_os_str()]));
     assert_eq!(
@@ -631,12 +667,7 @@ fn a_tile_reads_no_key_of_its_supervisor() {
     let keys = state.path().join("keys");
     smallclaims::fleet::keys::MemberKey::load_or_create(&keys.join("node.key")).unwrap();
     for path in [keys.clone(), keys.join("node.key")] {
-        let read = sudo([
-            "-u".as_ref(),
-            format!("#{}", a.uid).as_ref(),
-            "cat".as_ref(),
-            path.as_os_str(),
-        ]);
+        let read = as_uid(a.uid, &["cat".as_ref(), path.as_os_str()]);
         assert!(
             !read.status.success(),
             "{} is readable by the tile",
@@ -829,13 +860,7 @@ fn a_tile_cannot_make_or_join_namespaces_mount_or_leave_its_cgroup() {
             "/sys/fs/cgroup{}/cgroup.procs",
             registry::tools_cgroup(&tile.name)
         );
-        let moved = sudo([
-            "-u",
-            &format!("#{}", a.uid),
-            "sh",
-            "-c",
-            &format!("echo $$ > {procs}"),
-        ]);
+        let moved = as_uid(a.uid, &["sh", "-c", format!("echo $$ > {procs}").as_str()]);
         assert!(!moved.status.success());
         assert!(
             String::from_utf8_lossy(&moved.stderr).contains("Permission denied")
@@ -1016,31 +1041,30 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
         String::from_utf8_lossy(&writable.stderr)
             .contains("can be changed by someone other than root")
     );
-    // A tile's user with a login shell looks like a person's login and is refused.
+    // An account that takes a tile's user ID would be the tile: the launch is refused.
+    let account = format!("{PREFIX}{}", a.uid);
+    assert!(ours(&account, a.uid));
     ok(sudo([
-        "usermod",
-        "--shell",
-        "/run/current-system/sw/bin/sh",
-        &a.user,
-    ]));
-    let login = sudo([
-        host.st.as_os_str(),
-        "tiles".as_ref(),
-        "run".as_ref(),
-        "--registry".as_ref(),
-        host.registry.as_os_str(),
-        a.name.as_ref(),
-        "--".as_ref(),
-        "true".as_ref(),
-    ]);
-    assert!(!login.status.success());
-    assert!(String::from_utf8_lossy(&login.stderr).contains("login shell"));
-    ok(sudo([
-        "usermod",
+        "useradd",
+        "--system",
+        "--no-create-home",
+        "--home-dir",
+        "/nonexistent",
         "--shell",
         "/run/current-system/sw/bin/nologin",
-        &a.user,
+        "--no-user-group",
+        "--uid",
+        &a.uid.to_string(),
+        &account,
     ]));
+    let taken = host.st(&["run", &a.name, "--", "true"]);
+    let _ = sudo(["userdel", &account]);
+    assert!(!taken.status.success());
+    assert!(
+        String::from_utf8_lossy(&taken.stderr).contains("now belongs to the account"),
+        "{}",
+        String::from_utf8_lossy(&taken.stderr)
+    );
     // A st that someone other than root can change never runs as root in a tile's unit.
     let user_st = Command::new("sudo")
         .arg("-n")
@@ -1155,6 +1179,7 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
                 configured_peers: vec![],
                 client_relay: None,
                 native_session_home: None,
+                owning_person: None,
                 planner_default: st3::model::PlannerSpec::default(),
             },
             host.registry.clone(),
@@ -1275,17 +1300,18 @@ fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
     );
 
     // The same Unix user outside the tile is no one.
-    let outside = sudo([
-        "-u".as_ref(),
-        format!("#{}", a.uid).as_ref(),
-        "env".as_ref(),
-        "-i".as_ref(),
-        format!("ST_SEKRETS_SOCKET={}", socket.display()).as_ref(),
-        "HOME=/nonexistent".as_ref(),
-        host.st.as_os_str(),
-        "sekrets".as_ref(),
-        "whoami".as_ref(),
-    ]);
+    let outside = as_uid(
+        a.uid,
+        &[
+            "env".as_ref(),
+            "-i".as_ref(),
+            format!("ST_SEKRETS_SOCKET={}", socket.display()).as_ref(),
+            "HOME=/nonexistent".as_ref(),
+            host.st.as_os_str(),
+            "sekrets".as_ref(),
+            "whoami".as_ref(),
+        ],
+    );
     let said = format!(
         "{}{}",
         text(&outside),
@@ -1302,5 +1328,176 @@ fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
         String::from_utf8_lossy(&refused.stderr).contains("no socket there"),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+#[test]
+fn the_launcher_allocates_each_tiles_user_id_and_gives_it_back() {
+    if !enabled() {
+        return;
+    }
+    let host = Host::new(&["a", "b"], 64);
+    let (a, b) = (host.tile("a"), host.tile("b"));
+    let (first, last) = test_range();
+    // Each tile has its own ID from the range, and no account or group has it.
+    assert_ne!(a.uid, b.uid);
+    for tile in [a, b] {
+        assert!((first..=last).contains(&tile.uid), "{}", tile.uid);
+        for database in ["passwd", "group"] {
+            let entry = Command::new("getent")
+                .args([database, &tile.uid.to_string()])
+                .output()
+                .unwrap();
+            assert!(!entry.status.success(), "{database} has {}", tile.uid);
+        }
+    }
+    // Root's launcher keeps the record, readable by the daemon and the gateway, writable by no
+    // one else.
+    let uids = host.registry().uids_file();
+    let metadata = std::fs::metadata(&uids).unwrap();
+    use std::os::unix::fs::MetadataExt as _;
+    assert_eq!(
+        (metadata.uid(), metadata.mode() & 0o7777),
+        (0, 0o644),
+        "{}",
+        uids.display()
+    );
+    // The ID lasts across launches: the tile's state is still its own.
+    let wrote = host.probe(
+        a,
+        "import os; open(os.environ['HOME'] + '/kept', 'w').write('kept'); print(os.getuid())",
+        "",
+    );
+    assert!(wrote.status.success());
+    assert_eq!(text(&wrote).trim(), a.uid.to_string());
+    host.prepare(&a.name);
+    assert_eq!(host.registry().uid(&a.name), Some(a.uid));
+    let again = host.probe(
+        a,
+        "import os; print(open(os.environ['HOME'] + '/kept').read())",
+        "",
+    );
+    assert_eq!(text(&again).trim(), "kept");
+
+    // A process of the tile's ID outside the tile keeps its ID allocated.
+    let mut stray = Command::new("sudo")
+        .args([
+            "-n",
+            "setpriv",
+            &format!("--reuid={}", a.uid),
+            &format!("--regid={}", a.uid),
+            "--clear-groups",
+            "--",
+            "sleep",
+            "300",
+        ])
+        .spawn()
+        .unwrap();
+    for _ in 0..500 {
+        if !processes_of(a.uid).is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!processes_of(a.uid).is_empty(), "the stray process started");
+    let refused = host.st(&["remove", &a.name]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("still runs processes"));
+    assert_eq!(host.registry().uid(&a.name), Some(a.uid));
+    let _ = sudo(["pkill", "-KILL", "-U", &a.uid.to_string()]);
+    let _ = stray.wait();
+
+    // Removing the tile removes its state and gives the ID back.
+    ok(host.st(&["remove", &a.name]));
+    let state = host.registry().tile_state(&a.name);
+    assert!(
+        !sudo([
+            std::ffi::OsStr::new("test"),
+            std::ffi::OsStr::new("-e"),
+            state.as_os_str()
+        ])
+        .status
+        .success(),
+        "{} remains",
+        state.display()
+    );
+    assert_eq!(host.registry().uid(&a.name), None);
+    assert!(processes_of(a.uid).is_empty());
+
+    // An ID that still owns a file under the state root is never handed out again, even with
+    // no record of it.
+    let leftover = host.registry().state_root.join("leftover");
+    ok(sudo([
+        std::ffi::OsStr::new("install"),
+        std::ffi::OsStr::new("-d"),
+        std::ffi::OsStr::new("-o"),
+        std::ffi::OsStr::new(&a.uid.to_string()),
+        std::ffi::OsStr::new("-m"),
+        std::ffi::OsStr::new("0700"),
+        leftover.as_os_str(),
+    ]));
+    host.prepare(&a.name);
+    let fresh = host.registry().uid(&a.name).unwrap();
+    assert_ne!(
+        fresh,
+        a.uid,
+        "an ID that owns {} was reused",
+        leftover.display()
+    );
+    assert_ne!(fresh, b.uid);
+    // Starting afresh, nothing of the old tile is there.
+    let home = host.probe(a, "import os; print(os.listdir(os.environ['HOME']))", "");
+    assert_eq!(text(&home).trim(), "[]");
+
+    // A range that holds an account is refused before anything is allocated.
+    let account = std::fs::read_to_string("/etc/passwd")
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split(':').nth(2)?.parse::<u32>().ok())
+        .find(|uid| (1000..60_000).contains(uid) && *uid != unsafe { libc::getuid() })
+        .expect("an account with an ordinary user ID");
+    let narrow = host.dir.join("narrow.toml");
+    let text_now = std::fs::read_to_string(&host.registry).unwrap().replace(
+        &format!("uids = {{ first = {first}, last = {last} }}"),
+        &format!("uids = {{ first = {account}, last = {account} }}"),
+    );
+    let mut tee = Command::new("sudo")
+        .args(["-n", "tee"])
+        .arg(&narrow)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    tee.stdin
+        .take()
+        .unwrap()
+        .write_all(
+            text_now
+                .replace(
+                    &format!("{}/state", host.dir.display()),
+                    &format!("{}/narrow-state", host.dir.display()),
+                )
+                .as_bytes(),
+        )
+        .unwrap();
+    assert!(tee.wait().unwrap().success());
+    ok(sudo([
+        "chmod".as_ref(),
+        "0644".as_ref(),
+        narrow.as_os_str(),
+    ]));
+    let holds = sudo([
+        host.st.as_os_str(),
+        "tiles".as_ref(),
+        "prepare".as_ref(),
+        "--registry".as_ref(),
+        narrow.as_os_str(),
+        b.name.as_ref(),
+    ]);
+    assert!(!holds.status.success());
+    assert!(
+        String::from_utf8_lossy(&holds.stderr).contains("holds the account"),
+        "{}",
+        String::from_utf8_lossy(&holds.stderr)
     );
 }
