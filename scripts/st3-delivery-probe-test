@@ -1077,7 +1077,11 @@ agent "probe/{node.name}" {{
                 if unavailable:
                     self.assertIn("agent/operations/amber", blocked["alert_warning"])
                     self.assertIn("Falling back", blocked["alert_warning"])
-            doctor = json.loads(await nodes[0].cli("doctor", "--json"))
+            # cli(check=True) discards the report a failed check is named in. Read it, then
+            # refuse the same failure with the failed checks shown.
+            doctor = json.loads(await nodes[0].cli("doctor", "--json", check=False))
+            self.assertNotEqual(doctor["status"], "fail",
+                                [check for check in doctor["checks"] if check["status"] == "fail"])
             self.assertTrue(any(check["name"] == "delivery-probes" and check["status"] == "warn" for check in doctor["checks"]))
             # This probe is seconds old and was never offered while its recipient was
             # stopped. Restart must recover it once, as well as reading new live probes.

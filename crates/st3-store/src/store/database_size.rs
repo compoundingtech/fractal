@@ -16,7 +16,7 @@ const SAMPLES: &str = "database_size_samples";
 const KEEP_MS: u128 = 49 * 60 * 60 * 1000;
 /// At most this many samples are kept, whatever the restarts.
 const MAX_SAMPLES: usize = 128;
-const DAY_MS: u128 = 24 * 60 * 60 * 1000;
+pub const DAY_MS: u128 = 24 * 60 * 60 * 1000;
 /// The shortest span a daily growth is extrapolated from.
 const MIN_SPAN_MS: u128 = 60 * 60 * 1000;
 /// How far from exactly a day ago a physical baseline may be.
