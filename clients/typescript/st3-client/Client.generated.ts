@@ -8,6 +8,7 @@ import type {
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
+    AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
 } from './Models.generated.ts';
 
@@ -643,10 +644,10 @@ export class St3Client {
     async assistantAttention(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantAttentionPage>> { return this.assistantRead<AssistantAttentionPage>('attention', params, proof, requestOptions); }
     async assistantMissions(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantMissionPage>> { return this.assistantRead<AssistantMissionPage>('missions', params, proof, requestOptions); }
     async assistantAgents(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantAgentPage>> { return this.assistantRead<AssistantAgentPage>('agents', params, proof, requestOptions); }
-    async assistantConversations(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Value>> { return this.assistantRead<Value>('conversations', params, proof, requestOptions); }
-    async assistantConversationDetail(params: AssistantAgentDetailRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Value>> { return this.assistantRead<Value>('conversation-detail', params, proof, requestOptions); }
-    async assistantConversationTimeline(params: AssistantConversationTimelineRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Value>> { return this.assistantRead<Value>('conversation-timeline', params, proof, requestOptions); }
-    async assistantConversationSearch(params: AssistantConversationSearchRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Value>> { return this.assistantRead<Value>('conversation-search', params, proof, requestOptions); }
+    async assistantConversations(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversations', params, proof, requestOptions); }
+    async assistantConversationDetail(params: AssistantAgentDetailRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversation-detail', params, proof, requestOptions); }
+    async assistantConversationTimeline(params: AssistantConversationTimelineRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversation-timeline', params, proof, requestOptions); }
+    async assistantConversationSearch(params: AssistantConversationSearchRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversation-search', params, proof, requestOptions); }
     async assistantConversationContent(params: AssistantConversationContentRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantContentPage>> { return this.assistantRead<AssistantContentPage>('conversation-content', params, proof, requestOptions); }
     async assistantTerminalContent(params: AssistantTerminalContentRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantContentPage>> { return this.assistantRead<AssistantContentPage>('terminal-content', params, proof, requestOptions); }
     async agentCreate(input: Omit<ActionOf<'agent.create'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'agent.create' } as ActionOf<'agent.create'>, requestOptions); }
