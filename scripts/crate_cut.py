@@ -1027,6 +1027,21 @@ def _dev_dependencies(lower_ident):
 TEST_SUPPORT_CFG = '#[cfg(any(test, feature = "test-support"))]'
 
 
+def _vis_position(text, start, code):
+    """Where `pub` goes for an item whose code starts at `code`: before the block comments in front of it (a
+    SQLite inventory marker has to stay adjacent to the `fn`)."""
+    pos = code
+    while True:
+        head = text[start:pos].rstrip()
+        if not head.endswith("*/"):
+            break
+        k = text.rfind("/*", start, pos)
+        if k < 0:
+            break
+        pos = k
+    return pos
+
+
 def _widen_item_edits(text, it):
     """Edits that make one item pub and, if it is gated by plain `cfg(test)`, gated by test-support too."""
     edits = []
@@ -1035,19 +1050,30 @@ def _widen_item_edits(text, it):
         edits.append((it.start + m.start(), it.start + m.end(), TEST_SUPPORT_CFG))
     vis = ri._VIS.match(text, code)
     if vis is None:
-        edits.append((code, code, "pub "))
+        pos = _vis_position(text, it.start, code)
+        edits.append((pos, pos, "pub "))
     elif vis.group(0).strip() != "pub":
         edits.append((code, vis.end(), "pub "))
     return edits
 
 
+def _shared_base(rel):
+    """The module a file's shared module sits in: next to the file, except for a top-level file, whose shared
+    module is its child (a sibling would be a second top-level module that depends on it both ways)."""
+    p = module_path(rel)
+    return p if len(p) == 1 else p[:-1]
+
+
 def _shared_name(rel, container):
-    stem = module_path(rel)[-1]
-    return stem + ("_" + "_".join(container) if container else "") + "_shared"
+    p = module_path(rel)
+    suffix = ("_" + "_".join(container)) if container else ""
+    if len(p) == 1:
+        return "shared" + suffix
+    return p[-1] + suffix + "_shared"
 
 
 def _shared_path(rel, container):
-    return module_path(rel)[:-1] + [_shared_name(rel, container)]
+    return _shared_base(rel) + [_shared_name(rel, container)]
 
 
 def _insert_position(text, container):
@@ -1105,6 +1131,8 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="cr
             elif not dest and segs[0] == "self":
                 segs = ["crate"] + f_path + segs[1:]
             absolute = _resolve_use(segs, f_path[:-1] + ["_"])
+            if absolute is not None and segs[0] in ("super", "self", "crate") and not dest:
+                segs = ["crate"] + absolute  # the shared module may not sit where the file does
             extra = None
             if absolute is not None:
                 hit = None
@@ -1148,7 +1176,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
     for (rel, cont), ns in sorted(shares.items()):
         name = _shared_name(rel, cont)
         parts = module_path(rel)
-        directory = "/".join(parts[:-1])
+        directory = "/".join(_shared_base(rel))
         path = os.path.join(src_dir, directory, name + ".rs") if directory else os.path.join(src_dir, name + ".rs")
         text, items = lower_files[rel]
         file_uses = [it.text for it in items if it.kind == "use"]
@@ -1161,15 +1189,15 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             uses = list(ifile_uses) + [u for u in file_uses]
             for u in CONTAINERS.get((irel, icont), ("", []))[1]:
                 if re.fullmatch(r"\s*use super::\*;\s*", u):
-                    uses.append("use super::%s::*;" % module_path(irel)[-1])
+                    uses.append("use crate::%s::*;" % "::".join(module_path(irel)))
                 else:
-                    uses.append(re.sub(r"\buse super::", "use super::%s::" % module_path(irel)[-1], u))
+                    uses.append(re.sub(r"\buse super::", "use crate::%s::" % "::".join(module_path(irel)), u))
         elif not cont:
             uses = list(file_uses)
             if rel not in test_rels:
                 # a production file's own items (the ones that stay) are neighbours of the shared module;
                 # named explicitly, because a glob import of the same name elsewhere would make them ambiguous
-                uses.append("use super::%s::*;" % parts[-1])
+                uses.append("use crate::%s::*;" % "::".join(parts))
                 groups_ = collections.defaultdict(set)
                 cur_path = os.path.join(src_dir, rel)
                 cur_items = ri.parse(Path(cur_path).read_text()) if os.path.exists(cur_path) else []
@@ -1179,15 +1207,15 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                 for cfgs, names_ in sorted(groups_.items()):
                     own = sorted(names_)
                     for k in range(0, len(own), 12):
-                        uses.append("".join(c + "\n" for c in cfgs) + "use super::%s::{%s};" % (parts[-1], ", ".join(own[k : k + 12])))
+                        uses.append("".join(c + "\n" for c in cfgs) + "use crate::%s::{%s};" % ("::".join(parts), ", ".join(own[k : k + 12])))
         else:
             # inside the inline module `super` is the file's module; here that module is a sibling
             uses = list(file_uses)
             for u in CONTAINERS.get((rel, cont), ("", []))[1]:
                 if re.fullmatch(r"\s*use super::\*;\s*", u):
-                    uses.append("use super::%s::*;" % parts[-1])
+                    uses.append("use crate::%s::*;" % "::".join(parts))
                 else:
-                    uses.append(re.sub(r"\buse super::", "use super::%s::" % parts[-1], u))
+                    uses.append(re.sub(r"\buse super::", "use crate::%s::" % "::".join(parts), u))
         uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels)
         globs = ["use %s::*;" % "::".join(["crate"] + _shared_path(*mk)) for mk in sorted(share_imports.get((rel, cont), ()))]
         body = []
@@ -1196,7 +1224,11 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             code = ri._leading_meta(t, 0, len(t))[1]
             vis = ri._VIS.match(t, code)
             if u.kind in ("fn", "const", "static", "struct", "enum", "type", "trait", "union"):
-                t = t[:code] + "pub " + t[(vis.end() if vis else code):]
+                if vis:
+                    t = t[:code] + "pub " + t[vis.end():]
+                else:
+                    pos = _vis_position(t, 0, code)
+                    t = t[:pos] + "pub " + t[pos:]
             body.append(t)
         # imports of the parent module that only exist for cfg(test) are not there in a test-support build
         extras = []
@@ -1469,7 +1501,8 @@ def apply_cut(args, nodes, files, tfiles, order):
             code = ri._leading_meta(text, it.start, len(text))[1]
             m = ri._VIS.match(text, code)
             if m is None:
-                edits.append((code, code, "pub "))
+                pos = _vis_position(text, it.start, code)
+                edits.append((pos, pos, "pub "))
                 widened += 1
             elif not m.group(0).startswith("pub ") and not m.group(0).rstrip() == "pub":
                 edits.append((code, m.end(), "pub "))
@@ -1696,7 +1729,7 @@ def _pub_line(path, line_no):
     if _in_trait_block(lines, line_no - 1):
         return 0
     ln = lines[line_no - 1]
-    new = re.sub(r"^(\s*)(?!pub\b)((?:async\s+|const\s+|unsafe\s+)*(?:fn|const|static|struct|enum|type|trait|mod|use)\b)", r"\1pub \2", ln)
+    new = re.sub(r"^(\s*)(?!pub\b)((?:/\*.*?\*/\s*)*(?:async\s+|const\s+|unsafe\s+)*(?:fn|const|static|struct|enum|type|trait|mod|use)\b)", r"\1pub \2", ln)
     new = re.sub(r"^(\s*)pub\((?:crate|super|self|in [\w:]+)\)\s+", r"\1pub ", new)
     if new != ln:
         lines[line_no - 1] = new
