@@ -88,6 +88,9 @@ pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
 
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::shared::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::fs;
@@ -127,7 +130,9 @@ use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicationInventory, Rep
 #[cfg(any(test, feature = "test-support"))]
 use crate::model::ReplicationExchange;
 #[cfg(any(test, feature = "test-support"))]
-use smallclaims::replication::{ReplicaRange, ReplicationBatch, ReplicationResponse};
+#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+use smallclaims::replication::ReplicationBatch;
 use crate::model::{SeatQueueMoveRequest, SeatQueueMoveView, SeatQueueRunView, SeatQueueView};
 use crate::seat_queue::{self, Placement, QueueJoin, QueueMove, SeatStep};
 #[cfg(test)]
@@ -256,6 +261,7 @@ pub mod published_views;
 pub mod published_list;
 pub mod mission_list;
 pub mod work_list;
+pub mod runtime_list;
 #[cfg(test)]
 pub mod tombstones_tests;
 #[cfg(test)]
@@ -304,19 +310,31 @@ pub mod projection_digest {
     }
 }
 
-type CumulativeUsage = (u64, u64, u64, u64, Option<f64>, Option<String>);
+pub type CumulativeUsage = (u64, u64, u64, u64, Option<f64>, Option<String>);
+
+/// The latest rollup snapshot of one series, with its cost when every token in it was priced.
+#[derive(Clone)]
+struct RollupSpend {
+    total: u64,
+    input: u64,
+    output: u64,
+    writes: u64,
+    reads: u64,
+    cost_microusd: Option<u64>,
+}
 
 /// One incarnation's spend as its usage claims fold, in canonical claim order.
 #[derive(Clone, Default)]
-struct UsageSpend {
+pub struct UsageSpend {
     cumulative: Option<CumulativeUsage>,
-    rollups: BTreeMap<String, (u64, u64, u64, u64, u64)>,
+    rollups: BTreeMap<String, RollupSpend>,
     response_total: u64,
     response_input: u64,
     response_output: u64,
     response_cached: u64,
     response_cost: f64,
     response_has_cost: bool,
+    response_unknown_cost: bool,
     response_currency: Option<String>,
 }
 
@@ -458,28 +476,38 @@ impl UsageFold {
                     .join("\0");
                 group.rollups.insert(
                     key,
-                    (
-                        fields
+                    RollupSpend {
+                        total: fields
                             .get("total_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        input: fields
                             .get("input_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        output: fields
                             .get("output_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        writes: fields
                             .get("cache_write_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        fields
+                        reads: fields
                             .get("cached_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                    ),
+                        cost_microusd: fields
+                            .get("cost_microusd")
+                            .and_then(Value::as_u64)
+                            .filter(|_| {
+                                fields
+                                    .get("unpriced_tokens")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                                    == 0
+                            }),
+                    },
                 );
             }
             Some("response") => {
@@ -509,9 +537,20 @@ impl UsageFold {
                 if let Some(cost) = fields.get("cost").and_then(Value::as_f64) {
                     group.response_cost += cost;
                     group.response_has_cost = true;
-                }
-                if let Some(currency) = fields.get("currency").and_then(Value::as_str) {
-                    group.response_currency = Some(currency.to_owned());
+                    if let Some(currency) = fields.get("currency").and_then(Value::as_str) {
+                        if group
+                            .response_currency
+                            .as_deref()
+                            .is_some_and(|current| current != currency)
+                        {
+                            group.response_unknown_cost = true;
+                        }
+                        group.response_currency = Some(currency.to_owned());
+                    } else {
+                        group.response_unknown_cost = true;
+                    }
+                } else if total > 0 {
+                    group.response_unknown_cost = true;
                 }
             }
             _ => {}
@@ -535,15 +574,32 @@ impl UsageFold {
         };
         let mut cost = 0.0;
         let mut has_cost = false;
+        let mut rollup_cost_microusd = 0_u128;
+        let mut unknown_cost = false;
         for group in self.spend.values().cloned() {
             summary.incarnation_count += 1;
             if !group.rollups.is_empty() {
-                for (total, input, output, writes, reads) in group.rollups.into_values() {
-                    summary.total_tokens = summary.total_tokens.saturating_add(total);
-                    summary.input_tokens = summary.input_tokens.saturating_add(input);
-                    summary.output_tokens = summary.output_tokens.saturating_add(output);
-                    summary.cache_write_tokens = summary.cache_write_tokens.saturating_add(writes);
-                    summary.cached_tokens = summary.cached_tokens.saturating_add(reads);
+                for rollup in group.rollups.into_values() {
+                    summary.total_tokens = summary.total_tokens.saturating_add(rollup.total);
+                    summary.input_tokens = summary.input_tokens.saturating_add(rollup.input);
+                    summary.output_tokens = summary.output_tokens.saturating_add(rollup.output);
+                    summary.cache_write_tokens =
+                        summary.cache_write_tokens.saturating_add(rollup.writes);
+                    summary.cached_tokens = summary.cached_tokens.saturating_add(rollup.reads);
+                    if let Some(value) = rollup.cost_microusd {
+                        rollup_cost_microusd = rollup_cost_microusd.saturating_add(u128::from(value));
+                        has_cost = true;
+                        if summary
+                            .currency
+                            .as_deref()
+                            .is_some_and(|currency| currency != "USD")
+                        {
+                            unknown_cost = true;
+                        }
+                        summary.currency.get_or_insert_with(|| "USD".into());
+                    } else if rollup.total > 0 {
+                        unknown_cost = true;
+                    }
                 }
             } else if let Some((total, input, output, cached, group_cost, currency)) =
                 group.cumulative
@@ -555,8 +611,19 @@ impl UsageFold {
                 if let Some(value) = group_cost {
                     cost += value;
                     has_cost = true;
+                    if currency.is_none()
+                        || summary
+                            .currency
+                            .as_ref()
+                            .zip(currency.as_ref())
+                            .is_some_and(|(current, candidate)| current != candidate)
+                    {
+                        unknown_cost = true;
+                    }
+                    summary.currency = summary.currency.or(currency);
+                } else if total > 0 {
+                    unknown_cost = true;
                 }
-                summary.currency = summary.currency.or(currency);
             } else {
                 summary.total_tokens = summary.total_tokens.saturating_add(group.response_total);
                 summary.input_tokens = summary.input_tokens.saturating_add(group.response_input);
@@ -565,11 +632,25 @@ impl UsageFold {
                 if group.response_has_cost {
                     cost += group.response_cost;
                     has_cost = true;
+                    if group.response_currency.is_none()
+                        || summary
+                            .currency
+                            .as_ref()
+                            .zip(group.response_currency.as_ref())
+                            .is_some_and(|(current, candidate)| current != candidate)
+                    {
+                        unknown_cost = true;
+                    }
+                    summary.currency = summary.currency.or(group.response_currency);
                 }
-                summary.currency = summary.currency.or(group.response_currency);
+                unknown_cost |= group.response_unknown_cost;
             }
         }
-        summary.cost = has_cost.then_some(cost);
+        if unknown_cost {
+            summary.currency = None;
+        } else {
+            summary.cost = has_cost.then_some(cost + rollup_cost_microusd as f64 / 1_000_000.0);
+        }
         Some(summary)
     }
 }
@@ -1279,7 +1360,7 @@ const ACTUAL_STATE_CLAIM: &str = "(claims.kind<'harness.' OR claims.kind>='harne
 // claim rows or has trimmed the admission receipt. The digest's repaired-ID set survives
 // receipt cleanup and is maintained transactionally by repair claims. Keep this separate
 // from ACTUAL_STATE_CLAIM, which is also a SQLite partial-index predicate.
-const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
+pub const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
     SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id
 )";
 
@@ -1403,7 +1484,7 @@ const AGENT_CARD_STATUS_LIMIT: usize = 4096;
 
 /// One subject's reduction, read at snapshot `read_at`, so it holds from there on. The claims
 /// mode is part of the answer: a summary reduction and a full one are cached side by side.
-struct StatusEntry {
+pub struct StatusEntry {
     read_at: u64,
     owners: Vec<String>,
     claims: ClaimsReduction,
@@ -1622,7 +1703,7 @@ pub enum ClaimsReduction {
 }
 /// One subject's status at `at_index`, and the action it asks of its host when it is current and
 /// differs from what is declared. With `owner_filter`, a subject another run owns is skipped.
-fn subject_status_at(
+pub fn subject_status_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -1755,7 +1836,7 @@ fn subject_status_at(
 
 /// What one subject's status reduction reads at a snapshot: read for one subject by
 /// [`subject_status_at`], or for many at once by the agent card fold.
-struct SubjectStatusInputs {
+pub struct SubjectStatusInputs {
     desired: Option<DesiredRow>,
     member: Option<crate::model::MemberSpec>,
     actual: Option<Value>,
@@ -1912,16 +1993,7 @@ pub struct StepLabel {
 
 /// A kept agent status: the snapshot it answers, the agent projection index it was reduced at,
 /// whether it includes history, which claims it carries, and the status.
-type AgentStatusEntry = (u64, u64, bool, ClaimsReduction, Arc<StatusResponse>);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MissionGateRunner {
-    pub subject: String,
-    pub host: String,
-    pub owner_run: String,
-    pub owner_step: Option<String>,
-    pub retired: bool,
-}
+pub type AgentStatusEntry = (u64, u64, bool, ClaimsReduction, Arc<StatusResponse>);
 
 /// The claims of one idempotency key used for different requests, each as `(subject, writer)`.
 pub type IdempotencyConflict = Vec<(String, String)>;
@@ -1930,7 +2002,7 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
 pub struct Store {
     pub graph: GraphStore,
-    smalltalk: Arc<SmalltalkRuntime>,
+    pub smalltalk: Arc<SmalltalkRuntime>,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -1995,59 +2067,6 @@ pub struct MessageCacheEntry {
     latest_claim_index: u64,
     desired_claim_id: Option<String>,
     view: MessageView,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Store {
-    /// Hold every read connection the pool has, as a burst of long reads does, so a read
-    /// inside has to open another.
-    pub fn hold_read_connections_for_test(&self, hold: impl FnOnce()) {
-        let idle_count = self
-            .readers
-            .idle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len();
-        let guards: Vec<_> = (0..idle_count).map(|_| self.readers.get()).collect();
-        hold();
-        drop(guards);
-    }
-
-    pub fn hold_writer_for_test(&self, hold: impl FnOnce()) {
-        let _writer = self.connection.write();
-        hold();
-    }
-
-    /// Record local observations as `append_claim` does, in one transaction: one commit, and
-    /// so one sync to disk, instead of one for each observation.
-    pub fn append_local_observations_for_test(&self, inputs: &[ClaimInput]) {
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction().unwrap();
-        for input in inputs {
-            self.validate_claim_input(input).unwrap();
-            assert!(
-                local_retention(&input.kind),
-                "{} is not a local observation",
-                input.kind
-            );
-            validate_local_observation(input).unwrap();
-            insert_local_observation_tx(&transaction, &self.origin, input, now_ms()).unwrap();
-        }
-        transaction.commit().unwrap();
-    }
-
-    pub fn hold_write_transaction_for_test(&self, hold: impl FnOnce()) {
-        let mut writer = self.connection.write();
-        let transaction = writer.transaction().unwrap();
-        transaction
-            .execute(
-                /* sqlite-large-value: allow-for-now lv-h164f6459fefe owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('test-write-stall', '1')",
-                [],
-            )
-            .unwrap();
-        hold();
-        transaction.rollback().unwrap();
-    }
 }
 
 pub struct ChildMissionContext {
@@ -2134,14 +2153,7 @@ pub fn stale_pull_request_request_tx(
 
 fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0
-        || version == 13
-        || version == 14
-        || version == 15
-        || version == 16
-        || version == 17
-        || version == 18
-        || version == smallclaims::store::CURRENT_SCHEMA_VERSION
+    if version == 0 || (13..=st3_schema::STORAGE_VERSION).contains(&version)
     {
         return Ok(());
     }
@@ -2827,15 +2839,15 @@ const ROSTER_LOCAL_FRONTIER: &str = "SELECT COALESCE((SELECT id FROM local_obser
 /// One frontier read, inside the caller's SQLite snapshot when it holds one: the reader pool
 /// lends pinned reads the same connection. The partial frontier index keeps an old cut from
 /// walking newer heartbeat rows.
-fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64> {
+pub fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64> {
     Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h6c35bfb1264e owner=st3_store::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [index], |row| row.get::<_, u64>(0))?)
 }
 
 #[derive(Default)]
 pub struct AgentResourcesDelta {
-    subjects: BTreeSet<String>,
-    queues: bool,
-    membership: bool,
+    pub subjects: BTreeSet<String>,
+    pub queues: bool,
+    pub membership: bool,
 }
 
 pub enum AgentResourcesChange {
@@ -3453,7 +3465,7 @@ impl Store {
         )
     }
 
-    fn apply_as_impl(
+    pub fn apply_as_impl(
         &self,
         intent: &NormalizedIntent,
         expected: &BTreeMap<String, Vec<String>>,
@@ -6018,6 +6030,7 @@ impl Store {
                 .filter(|item| !item.person.starts_with("person/")),
         );
         items.extend(self.checkpoint_attention_items(None, as_of)?);
+        items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
         self.current_attention(items, as_of)?
             .into_iter()
@@ -6028,6 +6041,37 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    fn signature_attention_items(&self) -> Result<Vec<AttentionItemView>> {
+        let mut items = Vec::new();
+        for fault in self.signature_state_faults()? {
+            items.push(AttentionItemView {
+                episode: format!("{}:{}", fault.code, fault.subject),
+                priority: "high".into(),
+                kind: "fault".into(),
+                review_mode: None,
+                subject: fault.subject,
+                person: String::new(),
+                requester_id: None,
+                launch_id: None,
+                variant_id: None,
+                message_id: None,
+                prompt_call: None,
+                conversation: None,
+                answers: Vec::new(),
+                title: fault.code,
+                detail: fault.detail,
+                request: None,
+                mission: None,
+                mission_run: None,
+                step: None,
+                targets: vec![format!("host/{}", self.origin)],
+                requested_at_unix_ms: 0,
+                actions: vec![attention_action("inspect signature state", &["st", "doctor"])],
+            });
+        }
+        Ok(items)
     }
 
     pub fn selected_desired_token(&self, subject: &str) -> Result<Option<String>> {
@@ -7773,9 +7817,9 @@ fn normalize_actor_for_publication(actor: &str) -> String {
 
 #[derive(Clone)]
 pub struct DesiredRow {
-    kind: String,
+    pub kind: String,
     revision: String,
-    claim_id: String,
+    pub claim_id: String,
     body: String,
     member: Option<String>,
     owner_run: Option<String>,
@@ -8077,7 +8121,7 @@ fn current_desired_row_tx(
         .map_err(Into::into)
 }
 
-fn desired_revision(desired: &DesiredSubject) -> String {
+pub fn desired_revision(desired: &DesiredSubject) -> String {
     let mut desired = desired.clone();
     desired.desired = canonical_json_value(&desired.desired);
     canonical_hash(&desired).expect("desired subject serializes")
@@ -8528,7 +8572,7 @@ const LOCAL_OBSERVATION_FLOOR_QUERY: &str =
 use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
 pub use st3_kernel::model::local_observation_position;
 
-fn local_retention(kind: &str) -> bool {
+pub fn local_retention(kind: &str) -> bool {
     st3_schema::registry()
         .claim(kind)
         .is_some_and(|spec| spec.retention == st3_schema::Retention::Local)
@@ -8575,7 +8619,7 @@ pub fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
 /// working, its newest usage replicates at once.
 const USAGE_PUBLISH_INTERVAL_MS: u128 = 5 * 60 * 1000;
 
-fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
+pub fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
     if input.expected_subject.is_some() {
         return Err(St3Error::new(
             "local-observation-head",
@@ -8599,7 +8643,7 @@ fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
 
 /// Insert one local observation. A repeated idempotency key returns the first observation
 /// and `false`.
-fn insert_local_observation_tx(
+pub fn insert_local_observation_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     input: &ClaimInput,
@@ -9701,7 +9745,7 @@ fn migrate_work_extension_projections_tx(transaction: &Transaction<'_>) -> Resul
     Ok(rebuilt)
 }
 
-fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
+pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h5466429023b1 owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews", [])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h64ed4e672e04 owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_candidates", [])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hcf35ae94ccca owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_sessions", [])?;
@@ -10465,7 +10509,7 @@ fn event_tail_sql(migrating: bool) -> &'static str {
     }
 }
 
-/* sqlite-large-value-flow: allow-for-now flow-h01fb1e54a2fa owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ fn insert_event(
+pub /* sqlite-large-value-flow: allow-for-now flow-h01fb1e54a2fa owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ fn insert_event(
     transaction: &Transaction<'_>,
     store_index: u64,
     _kind: &str,
@@ -16081,7 +16125,7 @@ fn clear_quarantined_claims_tx(
     Ok(())
 }
 
-fn select_replicated_desired(
+pub fn select_replicated_desired(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
     desired: &DesiredSubject,
@@ -16190,7 +16234,7 @@ fn select_desired_repair_tx(
     Ok(())
 }
 
-fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<(), St3Error> {
     clear_quarantined_claims_tx(transaction, "projection:runs")?;
     for pass in 0..3 {
         let filter = match pass {
@@ -16291,7 +16335,7 @@ fn reconcile_carried_step_tx(
     Ok(())
 }
 
-fn project_mission_run_created(
+pub fn project_mission_run_created(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
 ) -> Result<(), St3Error> {
@@ -17111,7 +17155,7 @@ fn claim_descends_from(
     Ok(false)
 }
 
-fn select_replicated_mission(
+pub fn select_replicated_mission(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
     created_index: u64,
@@ -20627,190 +20671,6 @@ const GRAPH_DIGEST_TABLES: [smallclaims::store::runtime::LegacyDigestTable; 6] =
 ];
 
 #[cfg(any(test, feature = "test-support"))]
-impl Store {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn import_replication(
-        &self,
-        relay: &str,
-        input: &ReplicationBatch,
-    ) -> Result<ReplicationResponse, St3Error> {
-        if relay != input.peer {
-            return Err(St3Error::new(
-                "peer-label-mismatch",
-                "the configured relay label does not match the batch label",
-            ));
-        }
-        for (hash, bytes) in &input.blobs {
-            if hex::encode(Sha256::digest(bytes)) != *hash {
-                return Err(St3Error::new(
-                    "blob-hash-mismatch",
-                    format!("replicated blob `{hash}` failed verification"),
-                ));
-            }
-        }
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction().map_err(internal)?;
-        for (hash, bytes) in &input.blobs {
-            transaction
-                .execute(
-                    /* sqlite-large-value: allow-for-now lv-hcb672505061d owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
-                    params![hash, bytes, bytes.len() as u64],
-                )
-                .map_err(internal)?;
-        }
-        let mut missing_ranges = Vec::new();
-        let mut blocked_origins = BTreeSet::new();
-        for batch in &input.batches {
-            if blocked_origins.contains(&batch.origin) {
-                continue;
-            }
-            let accepted_through = transaction
-                .query_row(
-                    "SELECT MAX(replica_sequence) FROM batches WHERE origin=?1",
-                    [&batch.origin],
-                    |row| row.get::<_, Option<u64>>(0),
-                )
-                .map_err(internal)?
-                .unwrap_or(0);
-            if batch.replica_sequence <= accepted_through {
-                let stored_hash = transaction
-                    .query_row(
-                        "SELECT hash FROM batches WHERE origin=?1 AND replica_sequence=?2",
-                        params![batch.origin, batch.replica_sequence],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(internal)?;
-                if stored_hash.as_deref() != Some(batch.hash.as_str()) {
-                    return Err(St3Error::new(
-                        "replica-sequence-conflict",
-                        format!(
-                            "replica `{}` sequence {} has another hash",
-                            batch.origin, batch.replica_sequence
-                        ),
-                    ));
-                }
-                continue;
-            }
-            if batch.replica_sequence != accepted_through.saturating_add(1) {
-                missing_ranges.push(ReplicaRange {
-                    origin: batch.origin.clone(),
-                    from: accepted_through.saturating_add(1),
-                    through: batch.replica_sequence.saturating_sub(1),
-                });
-                blocked_origins.insert(batch.origin.clone());
-                continue;
-            }
-            let expected_previous = transaction
-                .query_row(
-                    "SELECT hash FROM batches WHERE origin=?1 ORDER BY replica_sequence DESC LIMIT 1",
-                    [&batch.origin],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(internal)?;
-            if expected_previous != batch.previous_hash {
-                return Err(St3Error::new(
-                    "broken-replica-chain",
-                    format!(
-                        "replica sequence {} does not cite the current chain head",
-                        batch.replica_sequence
-                    ),
-                ));
-            }
-            verify_replica_batch(batch)?;
-            transaction
-                .execute(
-                    /* sqlite-large-value: allow-for-now lv-hbcd156b2bba6 owner=st3_store::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![batch.id, batch.origin, batch.replica_sequence, batch.previous_hash, batch.hash, batch.accepted_at_unix_ms.to_string()],
-                )
-                .map_err(internal)?;
-            for claim in &batch.claims {
-                ensure_claim_blobs(&transaction, claim)?;
-                let inserted = transaction
-                    .prepare_cached(
-                        /* sqlite-large-value: allow-for-now lv-hc93fe1abb0d9 owner=st3_store::store TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    )
-                    .map_err(internal)?
-                    .execute(/* sqlite-large-value: allow-for-now lv-h46da1eabe0d9 owner=st3_store::store TODO=trace-statement-and-value-representation */ params![
-                        claim.id,
-                        claim.batch_id,
-                        claim.subject,
-                        claim.kind,
-                        claim.origin,
-                        claim.actor,
-                        canonical_json_text(&claim.body).map_err(internal)?,
-                        serde_json::to_string(&claim.predecessors).map_err(internal)?,
-                        claim.accepted_at_unix_ms.to_string(),
-                    ])
-                    .map_err(internal)?;
-                if inserted != 0 {
-                    let index = transaction.last_insert_rowid() as u64;
-                    let effective = register_operation_tx(&transaction, claim).map_err(internal)?;
-                    if effective {
-                        insert_event(
-                            &transaction,
-                            index,
-                            &claim.kind,
-                            &claim.subject,
-                            &claim.body,
-                        )
-                        .map_err(internal)?;
-                    }
-                    if effective && claim.kind == "intent.desired" {
-                        if let Ok(desired) =
-                            serde_json::from_value::<DesiredSubject>(claim.body.clone())
-                        {
-                            select_replicated_desired(&transaction, claim, &desired)?;
-                        }
-                    } else if effective && claim.kind == retirements::KIND {
-                        retirements::project_subject(&transaction, &claim.subject)?;
-                    } else if effective && claim.kind == "doc.bound" {
-                        select_replicated_document(&transaction, claim, index)?;
-                    } else if effective && claim.kind == "mission.published" {
-                        select_replicated_mission(&transaction, claim, index)?;
-                    }
-                }
-            }
-            transaction
-                .execute(
-                    /* sqlite-large-value: allow-for-now lv-hc355e0faa5e1 owner=st3_store::store TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO peer_replica_cursors(peer, origin, accepted_through) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(peer, origin) DO UPDATE SET accepted_through=MAX(accepted_through, excluded.accepted_through)",
-                    params![relay, batch.origin, batch.replica_sequence],
-                )
-                .map_err(internal)?;
-        }
-        rebuild_operations_tx(&transaction).map_err(internal)?;
-        owned_sets::project_tx(&transaction)?;
-        project_replicated_mission_runs(&transaction)?;
-        rebuild_planning_tx(&transaction).map_err(internal)?;
-        custom::flush(&transaction).map_err(internal)?;
-        let accepted_heads = replica_heads(&transaction).map_err(internal)?;
-        let accepted_through = accepted_heads.get(&input.peer).copied().unwrap_or(0);
-        let missing_sequences = missing_ranges
-            .iter()
-            .filter(|range| range.origin == input.peer)
-            .flat_map(|range| range.from..=range.through)
-            .collect::<Vec<_>>();
-        transaction
-            .execute(
-                /* sqlite-large-value: allow-for-now lv-h814255540f9c owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO peer_cursors(peer, accepted_through) VALUES (?1, ?2)
-                 ON CONFLICT(peer) DO UPDATE SET accepted_through=excluded.accepted_through",
-                params![relay, accepted_through],
-            )
-            .map_err(internal)?;
-        transaction.commit().map_err(internal)?;
-        Ok(ReplicationResponse {
-            accepted_through,
-            missing_sequences,
-            accepted_heads,
-            missing_ranges,
-        })
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
 pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), St3Error> {
     verify_replica_batch_header(batch)?;
     for claim in &batch.claims {
@@ -21635,3 +21495,30 @@ pub fn a_malformed_peer_hash_does_not_stop_replication() {
 
 #[cfg(test)]
 pub mod harness_event_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod card_fold_tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod owned_sets_tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod publication_tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod publication_facts_tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod roster_fresh_proof_tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod runtime_ivm_attachment_tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod terminal_gate_evidence_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared;

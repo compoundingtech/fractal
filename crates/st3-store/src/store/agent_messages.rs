@@ -733,9 +733,9 @@ mod tests {
         }).unwrap();
         let peer = Store::open_memory("peer").unwrap();
         let exchange =
-            super::super::tests::exchange_from(&source, &peer.replication_inventory().unwrap());
-        super::super::tests::receive_and_project(&peer, "node", &exchange);
-        super::super::tests::receive_and_project(&peer, "node", &exchange);
+            crate::store::tests_shared::exchange_from(&source, &peer.replication_inventory().unwrap());
+        crate::store::tests_shared::receive_and_project(&peer, "node", &exchange);
+        crate::store::tests_shared::receive_and_project(&peer, "node", &exchange);
         let until = now_ms() as u64 + 1;
         let (_, expected) = source.usage_period_report(0, until).unwrap();
         assert_eq!(peer.usage_period_report(0, until).unwrap().1, expected);

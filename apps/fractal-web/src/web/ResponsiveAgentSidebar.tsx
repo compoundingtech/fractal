@@ -14,6 +14,7 @@ export type ResponsiveAgentSidebarProps = {
   readonly maxWidth: number
   readonly collapsed: boolean
   readonly drawerOpen: boolean
+  readonly drawerId?: string
   readonly onDrawerOpenChange: (open: boolean) => void
   readonly onToggleCollapsed: () => void
   readonly onWidthChange: (width: number) => void
@@ -26,7 +27,7 @@ export type ResponsiveAgentSidebarProps = {
 const renderModalDialog = (props: React.ComponentPropsWithRef<'section'>) => <section {...props} aria-modal="true" />
 
 /** The dock consumes layout space; the modal drawer never resizes the thread. */
-export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, children }: ResponsiveAgentSidebarProps) => {
+export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, children }: ResponsiveAgentSidebarProps) => {
   const portalContainer = React.useRef<HTMLDivElement>(null)
   const narrow = viewport < sidebarDrawerBreakpoint
   const sidebar = <aside aria-label="Agents" data-sidebar-presentation={narrow ? 'drawer' : 'dock'} style={{ width: Math.max(sidebarMinimumWidth, width) }} {...stylex.props(styles.sidebar)}>
@@ -40,7 +41,7 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
   return <div ref={portalContainer} {...stylex.props(styles.portal)}>
     <Aria.ModalOverlay isOpen={drawerOpen} onOpenChange={onDrawerOpenChange} isDismissable UNSTABLE_portalContainer={portalContainer.current ?? undefined} {...stylex.props(styles.overlay)}>
       <Aria.Modal {...stylex.props(styles.modal)}>
-        <Aria.Dialog aria-label="Agent navigation" render={renderModalDialog} {...stylex.props(styles.dialog)}>{sidebar}</Aria.Dialog>
+        <Aria.Dialog id={drawerId} aria-label="Agent navigation" render={renderModalDialog} {...stylex.props(styles.dialog)}>{sidebar}</Aria.Dialog>
       </Aria.Modal>
     </Aria.ModalOverlay>
   </div>

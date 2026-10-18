@@ -136,6 +136,8 @@ export function ThreadHeader({
   sidebarCollapsed = false,
   onToggleSidebar,
   sidebarToggleRef,
+  sidebarSheet,
+  narrow = false,
 }: {
   /** Reported folder for the breadcrumb; omitted entirely when the host knows none. */
   folder?: string
@@ -164,20 +166,24 @@ export function ThreadHeader({
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
   sidebarToggleRef?: React.Ref<HTMLButtonElement>
+  /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
+  sidebarSheet?: { readonly open: boolean; readonly id: string }
+  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. */
+  narrow?: boolean
 }) {
   const terminalReasonId = React.useId()
   return (
     <header data-testid="thread-header" {...stylex.props(styles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <Tooltip label="Expand sidebar (⌘/Ctrl+B)">
-          <Button ref={sidebarToggleRef} aria-label="Expand sidebar" onPress={onToggleSidebar} {...stylex.props(styles.ghostMd)}>
+          <Button ref={sidebarToggleRef} aria-label="Expand sidebar" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { 'aria-haspopup': 'dialog' as const, 'aria-expanded': sidebarSheet.open, ...(sidebarSheet.open ? { 'aria-controls': sidebarSheet.id } : {}) })} {...stylex.props(styles.ghostMd)}>
             <Icon name="chevron-right" />
           </Button>
         </Tooltip>
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>
-          <span {...stylex.props(styles.crumbFolder)}>{folder}</span>
+          <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash)}>/</span>
         </> : null}
         <span {...stylex.props(styles.crumbTitle)}>{title}</span>
@@ -188,19 +194,21 @@ export function ThreadHeader({
         <div data-testid="native-action-slot" ref={actionPortalRef}>{nativeActions}</div>
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs)}>Open <Icon name="chevron-down" size={12} /></button>}
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs)}>Commit <Icon name="chevron-down" size={12} /></button>}
-        {terminalAvailable && <button type="button" aria-label="Toggle terminal drawer" title="Toggle terminal drawer" aria-pressed={drawerOpen} onClick={onToggleDrawer} {...stylex.props(styles.ghostMd, drawerOpen && styles.ghostOn)}>
+        {!narrow && terminalAvailable && <button type="button" aria-label="Toggle terminal drawer" title="Toggle terminal drawer" aria-pressed={drawerOpen} onClick={onToggleDrawer} {...stylex.props(styles.ghostMd, drawerOpen && styles.ghostOn)}>
           <Icon name="drawer" />
         </button>}
         {/* A disabled button receives no pointer events, so the hover title sits on its wrapper. */}
-        {!terminalAvailable && terminalDisabledReason !== undefined && <span data-testid="terminal-toggle-disabled" title={terminalDisabledReason} {...stylex.props(styles.disabledWrap)}>
+        {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <span data-testid="terminal-toggle-disabled" title={terminalDisabledReason} {...stylex.props(styles.disabledWrap)}>
           <Button isDisabled aria-label="Toggle terminal drawer" aria-describedby={terminalReasonId} {...stylex.props(styles.ghostMd, styles.ghostDisabled)}>
             <Icon name="drawer" />
           </Button>
           <span id={terminalReasonId} hidden>{terminalDisabledReason}</span>
         </span>}
-        <button type="button" aria-label="Toggle right panel" title="Toggle right panel" aria-pressed={panelOpen} onClick={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
+        {narrow ? <Button aria-label="Agent details" aria-haspopup="dialog" aria-expanded={panelOpen} onPress={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
           <Icon name="panel" />
-        </button>
+        </Button> : <button type="button" aria-label="Toggle right panel" title="Toggle right panel" aria-pressed={panelOpen} onClick={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
+          <Icon name="panel" />
+        </button>}
       </div>
     </header>
   )
@@ -226,6 +234,7 @@ const styles = stylex.create({
   resizeHorizontal: { position: 'absolute', insetInlineStart: 0, insetInlineEnd: 4, insetBlockStart: 0, height: 1, cursor: 'row-resize', zIndex: 2, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   header: { height: g.band, display: 'flex', alignItems: 'center', gap: g.gutter, paddingInline: g.gutter, flexShrink: 0, minWidth: 0 },
   breadcrumb: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
   crumbSlash: { color: c.fgMuted },
   crumbTitle: { color: c.fg, fontWeight: t.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },

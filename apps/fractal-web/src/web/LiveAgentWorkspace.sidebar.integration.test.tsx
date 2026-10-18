@@ -82,6 +82,21 @@ const sidebar = () => host.querySelector<HTMLElement>('aside[aria-label="Agents"
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
 
+it('connects the responsive drawer toggle to its dialog while retaining narrow agent details', async () => {
+  registry.set(agents, observed({ value: [agent] }))
+  await mount(800)
+  const toggle = within(host).getByRole('button', { name: 'Expand sidebar' })
+  expect(toggle.getAttribute('aria-haspopup')).toBe('dialog')
+  expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  expect(toggle.hasAttribute('aria-controls')).toBe(false)
+  expect(within(host).getByRole('button', { name: 'Agent details' })).not.toBeNull()
+  await act(async () => toggle.click())
+  const dialog = within(host).getByRole('dialog', { name: 'Agent navigation' })
+  expect(dialog.id).toBe(toggle.getAttribute('aria-controls'))
+  expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  expect(within(dialog).getByRole('navigation', { name: 'Agent roster' })).not.toBeNull()
+})
+
 it('keeps workspace providers and unchanged roster rows out of the one-second clock render', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }

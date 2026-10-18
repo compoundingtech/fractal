@@ -2946,8 +2946,8 @@ witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
-fn the_policy_renders_the_rules_description_with_review_and_question_history_compaction() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 18);
+fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 19);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2963,6 +2963,10 @@ fn the_policy_renders_the_rules_description_with_review_and_question_history_com
                     "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n\
                      harness-question.observed slot=subject {questions}\n"
                 ),
+            )
+            .replace(
+                "\nguards=",
+                "\nreader-usage=rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas,cost-complete-single-currency\nguards=",
             )
             .replace(
                 "witness=every-field-set-again-by-a-later-kept-claim-of-the-slot",
