@@ -1509,7 +1509,7 @@ mod tests {
         let template = include_str!("../templates/Client.ts.in");
         for (id, request) in reads {
             let method = lower_camel(&pascal(id));
-            assert!(template.lines().take_while(|line| !line.contains("} from './Models.generated.ts'")).any(|line| line.contains(request)), "{request} must be imported");
+            assert!(template.lines().take_while(|line| !line.starts_with("} from './Models.generated.ts'")).any(|line| line.contains(request)), "{request} must be imported");
             assert!(methods.contains(&format!("async {method}(params: {request},")));
         }
         assert_eq!(methods.matches("Promise<EnvelopeOf<unknown>>").count(), 4);
