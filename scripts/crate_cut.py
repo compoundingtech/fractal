@@ -1093,7 +1093,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
     return out
 
 
-def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels):
+def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers):
     """Extract the lower test items the moved tests need into a shared module next to their file, gated by
     test-support, and re-export it where the items were (`pub use`), so old paths keep resolving."""
     added_decls = collections.defaultdict(list)
@@ -1104,7 +1104,19 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
         path = os.path.join(src_dir, directory, name + ".rs") if directory else os.path.join(src_dir, name + ".rs")
         text, items = lower_files[rel]
         file_uses = [it.text for it in items if it.kind == "use"]
-        if not cont:
+        inc = includers.get(rel) if not cont else None
+        if inc is not None:
+            # an included file runs in the scope of the module that includes it
+            irel, icont = inc
+            iitems = lower_files[irel][1]
+            ifile_uses = [it.text for it in iitems if it.kind == "use"]
+            uses = list(ifile_uses) + [u for u in file_uses]
+            for u in CONTAINERS.get((irel, icont), ("", []))[1]:
+                if re.fullmatch(r"\s*use super::\*;\s*", u):
+                    uses.append("use super::%s::*;" % module_path(irel)[-1])
+                else:
+                    uses.append(re.sub(r"\buse super::", "use super::%s::" % module_path(irel)[-1], u))
+        elif not cont:
             uses = file_uses
         else:
             # inside the inline module `super` is the file's module; here that module is a sibling
@@ -1124,6 +1136,24 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             if u.kind in ("fn", "const", "static", "struct", "enum", "type", "trait", "union"):
                 t = t[:code] + "pub " + t[(vis.end() if vis else code):]
             body.append(t)
+        # imports of the parent module that only exist for cfg(test) are not there in a test-support build
+        extras = []
+        parent_rel = ("/".join(parts[:-1]) + ".rs") if len(parts) > 1 else None
+        body_text = "\n".join(body)
+        for pit in (lower_files.get(parent_rel, (None, []))[1] if parent_rel else []):
+            if pit.kind != "use" or "cfg(test)" not in pit.text.split("use ", 1)[0]:
+                continue
+            parsed_p = use_paths(pit.text)
+            if not parsed_p:
+                continue
+            for segs, alias in parsed_p[2]:
+                leaf = alias or segs[-1]
+                if leaf == "*" or not re.search(r"\b" + re.escape(leaf) + r"\b", body_text):
+                    continue
+                absolute = _resolve_use(segs, module_path(parent_rel) + ["_"])
+                target = (["crate"] + absolute) if absolute is not None else segs
+                extras.append(render_use("", "", [(target, alias)]))
+        uses = uses + [e for e in extras if e not in uses]
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text("#![allow(unused_imports)]\n" + "\n".join(uses + globs) + "\n\n" + "\n\n".join(body) + "\n")
         parent = (directory + ".rs") if directory else "lib.rs"
@@ -1363,7 +1393,12 @@ def apply_cut(args, nodes, files, tfiles, order):
         new = prune_uses(cur, items_now, pairs)
         if new != cur:
             open(path, "w").write(new)
-    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles))
+    includers = {}
+    for n in nodes:
+        if n.test and n.kind == "macro_call":
+            for m in re.finditer(r'include!\("([^"]+)"\)', n.item.text):
+                includers[os.path.normpath(os.path.join(os.path.dirname(n.file), m.group(1)))] = (n.file, n.container)
+    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles), includers)
     for rel, names in macro_imports.items():
         path = os.path.join(new_src, rel)
         if not os.path.exists(path):
