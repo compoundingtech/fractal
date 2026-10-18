@@ -22,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use st_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h09403c055b13 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h067531560dbf owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -87,6 +87,16 @@ the checkpoint tables: reading the ledger before local-mode activation stops tho
 would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
+
+## Retired claim facts
+
+`retired_operation_receipts` (operation, request digest, claim) and `retired_claim_ancestry`
+(claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
+read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
+cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
+them, including rows adoption later withdraws, so they only grow. Claim identities use the
+ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
+activation stops those withdrawals.
 "#;
 
 pub fn storage_digest() -> String {

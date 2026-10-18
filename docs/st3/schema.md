@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `5a773ab229f6840a044c37d88812f64af0179542bff88ba67994415efd4cf6c3`
+Storage digest: `fc23a298e3c6229d642457175cb754bf2cc3dae797af08d9a43716b543c85faa`
 
 ## Subject families
 
@@ -324,3 +324,13 @@ the checkpoint tables: reading the ledger before local-mode activation stops tho
 would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
+
+## Retired claim facts
+
+`retired_operation_receipts` (operation, request digest, claim) and `retired_claim_ancestry`
+(claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
+read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
+cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
+them, including rows adoption later withdraws, so they only grow. Claim identities use the
+ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
+activation stops those withdrawals.

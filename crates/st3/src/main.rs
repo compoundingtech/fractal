@@ -17922,7 +17922,10 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
 async fn import_retired_identities(store: Arc<Store>) {
     loop {
         let worker = store.clone();
-        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || worker.import_retired_identities_paced(std::thread::sleep))).await;
+        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || {
+            worker.import_retired_identities_paced(std::thread::sleep)?;
+            worker.import_retired_claim_facts_paced(std::thread::sleep)
+        })).await;
         match result {
             Ok(Ok(())) => return,
             error => {
