@@ -1214,7 +1214,7 @@ mod tests {
         crate::harness_events::enable(root.path(), "runtime-a").unwrap();
         let seq = harness_state::claim(root.path(), "agent/example", "omp", "provider-a").unwrap();
         let mut observer = EventObserver::new(
-            root.path(), "agent/example", "omp", "provider-a", seq, "runtime-a",
+            root.path(), &root.path().join("sessions"), "agent/example", "omp", "provider-a", seq, "runtime-a",
         ).unwrap();
         let start = serde_json::json!({"type":"subagent","event":"start","id":"0-Review","name":"task"});
         observer.observe(&start).unwrap();

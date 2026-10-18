@@ -1404,7 +1404,7 @@ fn typescript_operation_methods(
                 "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
         } else if id == "harness-inventory.get" {
-            writeln!(out, "    async {method}(id: string, options: HarnessInventoryQuery): Promise<EnvelopeOf<HarnessInventory>> {{ return this.get(`{route}` + query({{ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }})); }}")?;
+            writeln!(out, "    async {method}(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HarnessInventory>> {{ return this.get(`{route}` + query({{ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }}), undefined, requestOptions); }}")?;
         } else if id == "resources.list" {
             writeln!(
                 out,
