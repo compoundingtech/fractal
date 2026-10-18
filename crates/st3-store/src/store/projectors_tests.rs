@@ -76,7 +76,7 @@ fn replicated_claims_project_arrangements_only() {
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "resources", "glass-heads", "directive-notes", "agent-messages", "limits"]
+        ["custom", "resources", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements"]
     );
 }
 

@@ -24,8 +24,8 @@
       "action": "agent.restart",
       "tests": [
         "crates/st3/tests/action_coverage.rs::restart_requests_capture_native_context_and_survive_stale_fences_and_restarts",
-        "crates/st3/src/api/client_v0.rs::typed_restart_without_an_incarnation_accepts_a_keyless_seat",
-        "crates/st3/src/api/client_v0.rs::typed_restart_captures_current_session_and_preserves_person_under_never_policy"
+        "crates/st3-api/src/api/client_v0.rs::typed_restart_without_an_incarnation_accepts_a_keyless_seat",
+        "crates/st3-api/src/api/client_v0.rs::typed_restart_captures_current_session_and_preserves_person_under_never_policy"
       ],
       "behavior": "real typed client refuses stale fences without writes; native context and person attribution are captured without changing declaration; accepted requests and exact replay survive daemon restarts without duplicate writes; incarnation omission also accepts a keyless seat"
     },
@@ -1152,7 +1152,7 @@
       "description": "Whether the check run or commit status named CHECK passed on a commit or branch head",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_github_gates_pass_wait_and_refuse_over_private_http_across_restart",
-        "crates/st3-store/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
+        "crates/st3-github-base/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
       ],
       "verification": "real CLI with private HTTP fixture covers pass/wait/broken and obsolete refs across daemon restarts"
     },
@@ -1161,7 +1161,7 @@
       "description": "Whether a pull request has merged; one that closed unmerged cannot pass",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_github_gates_pass_wait_and_refuse_over_private_http_across_restart",
-        "crates/st3-store/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
+        "crates/st3-github-base/src/resource/github_gates.rs::lookups_pass_wait_or_break_as_github_answers"
       ],
       "verification": "real CLI with private HTTP fixture covers pass/wait/broken and obsolete refs across daemon restarts"
     },

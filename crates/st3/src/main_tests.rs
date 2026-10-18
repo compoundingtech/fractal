@@ -394,8 +394,13 @@ async fn native_publisher_uses_one_endpoint_for_availability_and_repeated_sessio
                 let record = store.append_claim(&ClaimInput {
                     subject: request["subject"].as_str().unwrap().into(),
                     actor: Some(request["actor"].as_str().unwrap().into()),
-                    kind: "harness.session".into(),
-                    fields: serde_json::from_value(request).unwrap(),
+                    kind: "harness.session-file".into(),
+                    fields: serde_json::from_value(json!({
+                        "harness": request["harness"],
+                        "session_id": request["session_id"],
+                        "incarnation_id": request["incarnation_id"],
+                        "resume_available": request["resume_available"],
+                    })).unwrap(),
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                 }).unwrap();
                 Json(json!({"api_version":"st3.v1", "value":record}))
@@ -707,11 +712,11 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
 #[test]
 fn missions_tree_fixture_renders_all_sections() {
     let fixture: Value =
-        serde_json::from_str(include_str!("../tests/fixtures/missions-tree.json"))
+        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h52c3278e9ae1 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.json"))
             .expect("valid missions tree fixture");
     assert_eq!(
         render_missions_tree(&fixture),
-        include_str!("../tests/fixtures/missions-tree.txt")
+        /* sqlite-large-value: allow-for-now lv-h42e40a77235e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.txt")
     );
     let cli = Cli::try_parse_from(["st", "missions", "tree", "--json"])
         .expect("missions tree --json parses");
@@ -726,7 +731,7 @@ fn missions_tree_fixture_renders_all_sections() {
 
 #[test]
 fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
-    let items: Vec<ClientTimelineEntry> = serde_json::from_str(include_str!(
+    let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h109bba6945fe owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude.json"
     ))
     .unwrap();
@@ -760,7 +765,7 @@ fn documents_get_renders_markdown_on_a_terminal_and_leaves_data_alone() {
 
 #[test]
 fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
-    let items: Vec<ClientTimelineEntry> = serde_json::from_str(include_str!(
+    let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h225f8728714b owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude-skill.json"
     ))
     .unwrap();
@@ -2434,7 +2439,7 @@ fn every_cli_command_has_a_valid_help_surface() {
 
 #[test]
 fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
-    let contract: Value = serde_json::from_str(include_str!(
+    let contract: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-ha2a0ed5a3f01 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/operational-state/cli-commands.json"
     ))
     .unwrap();
@@ -2497,20 +2502,20 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
-        ("agents", include_str!("agents_cli.rs")),
-        ("attention", include_str!("attention_cli.rs")),
-        ("change", include_str!("change_cli.rs")),
-        ("conversations", include_str!("conversations_cli.rs")),
-        ("doctor", include_str!("doctor_cli.rs")),
-        ("driver", include_str!("driver_cli.rs")),
-        ("fleet", include_str!("fleet_cli.rs")),
-        ("launch", include_str!("launch_cli.rs")),
-        ("replication", include_str!("replication_cli.rs")),
-        ("terminals", include_str!("terminals_cli.rs")),
-        ("uninstall", include_str!("uninstall_cli.rs")),
-        ("work", include_str!("work_cli.rs")),
+        ("agents", /* sqlite-large-value: allow-for-now lv-h64e7bce424cc owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
+        ("attention", /* sqlite-large-value: allow-for-now lv-h894830f2da6e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
+        ("change", /* sqlite-large-value: allow-for-now lv-hf9512b75213b owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
+        ("conversations", /* sqlite-large-value: allow-for-now lv-hce9b519c20da owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
+        ("doctor", /* sqlite-large-value: allow-for-now lv-h4ef68d330bf0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
+        ("driver", /* sqlite-large-value: allow-for-now lv-h6901be108db9 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
+        ("fleet", /* sqlite-large-value: allow-for-now lv-hc13e13e1dcef owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
+        ("launch", /* sqlite-large-value: allow-for-now lv-h65740c83118e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
+        ("replication", /* sqlite-large-value: allow-for-now lv-ha35371b1cf0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("terminals", /* sqlite-large-value: allow-for-now lv-hc9c07b4d9f7f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
+        ("uninstall", /* sqlite-large-value: allow-for-now lv-haa99fd7b7bb0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("work", /* sqlite-large-value: allow-for-now lv-h76caa29e91f6 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
-    let main_source = include_str!("main.rs");
+    let main_source = /* sqlite-large-value: allow-for-now lv-h4403a9330a0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
     let declared: BTreeSet<&str> = main_source
         .lines()
         .filter_map(|line| line.strip_prefix("mod ")?.strip_suffix("_cli;"))
@@ -2563,7 +2568,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         );
     }
 
-    let server_source = include_str!("../../st3-api/src/api.rs");
+    let server_source = /* sqlite-large-value: allow-for-now lv-hcac4fd417c19 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../st3-api/src/api.rs");
     for handler in [
         "watch_resource",
         "unwatch_resource",
@@ -2581,7 +2586,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
 }
 
 fn fixture_product_page(kinds: &[&str], has_more: bool) -> ClientPage {
-    let resources: Vec<Value> = serde_json::from_str(include_str!(
+    let resources: Vec<Value> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hbfc205208eb4 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/client-v0/fixtures/resources.json"
     ))
     .unwrap();
@@ -2629,6 +2634,31 @@ fn replication_status_renders_the_fabric_grant_reason() {
     let output = render_replication_peers(&[peer], "local", 2000);
     assert!(output.contains("peer\tcobalt\trefused\trefused by that member's Fabric grants"));
     assert!(!output.contains("down"));
+}
+
+#[test]
+fn replication_status_names_fallback_and_preferred_retry_deadline() {
+    let mut peer = peer_status("cedar", None);
+    peer.worker = Some(
+        serde_json::from_value(serde_json::json!({
+            "phase": "idle", "last_attempt_at_unix_ms": 1000,
+            "next_retry_at_unix_ms": null, "route_is_preferred": false,
+            "preferred_retry_at_unix_ms": 61_000
+        }))
+        .unwrap(),
+    );
+    let output = render_replication_peers(&[peer.clone()], "local", 1000);
+    assert!(output.contains("  route fallback"), "{output}");
+    assert!(
+        output.contains("preferred route retry in 60s (unix ms 61000)"),
+        "{output}"
+    );
+    let worker = peer.worker.as_mut().unwrap();
+    worker.route_is_preferred = Some(true);
+    worker.preferred_retry_at_unix_ms = None;
+    let output = render_replication_peers(&[peer], "local", 1000);
+    assert!(output.contains("  route preferred"), "{output}");
+    assert!(!output.contains("preferred route retry"), "{output}");
 }
 
 #[test]
@@ -3456,7 +3486,7 @@ fn machines_help_and_contract_include_configured_failures_by_default() {
         "Include historical and discovered hosts beyond the current configured fleet"
     );
 
-    let contract: Value = serde_json::from_str(include_str!(
+    let contract: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc4ec7d1cf50b owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/operational-state/cli-commands.json"
     ))
     .unwrap();
@@ -3517,7 +3547,7 @@ fn machine_and_device_renderers_have_exact_operational_output() {
 
 #[test]
 fn activity_renderer_uses_exact_contract_labels_and_cursors() {
-    let events: ClientEnvelope<ClientEventPage> = serde_json::from_str(include_str!(
+    let events: ClientEnvelope<ClientEventPage> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9f2400142fd2 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/client-v0/fixtures/events.json"
     ))
     .unwrap();
@@ -3604,7 +3634,7 @@ fn terminal_screen_accepts_a_remote_owner_subject_and_person() {
 
 #[test]
 fn terminal_screen_renderer_preserves_each_terminal_row() {
-    let response: ClientEnvelope<ClientTerminalScreen> = serde_json::from_str(include_str!(
+    let response: ClientEnvelope<ClientTerminalScreen> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h877df9dd7077 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/client-v0/fixtures/terminal-screen.json"
     ))
     .unwrap();
@@ -3924,7 +3954,7 @@ fn every_offered_cli_command_has_an_action_coverage_row() {
     let mut offered = std::collections::BTreeSet::new();
     walk(&command, "st", &mut offered);
     let inventory: serde_json::Value =
-        serde_json::from_str(include_str!("../../../docs/st3/action-coverage.json")).unwrap();
+        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc7a5f3b26311 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../../docs/st3/action-coverage.json")).unwrap();
     let documented = inventory["cli"]
         .as_array()
         .unwrap()
@@ -3959,7 +3989,7 @@ fn machine_read_inventory_comes_from_the_live_clap_graph() {
         .iter()
         .map(|command| command.as_str().unwrap().to_owned())
         .collect::<BTreeSet<_>>();
-    let visible: Value = serde_json::from_str(include_str!(
+    let visible: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h04c6b5b87989 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/action-coverage.json"
     ))
     .unwrap();

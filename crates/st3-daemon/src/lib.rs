@@ -18,7 +18,8 @@ pub use st3_store::backup;
 pub use st3_store::blobs;
 pub use st3_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
-pub use st3_store::changes;
+pub use st3_github::changes;
+pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use st3_api::claude_channel;
 pub use st3_store::client;
 pub use st3_kernel::config;
