@@ -1080,13 +1080,16 @@ def _shared_base(rel):
     return base
 
 
+SHARED_SUFFIX = ""  # a cut on top of another names its shared modules apart from that cut's
+
+
 def _shared_name(rel, container):
     p = module_path(rel)
     base = _shared_base(rel)
     suffix = ("_" + "_".join(container)) if container else ""
     if len(p) == 1:
-        return "shared" + suffix
-    return "_".join(p[len(base):]) + suffix + "_shared"
+        return "shared" + suffix + SHARED_SUFFIX
+    return "_".join(p[len(base):]) + suffix + "_shared" + SHARED_SUFFIX
 
 
 def _shared_path(rel, container):
@@ -2215,6 +2218,8 @@ def main(argv=None):
         path, lay = spec.split("=")
         load(path, nodes=nodes, fixed=config["order"].index(lay) + 1)
     if args.cmd == "apply":
+        if args.above:
+            globals()["SHARED_SUFFIX"] = "_" + args.layer
         below = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] < current]
         above = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] > current]
         if not args.lower:
