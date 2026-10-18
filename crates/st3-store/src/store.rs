@@ -204,7 +204,7 @@ pub mod delegation;
 pub mod limits;
 pub mod database_size;
 pub mod projection_divergence;
-pub use database_size::DatabaseSize;
+pub use database_size::{DatabaseSize, FREE_PAGE_CHUNK};
 pub mod person_work;
 pub use person_work::AskImages;
 pub mod reconcile_work_context;

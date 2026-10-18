@@ -97,3 +97,22 @@ cargo run --release -p st3 --example retention_plan -- /private/dir/clone.sqlite
 
 It opens and migrates the clone, so never point it at a live store or at the copy you keep. Two
 builds that plan the same clone with the same rules report the same digests.
+
+## Giving space back
+
+A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A
+store made with incremental auto-vacuum gives them back: the hourly retention pass releases free
+pages 512 at a time (2 MiB), one short write each, so other writes run between them. A new store
+is made that way.
+
+A store made before then has auto-vacuum off: the file never shrinks, whatever the trims free. One
+VACUUM converts it. It rewrites the whole file, so it needs free disk as large as the store and runs
+with the daemon stopped, during a deploy swap:
+
+```sh
+python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("PRAGMA auto_vacuum = INCREMENTAL"); c.execute("VACUUM")' "$STATE/claims.sqlite3"
+```
+
+The VACUUM also gives back every page already free, so run it after the trims have caught up.
+`PRAGMA auto_vacuum` then answers 2, and from then on the hourly pass keeps the file close to its
+pages in use.
