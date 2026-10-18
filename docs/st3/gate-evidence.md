@@ -11,8 +11,16 @@ verified trace receipt; v1 rejects it until its predicate and verifier exist.
 ## Record and transport
 
 The record is an in-toto v1 statement with one subject: `name` is the observed
-full commit ID, and `digest.gitTree` is its exact Git tree ID. The predicate type
-is `https://smalltalk.dev/evidence/gate/v1`. Its fields are:
+full commit ID, and `digest.gitTree` is its exact Git tree ID. Rust and Python
+verifiers accept both predicate types:
+`https://compounding.tech/fractal/evidence/gate/v1` and
+`https://smalltalk.dev/evidence/gate/v1`. Acceptance of the old URI is the
+permanent signed-history decoder exception named in
+[#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
+attestations are never rewritten. All other predicate URIs are rejected.
+The Rust observers and `scripts/evidence-sign` still write
+`https://smalltalk.dev/evidence/gate/v1`. The signer switches only in a later
+release, after this dual-URI verifier release is on main. Its fields are:
 
 | Field | Meaning |
 | --- | --- |
@@ -678,6 +686,24 @@ key stops the skip by itself. Paths are literal and relative; an under-declared 
 keeps running the real job for one run in N even when a note matches, chosen by a hash of the check, the key and
 the head, so a retry behaves the same; the gate prints `decision=run` with a reason starting `sampled`.
 
+`linux-gate` declares its inputs too (shadow only: `enforce` stays false, `sample_one_in` 5). The list is the Rust test stage's
+(`doc/fleet/factory/nix-evidence/rust-test-declared-inputs`, a textual scan of what the Rust sources name) plus what the other
+members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
+scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
+`docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
+on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the st3 crate), `evals` (the example and graph tests read `evals/st3`),
+`claude-channel` and `plugins` (the plugin files `include_bytes!`d into st-drivers) and `docs/st2` (`tests/invariants.rs` includes
+`docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
+`include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
+artifact name, and `upgrade-impact`, which reads the fragments, always runs. The one file under `apps` the Rust tests read at run time is declared by name
+(`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/st3-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
+the first runs are shadow: a miss shows up as a satisfied note beside a failing real job, and `scripts` and `.github` are declared
+whole until a per-file list is reviewed against a trace of what each stage opens.
+
+**Known gap, whole-tree lints:** `tests/public_repo.rs`, `tests/native_only.rs` and `tests/vrs_ledger.rs` read EVERY tracked file, so a pull request that changes only a path outside the declared inputs (a page under `apps`, `packages`, `release-notes`) still changes what those lints see. The Rust key therefore must not be enforced until those lints run on every tree (a separate always-run check or an inputs list that includes them); until then it is shadow only, and a miss would show as a satisfied note beside a failing real job. The skip decision is taken once per stage group
+before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
+share one key.
+
 The projection reads names as bytes and passes them NUL-terminated both ways (`ls-tree -z`, `update-index -z`),
 so a newline in a name cannot split one file into two entries; symlinks and gitlinks keep their modes. When none
 of the declared paths exists the projection would be the empty tree that every such tree shares, so there is no
@@ -722,6 +748,92 @@ host-signed local note (its command is the `nix develop ...` line `scripts/st-te
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
 `host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+
+### Requiring a signed note (`require`, shadow only so far)
+
+`require` is a second per-check switch in `.st/evidence-skip-policy.json`, separate from `enforce`: `off` (the default, also when absent),
+`shadow` or `reject` (anything else is an error). It is about REJECTING a change that has no trusted note, where `enforce` is about SKIPPING
+work that has one. `scripts/evidence-verify --require-all --tree T --keys-from BASE --policy-from BASE --repository OWNER/NAME` judges
+every check whose `require` is not `off`, each by exactly the rules of a single check, and prints one entry per check with its own reason
+(`no_record`, `stale_tree`, `bad_signature`, `untrusted_signer`, `untrusted_level`, `wrong_command`, `check_failed`, ...), so a missing lane is named.
+The overall `decision` is `reject` when a `reject` check is not satisfied, `would-reject` when only `shadow` checks are not, and `ok` otherwise
+(also when nothing requires anything). The exit code is 1 only for `reject`; `shadow` never fails; a verifier that could not decide (invalid or missing base policy, unreadable keys, any unexpected error) exits 2 with `decision: error`, so a consumer can tell an error from a reject. Every kind rule must declare its command (the policy refuses one that does not), so a lane is always held to the argv its kind records. With no check requiring anything the answer is `ok` with an empty `lanes`; a queue mode built on this must treat an empty required set as an error, and this switch never enables skipping (`enforce` does). The policy and the keys are read from the
+accepted base like everything else here. Nothing calls it yet and no check sets `require`: this adds the switch and the report, and a test
+asserts that every committed check is `off`. Making any check `reject` is a separate reviewed change, and making it a required status
+check is a repository ruleset change that is not made here. A pass for a tree is never evidence for the combined tree the merge queue tests.
+
+### Lane definitions (`.st/required-lanes.json`, nothing reads it yet)
+
+A note says a check passed; what the check RAN is decided by scripts that live in the tree under test, so an agent could change them and still hold a
+valid note. `.st/required-lanes.json` (read from the accepted base, strictly validated) names, per lane, the exact `argv`, the `definition_paths`
+(files or directories whose bytes decide what that argv does) and, for information, the `tree_inputs` the lane is meant to test. With
+`--lanes-from BASE` the verifier (single check or `--require-all`) holds a check to its lane: every blob at or below a definition path must be
+IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
+runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
+no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
+The committed file lists the two lanes `scripts/st-test` can run today, with the same argv (a test pins that) and deliberately wide definition paths
+(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for genie-freshness): a change to any script then always runs in CI. They are to be tightened
+only with a read trace of the lane (a later change). No producer writes the digest yet, nothing passes `--lanes-from`, and no gate reads the file, so
+this changes no behaviour; when a gate does read it, `.st/required-lanes.json` must join that gate's protected paths.
+
+Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
+refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
+message names the paths), and records `lane_definition_sha256`, the digest the verifier recomputes from the same base. Without a lane file at the base
+nothing changes. A lane's `definition_paths` are a hand-declared list: a helper script it reads but the list omits is not covered, which is what the closure
+control below checks. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
+uses until every lane a gate relies on has a clean trace (typescript-client has; genie-freshness has not been traced).
+
+#### Lane closure: what the lane really touches (`scripts/evidence-lane-trace`)
+
+A lane entry may also list `absent_paths`: paths the lane LOOKS FOR and does not find (a `.pnpmfile.cjs`, a `package.yaml`, a `fixtures/package.json`
+that would change module resolution). A tracked file appearing at or below one of them changes what the lane does, so none may exist in the signed
+tree (`definition_changed` names it), none may exist at the base (a lane-file error), and the list is part of the digest. The hand-written lists are
+checked against a real run: `scripts/evidence-lane-trace --lane NAME --lanes-file FILE --root DIR -- COMMAND...` runs the command under `strace -f -y`
+(or `--analyze RAW` reads a log) and reports `uncovered_reads` (repository files opened or stat'ed that no list covers) and
+`uncovered_absence_probes` (paths looked for and not found that no list covers), exit 1 if either is non-empty. Relative paths are resolved from the
+log's directory annotations and chdir/clone tracking; `unresolved_calls` counts the ones that could not be placed (a lane is not closed by a trace
+that has any). Anything inside `node_modules` or `.git` is not tree content and is skipped, but a MISSING `node_modules` directory is reported.
+
+typescript-client was traced once on 2026-10-17 at main 47fb60d96cb (`nix develop .#web -c bash -c 'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'`,
+3,607 distinct paths opened, 1,922 looked for and not found). The hand-written lists had missed one file the tests import
+(`apps/fractal-web/src/folders/core.mts`, now a `tree_input` and in the skip policy's declared `inputs`, which had the same gap) and 24 absence probes (now
+`absent_paths`); the result after the fix is no uncovered path and no unresolved call. Limits, stated plainly: the trace covers only the paths that ONE
+run took (a branch the run did not execute is not seen); it must be repeated when the lane's command, the dev shell or the test suites change; the
+genie-freshness lane was traced separately (below; its input is the whole tree); and a lane whose `unresolved_calls` is not 0 is not closed. Until
+every lane a gate relies on has a clean trace, a signed note still must not skip a queue lane on this alone.
+
+genie-freshness was traced on 2026-10-17 at main 7c25ef7e87e (`nix develop .#genie -c bash scripts/ci-genie-freshness`, with `LD_PRELOAD` unset: the signer
+refuses to start with it set; 8 min 55 s under strace, 1.8 GB of log; the lane's own real-strace test skips itself when already traced). Its input is the
+whole tree (`genie --check` regenerates and checks every file, the licence check reads every lockfile, the tests build fixture repositories), so its lane
+entry declares `tree_inputs: ["."]` and the trace tool reports nothing under the root as uncovered; the trace shows 2,353 repository paths opened, 2,513 looked
+for and not found, and no call it could not place. What the whole-tree declaration does NOT cover is the environment outside the repository, which the
+trace did show and no fingerprint records: the user's global git configuration (`~/.gitconfig`, `~/.config/git`, read by every git the lane starts outside
+its fixtures), the bun install cache under `~/.bun`, the user's `PATH` tools (`gh`, `flock`) and `/etc/localtime`. They are not tree content and are not
+bound by `flake.lock`; a host whose global git configuration differs can in principle produce a different result. That is a documented limit of the
+cooperative host signature, not something this control removes.
+
+### The `signed-tree` shadow job
+
+`.github/workflows/signed-tree.yml` (source `signed-tree.yml.genie.ts`) runs `scripts/ci-signed-tree` on `pull_request_target` for same-repository,
+non-draft pull requests and prints one line, also written to the step summary:
+
+```
+signed-tree v1 decision=ok|would-reject|reject|skipped|error mode=shadow pr=N head=SHA tree=SHA base=SHA reason=... lanes=name:state,... seconds=S
+```
+
+It asks `evidence-verify --require-all --lanes-from BASE` whether the pull request's HEAD tree has a trusted signed note for every check whose policy
+says `require` (today `genie-freshness` and `typescript-client`, both `shadow`), with the reason per check (`no_record`, `stale_tree`, `wrong_definition`,
+`definition_changed`, ...). It is SHADOW ONLY: the job always passes (`continue-on-error`, the script exits 0 on every path), it is not a required
+check and no ruleset names it; `decision=reject` can only appear once a check's policy says `reject`, and even then it is reported, not enforced.
+
+How a pull request cannot edit or delete the job: `pull_request_target` always runs the workflow file of the BASE branch, so the pull request's copy
+of the workflow is never used, and the checkout is the base branch tip (no `ref`). The pull request's code is never checked out or executed:
+`ci-signed-tree` fetches `refs/pull/N/head` as git objects (and the evidence notes) and reads them with `git rev-parse` / `git ls-tree`; the verifier,
+key list, skip policy and lane file are the base checkout's. Permissions are `contents: read`, no secret is referenced, the checkout keeps no
+credentials, and the event fields reach the script only as environment variables (never interpolated into a command). A test runs a pull request
+that rewrites the script, the verifier, the policy and the lane file and shows that none of it runs and the base's rules decide. Forks and drafts are
+`skipped`. With no check requiring a note the job is a no-op that fetches nothing. A new `pull_request_target` workflow does not run for the pull
+request that adds it (the base does not have it yet), so its first runs are the next pull requests after it lands.
 
 ### Which tree a pull request run asks about
 

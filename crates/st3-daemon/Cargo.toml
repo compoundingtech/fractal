@@ -9,7 +9,7 @@ license = "MIT"
 # Enabled by the st3 package for its tests and fixtures, and by the dev-dependency below for this package's
 # own tests (so `cargo test -p st3-daemon --lib` runs the test-support tests, as `-p st3 --lib` did).
 # Never enabled by a production build.
-test-support = []
+test-support = ["st3-telemetry/test-support", "st3-store/test-support", "st3-github/test-support", "st3-peer/test-support", "st3-reconcile/test-support", "st3-api/test-support"]
 
 [dependencies]
 anyhow = "1"
@@ -36,7 +36,6 @@ libc = "0.2"
 libghostty-vt = "=0.2.1"
 libghostty-vt-sys = { version = "=0.2.1", features = ["pkg-config"] }
 notify = "8"
-parking_lot = "0.12"
 opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
@@ -52,6 +51,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
+st3-kernel = { path = "../st3-kernel" }
+st3-telemetry = { path = "../st3-telemetry" }
+st3-store = { path = "../st3-store" }
+st3-github = { path = "../st3-github" }
+st3-peer = { path = "../st3-peer" }
+st3-reconcile = { path = "../st3-reconcile" }
+st3-api = { path = "../st3-api" }
 st-runtime = { path = "../st-runtime" }
 st3-client = { path = "../st3-client", features = ["trace-propagation"] }
 st3-terminal-direct = { path = "../st3-terminal-direct" }
