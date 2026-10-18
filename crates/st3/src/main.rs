@@ -5915,6 +5915,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(st3::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
@@ -17911,6 +17912,25 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
             eprintln!("st3: signature migration fault could not be persisted: {error:#}");
         }
         eprintln!("st3: signature candidate migration stopped: {result:?}");
+    }
+}
+
+/// Checkpoint tombstones recorded before the retired-identity ledger union into it after
+/// startup, a page at a time on the writer queue with its cursor. Later recordings and
+/// deletions reach the ledger by trigger, so an unfinished import loses nothing. A failed page
+/// retries, including after a daemon restart.
+async fn import_retired_identities(store: Arc<Store>) {
+    loop {
+        let store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || store.import_retired_identities())).await;
+        match result {
+            Ok(Ok(report)) if report.done => return,
+            Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
+            error => {
+                eprintln!("st3: retired identity import failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
     }
 }
 

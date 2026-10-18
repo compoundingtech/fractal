@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep every retired claim and envelope identity in a ledger that only grows",
+  "replay": {
+    "status": "none",
+    "detail": "No replay. A background job unions existing checkpoint tombstones into the ledger, 4,096 rows per writer transaction with a committed cursor; it resumes after a restart. Later checkpoint recordings and deletions reach the ledger by trigger."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds WITHOUT ROWID tables retired_claim_ids, retired_envelopes, retired_claim_withdrawals and retired_envelope_withdrawals, plus six triggers on checkpoint_claims and checkpoint_envelopes (AFTER INSERT, AFTER UPDATE, BEFORE DELETE). Storage version stays 20; earlier binaries open the store and the triggers keep the ledger current. Synthetic SQLite 3.51 measurement, random insertion order, 4 KiB pages: 41.4 B per retired claim ID and 61.1 B per envelope identity (1,000,000 rows each). The local member held 1,136,087 claim tombstones on 2026-10-18; at those rates its ledger is roughly 47 MB of claim IDs plus about 61 MB per million envelope tombstones. This is an estimate, not a measurement of a production store."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Admission, evidence, checkpoint planning, manifests and digests still read checkpoint_claims and checkpoint_envelopes; nothing reads the ledger yet. Adoption still withdraws tombstones from those tables exactly as before."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or backup format change. A restore rebuilds the ledger from the restored tombstones through the triggers; withdrawal labels are local and not part of backups."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal restart; the tables and triggers are created empty at open. The import runs after startup on the writer queue, in pages, with a 50 ms pause between pages."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back to an earlier binary is supported; the ledger and triggers remain and are harmless. Nothing reads the ledger yet, so no behavior depends on it."
+  }
+}
