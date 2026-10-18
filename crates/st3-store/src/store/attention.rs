@@ -158,7 +158,7 @@ impl Store {
     pub fn discard_desired_owned_by(&self, owner_run: &str) -> Result<usize> {
         let connection = self.connection.write();
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-hbd2926fa2f28 owner=st3_store::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1", [owner_run])
+            .execute(/* sqlite-large-value: allow-for-now lv-hd884caed6efc owner=st3_store::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1 AND subject NOT LIKE 'resource/uri/%'", [owner_run])
             .map_err(Into::into)
     }
 

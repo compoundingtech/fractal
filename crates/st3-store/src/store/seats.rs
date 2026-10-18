@@ -1470,8 +1470,8 @@ impl Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h4614ccc7d8b8 owner=st3_store::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
-             WHERE owner_run IN (
+            /* sqlite-large-value: allow-for-now lv-h2a2742c6fb11 owner=st3_store::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
+             WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
             [run_id],
@@ -1482,7 +1482,7 @@ impl Store {
                  FROM desired
                  JOIN mission_runs
                    ON desired.owner_run='mission-run/' || mission_runs.id
-                 WHERE mission_runs.root_run_id=?1
+                 WHERE mission_runs.root_run_id=?1 AND desired.subject NOT LIKE 'resource/uri/%'
                  ORDER BY desired.subject",
             )?;
             statement

@@ -441,6 +441,16 @@ pub struct StatusQuery {
     harness_only: bool,
 }
 
+pub async fn resource_referrers(
+    State(state): State<AppState>,
+    AxumPath(subject): AxumPath<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.declared_resource_referrers(&subject))
+        .await
+        .map(Json)
+}
+
 /// One subject's desired record. Each Claude seat's status line reads it on every render (every
 /// five seconds), which a full status reduction of the seat made a tenth of a core on a member.
 pub async fn get_desired(

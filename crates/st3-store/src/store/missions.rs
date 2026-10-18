@@ -5159,11 +5159,11 @@ impl Store {
         for (subject, desired) in &intent.subjects {
             let current = desired_row_at(&connection, subject, at_index).map_err(internal)?;
             let revision = desired_revision(desired);
+            let changed = !desired_matches(current.as_ref(), desired, &revision)?;
             tokens.insert(
                 subject.clone(),
                 intent_leaves_at(&connection, subject, at_index).map_err(internal)?,
             );
-            let changed = current.as_ref().is_none_or(|row| row.revision != revision);
             if changed {
                 changes.push(SubjectChange {
                     subject: subject.clone(),
@@ -5565,6 +5565,50 @@ impl Store {
         )?;
         let rows = statement.query_map([owner_step], desired_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Incoming named edges, using the target index rather than scanning declaration bodies.
+    /// While a preexisting store's edge index is still being folded in bounded background
+    /// steps, the same answer comes straight from the selected declarations.
+    pub fn declared_resource_referrers(&self, subject: &str) -> Result<Vec<Value>> {
+        let connection = self.readers.get();
+        if resource_references::backfilling(&connection)? {
+            return resource_references::referrers_from_declarations(&connection, subject);
+        }
+        let mut statement = connection.prepare_cached(
+            "SELECT owner, name, reason FROM declared_resource_edges WHERE target=?1 ORDER BY owner, name",
+        )?;
+        let rows = statement.query_map([subject], |row| {
+            Ok(json!({
+                "owner": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "reason": row.get::<_, Option<String>>(2)?,
+            }))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
+    /// only typed edges; this resolves them through the ordinary desired resource subjects.
+    pub fn declared_resource_uris<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a crate::model::DeclaredResourceReference>,
+    ) -> Result<BTreeMap<String, String>> {
+        let subjects = references
+            .into_iter()
+            .map(|reference| reference.subject.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(self
+            .desired_subjects_named(&subjects)?
+            .into_iter()
+            .filter(|desired| desired.kind == "resource")
+            .filter_map(|desired| {
+                let uri = crate::graph::declared_uri(&desired.desired)?.to_owned();
+                Some((desired.subject, uri))
+            })
+            .collect())
     }
 
     /// The desired subjects that the runs `owner_runs` own.
