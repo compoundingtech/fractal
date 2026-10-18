@@ -10,7 +10,7 @@ import { darkTheme } from './assistant-ui/embrace-theme'
 import { DiffPanel } from './assistant-ui/composition/DiffPanel'
 import { assertDiffTint } from './assistant-ui/composition/diff-tint-assertion'
 
-const diff = ['@@ -1,2 +1,2 @@', ' const rows = [', '-  "previous row",', '+  "retained row",', ' ]']
+const diff = ['@@ -1,2 +1,2 @@', ' const rows = [', '-  [PREVIOUS, 1, false, "previous row"],', '+  [RETAINED, 2, true, "retained row"],', ' ]']
 const themes = { neutral: baselineTheme, composition: [], embrace: [...baselineTheme, darkTheme] } as const
 function DiffTintCanvas({ theme = 'neutral', scheme = 'dark' }: { theme?: keyof typeof themes; scheme?: 'dark' | 'light' }) {
   return <div data-scheme={scheme} {...stylex.props(styles.canvas, ...themes[theme], ...(scheme === 'light' ? lightTheme : []))}><DiffPanel open width="100%" diff={diff} path="sample/rows.ts" added={1} removed={1} /></div>
@@ -18,6 +18,11 @@ function DiffTintCanvas({ theme = 'neutral', scheme = 'dark' }: { theme?: keyof 
 const meta = { title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: { theme: 'neutral', scheme: 'dark' }, parameters: { layout: 'fullscreen' }, play: async ({ canvasElement, args }) => {
   const receipt = assertDiffTint(canvasElement)
   canvasElement.dataset.diffTintReceipt = JSON.stringify(receipt)
+  await expect(receipt.minimumTextContrast).toBeGreaterThanOrEqual(4.5)
+  await expect(receipt.minimumGutterContrast).toBeGreaterThanOrEqual(4.5)
+  for (const token of ['constant', 'number', 'boolean']) {
+    await expect(canvasElement.querySelector(`[data-diff-kind="added"] [data-syntax-token="${token}"]`)).not.toBeNull()
+  }
   const counts = [...canvasElement.querySelectorAll('span')].filter(element => /^[-−+]1$/.test(element.textContent ?? ''))
   await expect(counts.length).toBeGreaterThan(0)
   for (const count of counts) {

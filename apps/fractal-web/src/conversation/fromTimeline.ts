@@ -1,7 +1,7 @@
 // Project decoded st3 conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineEntry } from '@smalltalk/st3-client/schema'
+import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry } from '@smalltalk/st3-client/schema'
 import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@st3/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
@@ -152,6 +152,31 @@ const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): Conve
   }
 }
 
+const isHiddenBlock = (block: { readonly visibility?: string | undefined }) =>
+  block.visibility === 'internal' || block.visibility === 'hidden-by-harness'
+
+/**
+ * Native bodies with internal or hidden-by-harness blocks stay out of prose but keep their inspectable data as one
+ * UnknownEvent. `mixedContent` marks a body that also has visible blocks, which need a visible disclosure until blocks
+ * carry separable prose.
+ */
+const hiddenNativeEvent = (entry: Exclude<Entry, { type: 'truncation' } | UnrecognizedEntry>): ConversationItem | undefined => {
+  if (!('blocks' in entry.body)) return undefined
+  const all = (entry.body as { readonly blocks?: ReadonlyArray<TimelineBlock> }).blocks
+  const blocks = all?.filter((block) => block.kind !== 'source_record')
+  if (!blocks?.some(isHiddenBlock)) return undefined
+  const mixedContent = blocks.some((block) => !isHiddenBlock(block))
+  const primaryType = blocks[0]?.view?.type
+  return {
+    _tag: 'UnknownEvent',
+    id: entry.id,
+    at: entryTimestamp(entry),
+    eventType: typeof primaryType === 'string' ? primaryType : primaryType?.raw ?? 'internal native content',
+    ...(mixedContent ? { mixedContent: true } : {}),
+    data: entry.body,
+  }
+}
+
 /** Projects one entry that is not a tool result (results join their call instead). */
 const baseItemOf = ({
   entry,
@@ -162,6 +187,12 @@ const baseItemOf = ({
 }): ConversationItem => {
   switch (entry.type) {
     case 'content': {
+      // Native text blocks can carry only {body_ref:true}, not their own prose:
+      // external_sessions.rs:3698-3728,4813-4832; Schema.generated.ts:2639-2662.
+      // Mixed bodies therefore need a visible disclosure, not guessed text boundaries.
+      // This mixed-content path goes away once TimelineBlock carries per-block text or body ranges.
+      const hidden = hiddenNativeEvent(entry)
+      if (hidden !== undefined) return hidden
       const internal = unrecognizedOmpItem(entry)
       if (internal !== undefined) return internal
       const reasoning = parseNativeReasoning(entry)
@@ -298,7 +329,7 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
   const facts = blockFacts(entry.body)
   const blocks = facts.blocks
   const degraded = entry.degraded ?? []
-  if (blocks === undefined && degraded.length === 0) return { markers: [], native: false }
+  if ((blocks === undefined || (blocks.length === 0 && entry.type === 'content')) && degraded.length === 0) return { markers: [], native: false }
   const harness = blocks?.find(block => block.kind === 'source_record')?.source_type
     ?? blocks?.find(block => block.source_type.includes('/'))?.source_type.split('/')[0] ?? 'st'
   const at = entryTimestamp(entry)
@@ -319,7 +350,8 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     const text = entry.type === 'content' ? entry.body.text ?? '' : ''
     const ctx = { id: entry.id, at, text, harness }
     const meaning = block.view !== undefined && isKnownView(block.view) ? viewMeaning(block.view, ctx) : undefined
-    if (meaning?._tag === 'Drop') continue
+    // A dropped view only hides its own internal record; visible content keeps its prose (visibility decides, not the label).
+    if (meaning?._tag === 'Drop') { if (!selected) { selected = true; fallback = entry.type === 'content' }; continue }
     if (meaning?._tag === 'Item') { if (!selected) { primary = meaning.item; selected = true }; continue }
     if (meaning?._tag === 'Tool') { if (!selected) { selected = true; fallback = entry.type !== 'content' }; continue }
     if (role === 'typed') {
@@ -333,7 +365,10 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     if (entry.type !== 'content') { fallback = true; continue }
     if (role === 'reasoning') primary = { _tag: 'Reasoning', id: entry.id, at, text: text.startsWith('[reasoning]\n') ? text.slice(12) : text, streaming: !entry.final }
     else if (entry.role === 'system') primary = q101OmpEnvelopeStopgap({ id: entry.id, at, role: 'system', text })
-      ?? { _tag: 'Event', id: entry.id, at, kind: 'harness-message', title: 'Harness message', text: ompNoticeExcerpt(text), sender: { kind: 'harness', label: harness }, data: {} }
+      // Only tagged envelopes are harness messages; plain visible system text stays prose.
+      ?? (/<\/?[a-z][\w-]*[\s>]/i.test(text)
+        ? { _tag: 'Event', id: entry.id, at, kind: 'harness-message', title: 'Harness message', text: ompNoticeExcerpt(text), sender: { kind: 'harness', label: harness }, data: {} }
+        : itemOf({ entry, sessionActive: true }))
     else primary = itemOf({ entry, sessionActive: true })
   }
   for (const [index, block] of degraded.entries()) {
@@ -341,6 +376,13 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     const raw = recordValue(block.raw)
     if (raw?.visibility === 'internal' || raw?.visibility === 'hidden-by-harness' || block.kind === 'source_record') continue
     markers.push(unsupported(`${entry.id}#${block.blockId ?? `dropped-${index}`}`, harness, block.kind ?? 'unknown', 'undecodable-block', block.raw, at))
+  }
+  // Main's rule: a content body with any hidden block is one inspectable UnknownEvent (itemOf builds it). Other entry kinds
+  // keep their visible blocks and only fall back to that event when every block is hidden.
+  const hiddenEvent = hiddenNativeEvent(entry)
+  if (hiddenEvent !== undefined) {
+    if (entry.type === 'content') return { markers, native: true, fallback: true }
+    if (primary === undefined && markers.length === 0 && !fallback) primary = hiddenEvent
   }
   return { markers, ...(primary === undefined ? {} : { primary: { ...primary, ...facts } }), native: true, fallback }
 }

@@ -473,8 +473,14 @@ The optional `agent_messages` field adds a **daily estimate**, also shown by `st
 the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
 Receipts and duplicate send claims add no messages. Bodies are never classified. Counts are
-maintained in the writer transaction and backfilled once on upgrade. Full UTC days use daily
-recipient counters; the first and last partial days use an indexed send-time range.
+backfilled atomically on the first usage-estimate request after upgrade, not during daemon
+startup. That first request can take longer; it never returns partially backfilled counts.
+Until then, daily counters are not maintained; the first request rebuilds them from every
+retained send. Once initialized, counts are maintained in each writer transaction. Full UTC
+days use daily recipient counters; the first and last partial days use an indexed send-time
+range.
+An estimate inside an already-pinned read snapshot with an uninitialized cache folds that
+snapshot's retained sends directly instead of writing or observing a later commit.
 
 `AgentMessageEstimate.days` contains at most the latest 31 UTC calendar days intersecting the
 period, including zero-message days. Each row names `day_start_ms`, the clipped `since_ms` and
@@ -1035,10 +1041,10 @@ uses this continuation and registers its wake before reading the frontier. The l
 `GET /v1/events` keeps its array shape, returns at most 200 rows, and reports continuation in
 `X-ST-Next-After`, `X-ST-Has-More`, and `X-ST-Frontier`; owner filters and subject filters
 during migration require the page endpoint. CLI condition, restart, and harness waits use pages.
-A new CLI probes that route once. On a bare missing-route 404, it negotiates only a legacy daemon
-that explicitly advertises `features.bounded_legacy_events=1`; otherwise it stops with daemon
-upgrade guidance before requesting legacy history. Typed refusals, errors and HTTP 410 never
-activate negotiation.
+The CLI requires the page endpoint and never falls back to legacy event history. On a bare
+missing-route 404, a daemon without `features.bounded_legacy_events=1` receives daemon upgrade
+guidance. A daemon advertising that capability but missing the page route receives the normal
+unexpected-response error. Typed refusals, errors and HTTP 410 retain their existing handling.
 A cursor before the recorded checkpoint deletion floor receives HTTP 410 `cursor-gap` with
 `full_resync=true`, `resume_floor`, and `frontier`. Refresh projections and establish a new
 cursor explicitly; do not silently reset or keep retrying the old cursor. Client-v0 event feeds
@@ -1874,7 +1880,20 @@ An optional `subject: ArrangementId` selects only that arrangement (zero or one 
 `has_more: false`), so a selected Sidebar cannot fall outside a busy owner's byte/count
 window. Its owner must equal `person`; mismatches are refused. Snapshots, upserts and
 retirement removals retain the ordinary collection semantics. Omitting the filter
-keeps owner-wide prefix windows unchanged.
+keeps owner-wide prefix windows and additionally invalidates the complete owner
+inventory: a changed owner revision sends an existing `changes` frame even if
+`upserts` and `removes` are empty and `order`/`has_more` are unchanged. Its `snapshot`
+names the same read snapshot as that revision and prefix. Create, rename, retire,
+layout edits and replicated materialization are covered, including older admitted claims
+projected after newer local edits. Owner-local counters commit with those projection
+writes; replay/rebuild advances touched owners. Other owners and unrelated routine
+global commits do not send inventory notices. Revisions are compared for inequality,
+so a database reset can cause one extra notice. A notice can retain the previous
+snapshot ID/index when projection changes without a new claim; never discard it on
+that basis. Clients needing complete discovery paginate
+the HTTP list after the initial snapshot and every owner-wide changes frame, including
+empty ones, rather than inferring absence from the prefix. See
+[current collection subscriptions](collections.md) for the exact contract.
 Arrangement list and stream windows also fit a byte budget: the 1,048,576-byte response
 ceiling reserves 128,000 bytes for the envelope. A byte-shortened window sets `has_more`
 and retains full resources, not truncated registers or placements. A replicated full

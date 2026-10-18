@@ -12,21 +12,26 @@ const entry = (blocks: readonly unknown[], fields: object = {}) => ({ id: 'timel
 const frame = (items: readonly unknown[], replace = true) => decodeConversationChunk({ kind: 'conversation', collection: 'conversation', id: 'follow/raw', session_id: 'session/raw', replace, has_more: false, items })
 const project = (raw: unknown) => { const timeline = new LiveTimeline(); timeline.apply(frame([raw])); return timeline.project().items }
 
+// Entries whose native blocks are all internal or hidden-by-harness stay out of prose but keep their inspectable
+// body as one UnknownEvent (never silently dropped); the transcript mapping omits them from the visible turns.
+const hiddenEvent = (visible: object = {}) => [{ _tag: 'UnknownEvent', ...visible }]
+const withoutHidden = <T extends { readonly _tag: string }>(items: ReadonlyArray<T>) => items.filter(item => item._tag !== 'UnknownEvent')
+
 describe('native closed transcript boundary', () => {
-  it('hides internal tool starts', () => {
-    expect(project(entry([block('status', { visibility: 'internal', view: { type: 'tool_start', call_id: 'call/a', tool: 'bash', started_at: '2026-10-12T12:00:00Z' } })]))).toEqual([])
+  it('keeps internal tool starts out of prose as an inspectable event', () => {
+    expect(project(entry([block('status', { visibility: 'internal', view: { type: 'tool_start', call_id: 'call/a', tool: 'bash', started_at: '2026-10-12T12:00:00Z' } })]))).toMatchObject(hiddenEvent({ eventType: 'tool_start' }))
   })
-  it.each(['internal', 'hidden-by-harness'])('hides %s native tool invocations', visibility => {
+  it.each(['internal', 'hidden-by-harness'])('keeps %s native tool invocations out of the tool rows', visibility => {
     expect(project(entry([], { type: 'tool_call', role: 'assistant', body: {
       call_id: 'call/hidden', name: 'bash', arguments: { command: 'INTERNAL_ONLY_COMMAND' },
       blocks: [block('tool_call', { visibility })],
-    } }))).toEqual([])
+    } }))).toMatchObject(hiddenEvent())
   })
-  it.each(['internal', 'hidden-by-harness'])('hides %s orphan native tool results', visibility => {
+  it.each(['internal', 'hidden-by-harness'])('keeps %s orphan native tool results out of the tool rows', visibility => {
     expect(project(entry([], { type: 'tool_result', role: 'tool', body: {
       call_id: 'call/hidden', content: 'INTERNAL_ONLY_OUTPUT', media_type: 'text/plain', status: 'success',
       blocks: [block('tool_output', { visibility })],
-    } }))).toEqual([])
+    } }))).toMatchObject(hiddenEvent())
   })
   it.each(['internal', 'hidden-by-harness'])('does not join %s result payloads into visible calls', visibility => {
     const timeline = new LiveTimeline()
@@ -39,9 +44,9 @@ describe('native closed transcript boundary', () => {
     expect(items[0]).not.toHaveProperty('result')
     expect(JSON.stringify(items)).not.toContain('INTERNAL_ONLY_OUTPUT')
   })
-  it.each(['internal', 'hidden-by-harness'])('hides %s non-content message and status bodies', visibility => {
+  it.each(['internal', 'hidden-by-harness'])('keeps %s non-content message and status bodies as inspectable events', visibility => {
     for (const type of ['message', 'status']) {
-      expect(project(entry([], { type, body: { message_id: 'message/hidden', title: 'INTERNAL_ONLY_MESSAGE', status: 'completed', detail: 'INTERNAL_ONLY_STATUS', blocks: [block(type === 'message' ? 'text' : 'status', { visibility })] } }))).toEqual([])
+      expect(project(entry([], { type, body: { message_id: 'message/hidden', ...(type === 'message' ? { from: 'agent/hidden' } : {}), title: 'INTERNAL_ONLY_MESSAGE', status: 'completed', detail: 'INTERNAL_ONLY_STATUS', blocks: [block(type === 'message' ? 'text' : 'status', { visibility })] } }))).toMatchObject(hiddenEvent())
     }
   })
   it('retains visible tool fallback and mixed unsupported markers', () => {
@@ -57,7 +62,7 @@ describe('native closed transcript boundary', () => {
       entry([], { type: 'tool_call', role: 'assistant', body: { call_id: 'call/mixed', name: 'bash', arguments: { command: 'INTERNAL_ONLY_COMMAND' }, blocks: [block('tool_call', { visibility: 'internal' })] } }),
       entry([], { id: 'timeline-entry/raw/visible-result', sequence: 2, type: 'tool_result', role: 'tool', body: { call_id: 'call/mixed', content: 'Visible output', media_type: 'text/plain', status: 'success', blocks: [block('tool_output')] } }),
     ]))
-    expect(timeline.project().items).toMatchObject([{ _tag: 'ToolCall', callSeen: false, result: { content: 'Visible output' } }])
+    expect(timeline.project().items).toMatchObject([...hiddenEvent(), { _tag: 'ToolCall', callSeen: false, result: { content: 'Visible output' } }])
   })
   it.each([
     ['internal', 'visible', 'call-only'],
@@ -79,7 +84,7 @@ describe('native closed transcript boundary', () => {
     timeline.apply(frame([result]))
     expect(timeline.project().items).toMatchObject([{ _tag: 'ToolCall', callSeen: false }])
     timeline.apply(frame([call], false))
-    expect(timeline.project().items).toMatchObject([{ _tag: 'ToolCall', callSeen: initial === 'visible', result: { content: 'Visible output' } }])
+    expect(withoutHidden(timeline.project().items)).toMatchObject([{ _tag: 'ToolCall', callSeen: initial === 'visible', result: { content: 'Visible output' } }])
     const revisedCall = { ...call, revision: 2, body: {
       ...call.body, blocks: [block('tool_call', { visibility: next })],
     } }
@@ -87,12 +92,14 @@ describe('native closed transcript boundary', () => {
     const updates = delivery === 'call-only' ? [revisedCall]
       : delivery === 'result-first' ? [revisedResult, revisedCall] : [revisedCall, revisedResult]
     timeline.apply(frame(updates, false))
-    const items = timeline.project().items
+    const all = timeline.project().items
+    const items = withoutHidden(all)
+    expect(all.length - items.length).toBe(next === 'visible' ? 0 : 1)
     expect(items).toHaveLength(1)
     expect(items).toMatchObject([{ _tag: 'ToolCall', callSeen: next === 'visible',
       result: { content: delivery === 'call-only' ? 'Visible output' : 'Revised visible output' } }])
     expect(items[0]?.id).toBe(next === 'visible' ? call.id : result.id)
-    expect(timeline.project().items).toEqual(items)
+    expect(timeline.project().items).toEqual(all)
   })
   it.each([
     [{ id: 'Impl2239-2', state: 'completed', duration_ms: 15 }, 'completed'],

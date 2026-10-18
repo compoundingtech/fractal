@@ -68,8 +68,9 @@ describe('rich page decode, fold and transcript mapping', () => {
     const timeline = new LiveTimeline()
     timeline.apply(decodeConversationChunk(richProfile()))
     const items = timeline.project().items
-    expect(items).toHaveLength(55)
-    expect(items.findIndex(item => item._tag === 'Text' && item.role === 'user')).toBe(52)
+    // Internal native records stay as inspectable UnknownEvents in the projection; the transcript turns omit them.
+    expect(items).toHaveLength(92)
+    expect(items.findIndex(item => item._tag === 'Text' && item.role === 'user')).toBe(88)
     const turns = prepareTranscriptTurns(items, { firstTurnComplete: !timeline.hasOlder })
     const kept = turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items])
     expect(turns).toHaveLength(2)

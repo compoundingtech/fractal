@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use st3::WatchesStore;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
