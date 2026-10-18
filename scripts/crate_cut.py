@@ -810,7 +810,7 @@ def is_vacant(text):
     return True
 
 
-def place_tests(nodes, mtests, files, tfiles):
+def place_tests(nodes, mtests, files, tfiles, lower):
     """Where the moved tests land and what they leave behind.
 
     Returns (facade_blocks, new_files, decls, removals, copied): the text appended to the facades of
@@ -883,6 +883,9 @@ def place_tests(nodes, mtests, files, tfiles):
             attrs, uses = CONTAINERS.get((rel, c), ("#[cfg(test)]\n", []))
             inner = render(rel, c, g)
             pad = "    " * len(prefix)
+            uses = list(uses)
+            if attrs.rstrip().endswith("pub") and "test-support" in attrs:
+                uses.append("pub use %s::%s::*;" % (lower, "::".join(module_path(rel) + list(c))))
             body = "\n".join(pad + "    " + u for u in uses) + ("\n\n" if uses else "") + inner
             out.append(f"{pad}{attrs}mod {nm} {{\n{body}\n{pad}}}")
         return "\n\n".join(x for x in out if x)
@@ -932,8 +935,8 @@ def apply_cut(args, nodes, files, tfiles, order):
     layer = order.index(args.layer) + 1
     moved = [n for n in nodes if n.eff == layer and n.fixed is None and (not n.test or n.kind == "method")]
     mtests = [n for n in nodes if n.eff == layer and n.fixed is None and n.test and n.kind != "method"]
-    facade_blocks, new_test_files, test_decls, test_removals, test_copies, pub_test_mods = place_tests(nodes, mtests, files, tfiles)
     lower = args.lower.replace("-", "_")
+    facade_blocks, new_test_files, test_decls, test_removals, test_copies, pub_test_mods = place_tests(nodes, mtests, files, tfiles, lower)
     crate_dir = os.path.join("crates", args.crate)
     new_src = os.path.join(crate_dir, "src")
     by_file = collections.defaultdict(list)
@@ -1210,6 +1213,8 @@ def wire_crate(args, top_mods):
            "# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.",
            f'test-support = ["{lower}/test-support"]', "", "[dependencies]", f'{lower} = {{ path = "../{lower}" }}']
     out += [ln for k, ln in lines.items() if k not in skip and uses(k)]
+    internal = sorted({m.replace("_", "-") for m in re.findall(r"\b(st3_[a-z0-9_]+)::", text)} - skip - {crate} - set(lines))
+    out += [f'{n} = {{ path = "../{n}" }}' for n in internal if os.path.isdir(f"crates/{n}") and n not in {l.split(" ")[0] for l in out}]
     out += ["", "[dev-dependencies]", f'{ident}_self = {{ package = "{crate}", path = ".", features = ["test-support"] }}']
     out += [ln for k, ln in devlines.items() if k != "st3_daemon_self" and uses(k)]
     out.append("")
