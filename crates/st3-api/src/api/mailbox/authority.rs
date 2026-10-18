@@ -1,5 +1,6 @@
 //! Authenticate the transport peer against physical runtime and provider ownership.
 //! Request/reported PIDs, activity and ready observations never grant channel custody.
+use crate::SeatsStoreCore;
 use super::*;
 use crate::mailbox::Authority;
 use smallclaims::error::internal;

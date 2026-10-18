@@ -391,3 +391,6 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;

@@ -16,7 +16,7 @@ const iframe = report => `<!doctype html><meta charset="utf-8"><title>Gate fixtu
     on(name, listener) {
       listeners.set(name, listener)
       if (name === 'storyErrored') queueMicrotask(() => listeners.get('storyFinished')({
-        storyId: new URLSearchParams(location.search).get('id'), status: 'success',
+        storyId: new URLSearchParams(location.search).get('id'), status: ${JSON.stringify(report?.some(({ status }) => status === 'failed') ? 'error' : 'success')},
         reporters: ${report === undefined ? "manual ? [] : [{ type: 'a11y', status: 'passed' }]" : JSON.stringify(report)},
       }))
     },
@@ -63,6 +63,20 @@ test('a11y on rejects a case whose axe report is missing', { timeout: 60000 }, a
   assert.equal(code, 1)
   assert.equal(receipt.pass, false)
   assert.ok(receipt.rows.every(row => /expected one passed a11y report/.test(row.error)))
+})
+
+test('a failed axe report names its rule and the node that broke it', { timeout: 60000 }, async () => {
+  const violation = { id: 'label-content-name-mismatch', impact: 'serious', nodes: [{ target: ['button[aria-label="Needs me only"]'], html: '<button aria-label="Needs me only">Needs me · 2</button>', failureSummary: 'Text inside the element is not included in the accessible name' }] }
+  const { code, receipt } = await runGate({ report: [{ type: 'a11y', status: 'failed', result: { violations: [violation] } }] })
+  assert.equal(code, 1)
+  assert.equal(receipt.pass, false)
+  for (const row of receipt.rows) {
+    assert.match(row.error, /label-content-name-mismatch/)
+    assert.match(row.error, /Needs me only/)
+    assert.match(row.error, /not included in the accessible name/)
+  }
+  const crashed = await runGate({ report: [{ type: 'a11y', status: 'failed', result: { error: { message: 'axe could not run' } } }] })
+  assert.ok(crashed.receipt.rows.every(row => /axe could not run/.test(row.error)))
 })
 
 test('critical set without a11y selects tagged stories and asks addon-a11y not to run', { timeout: 60000 }, async () => {
