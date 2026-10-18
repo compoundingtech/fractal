@@ -977,7 +977,16 @@ async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext
                         && member.ended.as_deref() == Some("left")
                 })
             });
-            if updated.awaiting != leave.awaiting {
+            updated.receiver_deadlines_unix_ms.retain(|key, _| {
+                view.members.iter().any(|member| {
+                    member.member_key == *key
+                        && member.state == "ended"
+                        && member.ended.as_deref() == Some("left")
+                })
+            });
+            if updated.awaiting != leave.awaiting
+                || updated.receiver_deadlines_unix_ms != leave.receiver_deadlines_unix_ms
+            {
                 if let Err(error) = save_leave_state(fleet, &updated).await {
                     eprintln!("cannot retire completed exchange carrier: {error:#}");
                 }

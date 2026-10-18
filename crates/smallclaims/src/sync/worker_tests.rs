@@ -2145,6 +2145,149 @@ async fn withheld_receipt_expires_after_restart_without_confirming_the_sender() 
     server.abort();
 }
 
+#[tokio::test]
+async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
+    let mut fixture = leave_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let settings = FleetFile {
+        fleet_id: fixture.leaving_auth.fleet_id().into(),
+        node: Some("a".into()),
+        ..FleetFile::default()
+    };
+    settings.save(root.path()).unwrap();
+    crate::fleet::join::write_private(&settings.node_key_path(root.path()), &fixture.anchor_bytes)
+        .unwrap();
+    fixture.receiver.fleet.state_dir = Some(root.path().to_path_buf());
+    let key = fixture.key.public().to_owned();
+    // A conservative signature-only admission can provisionally protect a carrier.
+    // Model that exchange's deadline having elapsed before its authoritative fold.
+    {
+        let mut leave = fixture.receiver.fleet.leave.lock().await;
+        leave.awaiting.insert(key.clone());
+        leave
+            .receiver_deadlines_unix_ms
+            .insert(key.clone(), crate::store::now_ms().saturating_sub(1));
+        save_leave_state(&fixture.receiver.fleet, &leave)
+            .await
+            .unwrap();
+    }
+    let mut ordinary = fixture
+        .leaving
+        .export_replication_exchange(
+            fixture.leaving_auth.fleet_id(),
+            &ReplicationInventory::default(),
+        )
+        .unwrap();
+    let signed = ordinary
+        .envelopes
+        .iter()
+        .find(|envelope| {
+            envelope.member_key.as_deref() == Some(key.as_str())
+                && !envelope
+                    .payload
+                    .bytes()
+                    .unwrap()
+                    .windows(b"fleet.member-left".len())
+                    .any(|part| part == b"fleet.member-left")
+        })
+        .unwrap()
+        .clone();
+    ordinary.envelopes.clear();
+    ordinary.signature_requests.clear();
+    ordinary.signatures = vec![crate::claim::ReplicaEnvelopeSignature {
+        writer: signed.writer,
+        sequence: signed.sequence,
+        hash: signed.hash,
+        member_key: key.clone(),
+        signature: signed.signature.unwrap(),
+    }];
+    assert!(may_carry_direct_leave(&ordinary, &key));
+    receive_from_peer(
+        &fixture.receiver.backend,
+        &fixture.receiver.fleet,
+        "b",
+        fixture.leaving_auth.fleet_id(),
+        &ordinary,
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let persisted: LeaveState =
+        serde_json::from_slice(&fs::read(root.path().join("fleet/leave-carriers.json")).unwrap())
+            .unwrap();
+    assert!(!persisted.awaiting.contains(&key));
+    assert!(
+        !persisted.receiver_deadlines_unix_ms.contains_key(&key),
+        "a current member's ordinary signature must not consume its future leave grace"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "a".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            peer_router(fixture.receiver.clone(), Router::new()),
+        )
+        .into_future(),
+    );
+    let http = replication_http_client();
+    exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap();
+    let deadline = fixture
+        .receiver
+        .fleet
+        .leave
+        .lock()
+        .await
+        .receiver_deadlines_unix_ms[&key];
+    assert!(
+        deadline > crate::store::now_ms(),
+        "the genuine leave gets a fresh grace"
+    );
+    assert!(
+        retained_for_test(&fixture.receiver.fleet)
+            .await
+            .contains(&key)
+    );
+    let error = exchange(
+        &http,
+        &Local(fixture.leaving.clone()),
+        "b",
+        &peer,
+        &fixture.leaving_auth,
+        &fixture.leaving_fleet,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<RemovedFromFleet>().unwrap().code,
+        "member-left"
+    );
+    assert!(
+        fixture
+            .receiver
+            .fleet
+            .leave
+            .lock()
+            .await
+            .completed
+            .contains(&key)
+    );
+    server.abort();
+}
+
 mod retry_tests {
     use super::*;
 
