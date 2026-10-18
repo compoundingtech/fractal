@@ -1044,13 +1044,13 @@ def _resolve_use(segs, base):
     return cur + list(segs[i:])
 
 
-def _shared_uses(uses, rel, cont, items, shares, dev, pairs):
+def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
     """The `use` items of the file a shared module is cut from, adjusted to where the module sits: dev
     dependencies dropped, child modules named absolutely, modules that only exist for tests replaced by
     their shared module (or dropped), and names that moved away pruned."""
     f_path = module_path(rel)
     children = {it.name for it in items if it.kind == "mod"}
-    shared_of = {tuple(module_path(r2)): _shared_path(r2, c2) for (r2, c2) in shares if not c2}
+    shared_of = {tuple(module_path(r2)): _shared_path(r2, c2) for (r2, c2) in shares if not c2 and r2 in test_rels}
     out = []
     for u in uses:
         parsed = use_paths(u)
@@ -1085,7 +1085,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs):
     return out
 
 
-def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev):
+def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels):
     """Extract the lower test items the moved tests need into a shared module next to their file, gated by
     test-support, and re-export it where the items were (`pub use`), so old paths keep resolving."""
     added_decls = collections.defaultdict(list)
@@ -1106,7 +1106,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev):
                     uses.append("use super::%s::*;" % parts[-1])
                 else:
                     uses.append(re.sub(r"\buse super::", "use super::%s::" % parts[-1], u))
-        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs)
+        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels)
         globs = ["use %s::*;" % "::".join(["crate"] + _shared_path(*mk)) for mk in sorted(share_imports.get((rel, cont), ()))]
         body = []
         for u in sorted(ns, key=lambda n: n.item.start):
@@ -1355,7 +1355,7 @@ def apply_cut(args, nodes, files, tfiles, order):
         new = prune_uses(cur, items_now, pairs)
         if new != cur:
             open(path, "w").write(new)
-    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower))
+    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles))
     for rel, names in macro_imports.items():
         path = os.path.join(new_src, rel)
         if not os.path.exists(path):
