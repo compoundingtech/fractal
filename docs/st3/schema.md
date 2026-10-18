@@ -13,6 +13,7 @@ Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab09
 | `account` | `account/NAME` | no | A model account: its provider, owner, plan and where its login lives. |
 | `agent` | `agent/RUN/LOCAL_ID` | no | A mission-run agent runtime. |
 | `arrangement` | `arrangement/person/NAME/UUIDv7` | no | A permanently person-owned shared folder arrangement. |
+| `assistant` | `assistant/chatgpt[/session/assistant-grant/ID]` | no | An external assistant principal or its grant-bound audit session, never a person. |
 | `attention` | `attention/ID` | yes | An explicit request for human attention. |
 | `checkpoint` | `checkpoint/DAY` | no | A checkpoint that trims replicated history dated before a UTC day. |
 | `checkpoint-excusal` | `checkpoint-excusal/ID` | no | A person's excusal of an unreachable writer from checkpoints. |
@@ -26,6 +27,7 @@ Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab09
 | `gate-operation` | `gate-operation/IDENTITY` | no | One gate evaluation attempt. |
 | `github-post` | `github-post/OWNER/REPO/KIND/ID` | no | A GitHub comment or review an agent seat posted, by its GitHub ID. |
 | `glass` | `glass/person/NAME/UUID` | no | A private person workspace. |
+| `harness-question` | `harness-question/ID` | no | A question a seat's harness asked natively: question ids and option positions, never text. |
 | `host` | `host/NAME` | no | A graph host. |
 | `lane` | `lane/RUN/LOCAL_ID` | no | A mission-run lane: an ordered line of entries its run works through front first. |
 | `loop-run` | `loop-run/GENERATION/PATH` | no | One bounded loop execution. |
@@ -102,6 +104,8 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `github.posted` | `github-post` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `id!:integer`, `item!:integer`, `kind!:string`, `login:string`, `repository!:string`, `url:string` |  |
 | `glass.deleted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `replaced_revision:string` |  |
 | `glass.upserted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `body:object`, `replaced_revision:string` |  |
+| `harness-question.observed` | `harness-question` | `system-only` | `append` | `durable` | `agent!:subject-reference(agent)`, `native_id!:string`, `questions!:array`, `runtime_incarnation!:string`, `session!:string` |  |
+| `harness-question.resolved` | `harness-question` | `system-only` | `append` | `durable` | `answers!:object`, `receipt:object`, `revision!:string`, `status!:string` |  |
 | `harness.context-clear.requested` | `agent` | `authorized-requester` | `append` | `durable` | `context_epoch:string`, `incarnation_id:string`, `operation_status:string`, `runtime_id:string` |  |
 | `harness.context-clear.result` | `agent` | `system-only` | `once` | `durable` | `context_epoch:string`, `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string` |  |
 | `harness.diagnostic` | `agent` | `same-subject-actor` | `append` | `durable` | `attempt:integer`, `auth_attention_key:string`, `code:string`, `driver:string`, `incarnation_id:string`, `matched_line:string`, `observed_since_ms:integer`, `ownership_sequence:integer`, `provider_auth_sequence:integer`, `readiness_epoch:integer`, `reason:string`, `retry_after_unix_ms:integer`, `retry_attempt:integer`, `selector_scope:string`, `session_id:string`, `severity:string`, `status:string`, `step_run:subject-reference(step-run)`, `wake_attempts:integer` |  |
@@ -124,7 +128,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `message.closed` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acted_for:subject-reference(person)`, `delegation:object`, `status!:string` |  |
 | `message.delivered` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `message.read` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `status!:string` |  |
-| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `session_id:string`, `status!:string`, `tags:array`, `title:string`, `to:subject-reference` | `message` |
+| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `assistant_grant_id:string`, `assistant_owner:subject-reference`, `assistant_session_actor:string`, `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `sender_class:string`, `session_id:string`, `status!:string`, `tags:array`, `title:string`, `to:subject-reference` | `message` |
 | `message.staged` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `mission-run.created` | `mission-run` | `system-only` | `once` | `durable` | `ad_hoc_title:string`, `after:subject-reference`, `current_generation:subject-reference`, `deadline_at_unix_ms:integer`, `default_selector:object`, `generation:subject-reference`, `initial_revision:string`, `inputs:object`, `mission:subject-reference`, `mission_spec:object`, `mode:string`, `parent_step_run:subject-reference`, `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `requester:subject-reference`, `revision:string`, `root_mission_run:subject-reference`, `root_revision:string`, `stalled_after_ms:integer`, `status:string`, `timeout_ms:integer`, `workspace:string` | `mission-run` |
 | `mission-run.report-to` | `mission-run` | `system-only` | `state-transition` | `durable` | `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `stalled_after_ms:integer` |  |

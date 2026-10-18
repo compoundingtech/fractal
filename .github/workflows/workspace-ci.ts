@@ -181,6 +181,17 @@ export const nixCacheStep = {
   },
 } as const
 
+// A Genie hit must contain the entire shell, including upstream-signed stdenv inputs.
+// Never accept the old selective archive as a hit or a restore-prefix match.
+export const genieNixCacheStep = {
+  ...nixCacheStep,
+  with: {
+    ...nixCacheStep.with,
+    key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}",
+    'restore-keys': '',
+  },
+} as const
+
 /** Keep shared dependency entries on protected main; PR builds have exact-source artifacts. */
 export const saveMainDependencyCaches = (setup: readonly unknown[]) => setup
   .filter((value: any) => value.id === 'cargo-cache' || value.id === 'nix-cache')
@@ -229,6 +240,11 @@ printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_ST
     run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"',
   },
 ]
+
+export const genieSetupSteps = commonSetupSteps
+  .filter((step) => step !== cargoCacheStep && step !== buildSnapshotRestore && step !== buildSnapshotPrepare)
+  .map((step) => step === nixCacheStep ? genieNixCacheStep
+    : 'name' in step && step.name === 'Use the cached Nix outputs' ? { ...step, run: 'bash scripts/ci-nix-cache use' } : step)
 
 /** Provider fixtures, rendered hooks, and the standalone workspace test build. */
 export const testBuildSteps = [
@@ -511,6 +527,17 @@ export const fractalWebStoreCache = {
   key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
 } as const
 
+/**
+ * The web lane's devShell closure and `print-dev-env` script (scripts/ci-web-shell), so the job
+ * neither fetches and evaluates the flake's inputs nor builds the shell's local tools. The key names
+ * every file `.#web` is built from; main upkeep fills it and a pull request that misses fills its own.
+ */
+export const fractalWebShellEnv = { CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell' } as const
+export const fractalWebShellCache = {
+  path: fractalWebShellEnv.CI_WEB_SHELL_DIR,
+  key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}",
+} as const
+
 const embeddedPython = (script: string) =>
   `python3 - <<'PY'\n${readFileSync(new URL(`../../scripts/${script}`, import.meta.url), 'utf8')}\nPY`
 
@@ -555,15 +582,34 @@ export const fractalWebJobs = {
       { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
+      { name: 'Restore the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: fractalWebShellCache },
       {
-        ...nixDevelopStep({ name: 'Run the fractal-web lanes and dependency license check', flake: '.#web', command: ['bash', 'scripts/ci-fractal-web'] }),
+        name: 'Run the fractal-web lanes and dependency license check',
+        shell: 'bash',
+        // Falls back to `nix develop .#web` when the closure is not cached.
+        run: 'bash scripts/ci-web-shell run bash scripts/ci-fractal-web',
         env: {
           ...pnpmStoreEnv,
+          ...fractalWebShellEnv,
           KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
+          // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
+          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
+          // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
+          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}",
+          KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
+          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
+          // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
+          // placed in the import graph); merge groups and manual runs run every test file.
+          APP_TEST_SET: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
       },
+      // Only a pull request can read what it saves; merge groups wait for main upkeep's entry.
+      ...[
+        { name: 'Fill the web shell closure', shell: 'bash', run: 'bash scripts/ci-web-shell fill', env: fractalWebShellEnv },
+        { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
+      ].map((step) => ({ ...step, 'continue-on-error': true, if: "${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}" })),
     ],
   },
   'fractal-web': {

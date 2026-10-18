@@ -145,6 +145,11 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
         login: start.args.service.unwrap_or(true),
         login_note,
         linger: lingering_offered(),
+        work_root: start
+            .config
+            .work_root()
+            .map(|root| root.display().to_string())
+            .unwrap_or_default(),
         rows,
         codex,
     }
@@ -493,6 +498,8 @@ async fn stages(
     next.node = form.machine.clone();
     next.codex_work_without_asking = form.codex;
     next.validate()?;
+    let should_start = !daemon_ready(&next).await && start.args.start.unwrap_or(true);
+    st3::service::preflight(form.login && should_start)?;
 
     reporter.step("Saving your name and this machine's name");
     merge_config(&start.path, &next)?;
@@ -511,7 +518,7 @@ async fn stages(
     };
     check_login_path(&executable);
 
-    if !daemon_ready(&next).await && start.args.start.unwrap_or(true) {
+    if should_start {
         reporter.step("Starting st");
         start_daemon(
             &next,

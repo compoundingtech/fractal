@@ -34,6 +34,15 @@ The in-process OMP extension starts `driver omp-channel` on the executable named
 configuration; `ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION` and
 `ST_OMP_CHANNEL_RESUME_GENERATION` fence a cold residency resume.
 
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
+The provider wrapper also sets matching `FRACTAL_OMP_CHANNEL_*` names. Shared Rust
+channel readers prefer those names, retain the `ST_*` fallback, and reject conflicting
+ownership values. The existing `ST_*` names remain available to hooks and agent policy.
+Daemon-launched seats also receive matching `FRACTAL_*` aliases for the launch
+environment, including `FRACTAL_AGENT` and `FRACTAL_SUBJECT`. CLI identity defaults
+accept either spelling; shell and TypeScript hooks can continue to use the old names.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
+
 `session_start` sends the native OMP session ID before accepting Rust's hello.
 A matching ready frame completes the two-way exchange. A cold resume must prove the
 expected native ID, wrapper incarnation and residency generation before its candidate
@@ -335,7 +344,7 @@ Its existing state-frame `reason` names the reopened toolCall id
 what the seat is waiting on. Shared native continuation does not depend on the bridge.
 
 The contraction criterion is behavioral, not a version equality assertion. The standalone
-`crates/st3/fixtures/omp-resume/native-reopen-probe.py` copies its adjacent public canary fixture into
+`crates/st3-daemon/fixtures/omp-resume/native-reopen-probe.py` copies its adjacent public canary fixture into
 a disposable native session directory, renders native resume in a PTY under an empty HOME with no
 auth or extensions, and never sends F5 or a prompt. It requires `OMP_BIN` pointing at the raw pinned
 OMP executable (not a fleet launcher); `--omp` overrides that variable. Optional `--fixture`,
@@ -344,7 +353,7 @@ OMP executable (not a fleet launcher); `--omp` overrides that variable. Optional
 **1** means the original picker reopened natively (contract this migration);
 **2** means probe error, not evidence either way.
 
-Smalltalk does not provide OMP in its checks: the native Rust test runs this probe only with
+Fractal does not provide OMP in its checks: the native Rust test runs this probe only with
 `OMP_BIN` set and otherwise prints an explicit skip. The hermetic gate belongs to the dotfiles
 OMP pin, `flakes/external/omp`: run the same script and fixture verbatim as a flake check on
 **every** OMP bump, including patches. That is where native reopening must fail the bridge-retaining

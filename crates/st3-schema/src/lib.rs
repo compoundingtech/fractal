@@ -5,6 +5,7 @@ pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
 pub mod glasses;
+pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
 pub mod retention;
@@ -21,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use st_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h337e5f63188e owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 19. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -406,6 +407,15 @@ impl Registry {
                 "a subject needs a non-empty path after its registered family",
             ));
         }
+        if spec.family == "assistant" && subject != "assistant/chatgpt" {
+            let grant = subject.strip_prefix("assistant/chatgpt/session/assistant-grant/");
+            if !grant.is_some_and(|id| id.len() == 24 && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+                return Err(error(
+                    "invalid-claim-subject",
+                    "an assistant subject must be assistant/chatgpt or its exact grant session",
+                ));
+            }
+        }
         if spec.family == "custom" {
             let parts = subject.split('/').collect::<Vec<_>>();
             if parts.len() < 3 || !parts[1..].iter().all(|part| valid_identifier_part(part)) {
@@ -539,6 +549,7 @@ impl Registry {
         if kind == "mission.provenance" {
             provenance::validate_claim(subject, fields)?;
         }
+        harness_questions::validate(kind, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -654,6 +665,13 @@ impl Registry {
         fields: &BTreeMap<String, Value>,
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
+        if kind.starts_with("custom.client.assistant.")
+            || subject.starts_with("custom/client/assistant-v1-") {
+            return Err(error(
+                "claim-write-forbidden",
+                "assistant authority claims require a dedicated trusted-local operation",
+            ));
+        }
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
         directive_notes::validate_actor(subject, kind, actor)?;
@@ -850,6 +868,12 @@ fn build_registry() -> Registry {
         ),
         ("host", "host/NAME", "A graph host.", false),
         (
+            "harness-question",
+            "harness-question/ID",
+            "A question a seat's harness asked natively: question ids and option positions, never text.",
+            false,
+        ),
+        (
             "lane",
             "lane/RUN/LOCAL_ID",
             "A mission-run lane: an ordered line of entries its run works through front first.",
@@ -863,6 +887,12 @@ fn build_registry() -> Registry {
             false,
         ),
         ("person", "person/IDENTITY", "A human actor.", false),
+        (
+            "assistant",
+            "assistant/chatgpt[/session/assistant-grant/ID]",
+            "An external assistant principal or its grant-bound audit session, never a person.",
+            false,
+        ),
         (
             "external",
             "external/PROVIDER/KIND/IDENTITY",
@@ -1956,6 +1986,26 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
             Some("subagents"),
+            false,
+            &[],
+        ),
+        // A question a seat's harness asked natively, and how it ended. Only st writes them: a
+        // client that could write one could forge a question or its answer.
+        (
+            harness_questions::OBSERVED,
+            &["harness-question"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            harness_questions::RESOLVED,
+            &["harness-question"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
             false,
             &[],
         ),
@@ -3471,6 +3521,22 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("cached_tokens", integer()),
             ("total_tokens", integer()),
         ],
+        harness_questions::OBSERVED => &[
+            ("agent", required_reference_to(&["agent"])),
+            ("session", required_string()),
+            ("native_id", required_string()),
+            ("runtime_incarnation", required_string()),
+            ("questions", required_array()),
+        ],
+        harness_questions::RESOLVED => &[
+            (
+                "status",
+                required_enum(&["answered", "answered_elsewhere", "expired", "cancelled"]),
+            ),
+            ("revision", required_string()),
+            ("answers", required_object()),
+            ("receipt", object()),
+        ],
         "harness.telemetry" => &[
             ("driver", required_enum(&["claude"])),
             ("unit", required_enum(&["hook"])),
@@ -3561,6 +3627,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("in_reply_to", reference()),
             ("tags", array()),
             ("attachments", array()),
+            ("sender_class", enumeration(&["external-assistant"])),
+            ("assistant_grant_id", string()),
+            ("assistant_owner", reference()),
+            ("assistant_session_actor", string()),
         ],
         "message.staged" => &[
             ("status", required_enum(&["staged"])),
@@ -4228,6 +4298,7 @@ mod tests {
                 "account",
                 "agent",
                 "arrangement",
+                "assistant",
                 "attention",
                 "checkpoint",
                 "checkpoint-excusal",
@@ -4241,6 +4312,7 @@ mod tests {
                 "gate-operation",
                 "github-post",
                 "glass",
+                "harness-question",
                 "host",
                 "lane",
                 "loop-run",
@@ -4338,6 +4410,8 @@ mod tests {
                 "github.posted",
                 "glass.deleted",
                 "glass.upserted",
+                "harness-question.observed",
+                "harness-question.resolved",
                 "harness.context-clear.requested",
                 "harness.context-clear.result",
                 "harness.diagnostic",
@@ -4530,6 +4604,9 @@ mod tests {
     #[test]
     fn subject_paths_and_file_subjects_are_strict() {
         for invalid in [
+            "assistant/other",
+            "assistant/chatgpt/session/person/operator",
+            "assistant/chatgpt/session/assistant-grant/not-a-grant",
             "agent/",
             "agent/run//worker",
             "file/node/tmp/example",
@@ -4542,6 +4619,8 @@ mod tests {
         registry()
             .validate_subject("file/node:/tmp/example")
             .unwrap();
+        registry().validate_subject("assistant/chatgpt").unwrap();
+        registry().validate_subject("assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567").unwrap();
     }
 
     #[test]

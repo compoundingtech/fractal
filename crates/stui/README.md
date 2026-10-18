@@ -1,4 +1,4 @@
-# Smalltalk terminal client
+# Fractal terminal client
 
 `st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
 a mission, a terminal, Now or usage. `st ui --space NAME` opens a named space. `st ui --demo`
@@ -119,6 +119,23 @@ not a latency success. Read/write overhead perturbs the opt-in run. Retain the e
 monotonic launch/key times, exit/result, exact installed source/build, host and ordinary UI
 context separately; process loading before `main` is outside the internal clock. Do not
 equate a subscribe-to-frame `STUI_TIMING_LOG` record with useful presentation.
+
+## Images
+
+Every image in a conversation is a line saying what it is before it loads: a message's
+(`▣ name · type · size  open`), a transcript's (`[image type, size]`), and an ask's on its
+card. Click the line, or press Ctrl+U on the focused row (Ctrl+↑/↓ move the focus), to load it
+inline; again to hide it. Where the terminal draws images (kitty, iTerm2, a sixel terminal,
+also through tmux) the first image on screen loads by itself; elsewhere it draws in half
+blocks. stui asks the terminal itself, once at start, and asks only a terminal that answered
+a status report, so one that answers nothing gets half blocks and no stray bytes.
+
+An image is read, decoded and scaled to at most 1600 pixels on a worker; its terminal
+encoding is built off the draw path, an image the edge of the pane cuts draws the rows still
+on screen, and its pixels leave memory once it is more than a screen away. An owner that
+cannot be reached says so on the image's line, with the way to try again. `open` shows the
+image in this machine's viewer, or saves it under its name to `ST3_DOWNLOADS`, else the XDG
+download directory, else `~/Downloads`.
 
 ## Resource sidebar
 
