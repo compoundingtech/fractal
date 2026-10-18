@@ -984,6 +984,15 @@ async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext
                         && member.ended.as_deref() == Some("left")
                 })
             });
+            // A conservative prefilter may see an ordinary signature exchange.
+            // Start grace only after the authoritative fold admits a real leave.
+            let now = crate::store::now_ms();
+            for key in &updated.awaiting {
+                updated
+                    .receiver_deadlines_unix_ms
+                    .entry(key.clone())
+                    .or_insert_with(|| now.saturating_add(LEAVE_RECEIPT_GRACE.as_millis()));
+            }
             if updated.awaiting != leave.awaiting
                 || updated.receiver_deadlines_unix_ms != leave.receiver_deadlines_unix_ms
             {
@@ -1188,12 +1197,6 @@ async fn receive_from_peer<B: Backend>(
         let mut leave = fleet.leave.lock().await;
         let mut updated = leave.clone();
         updated.awaiting.insert(key.clone());
-        updated
-            .receiver_deadlines_unix_ms
-            .entry(key.clone())
-            .or_insert_with(|| {
-                crate::store::now_ms().saturating_add(LEAVE_RECEIPT_GRACE.as_millis())
-            });
         save_leave_state(fleet, &updated).await?;
         *leave = updated;
     }

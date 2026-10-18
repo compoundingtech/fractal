@@ -2235,6 +2235,7 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
         .into_future(),
     );
     let http = replication_http_client();
+    let before_departure = crate::store::now_ms();
     exchange(
         &http,
         &Local(fixture.leaving.clone()),
@@ -2255,6 +2256,10 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
     assert!(
         deadline > crate::store::now_ms(),
         "the genuine leave gets a fresh grace"
+    );
+    assert!(
+        deadline >= before_departure.saturating_add(LEAVE_RECEIPT_GRACE.as_millis()),
+        "only the confirmed real departure starts its full grace"
     );
     assert!(
         retained_for_test(&fixture.receiver.fleet)

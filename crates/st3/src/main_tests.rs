@@ -777,21 +777,21 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
     let output = render_usage_report(&report, 24, None);
     assert_eq!(output.matches("USAGE  ").count(), 6);
     assert!(
-        output.starts_with("SPEND  .25+ · 990 tokens · 24h · API-equivalent\n"),
+        output.starts_with("SPEND  $4.25+ · 990 tokens · 24h · API-equivalent\n"),
         "{output}"
     );
     assert!(output.contains("UNPRICED  50 tokens on models without a price"));
     // Cost ranks, not tokens: the dear agent spent fewer tokens on a pricier model.
     assert!(
-        output.find(".00  40  7  3  4  26  agent/dear").unwrap()
+        output.find("$4.00  40  7  3  4  26  agent/dear").unwrap()
             < output
-                .find(".25  900  200  100  0  600  agent/cheap")
+                .find("$0.25  900  200  100  0  600  agent/cheap")
                 .unwrap()
     );
-    assert!(output.contains(".00+  50  50  0  0  0  agent/local"));
-    assert!(output.contains(".00  40  7  3  4  26  step-run/two/review"));
-    assert!(output.contains(".00  40  7  3  4  26  claude/bbbb"));
-    assert!(output.contains(".00+  50  50  0  0  0  unknown"));
+    assert!(output.contains("$0.00+  50  50  0  0  0  agent/local"));
+    assert!(output.contains("$4.00  40  7  3  4  26  step-run/two/review"));
+    assert!(output.contains("$4.00  40  7  3  4  26  claude/bbbb"));
+    assert!(output.contains("$0.00+  50  50  0  0  0  unknown"));
     let with_limits = json!({"rows": [], "limits": [
         {"account": "claude/aaaa", "weekly_percent": 96.4, "five_hour_percent": null,
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
@@ -832,8 +832,7 @@ fn usage_report_labels_the_daily_proxy_and_unknown_share() {
     assert!(rendered.contains("daily estimate"));
     assert!(rendered.contains("includes useful work"));
     assert!(
-        rendered
-            .contains("1970-01-01 (partial)  2  .44–.66  unknown (no priced usage)  1/2"),
+        rendered.contains("1970-01-01 (partial)  2  $0.44–$0.66  unknown (no priced usage)  1/2"),
         "{rendered}"
     );
 }

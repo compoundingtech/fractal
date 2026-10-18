@@ -423,9 +423,11 @@ Only that member receives a direct export of the leave; other members learn it
 through ordinary replication and revoke on the sync that admits it. An ambiguous
 send cannot silently select another confirmer.
 
-The direct receiver records the carrier drain and its first absolute 120-second
-deadline before admitting the leave, whether it arrives in a push or a pull
-response. It retains only the fleet replication grant while awaiting the leaving
+The direct receiver records the provisional carrier drain before admission,
+whether the leave arrives in a push or pull response. Its first absolute
+120-second deadline starts only when the authoritative membership fold confirms
+departure; ordinary signatures cannot consume a future leave's grace.
+It retains only the fleet replication grant while awaiting the leaving
 member's authenticated receipt of its signed `member-left` proof through
 `/v1/replication/leave-receipt`. A receipt is persisted before the carrier is
 withdrawn on the next policy refresh; the handler first returns its signed ACK.
