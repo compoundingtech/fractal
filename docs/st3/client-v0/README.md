@@ -473,8 +473,14 @@ The optional `agent_messages` field adds a **daily estimate**, also shown by `st
 the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
 Receipts and duplicate send claims add no messages. Bodies are never classified. Counts are
-maintained in the writer transaction and backfilled once on upgrade. Full UTC days use daily
-recipient counters; the first and last partial days use an indexed send-time range.
+backfilled atomically on the first usage-estimate request after upgrade, not during daemon
+startup. That first request can take longer; it never returns partially backfilled counts.
+Until then, daily counters are not maintained; the first request rebuilds them from every
+retained send. Once initialized, counts are maintained in each writer transaction. Full UTC
+days use daily recipient counters; the first and last partial days use an indexed send-time
+range.
+An estimate inside an already-pinned read snapshot with an uninitialized cache folds that
+snapshot's retained sends directly instead of writing or observing a later commit.
 
 `AgentMessageEstimate.days` contains at most the latest 31 UTC calendar days intersecting the
 period, including zero-message days. Each row names `day_start_ms`, the clipped `since_ms` and
@@ -556,6 +562,41 @@ retention decision for native per-request records remain later work.
 
 The Rust method is `Client::usage_period(since_ms, until_ms)`;
 Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms, until_ms })`.
+
+### Objectives and budgets
+
+`GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
+`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
+phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
+limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`
+(`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
+left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
+`no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
+plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`. The list is
+computed on each read from live windows and readings; it writes nothing.
+
+`GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
+across a period, from the daemon's local observation log (one reading a minute, kept seven days;
+it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
+spans at most seven days and answers in `steps` equal steps (default 120, 1 to 1000); a period
+that ends before it starts, is longer than seven days or asks for another number of steps is
+`validation-failed` (HTTP 422). The value is `SloHistory { id, since_ms, until_ms, samples, steps }`: each
+step holds its lowest reading, and a step with no reading is null, so a gap means "not measured",
+never "spent". A daemon that has run for less than the period has fewer readings than steps. An
+id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an
+error: a client that remembers an id should check it against the list.
+
+The objectives are this daemon's own: each member reports the targets and limits it measures, and
+nothing replicates between members. The wording in `about`, `target`, `current`, `window` and
+`explain` is display text built by the daemon for a person to read; it may change between builds,
+so a client shows it and does not parse it. The pair of reads is experimental while the TUI,
+the phone and the web app settle on what they need. The `slo` capability (version 1) is granted to
+a session with `read.projections`; an older daemon does not list it and answers both paths with 404.
+
+The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms, until_ms, steps)`;
+Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
+`sloHistory(id, { since_ms, until_ms, steps })`.
 
 ### Clients connected now
 
@@ -668,24 +709,39 @@ a permission, a question or a review. Its `source_id` and `conversation_id` are 
 `episode` is the harness observation that opened the prompt, and its detail carries the prompt
 text the harness reported. It clears when the harness reports the prompt gone, however it was
 answered, when Claude's terminal shows it was refused (Claude reports no event for that), or
-when the seat's runtime incarnation changes. It offers no typed action yet: its action attaches
-to the seat's terminal to answer there.
+when the seat's runtime incarnation changes. Its action attaches to the seat's terminal to answer
+there.
 
-A Claude permission prompt or a Codex approval request can also be answered from a client: its
-alert lists `answers` (`allow`, `deny`) under `action_parameters["prompt.respond"]` with its
-`target_id` and `episode`, and offers the typed action `prompt.respond`. The alert names only
-Claude's tool (a Codex alert names none); the call it would make (its command, path or other
-input) is conversation content, read from the seat's conversation, where the harness records the
-pending call before it asks. A client shows that pending call in full beside the answers and
-offers `allow` only when it can show it. Only the seat's person answers, only the prompt still
-waiting, and only once; the answer is recorded as a replicated `harness.diagnostic`
-(`native-prompt-answered`, naming the seat's driver). On the seat's host, Claude's prompt hook,
-which waits while Claude shows its own dialog, returns it to Claude; the Codex driver's control
-connection to the app-server sends it as the request's response (`accept`/`decline` for a
-command or file change; the requested permissions, or none, for a permissions request), which
-closes the TUI's prompt. Each waits on the exact observation its prompt wrote, so an answer to an
-earlier prompt never answers a later one. An answer in the terminal still wins at once. A
-question prompt, and prompts of other harnesses, are answered in the terminal.
+A prompt st can deliver an answer to lists its `answers` under `action_parameters["prompt.respond"]`
+with its `target_id` and `episode`, and offers the typed action `prompt.respond`:
+
+| Prompt | `answers` | What is sent as `answer` |
+|---|---|---|
+| Claude permission (its own or a subagent's), Codex command, file change or permissions approval | `allow`, `deny` | the answer |
+| Claude plan approval (`ExitPlanMode`) | `approve`, `deny` | the answer |
+| Claude question (`AskUserQuestion`, single or multi-select) | `answer`, `deny` | `deny`, or the choices as positions: a JSON object of each question's position in the pending call to the positions of the options chosen, such as `{"0":[1],"1":[0,2]}`; the questions and labels stay in the conversation, and the seat's hook turns positions into labels |
+| Claude's new-MCP-server dialog | `use`, `use-all`, `skip` | the answer |
+| Claude's or Codex's workspace trust dialog | `trust`, and `exit` or `quit` | the answer |
+
+The alert names only Claude's tool, or what a Codex request asks to do; the call it would make
+(its command, path, plan, questions or other input) is conversation content, read from the seat's
+conversation, where the harness records the pending call before it asks. A client shows that
+pending call in full beside the answers, and offers `allow` or `approve` only when it can show it,
+and `answer` only when it can show the call's questions to choose from. A screen prompt (the MCP
+and trust dialogs) has no pending call: its detail says what it asks. Only the seat's person
+answers, only the prompt still waiting, and only once; the answer is recorded as a replicated
+`harness.diagnostic` (`native-prompt-answered`, naming the seat's driver). On the seat's host,
+Claude's prompt hook, which waits while Claude shows its own dialog, returns it to Claude (a
+question's choices as the tool's answers); the Codex driver's control connection to the app-server
+sends it as the request's response (`accept`/`decline` for a command or file change; the requested
+permissions, or none, for a permissions request); a plan's approval and a screen prompt's answer
+are pressed into the dialog with its own keys by the reconciler, only while the screen still shows
+that dialog. Each waits on the exact observation its prompt wrote, so an answer to an earlier
+prompt never answers a later one. An answer in the terminal still wins at once. A Claude prompt is
+answered from a client only while its hook still waits (a day); a Codex approval only when the
+driver saw its request. Other prompts are answered in the terminal. A refusal because the prompt
+is gone or terminal-only is `stale-fence` with a message beginning `that prompt `, written for the
+person; sending it again never helps.
 
 A `fault` also carries `target_states`: for each target with a lifecycle (a mission, run,
 generation, step, or agent), its current `state` and, when known, the `since`
@@ -805,6 +861,16 @@ is the only remainder; if the payload or another open field also needs a continu
 the same ref fetches the complete original `/body`, including its unbounded blocks.
 The final per-entry size guard remains authoritative and can replace an entry with a
 `native-entry-too-large` error whose continuation fetches its original body.
+
+A timeline page is also bounded after preparation. An entry that alone still exceeds the response
+ceiling (the 1 MiB response cap minus 128,000 reserved bytes) does not fail the page: it is
+replaced in place by an `error` entry that keeps its `id` and `sequence`, with body
+`{code: "timeline-entry-too-large", message, retryable: false, details: {size}}`, and the page
+cursor continues after it. This applies to native keyset pages and cached offset pages alike. The
+code is an entry-level string in the open `error` body, not an HTTP error code. Native entries
+normally reach this limit through the `native-entry-too-large` guard above, so they keep its
+continuation; the `timeline-entry-too-large` entry carries only the entry's size and has no
+continuation.
 
 External process sessions remain listed even when st cannot identify a native transcript.
 Opening their timeline returns a non-retryable `unsupported-capability` error with
@@ -975,10 +1041,10 @@ uses this continuation and registers its wake before reading the frontier. The l
 `GET /v1/events` keeps its array shape, returns at most 200 rows, and reports continuation in
 `X-ST-Next-After`, `X-ST-Has-More`, and `X-ST-Frontier`; owner filters and subject filters
 during migration require the page endpoint. CLI condition, restart, and harness waits use pages.
-A new CLI probes that route once. On a bare missing-route 404, it negotiates only a legacy daemon
-that explicitly advertises `features.bounded_legacy_events=1`; otherwise it stops with daemon
-upgrade guidance before requesting legacy history. Typed refusals, errors and HTTP 410 never
-activate negotiation.
+The CLI requires the page endpoint and never falls back to legacy event history. On a bare
+missing-route 404, a daemon without `features.bounded_legacy_events=1` receives daemon upgrade
+guidance. A daemon advertising that capability but missing the page route receives the normal
+unexpected-response error. Typed refusals, errors and HTTP 410 retain their existing handling.
 A cursor before the recorded checkpoint deletion floor receives HTTP 410 `cursor-gap` with
 `full_resync=true`, `resume_floor`, and `frontier`. Refresh projections and establish a new
 cursor explicitly; do not silently reset or keep retrying the old cursor. Client-v0 event feeds
@@ -1159,7 +1225,7 @@ The coverage query reads interval bounds only; it does not materialize older tra
 
 ## Pairing and remote access
 
-Pairing is device-to-person. Its begin request names the concrete initiating `person/*` identity and
+Person pairing is device-to-person. Its begin request names the concrete initiating `person/*` identity and
 is accepted only on the trusted local Unix API; the daemon persists that person as the delegator.
 The response shows a short-lived single-use code and pairing ID. A remote device reaches the
 loopback gateway through Fabric, proves the code, supplies its public key, and receives a scoped
@@ -1180,6 +1246,105 @@ must use `st devices --as person/alex pair --full-control "Alex iPhone"` on the 
 socket. The selected concrete scopes are sealed into that pairing; existing limited devices are
 not silently upgraded and must be re-paired, then revoked when no longer needed. Revocation takes
 effect for every subsequent request, including a new bounded terminal WebSocket exchange.
+
+### External assistant grants
+
+External assistants use a separate, closed principal namespace, never person delegation.
+See [External assistants](../external-assistants.md) for the staged A/B contract and dormant
+future send/kill requirements. No live issuance is authorized by merging this implementation.
+
+`PairingBegin` and `PairedSession` are disjoint untagged unions of person and assistant variants. Person
+wire fields and historical claims are unchanged; typed person clients use `PersonPairingBegin`
+and `PersonPairedSession`. Assistant begin names only `assistant/chatgpt`, seals explicit
+assistant read scopes, requires disclosure consent and its evidence, and uses the same
+five-minute single-use challenge. Grant duration defaults to one hour and cannot exceed
+30 days; it is independent of challenge expiry. Completion returns `assistant-paired-session`,
+not a person session, and never creates a person signing chain. Assistant credentials and keys
+are retained in a separate owner-only client profile.
+
+Only the daemon's configured owning person through the trusted-local CLI over the Unix API
+may issue, inspect, renew, revoke, or change assistant grants. Missing owner configuration
+fails closed. Deployment owner identity is external configuration, never a hardcoded public
+identity; public examples and tests use `person/operator`. Management routes are
+`GET /v1/client/assistant/grants/{id}`, `POST .../{id}/revoke`, and `POST .../{id}/policy`.
+Responses use the normal snapshot envelope with an `AssistantGrant` value. Policy updates
+increment the policy revision. The standalone ChatGPT adapter requires
+`minimal_read_mode=caller-bound-allow`: the scoped bearer grant and its disclosure consent
+authorize reads without a per-read signature or approval key. Grant projections include exact
+scope, consent, issuer as a concrete `PersonId` and revoked status, never the bearer or credential
+digest. `key_id` is the public-key SHA-256 digest. The owner may configure exact agent recipient
+IDs and `write.assistant.messages` / `write.assistant.custom-reply` scopes for low-risk writes.
+
+The issuer is sealed from the configured owner at trusted-local begin and preserved through
+gateway completion; remote callers cannot select or replace it. Assistant clients validate
+the issuer's concrete person shape from that gateway response without person grant proofs
+or a fixed named-owner check. The baseline fixture scopes are exactly
+`read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`, and
+`read.assistant.agents`; disclosure consent and non-empty `consent_evidence` (1-512 bytes, the recorded owner consent) remain required.
+
+Pairing completion, authenticated assistant requests, renewal/policy change and revocation
+must reach the authoritative grant-issuer member. A replicated claim on another member
+cannot establish current revocation/policy authority or permit cross-member proof replay.
+Only the configured owner's trusted-local inventory includes assistant device rows; these
+carry principal, sender class and grant metadata, without a synthetic `person_id`.
+Capability discovery advertises `assistant.grants.v1` to the trusted-local configured owner
+and does not substitute ordinary person grants on older servers.
+
+The original slice-B proof-gated mode remains a legacy branch capability; the standalone
+adapter does not use it, does not send its proof header, and has no SCG dependency.
+In consent-at-grant mode, the same six scoped reads authorize against the current grant on
+every request and revalidate it immediately before returning the response. Envelope budgets
+default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
+`response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
+
+The adapter uses `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
+under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
+the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only
+closed typed actions. `work.done` creates a daemon-owned structured owner ask whose digest
+binds the whole request, including alert ID, episode, option, fence and idempotency key. The
+owner answers with `st work done <approval-id> --as person/ada --answer approve --episode ...`;
+an identical MCP retry executes through the existing fenced, idempotent action path.
+`message.send` is low-risk: it requires its explicit grant scope and an exact owner-allowlisted
+agent recipient. Its non-read-only tool annotation asks ChatGPT to show a confirmation card;
+the daemon does not treat the advisory card as execution authorization or create another
+st approval. `custom.reply` is likewise grant-scoped at the daemon boundary.
+
+Execution carries the original assistant grant and policy revision through typed action dispatch.
+The message append, person-answer transaction, and custom-reply transaction recheck the
+authoritative grant, revocation, expiry, exact scope, policy revision, recipient, and owner
+approval where required. Revocation or recipient removal between handler preflight and the
+writer transaction denies the synchronous send without appending a message claim.
+
+`crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
+Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
+The adapter holds only a scoped bearer, never an approval key. The current HTTP frontend is
+loopback/no-auth for the recorded personal-tunnel dogfood exception; OAuth is the next
+frontend-auth boundary and does not alter tool arguments or daemon grants. No generic command
+runner, daemon-control socket, or terminal scraping is exposed. `GET /mcp` is 405; unknown
+paths return an empty 404.
+
+The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
+Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
+`nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
+The shared `checks.st3` suite includes the adapter's Rust tests.
+
+Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
+
+```sh
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p st3-client-codegen && cargo build -j 2 -p st-chatgpt -p st3 --features st3/test-support --bin st-chatgpt --bin st3 --example chatgpt_fixture && cargo test -j 2 -p st-chatgpt && cargo test -j 2 -p st3 --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+```
+
+The script starts the repository API harness with its own persistent store, paired gateway,
+and invented `person/ada` owner; it writes evidence to `tmp/chatgpt-e2e-results.json` and
+terminates its processes. Real ChatGPT access remains human-gated: start the Secure MCP Tunnel
+with the intended personal Platform org/workspace association, then create the dev-mode app.
+The scripted race cases use a scheduling gate compiled only with `test-support`, installed
+by the isolated fixture. Normal and release daemon builds contain no gate. The Rust crate
+tests cover tool schemas, input validation, credential permissions, tunnel HTTP responses,
+and daemon API/transaction authorization independently of the script.
+
+
+### Person declaration access
 
 Agent declarations are a separate, sensitive read: `GET /v1/client/agent-declarations/{id}`
 returns the currently applied desired tree, its canonical KDL v2 text, exact revision ID, and
@@ -1456,7 +1621,7 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `cursor-gap`, `page-cursor-expired`, `projection-detail-too-large`,
 `projection-detail-invalid-source`, `rate-limited`, `runtime-not-local`,
 `runtime-authority-indeterminate`, `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
-and `internal`.
+`response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
 
 Revoking a pairing from a non-issuer returns HTTP 409 with `code: issuer-required`,
 `retryable: false`, and `details.issuer_host_id` naming the authoritative issuer.
@@ -1487,7 +1652,8 @@ branch. Consumers accept future strings without changing their wire value. `Reso
 `UnknownResource`, which preserves a future kind's valid header and arbitrary payload. Its kind
 exclusion prevents malformed known resources from falling through that branch. The generated raw
 Rust, Swift, and TypeScript `Resource` types model known kinds only, so TypeScript keeps
-discriminant narrowing on `kind`.
+discriminant narrowing on `kind`. A plain-string `not: { pattern }` excludes a family of values,
+such as the native collections that `Page.collection` leaves to their dedicated page types.
 
 Daemon conformance uses a strict test-only view of the same schema: it closes composed resource
 fields, tightens open enums to known values, and removes `UnknownResource`. Consumer tolerance
@@ -1714,7 +1880,20 @@ An optional `subject: ArrangementId` selects only that arrangement (zero or one 
 `has_more: false`), so a selected Sidebar cannot fall outside a busy owner's byte/count
 window. Its owner must equal `person`; mismatches are refused. Snapshots, upserts and
 retirement removals retain the ordinary collection semantics. Omitting the filter
-keeps owner-wide prefix windows unchanged.
+keeps owner-wide prefix windows and additionally invalidates the complete owner
+inventory: a changed owner revision sends an existing `changes` frame even if
+`upserts` and `removes` are empty and `order`/`has_more` are unchanged. Its `snapshot`
+names the same read snapshot as that revision and prefix. Create, rename, retire,
+layout edits and replicated materialization are covered, including older admitted claims
+projected after newer local edits. Owner-local counters commit with those projection
+writes; replay/rebuild advances touched owners. Other owners and unrelated routine
+global commits do not send inventory notices. Revisions are compared for inequality,
+so a database reset can cause one extra notice. A notice can retain the previous
+snapshot ID/index when projection changes without a new claim; never discard it on
+that basis. Clients needing complete discovery paginate
+the HTTP list after the initial snapshot and every owner-wide changes frame, including
+empty ones, rather than inferring absence from the prefix. See
+[current collection subscriptions](collections.md) for the exact contract.
 Arrangement list and stream windows also fit a byte budget: the 1,048,576-byte response
 ceiling reserves 128,000 bytes for the envelope. A byte-shortened window sets `has_more`
 and retains full resources, not truncated registers or placements. A replicated full
@@ -1843,19 +2022,45 @@ background refresher last published; no read folds the roster itself. Each page 
 that roster's own cut in its `snapshot` (`store_index`, `created_at`) and when it was folded
 (`published_at`). That cut can be older than the request, by about a second plus one fold.
 
-A first page answers at once. A client that prefers to see what was written before its request
-passes `fresh=true`. The daemon requests a refresh and waits up to two seconds for a publication
-at or after the request's cut, including while the refresher is idle. It returns the newest
-publication at once only if the latest attempt failed and no newer attempt is in flight.
-A failure while the read waits also wakes it. The retained publication's original `store_index`
-and `published_at` show its age. `st agents ls` and `st agents tree` ask for this fresh read;
-Rust exposes `agents_list_fresh`.
+An ordinary first page answers immediately from the latest publication, including `st agents ls`
+and `st agents tree`, which no longer send `fresh=true`. Existing callers may still pass
+`fresh=true`: its legacy behavior is unchanged. It requests a refresh and waits up to two
+seconds for a publication at or after the request cut, returns the retained publication
+promptly after a failed latest attempt with no newer attempt in flight, and uses the existing
+unchanged-card proof. Rust keeps `agents_list_fresh`; current-work `fresh=true` is unchanged.
 
-A read returns a retryable 503 (the stream sends `resync`) only before a usable roster of
-the requested mode has been published, or after a full projection reset clears it. Current
-and history rosters remain separate: a history read never substitutes current-only membership.
+Ordinary `st agents ls` and `st agents tree` read the latest published roster without
+requesting a refresh. Immediately after starting or changing an agent they can show the
+earlier roster; after daemon startup the roster may still be being prepared. When you need
+to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
+client read and check the served snapshot index. This is not a replicated or cross-host cut.
+
+A caller that needs a strict read-after-write fence passes `min_cut=N`, using the
+`ClaimRecord.store_index` returned by its write on this same host. This is a host-local
+acceptance index, not a replicated sequence: a cut minted on host A must not fence host B.
+The daemon waits at most two seconds for a publication whose served `snapshot.store_index`
+is at least `min_cut`, rechecking the final snapshot after the wait. A cut above this host's
+current head is refused immediately with the same cut-not-ready error and `min_cut`/`head`
+details; it cannot be a receipt from a write this host already accepted. If that cut is unavailable,
+it returns retryable HTTP 503 with `details.reason: "agent-roster-cut-not-ready"`; failure of a
+refresh never permits an older publication to satisfy this barrier. When both `fresh` and
+`min_cut` are supplied, `min_cut` wins: one named barrier and one two-second timer.
+
+An older daemon ignores `min_cut` and returns its newest publication, without a new server
+error. The caller must compare the returned `snapshot.store_index` on the same host with its
+requested cut. Rust's additive `agents_list_after` does that comparison and reports the same
+cut-not-ready message/error as a barrier timeout if the publication is older. There is no
+in-repo CLI mutation-following roster read; existing mutation commands' point-detail reads
+stay unchanged.
+
+Without an explicit cut, a read returns a retryable 503 (the stream sends `resync`) only before
+a usable roster of the requested mode has been published, or after a full projection reset
+clears it. Current and history rosters remain separate: a history read never substitutes
+current-only membership.
 A continuation reads the roster published at its first page's cut; once that roster is gone
 it answers `page-cursor-expired`. A stream rereads on a new publication.
+Combining `min_cut` with a continuation `cursor` is rejected with `validation-failed`: the
+continuation is already pinned to its first page's cut.
 
 A card-faults read that reaches its deadline does not stop publication. Other card fields
 are current; each affected card keeps its previous `fault`, including a known null value.
@@ -1973,6 +2178,21 @@ has it, and `working` comes only from the register. The full mapping tables live
 [conversation normalization design](../conversation-normalization-design.md). Generated
 clients model `view` and `header` as optional loose JSON; `timeline-views.json` is the
 wire fixture.
+
+Schema-integer typed duration projections round native fractional values to the nearest
+whole contract unit: milliseconds for `wall_ms`, `total_ms` and `duration_ms`, seconds
+for `timeout_s`. Open assistant metadata, including `ttft_ms` and `duration_ms`, and
+native payloads and tool-result detail metadata preserve their original number precision.
+Integer counts are projected only from nonnegative integers; signed exit codes remain signed.
+Job summaries require a native identity and use `unknown` when no state was supplied;
+jobs without an identity remain in the native payload rather than receiving invented IDs.
+Tool-start views use the record timestamp when `startedAt` is absent or invalid. If neither
+instant is available, the native record remains readable without a typed tool-start view.
+The optional thinking-level `configured` field is projected only from native boolean
+evidence. A native string such as `"high"` stays in the payload but is omitted from the
+typed view; its presence does not imply an explicit-configuration fact.
+Non-fetchable prefix notices express that fact in `reason` and omit a continuation cursor,
+without adding undeclared fields to the closed truncation body.
 
 The pre-approval parity audit adds these parsed contract fields explicitly:
 `TimelineViewTask.context`, `SubagentSummary.name` (OMP name, distinct from agent

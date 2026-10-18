@@ -7,6 +7,7 @@ import { ContextMenu } from '../menu';
 import { alertsHeading, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@smalltalk/st3-views';
 import type { RootParams } from '../navigation';
 import { agentName } from '../agentsView';
+import { alertsEmptyText } from '../alertsEmpty';
 import { attentionActionLabel, attentionKindLabel, blockedLine } from '../presentation';
 import { missionTitle } from '../missionsView';
 import { useStore } from '../store';
@@ -18,7 +19,7 @@ import type { RootScreen } from '../navigation';
 
 // Now: what needs the person, as stui's Home lists it.
 export function NowScreen() {
-  const { data, caps, hasSynced, truncated, loadErrors, busy, status, actions } = useStore();
+  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
   useDebugScroll(list as never);
@@ -86,7 +87,7 @@ export function NowScreen() {
       </ContextMenu>}
       ListHeaderComponent={<View><StatusLine />{heading ? <T bold style={{ paddingHorizontal: 32, paddingTop: 16 }}>{heading}</T> : null}</View>}
       refreshControl={refresh}
-      ListEmptyComponent={<Empty text={loadErrors.attention ? `Alerts could not be loaded: ${loadErrors.attention}` : status === 'offline' ? hasSynced ? 'No alerts in the offline snapshot.' : 'Connect to check for alerts.' : hasSynced ? 'No alerts. You’re all caught up.' : 'Checking for alerts…'} />}
+      ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `st now` lists them all.</Note> : null}
       </View>}
@@ -174,7 +175,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       <T bold selectable>{row.title}</T>
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'
         // A prompt is allowed from its conversation, where the call it asks about is shown.
-        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} calls={[]} seats={[]} />
+        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} calls={null} seats={[]} />
         : item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
       {item.because ? <T soft>because {item.because}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}
