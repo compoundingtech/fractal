@@ -6,6 +6,12 @@ mod cursor_tests;
 #[path = "reads_envelope_tests.rs"]
 mod envelope_tests;
 
+#[path = "reads_identifier_mission_tests.rs"]
+mod identifier_mission_tests;
+
+#[path = "reads_identifier_agent_tests.rs"]
+mod identifier_agent_tests;
+
 const OWNER: &str = "person/operator";
 const AGENT: &str = "agent/reads-fixture.worker";
 const MISSION: &str = "mission/reads-fixture-mission";

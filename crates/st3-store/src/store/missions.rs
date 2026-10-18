@@ -1,5 +1,81 @@
 use super::*;
 
+// One query preserves the native collection's indexed latest/live probes and shallow
+// key sort. Assistant membership matches reads::ident before pagination/hydration:
+// mission/ contributes seven allowed ASCII bytes; '-' is literal at the GLOB class end.
+// GLOB stops at NUL, so reject it explicitly. API regression tests exercise this SQL
+// against the canonical identifier policy, including every ASCII byte.
+const MISSION_COLLECTION_PAGE_SQL: &str = "WITH RECURSIVE run_missions(mission_id) AS (
+    SELECT MIN(mission_id) FROM mission_runs
+    UNION ALL
+    SELECT (SELECT MIN(mission_id) FROM mission_runs WHERE mission_id>run_missions.mission_id)
+    FROM run_missions WHERE mission_id IS NOT NULL
+ ), ids AS (
+    SELECT mission_id FROM mission_definitions
+    UNION SELECT mission_id FROM run_missions WHERE mission_id IS NOT NULL
+ )
+ SELECT ids.mission_id, COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms,'0')
+ FROM ids
+ LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
+ LEFT JOIN claims published ON published.id=def.claim_id
+ LEFT JOIN mission_runs latest ON latest.id=(
+    SELECT id FROM mission_runs WHERE mission_id=ids.mission_id
+    ORDER BY created_at_unix_ms DESC,id DESC LIMIT 1)
+ LEFT JOIN mission_runs live ON live.id=(
+    SELECT id FROM mission_runs WHERE mission_id=ids.mission_id AND status IN ('running','standing')
+    ORDER BY status LIMIT 1)
+ WHERE (NOT ?7 OR (
+       length(CAST(ids.mission_id AS BLOB)) + 7 BETWEEN 1 AND 256
+       AND instr(ids.mission_id,char(0))=0
+       AND ids.mission_id NOT GLOB '*[^a-zA-Z0-9/._:@+=~-]*'))
+   AND (?5 IS NULL OR CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) < ?5
+     OR (CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) = ?5 AND ids.mission_id > ?6))
+   AND (?1 OR ids.mission_id NOT LIKE '__st3/%')
+   AND (?1 OR CASE
+       WHEN live.status IS NOT NULL THEN live.status
+       WHEN def.state='retired' THEN 'retired'
+       WHEN latest.status IS NOT NULL THEN latest.status
+       ELSE def.state END NOT IN ('completed','failed','cancelled','retired')
+       -- A failed/cancelled run remains briefly unless its mission was retired.
+       OR (latest.status IN ('failed','cancelled')
+           AND COALESCE(def.state,'')<>'retired'
+           AND live.status IS NULL
+           AND CAST(latest.updated_at_unix_ms AS INTEGER)>=?4))
+ ORDER BY CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms) AS INTEGER) DESC,
+          ids.mission_id ASC
+ LIMIT ?2 OFFSET ?3";
+
+#[cfg(test)]
+mod identifier_query_tests {
+    use super::*;
+
+    #[test]
+    fn identifier_mission_query_preserves_indexed_run_probes() {
+        let store = Store::open_memory("identifier-query").unwrap();
+        let connection = store.readers.get();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {MISSION_COLLECTION_PAGE_SQL}")).unwrap();
+        let mut plans = Vec::new();
+        for assistant_identifiers_only in [false, true] {
+            let plan = statement.query_map(params![
+                false, 10_i64, 0_i64, 0_i64, None::<i64>, None::<String>,
+                assistant_identifiers_only,
+            ], |row| row.get::<_, String>(3)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            let description = plan.join("\n");
+            for index in [
+                "mission_runs_collection_latest_index", "mission_runs_collection_live_index",
+            ] {
+                assert!(description.contains(index), "{description}");
+            }
+            assert!(!plan.iter().any(|step| step.starts_with("SCAN mission_runs")),
+                "run history must remain indexed probes: {description}");
+            plans.push(plan);
+        }
+        assert_eq!(plans[0], plans[1], "membership must not introduce a different scan");
+    }
+}
+
 impl Store {
     /// Whether a refresher keeps the roster published, so readers must never fold it.
     pub fn agent_roster_refresher_running(&self) -> bool {
@@ -215,48 +291,37 @@ impl Store {
         after: Option<&(u128, String)>,
         at_unix_ms: u128,
     ) -> Result<Vec<(String, u128)>> {
+        self.mission_collection_page_filtered_at(history, offset, limit, after, at_unix_ms, false)
+    }
+
+    /// Assistant-visible shallow mission keys, filtered before SQL pagination and
+    /// card hydration. Native collection callers retain their broader ID contract.
+    pub fn assistant_mission_collection_page_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+    ) -> Result<Vec<(String, u128)>> {
+        self.mission_collection_page_filtered_at(history, offset, limit, after, at_unix_ms, true)
+    }
+
+    fn mission_collection_page_filtered_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+        assistant_identifiers_only: bool,
+    ) -> Result<Vec<(String, u128)>> {
         let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
         // Seek once per distinct mission, not once per historical run. Latest and live
         // state are indexed probes; only shallow mission keys reach the final sort.
         let mut statement = connection.prepare(
-            /* sqlite-large-value: allow-for-now lv-hcf8090320e4a owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH RECURSIVE run_missions(mission_id) AS (
-                SELECT MIN(mission_id) FROM mission_runs
-                UNION ALL
-                SELECT (SELECT MIN(mission_id) FROM mission_runs WHERE mission_id>run_missions.mission_id)
-                FROM run_missions WHERE mission_id IS NOT NULL
-             ), ids AS (
-                SELECT mission_id FROM mission_definitions
-                UNION SELECT mission_id FROM run_missions WHERE mission_id IS NOT NULL
-             )
-             SELECT ids.mission_id, COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms,'0')
-             FROM ids
-             LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
-             LEFT JOIN claims published ON published.id=def.claim_id
-             LEFT JOIN mission_runs latest ON latest.id=(
-                SELECT id FROM mission_runs WHERE mission_id=ids.mission_id
-                ORDER BY created_at_unix_ms DESC,id DESC LIMIT 1)
-             LEFT JOIN mission_runs live ON live.id=(
-                SELECT id FROM mission_runs WHERE mission_id=ids.mission_id AND status IN ('running','standing')
-                ORDER BY status LIMIT 1)
-             WHERE (?5 IS NULL OR CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) < ?5
-                 OR (CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) = ?5 AND ids.mission_id > ?6))
-               AND (?1 OR ids.mission_id NOT LIKE '__st3/%')
-               AND (?1 OR CASE
-                   WHEN live.status IS NOT NULL THEN live.status
-                   WHEN def.state='retired' THEN 'retired'
-                   WHEN latest.status IS NOT NULL THEN latest.status
-                   ELSE def.state END NOT IN ('completed','failed','cancelled','retired')
-                   -- A run that failed or was cancelled stays in view for a while with its
-                   -- outcome, instead of vanishing the moment it ends, unless its mission
-                   -- was retired.
-                   OR (latest.status IN ('failed','cancelled')
-                       AND COALESCE(def.state,'')<>'retired'
-                       AND live.status IS NULL
-                       AND CAST(latest.updated_at_unix_ms AS INTEGER)>=?4))
-             ORDER BY CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms) AS INTEGER) DESC,
-                      ids.mission_id ASC
-             LIMIT ?2 OFFSET ?3",
+            /* sqlite-large-value: allow-for-now lv-h810d8280f84c owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ MISSION_COLLECTION_PAGE_SQL,
         )?;
         statement
             .query_map(
@@ -266,7 +331,12 @@ impl Store {
                     offset as i64,
                     ended_since as i64,
                     after.map(|key| key.0 as i64),
-                    after.map(|key| key.1.trim_start_matches("mission/"))
+                    after.map(|key| if assistant_identifiers_only {
+                        key.1.strip_prefix("mission/").unwrap_or(&key.1)
+                    } else {
+                        key.1.trim_start_matches("mission/")
+                    }),
+                    assistant_identifiers_only
                 ],
                 |row| {
                     Ok((

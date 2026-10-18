@@ -1,6 +1,9 @@
 use super::*;
 use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair as _}};
 
+#[path = "authorization_identifier_agent_tests.rs"]
+mod identifier_agent_tests;
+
 const OWNER: &str = "person/operator";
 struct Fixture {
     root: tempfile::TempDir,

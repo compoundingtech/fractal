@@ -135,15 +135,15 @@ fn budget_exceeded(message: impl Into<String>) -> ApiError {
 
 /// An identifier copied out of a source row, or nothing. Identifiers are short tokens; a value
 /// with spaces, controls or prose punctuation is source text, which never leaves.
-fn ident(value: Option<&str>) -> Option<String> {
-    value
-        .filter(|value| {
-            (1..=256).contains(&value.len())
-                && value.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte)
-                })
+fn identifier_allowed(value: &str) -> bool {
+    (1..=256).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte)
         })
-        .map(str::to_owned)
+}
+
+fn ident(value: Option<&str>) -> Option<String> {
+    value.filter(|value| identifier_allowed(value)).map(str::to_owned)
 }
 
 fn closed(value: Option<&str>, allowed: &[&'static str]) -> &'static str {

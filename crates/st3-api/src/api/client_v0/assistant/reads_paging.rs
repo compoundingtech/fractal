@@ -76,7 +76,7 @@ fn read_page(
             .map_err(ApiError::internal)?;
         let marker = format!("assistant-mission-keyset-v3:{frontier:?}:{generation}");
         check_source(&cursor, &marker)?;
-        let mut keys = state.store.mission_collection_page_at(
+        let mut keys = state.store.assistant_mission_collection_page_at(
             false, 0, limit.saturating_add(1),
             cursor.as_ref().and_then(|cursor| cursor.after_key.as_ref()), now,
         ).map_err(ApiError::internal)?;
@@ -119,19 +119,34 @@ fn read_page(
         if cut < index { state.store.request_agent_roster_refresh(); }
         let marker = format!("assistant-agents:{cut}:{published_at}");
         check_source(&cursor, &marker)?;
-        if cursor.is_some() && offset >= cards.len() {
+        // Count assistant-visible membership before applying offsets; clone only the
+        // selected cards, never the whole publication or its excluded identifiers.
+        let window = offset..offset.saturating_add(limit);
+        let mut visible_len = 0;
+        let mut selected = Vec::new();
+        for card in cards.iter().filter(|card| card["id"].as_str()
+            .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")))
+        {
+            if window.contains(&visible_len) {
+                selected.push(card.clone());
+            }
+            visible_len += 1;
+        }
+        if cursor.is_some() && offset >= visible_len {
             return Err(client_page_expired("the agent cursor is outside its source publication"));
         }
         let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
-        let end = offset.saturating_add(limit).min(cards.len());
-        let mut selected = cards.get(offset..end).unwrap_or_default().to_vec();
+        let end = window.end.min(visible_len);
         overlay_agent_resources(&state.store, &mut selected, &snapshot.created_at).map_err(ApiError::internal)?;
-        (snapshot, agent_rows(&selected, rich), end < cards.len(), marker)
+        (snapshot, agent_rows(&selected, rich), end < visible_len, marker)
     } else {
-        // Reuse the native unfiltered agent path: cache only membership/queue refs, then
-        // materialize the selected cards. No full-card list or all-row JSON digest is built.
+        // Reuse native shallow membership, but filter before caching positions and
+        // materializing selected cards so every cached ref projects to one visible row.
         let refs = if cursor.is_some() { Vec::new() } else {
-            client_agent_page_refs(&state.store, false, index).map_err(ApiError::internal)?
+            let mut refs = client_agent_page_refs(&state.store, false, index).map_err(ApiError::internal)?;
+            refs.retain(|reference| reference["id"].as_str()
+                .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")));
+            refs
         };
         let page = client_page_read_projected(
             state, &snapshot, collection, &format!("assistant.{projection}"), refs, query,
