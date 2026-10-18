@@ -47,6 +47,7 @@ fn response(digest: String) -> ReplicationExportResponse {
             envelopes: Vec::new(),
             signature_requests: Vec::new(),
             signatures: Vec::new(),
+            build: None,
         },
     }
 }

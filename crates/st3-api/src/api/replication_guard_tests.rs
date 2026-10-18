@@ -184,7 +184,7 @@ async fn reduced_mode_requires_all_three_local_flags_and_omits_only_buckets() {
     let state = super::tests::state(root.path());
     state.store.bind_fleet(FLEET).unwrap();
     state.store.connection.write().execute(
-        "INSERT INTO replica_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,payload,relay,receipt_state,received_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hb9af0eaf4081 owner=st3_api::api::replication_guard_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,payload,relay,receipt_state,received_at_unix_ms)
          VALUES('fixture',1,?1,'0',X'','fixture','pending','0')", ["a".repeat(64)],
     ).unwrap();
     let full_summary = replication_export(State(state.clone()), Json(request(true, false)))
@@ -272,7 +272,7 @@ async fn reduced_mode_preserves_reached_store_errors_and_guard_accounting() {
         .store
         .connection
         .write()
-        .execute_batch("DROP TABLE replica_envelope_holds")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-ha30955b3d884 owner=st3_api::api::replication_guard_tests TODO=chunk-or-reference-exact-wire-values */ "DROP TABLE replica_envelope_holds")
         .unwrap();
     let before = count(GUARD);
     let old = replication_export(State(state.clone()), Json(request(true, true))).await;
@@ -349,7 +349,7 @@ async fn main_backend_scalar_uses_only_new_local_mode_and_reads_a_later_change()
     let before = main.authority_digest(FLEET).await.unwrap();
     assert_eq!(before, ordinary.exchange.authority_digest);
     state.store.connection.write().execute(
-        "INSERT INTO replica_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,payload,relay,receipt_state,received_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h0f3e19bf837f owner=st3_api::api::replication_guard_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,payload,relay,receipt_state,received_at_unix_ms)
          VALUES('fixture',1,?1,'0',X'','fixture','pending','0')", ["b".repeat(64)],
     ).unwrap();
     let after = main.authority_digest(FLEET).await.unwrap();
