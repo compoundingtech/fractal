@@ -4,11 +4,14 @@
 //! indexed lookup of pending mail or a delivered wake, one seat's watches and reporting runs,
 //! or a fixed number of one thread's newest observations.
 
-use super::*;
+use crate::WatchesStore;
 use crate::github_watch::{self, ThreadRef};
-
-/// The claim recorded on a step each time its holder is nudged.
-pub const WORK_NUDGED_KIND: &str = "work.nudged";
+use crate::model::{ClaimRecord, StepRunView};
+use crate::store::Store;
+use crate::store::*;
+use anyhow::Result;
+use rusqlite::{OptionalExtension as _, params};
+use serde_json::{Value, json};
 
 /// How many of a thread's newest observations a merge-queue check reads at most. A thread is
 /// observed only when it changes.
@@ -40,10 +43,43 @@ pub struct LiveWatch {
     pub until_unix_ms: Option<u128>,
 }
 
-impl Store {
+pub trait IdleHoldsStore {
     /// Whether a message to `agent` has not reached its harness yet: sent or staged, with no
     /// delivery, read or close.
-    pub fn has_undelivered_message(&self, agent: &str) -> Result<bool> {
+    fn has_undelivered_message(&self, agent: &str) -> Result<bool>;
+    /// The newest delivered wake carrying the exact wait tag and the source's tag prefix.
+    /// A nudge or a conversation that merely mentions the wait is not a source wake.
+    /// Both source producers put their source tag first and exact wait tag second; claim
+    /// writes materialize those fields and delivery state in the disposable message index.
+    fn last_wake_to(&self, agent: &str, tag: &str, prefix: &str) -> Result<Option<u128>>;
+    /// The watches `agent` holds that have not ended. Watch subjects end with their seat, so
+    /// this reads the declared watches' subject range, not the fleet's declarations.
+    fn live_watches_of(&self, agent: &str) -> Result<Vec<LiveWatch>>;
+    /// When a watched thread that is still open left the merge queue, if it is out of the queue
+    /// now and left it after `after_unix_ms`: the first observation that saw it out.
+    fn thread_left_merge_queue(
+        &self,
+        thread: &ThreadRef,
+        after_unix_ms: u128,
+    ) -> Result<Option<u128>>;
+    /// Open runs that have named this reporter. The caller checks the current reporter
+    /// against later overrides. Seek this seat's report claims, without reading other runs.
+    fn open_mission_runs_reporting_to(&self, agent: &str) -> Result<Vec<(String, u128)>>;
+    /// The latest progress line for a nudge, read only when sending one. Reconcile work rows
+    /// deliberately omit presentation history.
+    fn nudge_progress(&self, step: &StepRunView) -> Result<Option<(String, u128)>>;
+    /// Readiness reports alone do not start another idle period: there must have been a
+    /// working observation from this incarnation since the last nudge.
+    fn harness_worked_after(&self, agent: &str, incarnation: &str, after: u128) -> Result<bool>;
+    /// A step's newest nudge.
+    fn latest_nudge(&self, step: &str) -> Result<Option<ClaimRecord>>;
+    /// The newest `harness.observed` of a seat, for its quiescence report.
+    fn latest_harness_report(&self, agent: &str) -> Result<Option<Value>>;
+    fn idle_lookup_plans(&self, agent: &str, tag: &str) -> Result<Vec<String>>;
+}
+
+impl IdleHoldsStore for Store {
+    fn has_undelivered_message(&self, agent: &str) -> Result<bool> {
         let (recipient, bare_recipient) = recipients(agent);
         smallclaims::touched::note_read(|| format!("mailbox:{recipient}"));
         let connection = self.readers.get();
@@ -60,16 +96,7 @@ impl Store {
         Ok(found.is_some())
     }
 
-    /// The newest delivered wake carrying the exact wait tag and the source's tag prefix.
-    /// A nudge or a conversation that merely mentions the wait is not a source wake.
-    /// Both source producers put their source tag first and exact wait tag second; claim
-    /// writes materialize those fields and delivery state in the disposable message index.
-    pub fn last_wake_to(
-        &self,
-        agent: &str,
-        tag: &str,
-        prefix: &str,
-    ) -> Result<Option<u128>> {
+    fn last_wake_to(&self, agent: &str, tag: &str, prefix: &str) -> Result<Option<u128>> {
         let (recipient, bare_recipient) = recipients(agent);
         smallclaims::touched::note_read(|| format!("mailbox:{recipient}"));
         let connection = self.readers.get();
@@ -81,9 +108,7 @@ impl Store {
             .map(u128::from))
     }
 
-    /// The watches `agent` holds that have not ended. Watch subjects end with their seat, so
-    /// this reads the declared watches' subject range, not the fleet's declarations.
-    pub fn live_watches_of(&self, agent: &str) -> Result<Vec<LiveWatch>> {
+    fn live_watches_of(&self, agent: &str) -> Result<Vec<LiveWatch>> {
         smallclaims::touched::note_read(|| format!("watches:{agent}"));
         let suffix = agent.trim_start_matches("agent/");
         let subjects = {
@@ -117,9 +142,7 @@ impl Store {
         Ok(watches)
     }
 
-    /// When a watched thread that is still open left the merge queue, if it is out of the queue
-    /// now and left it after `after_unix_ms`: the first observation that saw it out.
-    pub fn thread_left_merge_queue(
+    fn thread_left_merge_queue(
         &self,
         thread: &ThreadRef,
         after_unix_ms: u128,
@@ -173,12 +196,7 @@ impl Store {
         Ok(None)
     }
 
-    /// Open runs that have named this reporter. The caller checks the current reporter
-    /// against later overrides. Seek this seat's report claims, without reading other runs.
-    pub fn open_mission_runs_reporting_to(
-        &self,
-        agent: &str,
-    ) -> Result<Vec<(String, u128)>> {
+    fn open_mission_runs_reporting_to(&self, agent: &str) -> Result<Vec<(String, u128)>> {
         let connection = self.readers.get();
         smallclaims::touched::note_read(|| format!("reports-to:{agent}"));
         let mut statement = connection.prepare_cached(
@@ -199,9 +217,7 @@ impl Store {
         Ok(runs)
     }
 
-    /// The latest progress line for a nudge, read only when sending one. Reconcile work rows
-    /// deliberately omit presentation history.
-    pub fn nudge_progress(&self, step: &StepRunView) -> Result<Option<(String, u128)>> {
+    fn nudge_progress(&self, step: &StepRunView) -> Result<Option<(String, u128)>> {
         let connection = self.readers.get();
         let found = connection
             .prepare_cached(
@@ -220,14 +236,7 @@ impl Store {
         Ok(found.and_then(|(line, at)| Some((line, at.parse().ok()?))))
     }
 
-    /// Readiness reports alone do not start another idle period: there must have been a
-    /// working observation from this incarnation since the last nudge.
-    pub fn harness_worked_after(
-        &self,
-        agent: &str,
-        incarnation: &str,
-        after: u128,
-    ) -> Result<bool> {
+    fn harness_worked_after(&self, agent: &str, incarnation: &str, after: u128) -> Result<bool> {
         let connection = self.readers.get();
         let after = after.to_string();
         Ok(connection
@@ -241,33 +250,17 @@ impl Store {
             .query_row(params![agent, incarnation, after], |row| row.get(0))?)
     }
 
-    /// A step's newest nudge.
-    pub fn latest_nudge(&self, step: &str) -> Result<Option<ClaimRecord>> {
+    fn latest_nudge(&self, step: &str) -> Result<Option<ClaimRecord>> {
         self.latest_claim(step, Some(WORK_NUDGED_KIND))
     }
 
-    /// The newest `harness.observed` of a seat, for its quiescence report.
-    pub fn latest_harness_report(&self, agent: &str) -> Result<Option<Value>> {
+    fn latest_harness_report(&self, agent: &str) -> Result<Option<Value>> {
         Ok(self
             .latest_claim(agent, Some("harness.observed"))?
             .map(|claim| claim.body.get("fields").cloned().unwrap_or(claim.body)))
     }
-}
 
-/// A seat's mailbox names, as messages address it.
-fn recipients(agent: &str) -> (String, String) {
-    let recipient = normalize_message_party(agent);
-    let bare_recipient = recipient
-        .strip_prefix("agent/")
-        .filter(|suffix| !suffix.contains('/'))
-        .unwrap_or(&recipient)
-        .to_owned();
-    (recipient, bare_recipient)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Store {
-    pub fn idle_lookup_plans(&self, agent: &str, tag: &str) -> Result<Vec<String>> {
+    fn idle_lookup_plans(&self, agent: &str, tag: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         let mut plans = Vec::new();
         for (label, sql, args) in [
@@ -316,6 +309,18 @@ impl Store {
     }
 }
 
+/// A seat's mailbox names, as messages address it.
+fn recipients(agent: &str) -> (String, String) {
+    let recipient = normalize_message_party(agent);
+    let bare_recipient = recipient
+        .strip_prefix("agent/")
+        .filter(|suffix| !suffix.contains('/'))
+        .unwrap_or(&recipient)
+        .to_owned();
+    (recipient, bare_recipient)
+}
+
+#[cfg(any(test, feature = "test-support"))]
 #[cfg(test)]
 mod tests {
     use super::*;
