@@ -57,14 +57,14 @@ capture staging has a separate lifetime.
 
 ## Read-only host census before merge
 
-Ops records one row for each checkpoint member (`hetz`, `hetz2`, `Silber`, `bluey`): live DB
+The invented member labels and `$ST_STATE_DIR` paths below stand in for the private host and home identifiers. Ops records one row for each checkpoint member (`linux-a`, `linux-b`, `mac-a`, `mac-b`): live DB
 allocated bytes, live WAL allocated bytes, available bytes and device IDs for live, scratch and
 selected SQLite temp directories, then the gate's required bytes, deficit and verdict. This
 requires `stat`/`statvfs` only; it does not make a production DB copy. The production DB size,
 retained fraction, proof disk peak and elapsed time are still unknown until measured. The prior
 2.68× RAW comment is not held evidence. The existing checkpoint heap test measures **MEMORY**,
 not **DISK**. Linux/ext4 behavior is the local implementation target; APFS `f_bavail` semantics
-and the guarded SQLite VFS on Silber and bluey remain UNKNOWN until tested there. Each proof
+and the guarded SQLite VFS on mac-a and mac-b remain UNKNOWN until tested there. Each proof
 performs a deliberate over-budget self-test write and refuses before copying if the guard does
 not intercept it. The 4× waiver and cleanup HOLD remain in effect.
 
@@ -74,10 +74,10 @@ Ops took one read-only filesystem census at 16:13 UTC on 2026-10-16. The daemon'
 
 | Member | Configured scratch path | Free bytes | Capture admission required bytes | Point verdict |
 | --- | --- | ---: | ---: | --- |
-| hetz | `/home/myobie/.local/state/st3/checkpoint` | 239,060,426,752 | 178,518,466,560 | PASS, conditional |
-| hetz2 | `/home/myobie/.local/state/st3/checkpoint` | 177,268,850,688 | 172,960,161,792 | PASS, conditional; 4.3 GB margin |
-| Silber | `/Users/myobie/.local/state/st3/checkpoint` | 381,645,103,104 | 163,008,110,592 | PASS, conditional |
-| bluey | `/Users/nathanherald/.local/state/st3/checkpoint` | 66,230,939,648 | 161,004,036,096 | REFUSE; 94.8 GB deficit |
+| linux-a | `$ST_STATE_DIR/checkpoint` | 239,060,426,752 | 178,518,466,560 | PASS, conditional |
+| linux-b | `$ST_STATE_DIR/checkpoint` | 177,268,850,688 | 172,960,161,792 | PASS, conditional; 4.3 GB margin |
+| mac-a | `$ST_STATE_DIR/checkpoint` | 381,645,103,104 | 163,008,110,592 | PASS, conditional |
+| mac-b | `$ST_STATE_DIR/checkpoint` | 66,230,939,648 | 161,004,036,096 | REFUSE; 94.8 GB deficit |
 
 ## Staged binary capability for deployment
 
