@@ -157,8 +157,9 @@ exclusive_lanes() {
 
 lane "Toolchain and Buck root" toolchain
 lane "Frozen install" pnpm install --frozen-lockfile
+# Storybook imports the app changelog too, so every shard needs its generated registry.
+lane "Changelog registry derives from its directory" bash -c 'node apps/fractal-web/scripts/changelog-registry.mjs && node apps/fractal-web/scripts/changelog-registry.mjs --check'
 if first_shard; then
-  lane "Changelog registry derives from its directory" bash -c 'node apps/fractal-web/scripts/changelog-registry.mjs && node apps/fractal-web/scripts/changelog-registry.mjs --check'
   run_streams stream_scenarios stream_checks stream_app stream_kit
 else
   run_streams stream_kit

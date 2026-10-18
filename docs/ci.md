@@ -681,6 +681,8 @@ and the gate refuses shard options for any set but `all`. Each shard validates t
 **full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
 cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
 configures N. `KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
+Every shard generates and checks the app changelog registry after the frozen install,
+before starting any streams: Storybook imports it through the workspace stories.
 Every selected story still runs all four width/theme cases with the same runner and
 assertions. Empty shards fail unless N exceeds the story count. Shard 0 runs every
 stream in `scripts/ci-fractal-web`; the other shards run only `stream_kit`'s play index
