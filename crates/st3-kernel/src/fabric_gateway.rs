@@ -46,6 +46,7 @@ impl GatewayExposure {
     pub fn save(&self, state_dir: &Path) -> Result<()> {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
+        fs::create_dir_all(state_dir).with_context(|| format!("create {}", state_dir.display()))?;
         let path = Self::path(state_dir);
         let temporary = path.with_extension(format!("toml.{}.tmp", std::process::id()));
         let mut file = fs::OpenOptions::new()
@@ -214,14 +215,21 @@ mod tests {
     const PHONE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
-    /// A fake `fabric` whose `peers` prints `peers` and which logs every call.
-    fn enable(root: &Path, peers: &str) -> PathBuf {
+    /// A fake `fabric` whose `peers --json` lists `peers`, as NodeID and name, and which logs
+    /// every call.
+    fn enable(root: &Path, peers: &[(&str, &str)]) -> PathBuf {
         let program = root.join("fabric");
         let log = root.join("calls");
+        let peers = json!({
+            "peers": peers
+                .iter()
+                .map(|(node, name)| json!({"node": node, "name": name, "allow": ["demo-client/0"]}))
+                .collect::<Vec<_>>()
+        });
         fs::write(
             &program,
             format!(
-                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1\" in peers) printf '{peers}';; esac\n",
+                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1\" in peers) echo '{peers}';; esac\n",
                 log = log.display()
             ),
         )
@@ -257,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn pairing_grants_exactly_the_gateway_inbound_only_and_revoking_removes_it() {
         let root = tempfile::tempdir().unwrap();
-        let log = enable(root.path(), "");
+        let log = enable(root.path(), &[]);
         assert_eq!(
             grant(root.path(), PHONE).await,
             Grant::Granted {
@@ -268,29 +276,23 @@ mod tests {
         assert_eq!(
             calls(&log),
             format!(
-                "peers\nadd {PHONE} st-device-0123456789ab --inbound-only --allow demo-client/0\n"
+                "peers --json\nadd {PHONE} st-device-0123456789ab --inbound-only --allow demo-client/0\n"
             )
         );
 
-        let log = enable(
-            root.path(),
-            &format!("{PHONE}\\tst-device-0123456789ab\\tdemo-client/0\\n"),
-        );
+        let log = enable(root.path(), &[(PHONE, "st-device-0123456789ab")]);
         fs::remove_file(&log).ok();
         assert_eq!(
             revoke(root.path(), PHONE).await.unwrap().as_deref(),
             Some("st-device-0123456789ab")
         );
-        assert_eq!(calls(&log), "peers\nremove st-device-0123456789ab\n");
+        assert_eq!(calls(&log), "peers --json\nremove st-device-0123456789ab\n");
     }
 
     #[tokio::test]
     async fn a_peer_st_did_not_add_is_left_alone() {
         let root = tempfile::tempdir().unwrap();
-        let log = enable(
-            root.path(),
-            &format!("{PHONE}\\tdemo-phone\\tdemo-client/0\\n"),
-        );
+        let log = enable(root.path(), &[(PHONE, "demo-phone")]);
         assert_eq!(
             grant(root.path(), PHONE).await,
             Grant::AlreadyTrusted {
@@ -298,20 +300,17 @@ mod tests {
             }
         );
         assert_eq!(revoke(root.path(), PHONE).await.unwrap(), None);
-        assert_eq!(calls(&log), "peers\npeers\n");
+        assert_eq!(calls(&log), "peers --json\npeers --json\n");
     }
 
     #[tokio::test]
     async fn a_name_taken_by_another_node_is_never_replaced() {
         let root = tempfile::tempdir().unwrap();
-        let log = enable(
-            root.path(),
-            &format!("{OTHER}\\tst-device-0123456789ab\\t\\n"),
-        );
+        let log = enable(root.path(), &[(OTHER, "st-device-0123456789ab")]);
         assert!(matches!(
             grant(root.path(), PHONE).await,
             Grant::Failed { .. }
         ));
-        assert_eq!(calls(&log), "peers\n");
+        assert_eq!(calls(&log), "peers --json\n");
     }
 }
