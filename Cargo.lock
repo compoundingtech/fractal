@@ -5081,6 +5081,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "st-drivers",
  "st-runtime",
  "st3-github-base",
  "st3-secrets",
