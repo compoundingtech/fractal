@@ -27,6 +27,36 @@ package has one dependency set for its library and its binary, so a library that
 binary was rebuilt whenever `stui`, `st3-conversation-ui` or `st3-feed` changed, although it uses
 none of them.
 
+## Domain crates, cut at function level
+
+st3-store held the whole claims store. At file level it is one knot (`store.rs` calls the domain
+files, which call `store.rs` back), but at function level it is not: the fold (`apply_as_impl`,
+`try_project_simple_replication_tx`, ...), the schema, the projector hooks and everything they reach
+form the knot, and the rest only calls down. `scripts/crate_cut.py` computes that split and applies
+it, one domain at a time, so a domain's code lives in a crate above st3-store: `st3-store` <
+the domain crates < `st3-github` < `st3-peer` < `st3-reconcile` < `st3-api`.
+
+- **Methods are extension traits.** A domain's `impl Store` fns became methods of a trait, one per
+  source file (`EvidenceStore`, `OwnedSetsStore`, ...), implemented for `Store` in the same file. Call
+  syntax is unchanged; import the trait (`use st3::EvidenceStore;` outside the chain, `use
+  crate::EvidenceStore;` in a crate of the chain). To add a method, add its signature to the trait and
+  its body to the impl in that file.
+- **A module can live in two crates.** Where a module has code on both sides of a cut, the upper crate
+  has a module of the same name that re-exports the lower one's items (`pub use
+  st3_store::store::evidence::*;`) and defines its own, so `crate::store::evidence::X` finds `X` in
+  whichever crate it is. The lower crate's items the upper code uses are `pub`.
+- **The core stays in st3-store.** If code in the fold, the schema or the open path starts to name a
+  domain item, the build fails in st3-store (the item is not there); move the item back down, or invert
+  the call. `scripts/crate_cut.py plan` lists what is core and why (`--show core`).
+- **Tests go with what they use.** A test moves to the highest crate among the items it uses; the
+  helpers it calls are copied next to it (types that are `pub` are shared, not copied).
+- **To cut another domain** (or redo one after a merge conflict: a cut is cheaper to redo on the merged
+  tree than to merge): `scripts/crate_cut.py plan` shows the placement, `apply --layer D --crate st3-D
+  --lower <crate below>` moves the layer, `fix` makes the workspace build (visibility and trait
+  imports), `sweep` removes what the move left unused. The domains, their order and the files that hint
+  at them are in `.st/crate-cut.json`; `scripts/crate-cut-test` checks the tool on a small workspace.
+  Layers are applied top first, so every step builds.
+
 ## The public surface of st3-daemon
 
 It is the library surface `st3` had: the modules `st3::{api, client, config, graph, model, store,
