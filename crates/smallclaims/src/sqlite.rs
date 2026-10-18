@@ -814,6 +814,7 @@ fn write_queue(
                     batches,
                     callbacks,
                     fifo,
+                    WRITE_BATCH_WINDOW,
                 );
                 admission.put_back(next);
             }
@@ -823,8 +824,8 @@ fn write_queue(
 
 /// Run `first` and the batched writes queued behind it in one transaction, each in its own
 /// savepoint, then commit once and answer every caller. The batch stops taking writes when it
-/// reaches `WRITE_BATCH_LIMIT`, has run for `WRITE_BATCH_WINDOW`, fails, or meets a lending write,
-/// which it returns to run next.
+/// reaches `WRITE_BATCH_LIMIT`, has run for `window` (`WRITE_BATCH_WINDOW` in the writer), fails,
+/// or meets a lending write, which it returns to run next.
 fn run_write_batch(
     connection: &mut Connection,
     first: WriterJob,
@@ -838,6 +839,7 @@ fn run_write_batch(
         Option<&telemetry::Writer>,
     ),
     fifo: &crate::fifo::Queue,
+    window: std::time::Duration,
 ) -> Option<WriterJob> {
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
     let first_origin = match &first {
@@ -950,7 +952,7 @@ fn run_write_batch(
         answers.push(done);
         if failure.is_none()
             && answers.len() < WRITE_BATCH_LIMIT
-            && started.elapsed() < WRITE_BATCH_WINDOW
+            && started.elapsed() < window
         {
             job = queue.try_recv().ok();
         }
@@ -2327,7 +2329,9 @@ mod tests {
             assert!(run_write_batch(
                 &mut connection, first, &receiver, &AtomicU64::new(0), &batches,
                 (&CommitObservers::default(), &TransactionFinalizers::default(), None, Some(&writer_for_batch)),
-                &fifo,
+                // Both jobs are queued before the batch begins; how long the first one runs
+                // must not decide whether the second shares its batch.
+                &fifo, std::time::Duration::MAX,
             ).is_none());
             assert_eq!(batches.0.load(Ordering::Relaxed), 1);
             assert_eq!(batches.1.load(Ordering::Relaxed), 2, "both origins must share one batch");
