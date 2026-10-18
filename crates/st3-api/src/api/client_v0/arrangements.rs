@@ -242,11 +242,27 @@ mod tests {
 
     async fn inventory_frame(socket: &mut InventorySocket) -> Value {
         use futures_util::StreamExt as _;
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await.expect("owner inventory change must produce a frame").unwrap().unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), async {
+            // Collection sockets send protocol Pings while idle; they are not inventory frames.
+            loop {
+                let frame = socket.next().await.unwrap().unwrap();
+                if !frame.is_ping() && !frame.is_pong() { break frame; }
+            }
+        }).await.expect("owner inventory change must produce a frame");
         let value: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
         super::super::tests::assert_collection_frame_conforms(&value);
         value
+    }
+
+    /// No data frame arrives for a moment; protocol Pings and Pongs do not count.
+    async fn inventory_silent(socket: &mut InventorySocket, window: Duration) -> bool {
+        use futures_util::StreamExt as _;
+        tokio::time::timeout(window, async {
+            loop {
+                let frame = socket.next().await;
+                if !matches!(&frame, Some(Ok(frame)) if frame.is_ping() || frame.is_pong()) { break; }
+            }
+        }).await.is_err()
     }
 
     async fn inventory_reads(
@@ -263,7 +279,7 @@ mod tests {
     }
 
     async fn owner_inventory_stream(replicated: bool, deferred: bool) {
-        use futures_util::{SinkExt as _, StreamExt as _};
+        use futures_util::SinkExt as _;
         const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
         const PREFIX_SECOND: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000002";
         const LOWER: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000003";
@@ -404,7 +420,7 @@ mod tests {
             }
             previous_index = index;
             assert_eq!(state.store.arrangement(WINNER, u64::MAX).unwrap().unwrap(), winner);
-            assert!(tokio::time::timeout(Duration::from_millis(200), socket.next()).await.is_err(),
+            assert!(inventory_silent(&mut socket, Duration::from_millis(200)).await,
                 "selected subject must stay silent, and the owner notice must not repeat");
         }
         // Replay and a rebuilt/reset local counter can change the inventory revision
@@ -426,7 +442,7 @@ mod tests {
             assert_eq!(frame["order"], initial["owner"]["order"]);
             assert_eq!(frame["has_more"], true);
             assert_eq!(frame["snapshot"]["store_index"], previous_index);
-            assert!(tokio::time::timeout(Duration::from_millis(200), socket.next()).await.is_err(),
+            assert!(inventory_silent(&mut socket, Duration::from_millis(200)).await,
                 "replay/reset sends one owner notice, never a selected-subject notice");
         }
         // Positive read completion proves the server examined the unrelated owner's
@@ -436,14 +452,14 @@ mod tests {
             json!([{"op":"create","name":"Sidebar"}]));
         signal_changed(&state);
         inventory_reads(&mut reads, state.store.index().unwrap()).await;
-        assert!(tokio::time::timeout(Duration::from_millis(200), socket.next()).await.is_err());
+        assert!(inventory_silent(&mut socket, Duration::from_millis(200)).await);
         state.store.append_claim(&ClaimInput {
             subject:"resource/inventory-noise".into(), kind:"resource.observed".into(), actor:None,
             fields:serde_json::from_value(json!({"kind":"custom.test.inventory"})).unwrap(),
             evidence:vec![], expected_subject:None, idempotency_key:None,
         }).unwrap();
         signal_changed(&state);
-        assert!(tokio::time::timeout(COLLECTION_REREAD_INTERVAL * 2, socket.next()).await.is_err(),
+        assert!(inventory_silent(&mut socket, COLLECTION_REREAD_INTERVAL * 2).await,
             "global commits must not invalidate the owner inventory");
         socket.close(None).await.unwrap();
         server.abort();

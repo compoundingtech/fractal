@@ -34,6 +34,33 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     bump_inventory_revisions(transaction, std::iter::once(owner))
 }
 
+/// Projects a replicated claim without bumping: the range may hold several claims of one owner,
+/// including this node's own, so the owner is marked and [`flush`] bumps it once per transaction.
+pub fn project_replicated(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    let owner = project_owner(transaction, claim)?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('arrangement_inventory_pending_v1/'||?1,'1')",
+        [owner])?;
+    Ok(())
+}
+
+/// Bumps each owner marked by [`project_replicated`] once, in the transaction that projected it.
+pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
+    let owners = take_pending(transaction)?;
+    bump_inventory_revisions(transaction, owners.iter().map(String::as_str))
+}
+
+fn take_pending(transaction: &Transaction<'_>) -> Result<BTreeSet<String>> {
+    const PREFIX: &str = "arrangement_inventory_pending_v1/";
+    let owners = transaction.prepare_cached("SELECT substr(key,?1) FROM meta WHERE key>=?2 AND key<?3")?
+        .query_map(params![PREFIX.len() as i64 + 1, PREFIX, "arrangement_inventory_pending_v1\u{30}"],
+            |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    transaction.execute("DELETE FROM meta WHERE key>=?1 AND key<?2",
+        params![PREFIX, "arrangement_inventory_pending_v1\u{30}"])?;
+    Ok(owners)
+}
+
 fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> Result<&'a str> {
     let fields = schema_fields_for_body(&claim.kind, &claim.body)?;
     let operations = schema::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
@@ -70,8 +97,8 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
     Ok(owner)
 }
 
-/// Call once per local edit or replay transaction with its distinct touched owners (a replicated
-/// batch bumps once per claim through `project`). Admission indices cannot order deferred materialization behind local edits.
+/// Call once per local edit or projecting transaction with its distinct touched owners (a replicated
+/// batch marks them through `project_replicated` and `flush` calls this). Admission indices cannot order deferred materialization behind local edits.
 pub(super) fn bump_inventory_revisions<'a>(
     transaction: &Transaction<'_>,
     owners: impl IntoIterator<Item = &'a str>,
@@ -238,6 +265,8 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     let mut owners = transaction.prepare_cached("SELECT DISTINCT owner FROM arrangements")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    // Owners an earlier incremental pass of this transaction marked are bumped by this rebuild.
+    owners.extend(take_pending(transaction)?);
     transaction.execute("DELETE FROM arrangement_registers", [])?;
     transaction.execute("DELETE FROM arrangements", [])?;
     let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='arrangement.edited' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
