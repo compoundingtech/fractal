@@ -16,8 +16,9 @@ import { ThinkingRun } from './ThinkingEntry'
 import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Icon } from './Icons'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
+import { useClockLabel } from '../../time/clock'
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -40,7 +41,8 @@ export interface TranscriptProps {
   /** Omit when the host already owns the conversation's header band. */
   readonly showHeader?: boolean
   readonly sync: SyncStatus
-  readonly now: number
+  /** Omit to subscribe only elapsed/sync labels to the host HumanClockProvider. */
+  readonly now?: number
   readonly observedAt: number
   /** Open output in the host's detail surface. No split/controller is hidden in the kit. */
   readonly onOpenTool?: (call: WorkLogCall) => void
@@ -231,7 +233,7 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
+const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
   // The work log lists tool calls separately, so every thought of the turn is visually adjacent: one disclosure.
   const reasoning = turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
@@ -252,11 +254,20 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
   </section>
 })
 /** Host clock keeps elapsed labels deterministic and pauses with the conversation clock. */
-export function LiveActivity({ state, startedAt, now }: { readonly state: LiveActivityState; readonly startedAt?: string; readonly now: number }) {
-  const started = Date.parse(startedAt ?? '')
-  const duration = Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
+export function LiveActivity({ state, startedAt, now }: { readonly state: LiveActivityState; readonly startedAt?: string; readonly now?: number }) {
+  const duration = useClockLabel(now => {
+    const started = Date.parse(startedAt ?? '')
+    return Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
+  }, now)
   const waiting = state._tag === 'WaitingForAnswer'
   return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><span aria-hidden="true" {...stylex.props(styles.liveRing, waiting && styles.waitingRing)} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{`${waiting ? 'Waiting for your answer' : 'Working'}${duration === '' ? '' : ` · ${duration}`}`}</span></div>
+}
+function RunElapsed({ startedAt, now }: { readonly startedAt?: string; readonly now?: number }) {
+  const elapsed = useClockLabel(now => {
+    const started = Date.parse(startedAt ?? '')
+    return Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''
+  }, now)
+  return <span data-testid="run-elapsed">Running{elapsed}</span>
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
@@ -316,8 +327,8 @@ export function Transcript({ turns, title, showHeader = true, sync, now, observe
   const rows = React.useMemo(() => committed.map(turn => ({ id: turn.id, version: (turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).map(contentVersion).join(' ') })), [committed])
   const running = [...committed].reverse().find(turn => turn.work.running)
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
-  const failure = syncLine({ status: sync, label: 'conversation', now, observedAt })
-  const started = Date.parse(running?.work.startedAt ?? '')
+  // Error copy is time-independent; time-bearing sync copy subscribes inside SyncLine.
+  const failure = sync._tag === 'Failed' ? syncLine({ status: sync, label: 'conversation', now: now ?? observedAt, observedAt }) : undefined
   if (availability._tag === 'Unavailable') return <section aria-label={`Conversation unavailable${landmarkContext ? `, ${landmarkContext}` : ''}`} data-testid="transcript-unavailable" {...stylex.props(styles.frame, styles.empty)}>{showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong></header>}<div {...stylex.props(styles.emptyBody)}>
     <TranscriptEmptyContent emptyState={{ title: availability.reason }} />
     {availability.action !== undefined && <Button data-testid="transcript-unavailable-action" onPress={availability.action.onPress} {...stylex.props(styles.unavailableAction)}>{availability.action.label}</Button>}
@@ -330,7 +341,7 @@ export function Transcript({ turns, title, showHeader = true, sync, now, observe
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>
       {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
-      {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
+      {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><RunElapsed startedAt={running.work.startedAt} now={now} /></>}
     </header>}
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
       {history._tag === 'HasOlder' && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
@@ -361,7 +372,7 @@ const styles = stylex.create({
   mixedTrigger: { minHeight: g.toolRow, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: g.focusOffset } },
   answerMeta: { display: 'flex', alignItems: 'center', gap: s.sm, flexShrink: 0, marginInlineStart: 'auto', fontVariantNumeric: 'tabular-nums' },
   // Copy keeps its place in the header and Tab order; pointer hover on the message or keyboard focus shows it.
-  copy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', opacity: { default: 0, ':focus': 1 }, transitionProperty: 'opacity', transitionDuration: { default: m.fast, '@media (prefers-reduced-motion: reduce)': '0s' }, transitionTimingFunction: m.ease, ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  copy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', opacity: { default: 0, ':focus': 1 }, transitionProperty: 'opacity', transitionDuration: { default: m.fast, '@media (prefers-reduced-motion: reduce)': '0s' }, transitionTimingFunction: m.ease, ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   copyVisible: { opacity: 1 },
   progress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm }, track: { height: g.progressSm, backgroundColor: surface.rowActive, overflow: 'hidden' }, fill: (width: string) => ({ width, height: '100%', backgroundColor: accent.primary }),
   runningProgress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm, overflow: 'hidden', backgroundColor: surface.rowActive },
@@ -374,13 +385,13 @@ const styles = stylex.create({
   output: { margin: 0, width: '100%', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.metaLeading, color: ink.fgSoft }, outputCode: { fontFamily: t.fontMono, fontSize: t.codeSize },
   command: { boxSizing: 'border-box', marginBlockEnd: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.codeBg, color: ink.fg },
   errorReason: { margin: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.metaSize },
-  previewActions: { display: 'flex', alignItems: 'center', gap: s.xs, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.metaSize }, previewOpen: { minHeight: g.toolRow, padding: 0, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  previewActions: { display: 'flex', alignItems: 'center', gap: s.xs, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.metaSize }, previewOpen: { minHeight: g.toolRow, padding: 0, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   empty: { backgroundColor: surface.washSubtle },
   emptyBody: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.sm, padding: s.xl, textAlign: 'center' },
   historyBoundary: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: s.md, minHeight: g.controlMd, flexShrink: 0 },
   historyNote: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
-  historyLoad: { minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
-  unavailableAction: { minHeight: g.controlSm, marginTop: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  historyLoad: { minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  unavailableAction: { minHeight: g.controlSm, marginTop: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   unavailableDetails: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.xs, maxWidth: g.lane },
   unavailableDetail: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, overflowWrap: 'anywhere' },
   userPending: { color: ink.fgMuted },

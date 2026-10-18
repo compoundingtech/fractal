@@ -279,7 +279,7 @@ impl Store {
         let exit_position = smallclaims::store::canonical::position_sql("claims");
         let connection = self.readers.get();
         let found = connection
-            .prepare_cached(&canonical_sql(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h47ddfebb1f7a owner=st3_store::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
                 "WITH current_request AS MATERIALIZED (
                    SELECT request.subject, request.batch_id, request.store_index,
                           request_batch.replica_sequence AS sequence,
@@ -334,7 +334,7 @@ impl Store {
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1"
             )))?
             .query_row(
-                params![requested.id, requested.subject, self.origin()],
+                /* sqlite-large-value: allow-for-now lv-hb5cc6c2063e9 owner=st3_store::store::evidence TODO=trace-statement-and-value-representation */ params![requested.id, requested.subject, self.origin()],
                 |row| {
                     Ok((
                         claim_from_row(row)?,
@@ -444,7 +444,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+                /* sqlite-large-value: allow-for-now lv-h54e0e8013d03 owner=st3_store::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
                  FROM claims WHERE kind='gate.requested'
                  AND json_extract(body, '$.fields.owner')=?1
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
@@ -480,7 +480,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                &canonical_sql(
+                /* sqlite-large-value: allow-for-now lv-h339a90b1feb5 owner=st3_store::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(
                     "SELECT body FROM claims INDEXED BY claims_harness_auth_incarnation_index WHERE subject=?1 AND kind='harness.observed'
              AND json_extract(body, '$.fields.incarnation_id')=?2
              AND json_type(body, '$.fields.provider_auth') IN ('true','false')

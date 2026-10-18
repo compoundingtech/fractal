@@ -1,3 +1,4 @@
+import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { sidebarRow } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
@@ -29,6 +30,7 @@ import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 import { useGatewaySync } from '../data/react.tsx'
 import { matchesSidebarHost, parseSidebarQuery } from '../shell/sidebar/filter.ts'
+import type { Agent } from '../data/source.ts'
 
 // A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
@@ -137,7 +139,7 @@ export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly 
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
 function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
-  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), now = useNow()
+  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
   React.useLayoutEffect(() => setTheme(scheme), [scheme])
@@ -163,7 +165,12 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     const cancelPrefetch = afterNextPaint(prefetchConversationPane)
     return () => { cancelCapture?.(); cancelPrefetch() }
   }, [ux])
-  const rosterCommit = React.useCallback((node: HTMLElement | null) => node === null || !rosterObserved ? undefined : ux?.rosterCommitted(), [ux, rosterObserved])
+  const rosterCommit = React.useCallback((node: HTMLElement | null) => {
+    if (node === null || !rosterObserved) return
+    const cancelTiming = measureEnd('sidebar_interactive')
+    const cancelCapture = ux?.rosterCommitted()
+    return () => { cancelTiming(); cancelCapture?.() }
+  }, [ux, rosterObserved])
   const current = initialAgentFromUrl() ?? (storedAgent || agents[0]?.ref || '')
   const agent = agents.find((row) => row.ref === current)
   // A canonical subject address is not proof of a terminal. Keep the control disabled
@@ -192,7 +199,11 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
   const select = (ref: string) => {
-    if (ref !== current) onSelectConversation?.(ref)
+    if (ref !== current) {
+      cancelMeasure('open_transcript')
+      markStart('switch_to_tail', { key: ref })
+      onSelectConversation?.(ref)
+    }
     setDiffOpen(false)
     setOpenedTool(undefined)
     navigate(ref)
@@ -211,7 +222,6 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   openLatest.current = open
   const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
-  const headerRow = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
   const parsedSearch = parseSidebarQuery(search)
   const textSearch = parsedSearch.query.toLowerCase()
   const filtered = agents.filter((row) =>
@@ -259,9 +269,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                           <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
                         </div>)}
                       </div> : null}
-                      {filtered.map((row) => (
-                        <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={parsedSearch.query} active={current === row.ref} onOpen={() => select(row.ref)} />
-                      ))}
+                      <LiveRoster agents={filtered} stale={stale} current={current} query={parsedSearch.query} onSelect={select} />
                     </nav>
                     {fleet._tag !== 'Observed' ? (
                       <SystemNotice
@@ -291,7 +299,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
               </aside>
               <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ThreadHeader terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
+                <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
                 <GatewayConnectionStatus />
                 {visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
@@ -340,6 +348,17 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   </>)
 }
 
+/** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
+function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentProps<typeof ThreadHeader>, 'now' | 'status' | 'statusLabel' | 'statusSince'> & { readonly agent?: Agent; readonly stale: boolean }) {
+  const row = agent === undefined ? undefined : sidebarRow({ agent, stale })
+  return <ThreadHeader {...props} status={row?.status} statusLabel={row?.statusLabel} statusSince={row?.statusSince} />
+}
+
+/** The list projects source observations; only SidebarTime leaves tick. */
+function LiveRoster({ agents, stale, current, query, onSelect }: { readonly agents: readonly Agent[]; readonly stale: boolean; readonly current: string; readonly query: string; readonly onSelect: (ref: string) => void }) {
+  return agents.map(agent => <SidebarAgentRow key={agent.ref} item={sidebarRow({ agent, stale })} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={query} active={current === agent.ref} onOpen={() => onSelect(agent.ref)} />)
+}
+
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
 /** Decoded gateway sync, never the socket's raw lifecycle tag, as the one connection band under the thread header. */
 const GatewayConnectionStatus = () => {
@@ -384,6 +403,13 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
   const [switched, setSwitched] = React.useState<{ readonly shown: string; readonly covered: string | undefined }>({ shown: current, covered: undefined })
   // The terminal is a drawer below the thread: the thread stays shown and usable beside it.
   const visible = current !== '' && (view._tag === 'Thread' || view._tag === 'Terminal')
+  React.useLayoutEffect(() => {
+    if (visible) return
+    // Abandon at the eager view boundary, even if the transcript module or data
+    // has not loaded. Effect cleanup only cancels paint (StrictMode can retry it).
+    cancelMeasure('switch_to_tail', current)
+    cancelMeasure('open_transcript', current)
+  }, [current, visible])
   const [visited, setVisited] = React.useState<readonly string[]>([])
   const rosterKeys = new Set(rosterRefs)
   const recent = visited.filter(ref => rosterKeys.has(ref))
@@ -441,7 +467,7 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
 /** Roster filter in the live sidebar. */
 export function LiveSidebarSearch({ value, onChange }: { readonly value: string; readonly onChange: (value: string) => void }) {
   return <Aria.SearchField aria-label="Search agents" value={value} onChange={onChange} {...stylex.props(styles.search)}>
-    <Aria.Input aria-description="Use machine:synthetic-138/1 or host:synthetic-138/1,synthetic-138/2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match. Combine with search text." placeholder="Search agents" {...stylex.props(styles.searchInput)} />
+    <Aria.Input aria-description="Use machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match. Combine with search text." placeholder="Search agents" {...stylex.props(styles.searchInput)} />
   </Aria.SearchField>
 }
 
