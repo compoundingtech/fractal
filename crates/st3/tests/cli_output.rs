@@ -308,6 +308,7 @@ async fn offline_leave_requires_confirmed_fabric_withdrawal_before_local_cleanup
     for outcome in ["unavailable", "disabled", "residual", "applied", "prior_transport"] {
         let root = tempfile::tempdir().unwrap();
         let state_dir = root.path().join("state");
+        st3::fleet::join::standalone_node_key(&state_dir).unwrap();
         st3::fleet::join::found(
             &state_dir,
             "orchid",

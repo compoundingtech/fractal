@@ -47,8 +47,10 @@ mod fabric_reconcile_status_tests {
     fn missing_result_is_pending_only_with_fabric_enabled() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(fabric_reconcile_status(root.path(), None).state, "disabled");
-        let mut file = crate::config::FleetFile::default();
-        file.transports = vec!["tailscale".into()];
+        let mut file = crate::config::FleetFile {
+            transports: vec!["tailscale".into()],
+            ..Default::default()
+        };
         assert_eq!(
             fabric_reconcile_status(root.path(), Some(&file)).state,
             "disabled"
