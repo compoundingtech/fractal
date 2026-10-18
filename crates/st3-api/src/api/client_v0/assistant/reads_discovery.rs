@@ -32,8 +32,7 @@ pub(super) async fn page(
     let continuation = cursor.is_some();
     let (snapshot, mut sources) = blocking_store(move || reader.store.clone().read_snapshot(|index| {
         let snapshot = if continuation { pinned } else { client_snapshot_at(&reader, index) };
-        let now = client_snapshot_time(&snapshot);
-        let sources =             reader.store.assistant_conversation_owners_page(after.as_deref(), limit, snapshot.store_index)?
+        let sources: Vec<_> = reader.store.assistant_conversation_owners_page(after.as_deref(), limit, snapshot.store_index)?
                 .into_iter().map(|(id, owner)| {
                     let incarnation = owner.incarnation.as_deref().or(owner.runtime.as_deref());
                     let value = incarnation.map(|incarnation| {
@@ -41,8 +40,7 @@ pub(super) async fn page(
                         json!({"id":id,"agent_id":id,"session_id":session,"current_session_id":session,"read":null})
                     });
                     (id, value)
-                }).collect()
-        ;
+                }).collect();
         Ok((snapshot, sources))
     })).await?;
     let source_more = sources.len() > limit;
