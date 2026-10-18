@@ -18,8 +18,8 @@ Send one JSON command per subscription:
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
 
-Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
-plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
+Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, `arrangements`,
+and native `subjects`, plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
 `person` to attention, and `status` plus exact `agent` to agents. For `arrangements`, `person: "person/NAME"`
 is required: agents explicitly select a fleet person's collection, never an inferred
 owner. Each read checks `read.arrangements` and the selected person's access.
@@ -164,6 +164,47 @@ fresh snapshot. If the socket closes, including during a daemon
 restart, open a new socket and subscribe again; the new snapshot is authoritative.
 Each socket subscribes to store changes before taking its first snapshot, so a
 write racing that snapshot is visible in the snapshot or a subsequent frame.
+
+## Native subjects
+
+Select either one canonical native ref or one registered family, never both:
+
+```json
+{"kind":"subscribe","id":"native-resource","collection":"subjects","family":"resource","ref_prefix":"resource/github/","limit":50}
+{"kind":"subscribe","id":"native-agent","collection":"subjects","ref":"agent/example/worker","limit":1}
+```
+
+The family prefix is literal, not a wildcard. Native windows share the socket's eight-subscription
+bound and its 1–200 item limit. Their snapshot/change frames use native subject IDs for `order`,
+`upserts`, and `removes`; they do not turn operational resources into native claims.
+Per-row descriptor validation permits explicit payload-free unsupported-schema rows while
+rejecting malformed known rows. Retained claim/history pages are separate HTTP reads.
+The generated native schema shares canonical-reference constraints through `$defs`/`$ref`,
+so compiling the collection-frame contract does not recompile a reference pattern for every
+claim field. The shared definitions retain the same family, syntax, and UTF-8 byte bounds.
+Native SQLite workers retain their physical read slot until they finish, even when a
+replacement or unsubscribe cancels delivery. Canceled workers cannot exceed the socket's
+eight-read bound.
+Native HTTP workers inherit the request's read deadline and cancellation budget through the
+same blocking-store boundary as operational reads; expired requests cancel their SQL work.
+
+Every native reread applies current identity visibility, claim audience, and positive field
+disclosure before choosing heads or computing diffs. Glass upserts/deletions and local observation
+changes wake native windows even when the operational claim feed omits them. Deleted or newly
+hidden identities leave an already delivered window through `removes`; reconnect starts with an
+authoritative snapshot. An initial subscription to a missing or hidden ref instead ends with the
+same `not-found` error, without disclosing whether that identity exists.
+
+Recorded-actor claims and custom-family enumeration are restricted to the session's
+delegated graph authority, for both local and paired reads. A paired device's transport
+actor (`person/<name>/session/<device>`) authenticates and binds its cursors; it does not
+replace the concrete `person/<name>` recorded by authorized writers. Other actors'
+claims remain hidden, including newer heads on the same subject.
+
+Paired native subscriptions retain their authenticated pairing/device/session binding. The server
+rechecks revocation and scopes before reads and again before delivering their results, and enforces
+expiry even on an idle socket. Results from replaced or unsubscribed windows are discarded.
+Revoked or expired authority ends the subscription before any further native data is sent.
 
 ## Terminals
 

@@ -3313,6 +3313,7 @@ jobs:
               "clients/typescript/st3-client/Models.generated.ts",
               "clients/typescript/st3-client/Client.generated.ts",
               "clients/typescript/st3-client/Schema.generated.ts",
+              "clients/typescript/st3-client/Subjects.generated.ts",
               "clients/typescript/st3-client/errors.ts",
               "clients/typescript/st3-client/package.json",
               "clients/typescript/st3-client/tsconfig.json",

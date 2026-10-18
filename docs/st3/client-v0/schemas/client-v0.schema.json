@@ -65,6 +65,14 @@
     },
     "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit).", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"type": "string", "minLength": 1, "maxLength": 16384}}},
     "CustomReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "registration", "revision", "episode", "fields"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "registration": {"type": "string"}, "revision": {"type": "string"}, "episode": {"type": "string"}, "fields": {"type": "object"}}},
+    "SubjectProjection": { "$ref": "./subject-projection.schema.json#/$defs/SubjectProjection" },
+    "SubjectClaim": { "$ref": "./subject-projection.schema.json#/$defs/SubjectClaim" },
+    "SubjectsPage": { "$ref": "./subject-projection.schema.json#/$defs/SubjectsPage" },
+    "SubjectClaimsPage": { "$ref": "./subject-projection.schema.json#/$defs/SubjectClaimsPage" },
+    "SubjectHistoryPage": { "$ref": "./subject-projection.schema.json#/$defs/SubjectHistoryPage" },
+    "SubjectSchemas": { "$ref": "./subject-projection.schema.json#/$defs/SubjectSchemas" },
+    "SubjectSubscription": { "$ref": "./subject-projection.schema.json#/$defs/SubjectSubscription" },
+    "SubjectCollectionFrame": { "$ref": "./subject-projection.schema.json#/$defs/SubjectCollectionFrame" },
     "ConversationSearchHit": {"type": "object", "additionalProperties": false, "required": ["conversation_id", "entry_id", "agent_id", "timestamp", "entry_type", "excerpt"], "properties": {"conversation_id": {"$ref": "#/$defs/Id"}, "entry_id": {"$ref": "#/$defs/Id"}, "agent_id": {"type": ["string", "null"]}, "timestamp": {"$ref": "#/$defs/Timestamp"}, "entry_type": {"type": "string"}, "excerpt": {"type": "string", "maxLength": 512}}},
     "ConversationSearch": {"type": "object", "additionalProperties": false, "required": ["kind", "items", "page", "indexed_at", "host_id", "incomplete_sources", "refreshing"], "properties": {"kind": {"const": "conversation-search"}, "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/ConversationSearchHit"}}, "page": {"$ref": "#/$defs/PageInfo"}, "indexed_at": {"$ref": "#/$defs/Timestamp"}, "host_id": {"$ref": "#/$defs/Id"}, "incomplete_sources": {"type": "array", "items": {"type": "string"}}, "refreshing": {"type": "boolean"}}},
 
@@ -309,7 +317,12 @@
             { "$ref": "#/$defs/UsagePeriod" },
             { "$ref": "#/$defs/MailBacklog" },
             { "$ref": "#/$defs/SloList" },
-            { "$ref": "#/$defs/SloHistory" }
+            { "$ref": "#/$defs/SloHistory" },
+            { "$ref": "#/$defs/SubjectProjection" },
+            { "$ref": "#/$defs/SubjectsPage" },
+            { "$ref": "#/$defs/SubjectClaimsPage" },
+            { "$ref": "#/$defs/SubjectHistoryPage" },
+            { "$ref": "#/$defs/SubjectSchemas" }
           ]
         }
       }
@@ -2108,7 +2121,7 @@
       "required": ["kind", "collection", "filters", "items", "page"],
       "properties": {
         "kind": { "const": "page" },
-        "collection": { "type": "string", "not": { "pattern": "^(?:resources|assistant\\.(?:attention|missions|agents))$" } },
+        "collection": { "type": "string", "not": { "pattern": "^(?:resources|subjects|subject-claims|subject-history|assistant\\.(?:attention|missions|agents))$" } },
         "filters": { "type": "object", "additionalProperties": { "type": "string" } },
         "items": { "type": "array", "items": { "$ref": "#/$defs/Resource" } },
         "page": { "$ref": "#/$defs/PageInfo" },
@@ -2164,7 +2177,7 @@
       }
     },
     "TimelineBlock": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "source_type", "payload"], "properties": {"id": {"type": "string"}, "kind": {"type": "string", "description": "text, reasoning, tool_call, tool_output, image, image_link, job, subagent, ask, status, error, document, source_record, raw_text, irc, unknown; future kinds remain readable as JSON"}, "source_type": {"type": "string"}, "visibility": {"type": "string", "description": "UI hint: visible (default), internal or hidden-by-harness; never an access restriction"}, "metadata": {"type": "object", "description": "Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); assistant text/reasoning blocks may carry model, provider, usage {input, output, cache_read, cache_write, total, cost_usd}, context_tokens, stop_reason, ttft_ms and duration_ms; preserve names, units, values and future fields"}, "view": {"$ref": "#/$defs/TimelineView", "description": "Parsed typed projection of the block; a renderer that does not know the view type renders the block as without a view. The full native data stays in payload"}, "payload": {"description": "Native JSON; {body_ref:true} refers to the containing known fallback body without duplication"}, "continuation": {"$ref": "#/$defs/ConversationContentRef"}}},
-    "TimelineView": {"description": "Parsed typed projection of a block, discriminated by type. Known types are closed; future types keep JSON through the fallback.", "oneOf": [{"$ref": "#/$defs/TimelineViewBash"}, {"$ref": "#/$defs/TimelineViewEdit"}, {"$ref": "#/$defs/TimelineViewWrite"}, {"$ref": "#/$defs/TimelineViewRead"}, {"$ref": "#/$defs/TimelineViewSearch"}, {"$ref": "#/$defs/TimelineViewTodo"}, {"$ref": "#/$defs/TimelineViewAsk"}, {"$ref": "#/$defs/TimelineViewTask"}, {"$ref": "#/$defs/TimelineViewHub"}, {"$ref": "#/$defs/TimelineViewEval"}, {"$ref": "#/$defs/TimelineViewGeneric"}, {"$ref": "#/$defs/TimelineViewIrc"}, {"$ref": "#/$defs/TimelineViewJob"}, {"$ref": "#/$defs/TimelineViewSkill"}, {"$ref": "#/$defs/TimelineViewCompaction"}, {"$ref": "#/$defs/TimelineViewAssistantError"}, {"$ref": "#/$defs/TimelineViewModelChange"}, {"$ref": "#/$defs/TimelineViewThinkingLevel"}, {"$ref": "#/$defs/TimelineViewTitle"}, {"$ref": "#/$defs/TimelineViewSessionExit"}, {"$ref": "#/$defs/TimelineViewToolStart"}, {"$ref": "#/$defs/TimelineViewResetBoundary"}, {"$ref": "#/$defs/TimelineViewCredentialPin"}, {"$ref": "#/$defs/TimelineViewOmpEvent"}, {"type": "object", "description": "Fallback for a future view.type: render the block as without a view", "required": ["type"], "properties": {"type": {"type": "string", "not": {"enum": [
+    "TimelineView": {"description": "Parsed typed projection of a block, discriminated by type. Known types are closed; future types keep JSON through the fallback.", "oneOf": [{"$ref": "#/$defs/TimelineViewBash"}, {"$ref": "#/$defs/TimelineViewEdit"}, {"$ref": "#/$defs/TimelineViewWrite"}, {"$ref": "#/$defs/TimelineViewRead"}, {"$ref": "#/$defs/TimelineViewSearch"}, {"$ref": "#/$defs/TimelineViewTodo"}, {"$ref": "#/$defs/TimelineViewAsk"}, {"$ref": "#/$defs/TimelineViewTask"}, {"$ref": "#/$defs/TimelineViewHub"}, {"$ref": "#/$defs/TimelineViewEval"}, {"$ref": "#/$defs/TimelineViewGeneric"}, {"$ref": "#/$defs/TimelineViewIrc"}, {"$ref": "#/$defs/TimelineViewJob"}, {"$ref": "#/$defs/TimelineViewSkill"}, {"$ref": "#/$defs/TimelineViewCompaction"}, {"$ref": "#/$defs/TimelineViewAssistantError"}, {"$ref": "#/$defs/TimelineViewModelChange"}, {"$ref": "#/$defs/TimelineViewThinkingLevel"}, {"$ref": "#/$defs/TimelineViewTitle"}, {"$ref": "#/$defs/TimelineViewSessionExit"}, {"$ref": "#/$defs/TimelineViewToolStart"}, {"$ref": "#/$defs/TimelineViewResetBoundary"}, {"$ref": "#/$defs/TimelineViewCredentialPin"}, {"$ref": "#/$defs/TimelineViewOmpEvent"}, {"type": "object", "description": "Fallback for a future view.type: render the block as without a view", "required": ["type"], "properties": {"type": {"type": "string", "x-st-unknown-case": true, "not": {"enum": [
       "bash",
       "edit",
       "write",
@@ -3525,7 +3538,8 @@
           "additionalProperties": false,
           "required": ["kind", "id"],
           "properties": { "kind": { "const": "unsubscribe" }, "id": { "type": "string", "minLength": 1, "maxLength": 128 } }
-        }
+        },
+        { "$ref": "#/$defs/SubjectSubscription" }
       ]
     },
     "CollectionFrame": {
@@ -3611,7 +3625,8 @@
             "message": { "type": "string" },
             "retryable": { "type": "boolean" }
           }
-        }
+        },
+        { "$ref": "#/$defs/SubjectCollectionFrame" }
       ]
     }
   }

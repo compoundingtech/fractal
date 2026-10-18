@@ -53,6 +53,17 @@ schema["$ref"] = json!(format!("#/$defs/{definition}"));
 jsonschema::options()
     .with_draft(jsonschema::Draft::Draft202012)
     .should_validate_formats(true)
+    // `$defs` reference the native subject schema beside it, relative to the schema's `$id`.
+    .with_resource(
+        "https://st3.local/schemas/subject-projection.schema.json",
+        jsonschema::Resource::from_contents(
+            serde_json::from_str(include_str!(
+                "../../../../docs/st3/client-v0/schemas/subject-projection.schema.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+    )
     .build(&schema)
     .unwrap()
 }

@@ -684,8 +684,21 @@ fn inventory_schema(frame: &Value) {
         "../../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
     ))
     .unwrap();
-    let schema = json!({"$ref":"#/$defs/CollectionFrame", "$defs":schema["$defs"]});
-    let validator = jsonschema::validator_for(&schema).unwrap();
+    let schema = json!({"$id":schema["$id"], "$ref":"#/$defs/CollectionFrame", "$defs":schema["$defs"]});
+    // Native subject frames reference the generated subject projection schema beside it.
+    let validator = jsonschema::options()
+        .with_resource(
+            "https://st3.local/schemas/subject-projection.schema.json",
+            jsonschema::Resource::from_contents(
+                serde_json::from_str(include_str!(
+                    "../../../../../docs/st3/client-v0/schemas/subject-projection.schema.json"
+                ))
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .build(&schema)
+        .unwrap();
     assert!(
         validator.is_valid(frame),
         "invalid frame: {frame}; {:?}",
@@ -1131,6 +1144,7 @@ fn paired_session() -> ClientSession {
         custom_forms: false,
         conversation_blocks: false,
         scopes: ["read.projections".into()].into_iter().collect(),
+        pairing_binding: None,
     }
 }
 

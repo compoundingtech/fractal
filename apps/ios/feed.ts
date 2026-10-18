@@ -1,4 +1,4 @@
-import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type St3Client, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/st3-client';
+import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionStreamFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type St3Client, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/st3-client';
 import type { InventoryName } from '@smalltalk/st3-views';
 import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
 import type { HeartbeatSocketFactory } from './collectionSocket';
@@ -360,7 +360,9 @@ export class Feed {
     this.timer = setTimeout(() => { void this.connect(); }, delay);
   }
 
-  private frame(frame: CollectionFrame, received: number): void {
+  private frame(frame: CollectionStreamFrame, received: number): void {
+    // This feed subscribes only to operational windows, never native subject projections.
+    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'subjects') return;
     if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {

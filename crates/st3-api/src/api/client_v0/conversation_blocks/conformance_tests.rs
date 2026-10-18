@@ -6,12 +6,21 @@ fn validator() -> jsonschema::Validator {
         .join("../../docs/st3/client-v0/schemas/client-v0.schema.json");
     let mut schema: Value =
         serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
-    schema.as_object_mut().unwrap().remove("$id");
     schema.as_object_mut().unwrap().remove("oneOf");
     schema["$ref"] = json!("#/$defs/TimelineEntry");
+    // `$defs` reference the native subject schema beside it, relative to the schema's `$id`.
+    let subjects = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/st3/client-v0/schemas/subject-projection.schema.json");
     jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
         .should_validate_formats(true)
+        .with_resource(
+            "https://st3.local/schemas/subject-projection.schema.json",
+            jsonschema::Resource::from_contents(
+                serde_json::from_str(&std::fs::read_to_string(subjects).unwrap()).unwrap(),
+            )
+            .unwrap(),
+        )
         .build(&schema)
         .unwrap()
 }

@@ -14,6 +14,7 @@ base64 = "0.22"
 bytes = "1"
 ciborium = "0.2"
 crossterm = "0.29"
+fancy-regex = "0.16.2"
 futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
@@ -38,8 +39,6 @@ tracing-opentelemetry = { version = "0.31", default-features = false, optional =
 [dev-dependencies]
 base64 = "0.22"
 hex = "0.4"
-ring = "0.17"
-sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
 tempfile = "3"
 opentelemetry_sdk = "0.30"

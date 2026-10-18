@@ -7,6 +7,7 @@
       "about": "Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043)."
     }
   },
+  "native_subject_schema": "./subject-projection.schema.json",
   "transport": {
     "local": "unix",
     "remote": "fabric-loopback",
@@ -30,6 +31,11 @@
     { "id": "mail-backlog.summary", "method": "GET", "path": "/v1/client/mail-backlog", "response": "MailBacklog", "scope": "read.projections" },
     { "id": "slo.list", "method": "GET", "path": "/v1/client/slo", "response": "SloList", "scope": "read.projections" },
     { "id": "slo.history", "method": "GET", "path": "/v1/client/slo/history", "response": "SloHistory", "scope": "read.projections", "query": { "id": "required exact objective or budget id from slo.list", "since_ms": "optional period start; default 24 hours before until_ms", "until_ms": "optional period end; default now", "steps": "optional 1 to 1000 equal steps to answer in; default 120" } },
+    { "id": "subjects.list", "method": "GET", "path": "/v1/client/subjects", "response": "SubjectsPage", "scope": "read.projections" },
+    { "id": "subject.get", "method": "GET", "path": "/v1/client/subject", "response": "SubjectProjection", "scope": "read.projections" },
+    { "id": "subject.claims", "method": "GET", "path": "/v1/client/subject-claims", "response": "SubjectClaimsPage", "scope": "read.projections" },
+    { "id": "subject.history", "method": "GET", "path": "/v1/client/subject-history", "response": "SubjectHistoryPage", "scope": "read.projections" },
+    { "id": "subject.schemas", "method": "GET", "path": "/v1/client/subject-schemas", "response": "SubjectSchemas", "scope": "read.projections" },
     { "id": "usage.period", "method": "GET", "path": "/v1/client/usage", "response": "UsagePeriod" },
     { "id": "clients.list", "method": "GET", "path": "/v1/client/clients", "response": "ClientConnections" },
     { "id": "now.list", "method": "GET", "path": "/v1/client/now", "response": "Page" },

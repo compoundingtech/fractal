@@ -27,6 +27,7 @@ fn open_installs_each_domain_in_order() {
             "directive-notes",
             "agent-messages",
             "arrangements",
+            "native-sources",
             "limits",
         ]
     );

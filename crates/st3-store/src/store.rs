@@ -37,6 +37,7 @@ pub mod authored_pull_requests_tests;
 #[cfg(test)]
 pub mod schedule_active_run_tests;
 pub mod glasses;
+pub mod native_sources;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
 pub mod mailbox_lease;
@@ -84,6 +85,10 @@ pub mod mission_provenance;
 pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
+pub mod subjects;
+pub use subjects::{
+    NativeSourceFence, NativeSourceRecord, native_source_log_order, normalize_native_claim_fields,
+};
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
@@ -135,7 +140,7 @@ use smallclaims::claim::ReplicaEnvelopePayload;
 use smallclaims::error::internal;
 use smallclaims::hash::{
     batch_header_hash, canonical_hash, canonical_json_text, canonical_json_value,
-    canonical_serialized_json_text, claim_hash,
+    canonical_serialized_json_text, claim_hash, keyed_canonical_hash,
 };
 #[cfg(any(test, feature = "test-support"))]
 use smallclaims::hash::{claim_id_is_content_hash, verify_replica_batch_header};
@@ -1931,6 +1936,7 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 pub struct Store {
     pub graph: GraphStore,
     smalltalk: Arc<SmalltalkRuntime>,
+    native_retention: Mutex<subjects::NativeRetentionLimits>,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2883,7 +2889,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, native_retention: Mutex::new(Default::default()) })
     }
 
     /// Open explicitly registered shadow views beside Smalltalk's production admission and
@@ -2898,7 +2904,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, native_retention: Mutex::new(Default::default()) })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2910,7 +2916,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, native_retention: Mutex::new(Default::default()) })
     }
 
     /// Simulate a different build's registry on this node.

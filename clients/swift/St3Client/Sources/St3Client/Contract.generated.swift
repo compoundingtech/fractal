@@ -75,6 +75,11 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case mailBacklogSummary = "mail-backlog.summary"
     case sloList = "slo.list"
     case sloHistory = "slo.history"
+    case subjectsList = "subjects.list"
+    case subjectGet = "subject.get"
+    case subjectClaims = "subject.claims"
+    case subjectHistory = "subject.history"
+    case subjectSchemas = "subject.schemas"
     case usagePeriod = "usage.period"
     case clientsList = "clients.list"
     case nowList = "now.list"
@@ -148,6 +153,11 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .sloList: "/v1/client/slo",
     .sloHistory: "/v1/client/slo/history",
+    .subjectsList: "/v1/client/subjects",
+    .subjectGet: "/v1/client/subject",
+    .subjectClaims: "/v1/client/subject-claims",
+    .subjectHistory: "/v1/client/subject-history",
+    .subjectSchemas: "/v1/client/subject-schemas",
     .usagePeriod: "/v1/client/usage",
     .clientsList: "/v1/client/clients",
     .nowList: "/v1/client/now",

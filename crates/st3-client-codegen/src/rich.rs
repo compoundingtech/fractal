@@ -41,6 +41,12 @@ const KEYWORDS: &[&str] = &[
     "x-st-ref",
     "x-st-brand",
     "x-st-codec",
+    "x-st-preserve-null",
+    "x-st-custom-claim-schema",
+    "x-st-native-ref-families",
+    "x-st-max-utf8-bytes",
+    "x-st-exact-json",
+    "x-st-unknown-case",
     "x-st-conditions",
 ];
 const DATE_TIME: &str =
@@ -103,7 +109,15 @@ fn merge_objects(parts: &[Value]) -> Result<Value> {
             match key.as_str() {
                 "properties" => {
                     for (name, schema) in value.as_object().context("properties")? {
-                        properties.insert(name.clone(), schema.clone());
+                        let mut schema = schema.clone();
+                        if let Some(known) = properties.get(name).and_then(open_enum)
+                            && schema["not"]["enum"]
+                                .as_array()
+                                .is_some_and(|excluded| known.iter().all(|value| excluded.contains(value)))
+                        {
+                            schema["x-st-unknown-case"] = Value::Bool(true);
+                        }
+                        properties.insert(name.clone(), schema);
                     }
                 }
                 "required" => {
@@ -310,7 +324,7 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         })
         .collect::<Result<Vec<_>>>()?;
     if open {
-        base["properties"][&key] = json!({ "type": "string", "not": { "enum": domain } });
+        base["properties"][&key] = json!({ "type": "string", "not": { "enum": domain }, "x-st-unknown-case": true });
         branches.push(base);
     }
     let mut out = Map::new();
@@ -447,15 +461,26 @@ fn subject_ref(object: &Map<String, Value>, families: &Value) -> Result<String> 
 }
 
 fn emit_string(object: &Map<String, Value>) -> Result<String> {
+    if let Some(families) = object.get("x-st-native-ref-families") {
+        return Ok(format!(
+            "Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, {}), {{ expected: \"a canonical registered native reference within 512 UTF-8 bytes\" }}))",
+            js(families)
+        ));
+    }
     let mut excluded = None;
+    let mut excluded_list = None;
     let mut excluded_pattern = None;
     if let Some(not) = object.get("not") {
         let only = not.as_object().filter(|n| n.len() == 1);
         if let Some(known) = only.and_then(|n| n.get("enum")).and_then(Value::as_array) {
-            return Ok(format!("unknownCase({})", js(&Value::Array(known.clone()))));
-        }
-        // `not: { pattern }` excludes a family of values (sibling collections) from a plain string.
-        if let Some(pattern) = only.and_then(|n| n.get("pattern")) {
+            // An open enum's unknown case excludes the known cases; any other `not: { enum }`
+            // excludes those values from a plain string.
+            if object.get("x-st-unknown-case") == Some(&Value::Bool(true)) {
+                return Ok(format!("unknownCase({})", js(&Value::Array(known.clone()))));
+            }
+            excluded_list = Some(known.clone());
+        } else if let Some(pattern) = only.and_then(|n| n.get("pattern")) {
+            // `not: { pattern }` excludes a family of values (sibling collections) from a plain string.
             excluded_pattern = Some(pattern.as_str().context("`not.pattern` must be a string")?);
         } else {
             // `not: { const }` excludes one value from an otherwise plain string.
@@ -495,6 +520,13 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             "{schema}.check(Schema.makeFilter((value: string) => value !== {}, {{ expected: {} }}))",
             js(value),
             js(&json!(format!("a string other than {value}")))
+        );
+    }
+    if let Some(excluded) = excluded_list {
+        schema = format!(
+            "{schema}.check(Schema.makeFilter((value: string) => !{}.includes(value), {{ expected: {} }}))",
+            js(&Value::Array(excluded.clone())),
+            js(&json!(format!("a string outside {}", js(&Value::Array(excluded)))))
         );
     }
     if let Some(pattern) = excluded_pattern {
@@ -623,6 +655,12 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
         }
         return Ok(format!("openEnum({})", js_cases(&known)));
     }
+    if let Some(exact) = object.get("x-st-exact-json") {
+        let mut inner = object.clone();
+        inner.remove("const");
+        inner.remove("x-st-exact-json");
+        return Ok(format!("{}.check(Schema.makeFilter((value) => RawSubjects.isExactJson(value, {}), {{ expected: \"the exact compiled descriptor array in its canonical order\" }}))", emit(&Value::Object(inner), cx)?, js(exact)));
+    }
     if let Some(constant) = object.get("const") {
         return Ok(format!("Schema.Literal({})", js(constant)));
     }
@@ -741,11 +779,16 @@ fn emit_field(
         Some(inner) => (emit(&inner, cx)?, true),
         None => (emit(value, cx)?, false),
     };
-    let schema = match (nullable, required) {
-        (true, true) => format!("Schema.OptionFromNullOr({schema})"),
-        (true, false) => format!("Schema.OptionFromOptionalNullOr({schema}, NULL_NONE)"),
-        (false, true) => schema,
-        (false, false) => format!("optionalKey({schema})"),
+    let schema = if value.get("x-st-preserve-null") == Some(&Value::Bool(true)) {
+        let schema = if nullable { format!("Schema.NullOr({schema})") } else { schema };
+        if required { schema } else { format!("Schema.optionalKey({schema})") }
+    } else {
+        match (nullable, required) {
+            (true, true) => format!("Schema.OptionFromNullOr({schema})"),
+            (true, false) => format!("Schema.OptionFromOptionalNullOr({schema}, NULL_NONE)"),
+            (false, true) => schema,
+            (false, false) => format!("optionalKey({schema})"),
+        }
     };
     let docs = annotations(value, None);
     let schema = if docs.is_empty() || value.get("$ref").is_some() {
@@ -1059,6 +1102,9 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
         Some(schema) => Some(emit(schema, cx)?),
     };
     let mut checks = vec![];
+    if object.get("x-st-custom-claim-schema") == Some(&json!(true)) {
+        checks.push("Schema.makeFilter((claim: { readonly kind: string; readonly schema_id: string; readonly ref: string }) => RawSubjects.isSupportedCustomClaim(claim), { expected: \"the locally compiled concrete custom kind descriptor and allowed custom reference\" })".to_owned());
+    }
     if let Some(conditions) = object.get("x-st-conditions") {
         for condition in conditions.as_array().context("object conditions")? {
             let condition = condition.as_object().context("object condition")?;
@@ -1123,7 +1169,7 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
     })
 }
 
-/// The required single-const discriminator shared by every branch, if all values are unique.
+/// A required string/number literal discriminator shared by every branch, with unique keys.
 fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     let resolved: Vec<&Value> = branches
         .iter()
@@ -1144,12 +1190,18 @@ fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
             }
             let values: Option<Vec<&Value>> = resolved
                 .iter()
-                .map(|branch| branch.get("properties")?.get(key.as_str())?.get("const"))
+                .map(|branch| {
+                    if !branch.get("required")?.as_array()?.contains(&json!(key)) {
+                        return None;
+                    }
+                    let value = branch.get("properties")?.get(key.as_str())?.get("const")?;
+                    (value.is_string() || value.is_number()).then_some(value)
+                })
                 .collect();
             values.is_some_and(|values| {
                 values
                     .iter()
-                    .map(|value| value.to_string())
+                    .map(|value| value.as_str().map_or_else(|| value.to_string(), str::to_owned))
                     .collect::<BTreeSet<_>>()
                     .len()
                     == values.len()

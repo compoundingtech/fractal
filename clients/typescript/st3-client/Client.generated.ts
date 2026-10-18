@@ -4,12 +4,14 @@ import type {
     ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, MessageBody, EnvelopeOf,
     ResourcesFilter, ResourcesPage, DirectiveNotes,
     Arrangement, ArrangementId, ArrangementPage,
-    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    PublicationDefinition, SubjectDefinition, SubjectSchemas, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
 } from './Models.generated.ts';
+import { decodeSubjectProjection, decodeSubjectsPage, decodeSubjectClaimsPage, decodeSubjectHistoryPage, decodeSubjectSchemas, decodeSubjectCollectionFrame } from './Subjects.generated.ts';
+import type { SubjectProjectionResult, SubjectsPageResult, SubjectClaimsPageResult, SubjectHistoryPageResult, SubjectCollectionFrameResult, SubjectsSelector } from './Subjects.generated.ts';
 
 export type PageOptions = { cursor?: string; limit?: number };
 /** Transport options, never serialized into a query or action body. */
@@ -99,8 +101,9 @@ export type CollectionSocket = TerminalSocket & {
     send(data: string): void;
 };
 export type CollectionSocketFactory = (url: string, protocols: string[], headers: Record<string, string>) => CollectionSocket;
+export type CollectionStreamFrame = Exclude<CollectionFrame, { collection: 'subjects' }> | SubjectCollectionFrameResult;
 export type CollectionStreamOptions = {
-    onFrame: (frame: CollectionFrame) => void;
+    onFrame: (frame: CollectionStreamFrame) => void;
     /** Called once when the socket ends: without an error after a normal close. Open a new
      * socket and subscribe again; its snapshots are authoritative. */
     onEnd?: (error?: Error) => void;
@@ -118,6 +121,7 @@ export type CollectionStream = {
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
     subscribeAgent(id: string, agent: string, status?: string | null): Promise<void>;
+    subscribeSubjects(id: string, selector: SubjectsSelector, limit?: number): void;
     /** Follow a terminal with the incarnation and single-use capability `terminal.attach` returned. */
     subscribeTerminal(id: string, terminal: string, incarnation: string | null | undefined, capability: string): void;
     /** Follow the conversation of an agent or a session. */
@@ -130,14 +134,24 @@ export type CollectionWindow = { items: Resource[]; hasMore: boolean; snapshot: 
 
 /** Apply one `snapshot` or `changes` frame to a window: removals and upserts first, then the
  * frame's complete order. A `changes` frame without an earlier snapshot has nothing to apply to. */
-export function applyWindow(window: CollectionWindow | undefined, frame: CollectionFrame): CollectionWindow | undefined {
-    if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return window;
+export function applyWindow(window: CollectionWindow | undefined, frame: CollectionStreamFrame): CollectionWindow | undefined {
+    if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection === 'subjects') return window;
     if (frame.kind === 'changes' && !window) return undefined;
     const rows = new Map<string, Resource>(frame.kind === 'snapshot' ? [] : window!.items.map(item => [item.id, item]));
     if (frame.kind === 'changes') for (const id of frame.removes) rows.delete(id);
     for (const item of frame.kind === 'snapshot' ? frame.items : frame.upserts) rows.set(item.id, item);
     const items = frame.order.flatMap(id => rows.get(id) ?? []);
     return { items, hasMore: frame.has_more, snapshot: frame.snapshot };
+}
+
+export type SubjectCollectionWindow = { items: SubjectProjectionResult[]; hasMore: boolean; snapshot: Snapshot };
+export function applySubjectWindow(window: SubjectCollectionWindow | undefined, frame: CollectionStreamFrame): SubjectCollectionWindow | undefined {
+    if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'subjects') return window;
+    if (frame.kind === 'changes' && !window) return undefined;
+    const rows = new Map<string, SubjectProjectionResult>(frame.kind === 'snapshot' ? [] : window!.items.map(item => [item.id, item]));
+    if (frame.kind === 'changes') for (const id of frame.removes) rows.delete(id);
+    for (const item of frame.kind === 'snapshot' ? frame.items : frame.upserts) rows.set(item.id, item);
+    return { items: frame.order.flatMap(id => rows.get(id) ?? []), hasMore: frame.has_more, snapshot: frame.snapshot };
 }
 
 function defaultTerminalSocket(url: string, protocols: string[], headers: Record<string, string>): TerminalSocket {
@@ -199,7 +213,7 @@ export class St3Client {
     private readonly baseUrl: string;
     private readonly credential?: ClientOptions['credential'];
     private readonly traceContext?: ClientOptions['traceContext'];
-    private readonly client?: string;
+    private readonly client: string | undefined;
     private readonly fetchImpl: typeof fetch;
     /** Shared with every `withTraceContext` view so they discover once. */
     private discoveryCache: { value?: EnvelopeOf<Capabilities> } = {};
@@ -524,11 +538,19 @@ export class St3Client {
         };
         socket.onmessage = event => {
             if (ended) return;
+            let frame: CollectionStreamFrame;
             try {
-                const frame: unknown = JSON.parse(String(event.data));
-                validateCollectionFrame(frame);
-                options.onFrame(frame as CollectionFrame);
-            } catch (error) { end(error instanceof Error ? error : new Error(String(error))); socket.close(1000); }
+                const value: unknown = JSON.parse(String(event.data));
+                // Native subject frames have their own generated decoder; every other frame keeps
+                // the framing-only validation.
+                if (value && typeof value === 'object' && 'collection' in value && value.collection === 'subjects' && 'kind' in value && (value.kind === 'snapshot' || value.kind === 'changes')) {
+                    frame = decodeSubjectCollectionFrame(value);
+                } else {
+                    validateCollectionFrame(value);
+                    frame = value as Exclude<CollectionFrame, { collection: 'subjects' }>;
+                }
+            } catch (error) { end(error instanceof Error ? error : new Error(String(error))); socket.close(1000); return; }
+            options.onFrame(frame);
         };
         socket.onclose = event => end(event.code === 1000 ? undefined : new Error(`The collections socket closed (${event.code}${event.reason ? ` ${event.reason}` : ''})`));
         socket.onerror = () => end(new Error('The collections socket failed'));
@@ -548,6 +570,12 @@ export class St3Client {
                     throw new Error(`This daemon does not advertise ${EXACT_AGENT_SELECTOR_CAPABILITY}; upgrade it before following one exact agent`);
                 }
                 send({ kind: 'subscribe', id, collection: 'agents', limit: 1, agent, ...(status === undefined ? {} : { status }) });
+            },
+            subscribeSubjects: (id, selector, limit) => {
+                bounded(limit, 200, 'limit');
+                const family = selector.family !== undefined, reference = selector.ref !== undefined;
+                if (family === reference || (!family && selector.ref_prefix !== undefined)) throw new TypeError('Subjects require exactly one family or ref; ref_prefix requires family');
+                send({ kind: 'subscribe', id, collection: 'subjects', ...selector, ...(limit === undefined ? {} : { limit }) });
             },
             subscribeTerminal: (id, terminal, incarnation, capability) => send({ kind: 'subscribe', id, collection: 'terminal', terminal, incarnation, capability }),
             subscribeConversation: (id, conversation) => send({ kind: 'subscribe', id, collection: 'conversation', conversation }),
@@ -583,6 +611,11 @@ export class St3Client {
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
     async sloList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloList>> { return this.get('/v1/client/slo', undefined, requestOptions); }
     async sloHistory(id: string, options: { since_ms?: number; until_ms?: number; steps?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloHistory>> { return this.get('/v1/client/slo/history' + query({ id, ...options }), undefined, requestOptions); }
+    async subjectsList(family: string, options: PageOptions & { ref_prefix?: string } = {}): Promise<EnvelopeOf<SubjectsPageResult>> { const envelope = await this.get<unknown>('/v1/client/subjects' + query({ family, ...options })); return { ...envelope, value: decodeSubjectsPage(envelope.value) }; }
+    async subjectGet(reference: string): Promise<EnvelopeOf<SubjectProjectionResult>> { const envelope = await this.get<unknown>('/v1/client/subject' + query({ ref: reference })); return { ...envelope, value: decodeSubjectProjection(envelope.value) }; }
+    async subjectClaims(reference: string, options: PageOptions & { kind?: string } = {}): Promise<EnvelopeOf<SubjectClaimsPageResult>> { const envelope = await this.get<unknown>('/v1/client/subject-claims' + query({ ref: reference, ...options })); return { ...envelope, value: decodeSubjectClaimsPage(envelope.value) }; }
+    async subjectHistory(reference: string, options: PageOptions & { kind?: string } = {}): Promise<EnvelopeOf<SubjectHistoryPageResult>> { const envelope = await this.get<unknown>('/v1/client/subject-history' + query({ ref: reference, ...options })); return { ...envelope, value: decodeSubjectHistoryPage(envelope.value) }; }
+    async subjectSchemas(): Promise<EnvelopeOf<SubjectSchemas>> { const envelope = await this.get<unknown>('/v1/client/subject-schemas'); return { ...envelope, value: decodeSubjectSchemas(envelope.value) }; }
     async usagePeriod(options: { since_ms?: number; until_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsagePeriod>> { return this.get('/v1/client/usage' + query(options), undefined, requestOptions); }
     async clientsList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ClientConnections>> { return this.get('/v1/client/clients', undefined, requestOptions); }
     async nowList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/now' + query(options), undefined, requestOptions); }

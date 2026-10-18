@@ -54,6 +54,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::open },
     Hook { name: "arrangements", run: arrangements::open },
+    Hook { name: "native-sources", run: native_sources::open },
     Hook { name: "limits", run: limits::open_limits },
 ];
 

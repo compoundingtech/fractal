@@ -11,6 +11,7 @@ package_view(
         "Client.generated.ts": "Client.generated.ts",
         "Models.generated.ts": "Models.generated.ts",
         "Schema.generated.ts": "Schema.generated.ts",
+        "Subjects.generated.ts": "Subjects.generated.ts",
         "errors.ts": "errors.ts",
         "fetch-receiver.test.ts": "fetch-receiver.test.ts",
         "index.ts": "index.ts",
