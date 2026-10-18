@@ -79,7 +79,7 @@ impl Harness {
         if self.state.store.published_attention_list().is_none() {
             let (status, unavailable) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{unavailable}");
-            assert_eq!(unavailable["code"], "attention-not-ready");
+            assert_eq!(unavailable["message"], "the attention view is still being prepared; retry shortly");
         }
         // Complete the same publication step the daemon performs at startup, including
         // an empty owner view. Pairing alone does not make attention ready.
