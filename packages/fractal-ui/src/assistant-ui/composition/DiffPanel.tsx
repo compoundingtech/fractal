@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Tabs, TabList, Tab, TabPanel, Select, SelectValue, Button as AriaButton, ToggleButton, Popover, ListBox, ListBoxItem } from 'react-aria-components'
-import { interactionVars as interaction, surfaceVars as surface, textVars as text, borderVars as border, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { diffPanelVars as diffColor, interactionVars as interaction, surfaceVars as surface, textVars as text, borderVars as border, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { surfaceOptions } from '../composition-model'
 import { Icon } from './Icons'
 import { Button, IconButton, Tooltip } from './Controls'
@@ -194,12 +194,12 @@ const styles = stylex.create({
   spacer: { flexGrow: 1 },
   code: { minHeight: 0, overflowX: 'auto', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, paddingBottom: s.lg, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(0px - ${g.focusRing})` } },
   codeRow: { display: 'flex', alignItems: 'stretch', minHeight: t.uiLeading, minWidth: '100%' },
-  addedRow: { backgroundColor: `color-mix(in srgb, ${status.diffAddTint} 9%, transparent)` },
+  addedRow: { backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
   removedRow: { backgroundColor: status.diffRemovedWash },
   gutter: { width: g.gutter40, minWidth: g.gutter40, flexShrink: 0, boxSizing: 'border-box', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: s.xs2, paddingInline: s.xs, color: text.fgMuted, fontVariantNumeric: 'tabular-nums', userSelect: 'none', borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: 'transparent' },
-  addedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: status.diffAddTint, color: status.diffAddTint },
-  removedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: status.diffRemoved, color: status.diffRemoved },
-  codeText: { fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', paddingInline: s.sm, color: text.fgSoft, whiteSpace: 'pre', flexGrow: 1 },
+  addedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: diffColor.added, color: diffColor.added },
+  removedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: diffColor.removed, color: diffColor.removed },
+  codeText: { '--fractal-diff-literal': diffColor.literal, fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', paddingInline: s.sm, color: text.fgSoft, whiteSpace: 'pre', flexGrow: 1 },
   wrappedText: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', minWidth: 0, flexBasis: 0 },
   hunk: { width: '100%', minHeight: g.toolRow, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: t.fontSans, fontSize: t.denseSize, color: text.fgMuted, borderWidth: 0, backgroundColor: 'transparent', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   split: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' },
