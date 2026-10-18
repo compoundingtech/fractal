@@ -7,10 +7,10 @@ license = "MIT"
 
 [features]
 # Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-store/test-support"]
+test-support = ["st3-github/test-support"]
 
 [dependencies]
-st3-store = { path = "../st3-store" }
+st3-github = { path = "../st3-github" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"

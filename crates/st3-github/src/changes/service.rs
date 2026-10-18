@@ -3,6 +3,7 @@
 use super::config::{Config, Repository as RepositoryConfig};
 use super::discovery::{Observation, Owner, SyncAdmission, Transport};
 use super::transport::{Advertisement, Authentication, Repository};
+use crate::GitChangesStore;
 use crate::store::Store;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -115,6 +116,12 @@ impl ImportReport {
             self.omitted_issues += 1;
         }
     }
+}
+
+/// What the git-change domain keeps on a `Store`, reached with `store.extension::<GitChanges>()`.
+#[derive(Default)]
+pub struct GitChanges {
+    pub registry: std::sync::OnceLock<Arc<Registry>>,
 }
 
 pub struct Registry {

@@ -790,7 +790,6 @@ mod tests {
             vec!["retirements.rs", "store.rs", "store.rs", "store.rs"]
         );
         for source in [
-            include_str!("watches.rs"),
             include_str!("person_work.rs"),
             include_str!("limits.rs"),
             include_str!("adhoc_work.rs"),

@@ -1,27 +1,14 @@
 //! Node-local, rebuildable index of verified Git metadata objects. This is not a
 //! claim kind, replicated scheduling authority, or a signed landing observation.
-use super::*;
-use crate::changes::{Revision, change_id, oid};
+use super::{Revision, change_id, oid};
+use crate::store::Store;
+use anyhow::Result;
+use rusqlite::{OptionalExtension as _, params};
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 const MAX_RECORD_BYTES: usize = 16 * 1024;
-
-pub const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS local_git_change_records (
-    repository TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    change_id TEXT NOT NULL,
-    record_json TEXT NOT NULL,
-    indexed_at TEXT NOT NULL,
-    PRIMARY KEY(repository, object_id)
-) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS local_git_change_latest (
-    repository TEXT NOT NULL,
-    change_id TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    generation INTEGER NOT NULL,
-    PRIMARY KEY(repository, change_id)
-) WITHOUT ROWID;
-"#;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct IndexedChange {
@@ -37,18 +24,56 @@ fn repository_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-impl Store {
-    pub fn install_git_change_registry(&self, registry: Arc<crate::changes::service::Registry>) -> Result<()> {
-        self.smalltalk.git_change_registry.set(registry).map_err(|_| anyhow::anyhow!("Git change registry already installed"))
-    }
-
-    pub fn git_change_registry(&self) -> Option<Arc<crate::changes::service::Registry>> {
-        self.smalltalk.git_change_registry.get().cloned()
-    }
-
+pub trait GitChangesStore {
+    fn install_git_change_registry(
+        &self,
+        registry: Arc<crate::changes::service::Registry>,
+    ) -> Result<()>;
+    fn git_change_registry(&self) -> Option<Arc<crate::changes::service::Registry>>;
     /// Call only after Git object/source/parent validation outside the writer. Immutable
     /// object rows and the latest pointer are published in one short transaction.
-    pub fn index_git_change(&self, repository: &str, revision: &Revision) -> Result<()> {
+    fn index_git_change(&self, repository: &str, revision: &Revision) -> Result<()>;
+    /// One bounded page of exact advertised object IDs. Unknown records stay unknown;
+    /// a latest pointer is never substituted for a different advertised current object.
+    fn indexed_git_changes(
+        &self,
+        repository: &str,
+        objects: &[String],
+    ) -> Result<BTreeMap<String, IndexedChange>>;
+    /// The seeked ID window used to include previously indexed, now missing changes.
+    /// It does not scan immutable record history or graph claims.
+    fn indexed_git_change_ids(
+        &self,
+        repository: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<String>>;
+    fn latest_indexed_git_change(
+        &self,
+        repository: &str,
+        id: &str,
+    ) -> Result<Option<IndexedChange>>;
+}
+
+impl GitChangesStore for Store {
+    fn install_git_change_registry(
+        &self,
+        registry: Arc<crate::changes::service::Registry>,
+    ) -> Result<()> {
+        self.extension::<crate::changes::service::GitChanges>()
+            .registry
+            .set(registry)
+            .map_err(|_| anyhow::anyhow!("Git change registry already installed"))
+    }
+
+    fn git_change_registry(&self) -> Option<Arc<crate::changes::service::Registry>> {
+        self.extension::<crate::changes::service::GitChanges>()
+            .registry
+            .get()
+            .cloned()
+    }
+
+    fn index_git_change(&self, repository: &str, revision: &Revision) -> Result<()> {
         repository_key(repository)?;
         oid(&revision.oid)?;
         revision.record.validate()?;
@@ -88,9 +113,7 @@ impl Store {
         Ok(())
     }
 
-    /// One bounded page of exact advertised object IDs. Unknown records stay unknown;
-    /// a latest pointer is never substituted for a different advertised current object.
-    pub fn indexed_git_changes(
+    fn indexed_git_changes(
         &self,
         repository: &str,
         objects: &[String],
@@ -137,9 +160,7 @@ impl Store {
         Ok(records)
     }
 
-    /// The seeked ID window used to include previously indexed, now missing changes.
-    /// It does not scan immutable record history or graph claims.
-    pub fn indexed_git_change_ids(
+    fn indexed_git_change_ids(
         &self,
         repository: &str,
         after: &str,
@@ -156,7 +177,7 @@ impl Store {
         )?.query_map(params![repository, after, limit], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn latest_indexed_git_change(
+    fn latest_indexed_git_change(
         &self,
         repository: &str,
         id: &str,
@@ -340,5 +361,16 @@ pub mod tests {
         assert_eq!(before.vm_steps, after.vm_steps);
         assert_eq!(after.fullscan_steps, 0);
         assert_eq!(after.sorts, 0);
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn no_git_change_registry_is_installed_on_a_fresh_store() {
+        let store = Store::open_memory("fixture").unwrap();
+        assert!(store.git_change_registry().is_none());
     }
 }

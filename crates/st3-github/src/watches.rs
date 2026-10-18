@@ -1,18 +1,131 @@
 //! Seats' GitHub watches: declaring one on the repository's standing observer, listing them,
 //! and ending one. The observation write decides each watch's wakes (`record_resource_observation`).
 
-use super::*;
 use crate::github_watch::{self, ThreadRef};
 use crate::model::ObserverSpec;
+use crate::model::{ClaimInput, DesiredSubject, St3Error, SubscriptionSpec};
+use crate::store::Store;
+use crate::store::*;
+use anyhow::Result;
+use rusqlite::Connection;
+use serde_json::{Value, json};
+use smallclaims::error::internal;
+use smallclaims::store::*;
+use std::collections::BTreeMap;
 
 /// What ended watches `st gh ls` still shows, by how recently they ended.
 const ENDED_SHOWN_FOR_MS: u128 = 24 * 60 * 60 * 1000;
 
-impl Store {
+pub trait WatchesStore {
     /// The complete declaration union consumed by watch maintenance, including remote
     /// subscriptions and observers. Read it only after selecting the stage: a pass-start
     /// roster can predate changes the preceding stages wrote and the change feed observed.
-    pub fn github_watch_declarations(&self) -> Result<Vec<DesiredSubject>> {
+    fn github_watch_declarations(&self) -> Result<Vec<DesiredSubject>>;
+    /// Declare a seat's watch on one thread, from now, and the repository's standing observer when
+    /// it is not running. Watching a thread the seat already watches keeps that watch and takes
+    /// the new deadline; watching one whose watch ended begins a new watch.
+    fn declare_watch(
+        &self,
+        thread: &ThreadRef,
+        agent: &str,
+        until_unix_ms: Option<u128>,
+    ) -> Result<Value, St3Error>;
+    /// Declare the repository's standing observer on this host unless it is running.
+    fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, St3Error>;
+    /// Declare a repository's standing observer on this host unless it runs on the resource it
+    /// should record into (`standing_resource`). `observers` is every declared observer.
+    fn ensure_standing_observer(
+        &self,
+        locator: &str,
+        observers: &[(String, ObserverSpec)],
+    ) -> Result<bool, St3Error>;
+    /// The resource a repository's standing observer records into. While another observer of the
+    /// repository runs, it is that observer's resource: both then record the same item facts,
+    /// and a poll by either delivers to the subscriptions of both, so moving a subscription from
+    /// one to the other neither repeats nor misses anything. Otherwise the standing observer
+    /// keeps the resource it last had, and a repository it never observed gets
+    /// `resource/github/OWNER/REPO`.
+    fn standing_resource(
+        &self,
+        locator: &str,
+        subject: &str,
+        current: Option<&ObserverSpec>,
+        observers: &[(String, ObserverSpec)],
+    ) -> Result<String, St3Error>;
+    /// Every declared observer, by subject.
+    fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, St3Error>;
+    fn live_watch(
+        &self,
+        subject: &str,
+    ) -> Result<Option<(SubscriptionSpec, crate::model::WatchSpec)>, St3Error>;
+    /// How a watch ended, if it did.
+    fn watch_ended(
+        &self,
+        subject: &str,
+        watch: &crate::model::WatchSpec,
+    ) -> Result<Option<Value>, St3Error>;
+    /// End a watch and stop its declaration. A final wake, when one is given, reaches its seat in
+    /// the same write. Ending a watch that already ended changes nothing.
+    fn end_watch(
+        &self,
+        subject: &str,
+        reason: &str,
+        final_wake: Option<&github_watch::Wake>,
+    ) -> Result<bool, St3Error>;
+    /// Stop an ended watch's declaration, or the standing observer's.
+    fn stop_watch_declaration(&self, subject: &str) -> Result<(), St3Error>;
+    /// Whether a seat's declaration is live: declared, not stopped, and its run still running.
+    fn seat_live(&self, agent: &str) -> Result<bool, St3Error>;
+    /// A stopped seat still owns its conversation and watches. Only removing the declaration
+    /// or explicitly starting a fresh conversation ends them silently.
+    fn watch_seat_ended(
+        &self,
+        subject: &str,
+        agent: &str,
+        watch: &crate::model::WatchSpec,
+    ) -> Result<bool, St3Error>;
+    /// One watch as `st gh ls` shows it, if it was ever declared.
+    fn watch_view(&self, subject: &str) -> Result<Option<Value>, St3Error>;
+    fn watch_view_of(&self, subject: &str, desired: &Value) -> Result<Option<Value>, St3Error>;
+    /// The watch that most recently ended under this subject, read from its ending.
+    fn last_ended_watch(&self, subject: &str) -> Result<Option<crate::model::WatchSpec>, St3Error>;
+    /// The watches of one seat, or of every seat: each running watch, and each that ended within a
+    /// day.
+    fn watches(&self, agent: Option<&str>) -> Result<Vec<Value>, St3Error>;
+    /// Record that a seat posted a comment or review, by its GitHub ID. The first seat to record
+    /// an ID keeps it; recording it again as that seat changes nothing.
+    fn record_github_post(
+        &self,
+        agent: &str,
+        thread: &ThreadRef,
+        kind: &str,
+        id: u64,
+        url: &str,
+        login: &str,
+    ) -> Result<Value, St3Error>;
+    /// The seat that recorded a comment or review, by its GitHub ID.
+    fn github_post_agent(
+        &self,
+        locator: &str,
+        kind: &str,
+        id: u64,
+    ) -> Result<Option<String>, St3Error>;
+    /// Background one-identity maintenance. The read captures an exact head, then releases
+    /// its snapshot before publication. Admission rechecks custody and own-post attribution
+    /// in the claim's existing savepoint; concurrent delivery cannot be overwritten.
+    fn close_mailbox_own_post_wake(
+        &self,
+        fence: &crate::mailbox::Fence,
+        subject: &str,
+    ) -> Result<bool, St3Error>;
+    /// Withdraw each undelivered wake of a seat about a comment or review it recorded as its own,
+    /// so the seat never hears about what it posted. Such a wake exists when another host observed
+    /// the comment before the seat's record reached it.
+    fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, St3Error>;
+}
+
+impl WatchesStore for Store {
+    fn github_watch_declarations(&self) -> Result<Vec<DesiredSubject>> {
         smallclaims::touched::note_read(|| "kind:intent.desired".into());
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
@@ -25,10 +138,7 @@ impl Store {
             .map_err(Into::into)
     }
 
-    /// Declare a seat's watch on one thread, from now, and the repository's standing observer when
-    /// it is not running. Watching a thread the seat already watches keeps that watch and takes
-    /// the new deadline; watching one whose watch ended begins a new watch.
-    pub fn declare_watch(
+    fn declare_watch(
         &self,
         thread: &ThreadRef,
         agent: &str,
@@ -63,15 +173,12 @@ impl Store {
         })
     }
 
-    /// Declare the repository's standing observer on this host unless it is running.
-    pub fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, St3Error> {
+    fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, St3Error> {
         let observers = self.repository_observers()?;
         self.ensure_standing_observer(&thread.locator(), &observers)
     }
 
-    /// Declare a repository's standing observer on this host unless it runs on the resource it
-    /// should record into (`standing_resource`). `observers` is every declared observer.
-    pub fn ensure_standing_observer(
+    fn ensure_standing_observer(
         &self,
         locator: &str,
         observers: &[(String, ObserverSpec)],
@@ -100,12 +207,6 @@ impl Store {
         Ok(true)
     }
 
-    /// The resource a repository's standing observer records into. While another observer of the
-    /// repository runs, it is that observer's resource: both then record the same item facts,
-    /// and a poll by either delivers to the subscriptions of both, so moving a subscription from
-    /// one to the other neither repeats nor misses anything. Otherwise the standing observer
-    /// keeps the resource it last had, and a repository it never observed gets
-    /// `resource/github/OWNER/REPO`.
     fn standing_resource(
         &self,
         locator: &str,
@@ -143,8 +244,7 @@ impl Store {
         ))
     }
 
-    /// Every declared observer, by subject.
-    pub fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, St3Error> {
+    fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, St3Error> {
         let connection = self.readers.get();
         let mut statement = connection
             .prepare_cached(
@@ -170,7 +270,7 @@ impl Store {
         Ok(observers)
     }
 
-    pub fn live_watch(
+    fn live_watch(
         &self,
         subject: &str,
     ) -> Result<Option<(SubscriptionSpec, crate::model::WatchSpec)>, St3Error> {
@@ -193,8 +293,7 @@ impl Store {
         Ok(Some((spec, watch)))
     }
 
-    /// How a watch ended, if it did.
-    pub fn watch_ended(
+    fn watch_ended(
         &self,
         subject: &str,
         watch: &crate::model::WatchSpec,
@@ -203,9 +302,7 @@ impl Store {
         watch_ended_tx(&connection, subject, watch)
     }
 
-    /// End a watch and stop its declaration. A final wake, when one is given, reaches its seat in
-    /// the same write. Ending a watch that already ended changes nothing.
-    pub fn end_watch(
+    fn end_watch(
         &self,
         subject: &str,
         reason: &str,
@@ -257,8 +354,7 @@ impl Store {
         Ok(ended)
     }
 
-    /// Stop an ended watch's declaration, or the standing observer's.
-    pub fn stop_watch_declaration(&self, subject: &str) -> Result<(), St3Error> {
+    fn stop_watch_declaration(&self, subject: &str) -> Result<(), St3Error> {
         let Some(source) = github_watch::stop_source(subject) else {
             return Ok(());
         };
@@ -267,15 +363,12 @@ impl Store {
         Ok(())
     }
 
-    /// Whether a seat's declaration is live: declared, not stopped, and its run still running.
-    pub fn seat_live(&self, agent: &str) -> Result<bool, St3Error> {
+    fn seat_live(&self, agent: &str) -> Result<bool, St3Error> {
         let connection = self.readers.get();
         person_work::declaration_live(&connection, agent).map_err(internal)
     }
 
-    /// A stopped seat still owns its conversation and watches. Only removing the declaration
-    /// or explicitly starting a fresh conversation ends them silently.
-    pub fn watch_seat_ended(
+    fn watch_seat_ended(
         &self,
         subject: &str,
         agent: &str,
@@ -319,8 +412,7 @@ impl Store {
         }))
     }
 
-    /// One watch as `st gh ls` shows it, if it was ever declared.
-    pub fn watch_view(&self, subject: &str) -> Result<Option<Value>, St3Error> {
+    fn watch_view(&self, subject: &str) -> Result<Option<Value>, St3Error> {
         let Some(desired) = self
             .desired_subjects_named(&[subject.to_owned()])
             .map_err(internal)?
@@ -379,7 +471,6 @@ impl Store {
         )))
     }
 
-    /// The watch that most recently ended under this subject, read from its ending.
     fn last_ended_watch(&self, subject: &str) -> Result<Option<crate::model::WatchSpec>, St3Error> {
         let Some((thread, _)) = github_watch::watch_parts(subject) else {
             return Ok(None);
@@ -400,9 +491,7 @@ impl Store {
             }))
     }
 
-    /// The watches of one seat, or of every seat: each running watch, and each that ended within a
-    /// day.
-    pub fn watches(&self, agent: Option<&str>) -> Result<Vec<Value>, St3Error> {
+    fn watches(&self, agent: Option<&str>) -> Result<Vec<Value>, St3Error> {
         let now = now_ms();
         let mut views = Vec::new();
         // Use the subject primary key to read only watches: unrelated fleet declarations must
@@ -448,9 +537,7 @@ impl Store {
         Ok(views)
     }
 
-    /// Record that a seat posted a comment or review, by its GitHub ID. The first seat to record
-    /// an ID keeps it; recording it again as that seat changes nothing.
-    pub fn record_github_post(
+    fn record_github_post(
         &self,
         agent: &str,
         thread: &ThreadRef,
@@ -496,8 +583,7 @@ impl Store {
         }))
     }
 
-    /// The seat that recorded a comment or review, by its GitHub ID.
-    pub fn github_post_agent(
+    fn github_post_agent(
         &self,
         locator: &str,
         kind: &str,
@@ -507,30 +593,42 @@ impl Store {
         github_post_agent_tx(&connection, locator, kind, id)
     }
 
-    /// Background one-identity maintenance. The read captures an exact head, then releases
-    /// its snapshot before publication. Admission rechecks custody and own-post attribution
-    /// in the claim's existing savepoint; concurrent delivery cannot be overwritten.
-    pub fn close_mailbox_own_post_wake(
+    fn close_mailbox_own_post_wake(
         &self,
         fence: &crate::mailbox::Fence,
         subject: &str,
     ) -> Result<bool, St3Error> {
-        let candidate = self.read_snapshot(|_| -> Result<_> {
-            let Some(message) = self.message(subject)? else { return Ok(None); };
-            if message.to != fence.subject || !matches!(message.status.as_str(), "sent" | "staged") {
-                return Ok(None);
-            }
-            let Some((locator, kind, id)) = github_watch::named_object(&message) else { return Ok(None); };
-            if self.github_post_agent(&locator, &kind, id)?.as_deref() != Some(&fence.subject) {
-                return Ok(None);
-            }
-            Ok(Some((locator, kind, id, self.latest_claim_id(subject)?)))
-        }).map_err(internal)?;
-        let Some((locator, kind, id, head)) = candidate else { return Ok(false); };
+        let candidate = self
+            .read_snapshot(|_| -> Result<_> {
+                let Some(message) = self.message(subject)? else {
+                    return Ok(None);
+                };
+                if message.to != fence.subject
+                    || !matches!(message.status.as_str(), "sent" | "staged")
+                {
+                    return Ok(None);
+                }
+                let Some((locator, kind, id)) = github_watch::named_object(&message) else {
+                    return Ok(None);
+                };
+                if self.github_post_agent(&locator, &kind, id)?.as_deref() != Some(&fence.subject) {
+                    return Ok(None);
+                }
+                Ok(Some((locator, kind, id, self.latest_claim_id(subject)?)))
+            })
+            .map_err(internal)?;
+        let Some((locator, kind, id, head)) = candidate else {
+            return Ok(false);
+        };
         let admission = |connection: &Connection| {
             check_mailbox_fence(connection, fence, &self.origin)?;
-            if github_post_agent_tx(connection, &locator, &kind, id)?.as_deref() != Some(&fence.subject) {
-                return Err(St3Error::new("stale-subject", "own-post attribution changed"));
+            if github_post_agent_tx(connection, &locator, &kind, id)?.as_deref()
+                != Some(&fence.subject)
+            {
+                return Err(St3Error::new(
+                    "stale-subject",
+                    "own-post attribution changed",
+                ));
             }
             Ok(())
         };
@@ -543,15 +641,22 @@ impl Store {
             expected_subject: Some(head),
             idempotency_key: Some(format!("message-closed:{subject}")),
         };
-        append_claim_with_commit_context(&self.graph, &input, None, None, None, None,
-            ClaimCommitContext { admission: Some(&admission), ..Default::default() })
-            .map(|(_, changed)| changed)
+        append_claim_with_commit_context(
+            &self.graph,
+            &input,
+            None,
+            None,
+            None,
+            None,
+            ClaimCommitContext {
+                admission: Some(&admission),
+                ..Default::default()
+            },
+        )
+        .map(|(_, changed)| changed)
     }
 
-    /// Withdraw each undelivered wake of a seat about a comment or review it recorded as its own,
-    /// so the seat never hears about what it posted. Such a wake exists when another host observed
-    /// the comment before the seat's record reached it.
-    pub fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, St3Error> {
+    fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, St3Error> {
         let mut closed = Vec::new();
         for message in self
             .messages(Some(agent), false)
@@ -577,5 +682,16 @@ impl Store {
             closed.push(message.subject);
         }
         Ok(closed)
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    /// Watch wakes are messages: the write that records one appends the claim and the message
+    /// together.
+    #[test]
+    fn watches_append_their_wake_messages_with_the_claim() {
+        let source = include_str!("watches.rs");
+        assert!(source.contains("append_claim_tx(") && source.contains("\"message.sent\""));
     }
 }
