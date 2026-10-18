@@ -34,6 +34,7 @@ pub(super) fn reviewer_tx(connection: &Connection, request: &ClaimRecord) -> Res
     smallclaims::touched::note_read(|| request.subject.clone());
     connection
         .query_row(
+            /* sqlite-large-value: allow-for-now lv-ha8c00ac6f48c owner=st3_store::store::human_review_reassignment TODO=trace-statement-and-value-representation */
             &format!(
                 "SELECT {} FROM claims request WHERE request.id=?1 AND request.kind='gate.requested'",
                 reviewer_sql("request", None),
@@ -158,7 +159,7 @@ pub(super) fn reassign_reviews_tx(
     origin: &str,
     input: &PersonRenameRequest,
 ) -> Result<Vec<String>, St3Error> {
-    let reviews = pending_human_reviews_tx(tx, Some(&input.old_person)).map_err(internal)?;
+    let reviews = attention::pending_human_reviews_tx(tx, Some(&input.old_person)).map_err(internal)?;
     let mut owners = Vec::with_capacity(reviews.len());
     for review in reviews {
         let request = claim_by_id_tx(tx, &review.request)

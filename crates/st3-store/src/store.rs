@@ -602,7 +602,7 @@ pub fn format_wait_span(milliseconds: u128) -> String {
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc62cde9f8f14 owner=st3_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h09503de2aa68 owner=st3_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -12353,7 +12353,7 @@ fn reviewer_answer_sql(result: &str) -> String {
 fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<Option<ClaimRecord>> {
     connection
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-h852d069ae2ac owner=st3_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+            /* sqlite-large-value: allow-for-now lv-h14927d84b2de owner=st3_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
                 "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject,
                         claims.kind, claims.origin, claims.actor, claims.body,
                         claims.predecessors, claims.accepted_at_unix_ms

@@ -20,7 +20,7 @@ impl Store {
         }
         validate_claim_subject(&input.actor)?;
         self.connection.batched(|tx| {
-            let receipt = tx.query_row(&canonical_sql(
+            let receipt = tx.query_row(/* sqlite-large-value: allow-for-now lv-h0bb078bcf6e7 owner=st3_store::store::person_rename TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
                  FROM claims WHERE kind='person.rename.completed'
                  AND json_extract(body,'$.idempotency_key')=?1 ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
@@ -220,6 +220,7 @@ pub(super) fn accepted_reassignment_sql(alias: &str, previous: &str, destination
 
 fn winner_person_tx(connection: &Connection, old: &str) -> Result<Option<String>> {
     Ok(connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h3fc98290ad14 owner=st3_store::store::person_rename TODO=trace-statement-and-value-representation */
         &canonical_sql("SELECT json_extract(body,'$.fields.new_person') FROM claims
             WHERE kind='person.rename.completed' AND subject=?1
             ORDER BY CANONICAL_ASC(claims) LIMIT 1"),

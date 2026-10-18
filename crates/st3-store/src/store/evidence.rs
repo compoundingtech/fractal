@@ -464,7 +464,7 @@ impl Store {
     /// attention card can name, open or long closed.
     pub fn human_gate_requests(&self) -> Result<Vec<(String, String, String)>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&canonical_sql(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4a4e5800fed4 owner=st3_store::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT request.id, json_extract(request.body, '$.fields.owner'), {}
              FROM claims request INDEXED BY claims_human_gate_request_index
              WHERE request.kind='gate.requested' AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL

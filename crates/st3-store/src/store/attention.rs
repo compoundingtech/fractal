@@ -1456,13 +1456,13 @@ fn attention_item_from_revision(
     }
 }
 
-fn pending_human_reviews_tx(
+pub(super) fn pending_human_reviews_tx(
     connection: &Connection,
     reviewer: Option<&str>,
 ) -> Result<Vec<HumanReviewView>> {
     let requests = {
         let mut statement =
-            connection.prepare(&human_review_reassignment::pending_requests_sql(reviewer.is_some()))?;
+            connection.prepare(/* sqlite-large-value: allow-for-now lv-h737241b591da owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &human_review_reassignment::pending_requests_sql(reviewer.is_some()))?;
         statement
             .query_map([reviewer], |row| {
                 Ok((claim_from_row(row)?, row.get::<_, String>(10)?))

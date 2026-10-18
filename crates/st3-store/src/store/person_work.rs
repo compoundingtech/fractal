@@ -1155,6 +1155,7 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Err
     let fields = &claim.body["fields"];
     if claim.kind == "work.person-reassigned" {
         let accepted: bool = tx.query_row(
+            /* sqlite-large-value: allow-for-now lv-hd6b038d4eb59 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */
             &format!("SELECT {} FROM claims reassignment WHERE reassignment.id=?1",
                 person_rename::accepted_reassignment_sql("reassignment", "previous_person", "person")),
             [&claim.id], |row| row.get(0)).map_err(internal)?;
@@ -1174,6 +1175,7 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Err
             return Ok(true);
         }
         tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h6010e488e8da owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */
             "UPDATE step_runs SET assignee=?2,updated_at_unix_ms=?3
              WHERE subject=?1 AND assignee=?4 AND status IN ('ready','pending')",
             params![claim.subject, fields["person"].as_str(), claim.accepted_at_unix_ms.to_string(),
