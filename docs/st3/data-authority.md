@@ -1,11 +1,22 @@
 # st data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
-(`crates/st3/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
+(`crates/st3-store/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
 are listed in `SHARED_TABLES` there and in the production projection digests. Replicated storage tables
 have their own logical authority digests; local physical fields and caches are outside those identities.
 
 The claim log and immutable blobs are the durable graph authority.
+
+## Large inline values
+
+New storage work must avoid unbounded large inline SQLite objects, including variable
+metadata and index keys. Use a reviewed bounded physical representation or reference
+without reducing the logical input contract or rejecting valid historical data.
+[Large SQLite values](large-values.md) defines the transitional source inventory,
+allow-for-now owner/TODO markers, static guard coverage and cleanup plan. No numeric
+large-value threshold is accepted; the guard checks source-site exceptions, not sizes.
+
+## Retention and local observations
 
 A claim kind of `local` retention (`st schema show KIND`) is an observation that only the node
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
@@ -81,6 +92,15 @@ publishes a backlog. Admission binds the Unix peer to its seat and checks the pu
 inside the daemon's writer transaction. Source runtime, spool sequence, claim kind and usage
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
+
+Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
+at most 64 per thread. At either limit a thread evicts its least recently used connection;
+at the global limit a thread with no cached connection reads without caching. Atomic slot
+reservations bound retained connections without a global query lock, and closing a connection
+releases its slot, including on thread exit. Only connections are retained: each check opens
+a fresh read transaction and releases it before returning, so subsequent checks observe
+committed producer writes without retaining a WAL snapshot. Reads still validate the spool
+format and provider/runtime binding; replacing the spool inode invalidates its connection.
 
 The outbox is transport recovery state, not graph authority. The daemon retains each admitted
 observation under its existing local/latest/durable policy. Producer snapshots remain local
