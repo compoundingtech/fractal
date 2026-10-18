@@ -1,7 +1,7 @@
 use super::*;
 
 pub fn example() -> Manifest {
-    serde_json::from_str(include_str!(
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h908629c8b2f9 owner=st3_store::store::custom::tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/custom-review.json"
     ))
     .unwrap()
@@ -475,7 +475,7 @@ fn custom_offline_registration_conflicts_and_indexed_reads() {
         let plan = a
             .readers
             .get()
-            .prepare(sql)
+            .prepare(/* sqlite-large-value: allow-for-now lv-h249a304d552a owner=st3_store::store::custom::tests TODO=trace-statement-and-value-representation */ sql)
             .unwrap()
             .query_map([], |r| r.get::<_, String>(3))
             .unwrap()
@@ -641,7 +641,7 @@ const SEAT: &str = "agent/example/decisions";
 const DECIDER: &str = "person/lichen";
 const RAW_KINDS: [&str; 6] = ["opened", "requested", "answered", "assumed", "promoted", "damaged"];
 fn decision_tree() -> Manifest {
-    serde_json::from_str(include_str!(
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hf193d5d798aa owner=st3_store::store::custom::tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/decision-tree.json"
     ))
     .unwrap()

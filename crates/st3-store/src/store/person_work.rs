@@ -36,7 +36,7 @@ pub struct AskImages {
 
 fn person_asks_for_reconcile(connection: &Connection) -> Result<Vec<ClaimRecord>> {
     connection
-        .prepare_cached(&canonical_sql(PERSON_ASKS_FOR_RECONCILE))?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hc15a69a8f40c owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(PERSON_ASKS_FOR_RECONCILE))?
         .query_map([], claim_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
@@ -175,14 +175,14 @@ const STEP_QUERY: &str = "SELECT subject, run_id, step_path, definition_hash, st
 
 pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
     Ok(connection
-        .query_row(STEP_QUERY, [subject], step_run_from_row)
+        .query_row(/* sqlite-large-value: allow-for-now lv-h13fc23320d92 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ STEP_QUERY, [subject], step_run_from_row)
         .optional()?)
 }
 
 pub fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRecord>> {
     Ok(connection
         .query_row(
-            &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-hd6af3dd30cf8 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id, store_index, batch_id, subject, kind,
         origin, actor, body, predecessors, accepted_at_unix_ms FROM claims
         WHERE subject=?1 AND kind='work.person-asked' ORDER BY CANONICAL_ASC(claims) LIMIT 1",
@@ -361,7 +361,7 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
     if unfenced {
         return Ok(true);
     }
-    let mut declarations = connection.prepare(&canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='intent.desired' ORDER BY CANONICAL_ASC(claims)"))?;
+    let mut declarations = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd93f47baa0ae owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='intent.desired' ORDER BY CANONICAL_ASC(claims)"))?;
     let ask_key = canonical::claim_key(connection, &ask.id)?;
     for declaration in declarations.query_map([requester], claim_from_row)? {
         let declaration = declaration?;
@@ -453,7 +453,7 @@ pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(&canonical_sql(
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3ea328157189 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
           json_extract(request.body,'$.fields.origin_step')=?1 FROM claims resolution JOIN claims request
         ON request.subject=resolution.subject AND request.kind='work.person-asked'
@@ -593,7 +593,7 @@ impl Store {
                 let Some(legacy) = legacy else { return Ok(false) };
                 let legacy: Value = serde_json::from_str(&legacy)?;
                 let accepted = canonical::claim_key(tx, id)?;
-                let mut claimed = tx.prepare(&canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.claimed' ORDER BY CANONICAL_DESC(claims)"))?;
+                let mut claimed = tx.prepare(/* sqlite-large-value: allow-for-now lv-h51e654479ada owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.claimed' ORDER BY CANONICAL_DESC(claims)"))?;
                 let mut proven = false;
                 for claim in claimed.query_map([&origin_subject], claim_from_row)? {
                     let claim = claim?;
@@ -665,7 +665,7 @@ impl Store {
             // Checked after authority and fences below; a replay compares against it first.
             let resolved = resolve_answer(ask.as_ref(), input, cancel);
             let kind = if cancel { "work.person-cancelled" } else { "work.person-done" };
-            if let Some(existing) = tx.query_row(&canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
+            if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-h97f8e7f9bbb3 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
                 actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2
                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, kind], claim_from_row).optional().map_err(internal)? {
                 if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(input.actor.as_str()) {
@@ -776,8 +776,8 @@ impl Store {
         let has_asks: bool = {
             let connection = self.readers.get();
             connection
-                .prepare_cached(HAS_PERSON_ASKS_FOR_RECONCILE)?
-                .query_row([], |row| row.get(0))?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha0a368f623bf owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ HAS_PERSON_ASKS_FOR_RECONCILE)?
+                .query_row(/* sqlite-large-value: allow-for-now lv-hdd0c28d905c2 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?
         };
         if !has_asks {
             // A concurrent new ask is handled by the next notified reconcile pass.
@@ -803,11 +803,11 @@ impl Store {
                     // Telling is best effort: a notice that cannot be written must never undo
                     // this cancellation or the others in this pass.
                     if !is_update(&ask) {
-                        tx.execute_batch("SAVEPOINT tell_ask_ended")?;
+                        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h21358cf5e57c owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ "SAVEPOINT tell_ask_ended")?;
                         match self.tell_ask_ended(tx, &ask) {
-                            Ok(()) => tx.execute_batch("RELEASE tell_ask_ended")?,
+                            Ok(()) => tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h92be25a9abc5 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ "RELEASE tell_ask_ended")?,
                             Err(error) => {
-                                tx.execute_batch("ROLLBACK TO tell_ask_ended; RELEASE tell_ask_ended")?;
+                                tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h41e64ed49d0e owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ "ROLLBACK TO tell_ask_ended; RELEASE tell_ask_ended")?;
                                 tracing::warn!("the ended ask {} could not be told: {error:#}", ask.subject);
                             }
                         }
@@ -1049,7 +1049,7 @@ pub fn project_minimal_run(
     reason: &str,
 ) -> Result<(), St3Error> {
     let at = claim.accepted_at_unix_ms.to_string();
-    tx.execute("INSERT OR IGNORE INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index)
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hc6dbc6c1aac3 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index)
                 VALUES(?1,?2,'ready',?3,?4,?5)", params![mission.id, mission.revision, serde_json::to_string(&mission).map_err(internal)?, claim.id, claim.store_index]).map_err(internal)?;
     // Independent daemons can create the same update revision. Retained revision history
     // survives replay, so its source must follow canonical claim order rather than arrival.
@@ -1065,12 +1065,12 @@ pub fn project_minimal_run(
             < canonical::claim_key(tx, &previous).map_err(internal)?
     {
         tx.execute(
-            "UPDATE mission_revisions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2",
+            /* sqlite-large-value: allow-for-now lv-hb8a521089ce6 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2",
             params![mission.id, mission.revision, claim.id],
         )
         .map_err(internal)?;
     }
-    tx.execute("INSERT OR IGNORE INTO mission_definitions(mission_id,revision,state,claim_id) VALUES(?1,?2,'ready',?3)", params![mission.id, mission.revision, claim.id]).map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hd0dc654f4513 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_definitions(mission_id,revision,state,claim_id) VALUES(?1,?2,'ready',?3)", params![mission.id, mission.revision, claim.id]).map_err(internal)?;
     // A run-tree rebuild retains this definition too, and a full replay keeps the canonically
     // first claim's. Independent daemons can write different revisions of one internal mission:
     // each words an ended ask's reason from its own view. So the canonically first claim gives
@@ -1094,16 +1094,16 @@ pub fn project_minimal_run(
             < canonical::claim_key(tx, &previous).map_err(internal)?
     {
         tx.execute(
-            "UPDATE mission_definitions SET revision=?2, claim_id=?3 WHERE mission_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h3ee697fee5eb owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET revision=?2, claim_id=?3 WHERE mission_id=?1",
             params![mission.id, mission.revision, claim.id],
         )
         .map_err(internal)?;
     }
-    tx.execute("INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h8a96359b0676 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,
                 workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
                 VALUES(?1,?2,?3,?4,?3,?5,'.',?6,'{}','run','running','normal',?7,?7)",
                 params![run, mission.id, mission.revision, generation, root, claim.actor, at]).map_err(internal)?;
-    tx.execute("INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hc41a17d1e212 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
                 VALUES(?1,?2,?3,'running',?4,?6,?5,?5)", params![generation, run, mission.revision, claim.actor, at, reason]).map_err(internal)?;
     Ok(())
 }
@@ -1127,22 +1127,22 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Err
                 .trim_start_matches("mission-run/");
             project_minimal_run(tx, claim, &mission, run, generation, root, "person ask")?;
         }
-        tx.execute("INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h63fd3a55cee5 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,
             attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints)
             VALUES(?1,?2,?3,?4,?5,'ready',1,?6,'[]',0,?7,?8,?9,?9,'[]')",
             params![claim.subject, run, generation, claim.subject.rsplit('/').next(), claim.id,
                 fields["person"].as_str(), fields["title"].as_str(), serde_json::to_string(&vec![fields["reason"].as_str().unwrap_or_default()]).map_err(internal)?, claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
         if step_owner_is_terminal_tx(tx, &claim.subject)? {
-            tx.execute("UPDATE step_runs SET status='cancelled',blocked_reason='the owning run ended' WHERE subject=?1", [&claim.subject]).map_err(internal)?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h1381d1e2a461 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled',blocked_reason='the owning run ended' WHERE subject=?1", [&claim.subject]).map_err(internal)?;
             return Ok(true);
         }
         if let Some(origin) = fields["origin_step"].as_str() {
-            tx.execute("UPDATE step_runs SET status='waiting-person',lease_owner=NULL,lease_incarnation=NULL,
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hed67ce22bd19 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='waiting-person',lease_owner=NULL,lease_incarnation=NULL,
                 lease_expires_at_unix_ms=NULL,blocked_reason=?3,updated_at_unix_ms=?4
                 WHERE subject=?1 AND attempt=?2 AND status IN ('claimed','working','ready','blocked')",
                 params![origin, fields["origin_attempt"].as_u64(), claim.subject, claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
             tx.execute(
-                "DELETE FROM local_work_lease_renewals WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h595e7709e6ff owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_work_lease_renewals WHERE subject=?1",
                 [origin],
             )
             .map_err(internal)?;
@@ -1156,7 +1156,7 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Err
         return Ok(false);
     }
     tx.execute(
-        "UPDATE step_runs SET status=?2,worker_reported=1,updated_at_unix_ms=?3
+        /* sqlite-large-value: allow-for-now lv-h8c1789cb67fd owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,worker_reported=1,updated_at_unix_ms=?3
         WHERE subject=?1 AND attempt=?4 AND status IN ('ready','pending')",
         params![
             claim.subject,
@@ -1168,12 +1168,12 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Err
     .map_err(internal)?;
     if let Some(ask) = request(tx, &claim.subject).map_err(internal)? {
         if ask.body["fields"].get("mission_spec").is_some() {
-            tx.execute("UPDATE mission_runs SET status=?2,phase='terminal',updated_at_unix_ms=?3 WHERE id=?1",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h35c04bd3eb7e owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2,phase='terminal',updated_at_unix_ms=?3 WHERE id=?1",
                 params![ask.body["fields"]["run"].as_str().unwrap_or_default().trim_start_matches("mission-run/"), fields["status"].as_str(), claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
         }
         if let Some(origin) = ask.body["fields"]["origin_step"].as_str() {
             if !step_owner_is_terminal_tx(tx, origin)? {
-                tx.execute("UPDATE step_runs SET status='ready',blocked_reason=NULL,readiness_epoch=readiness_epoch+1,
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h724365d04190 owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='ready',blocked_reason=NULL,readiness_epoch=readiness_epoch+1,
                     activated_at_unix_ms=?3,updated_at_unix_ms=?3 WHERE subject=?1 AND attempt=?2 AND status='waiting-person' AND blocked_reason=?4",
                     params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject]).map_err(internal)?;
             }
@@ -1404,7 +1404,7 @@ schedule "intake" {
                 }
                 "stale-generation" => {
                     store.connection.batched(|tx| -> Result<()> {
-                        tx.execute("UPDATE desired SET owner_generation='run-generation/old' WHERE subject='subscription/intake'", [])?;
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h453c7db3811b owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_generation='run-generation/old' WHERE subject='subscription/intake'", [])?;
                         Ok(())
                     }).unwrap().unwrap();
                 }
@@ -1418,7 +1418,7 @@ schedule "intake" {
                         .connection
                         .batched(|tx| -> Result<()> {
                             tx.execute(
-                                "UPDATE mission_runs SET parent_step_run=?1 WHERE id=?2",
+                                /* sqlite-large-value: allow-for-now lv-h05753a6e2a1e owner=st3_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET parent_step_run=?1 WHERE id=?2",
                                 params![parent, origin.run.trim_start_matches("mission-run/")],
                             )?;
                             Ok(())
