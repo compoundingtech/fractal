@@ -32,8 +32,9 @@ impl Harness {
         let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
         store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
         // There is no daemon task in this harness. Register its production publication
-        // surface; pair() explicitly performs the attention refresh before reading it.
+        // surfaces; pair() explicitly refreshes them before reading the summary.
         store.start_attention_list_refresher().unwrap();
+        store.start_agent_roster_refresher().unwrap();
         let state = AppState {
             owning_person: Some(OWNER.into()), store,
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -81,12 +82,17 @@ impl Harness {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{unavailable}");
             assert_eq!(unavailable["message"], "the attention view is still being prepared; retry shortly");
         }
-        // Complete the same publication step the daemon performs at startup, including
-        // an empty owner view. Pairing alone does not make attention ready.
+        // Complete the same publications the daemon performs at startup, including
+        // an empty owner view. Pairing alone does not make these views ready.
+        st3::api::refresh_agent_roster_for_test(&self.state.store).unwrap();
         st3::api::refresh_attention_list(&self.state.store).unwrap();
         let publication = self.state.store.published_attention_list()
             .expect("the fixture must publish attention before assistant reads");
         assert_eq!(publication.cut, self.state.store.index().unwrap());
+        let (cut, _, _) = self.state.store.published_agent_roster(
+            self.state.store.index().unwrap(), false,
+        ).expect("the fixture must publish agents before assistant reads");
+        assert_eq!(cut, publication.cut);
         let (status, summary) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
         assert_eq!(status, StatusCode::OK, "fresh pairing must read without a policy call: {summary}");
         for id in [paired.grant.id.as_str(), paired.grant.id.trim_start_matches("assistant-grant/")] {

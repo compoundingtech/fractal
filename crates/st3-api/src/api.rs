@@ -95,6 +95,11 @@ mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{published_attention_rows, refresh_attention_list};
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
+    refresh_agent_roster(store, false)
+}
 mod directive_notes;
 mod request_latency;
 mod client_observations;
