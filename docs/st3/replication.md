@@ -423,16 +423,25 @@ Only that member receives a direct export of the leave; other members learn it
 through ordinary replication and revoke on the sync that admits it. An ambiguous
 send cannot silently select another confirmer.
 
-The direct receiver records the carrier drain before admitting the leave, whether
-the leave arrives in a push or a pull response. It retains only the fleet
-replication grant until the leaving member returns an authenticated receipt of
-its signed `member-left` proof through `/v1/replication/leave-receipt`. The receiver
-persists the receipt before withdrawing that carrier. The leaving worker reports
-completion only after a signed receipt acknowledgement or an authenticated
-Fabric grant refusal following that signed proof. Generic timeout, reset, or
-offline failure stays pending and is retryable; matching graph digests alone
-do not complete this second stage. Receipt support requires an upgraded
-confirmer. The drain and selected member survive a worker restart.
+The direct receiver records the carrier drain and its first absolute 120-second
+deadline before admitting the leave, whether it arrives in a push or a pull
+response. It retains only the fleet replication grant while awaiting the leaving
+member's authenticated receipt of its signed `member-left` proof through
+`/v1/replication/leave-receipt`. A receipt is persisted before the carrier is
+withdrawn on the next policy refresh; the handler first returns its signed ACK.
+Without a receipt, expiry removes the carrier and grant and reports
+`leave_unconfirmed`. Retries and restarts never extend the deadline or re-add an
+expired carrier. Policy refresh is periodic, so revocation occurs within 30
+seconds after the deadline, plus daemon control-call latency.
+
+The leaving worker reports confirmation only after a valid signature from the
+exact selected member on the receipt ACK, even when legacy peers are enabled.
+Grant refusal cannot prove receipt delivery because the bounded deadline can
+also revoke a carrier. Timeout, reset, and offline failures remain unconfirmed;
+matching graph digests alone do not complete this second stage. Receipt support
+requires an upgraded, listening confirmer; dial-out members cannot be selected.
+The drain, deadline, selected member, and unconfirmed expiry evidence survive
+a worker restart.
 
 `st fleet status` and `st replication status` expose the worker's last local result
 as `fabric_reconcile` in JSON, including `state`, `message`, and `policy_revision`.
@@ -444,6 +453,8 @@ is an `error`, not an assumed successful reconciliation.
 `applied` means the runtime policy was applied at the reported revision; it does
 not prove transport connectivity or replication convergence. `leaving` means a
 replication-only carrier is retained for authenticated leave completion.
+`leave_unconfirmed` means a receiver's grace deadline expired without its
+authenticated receipt; the grant is withdrawn, not retained indefinitely.
 `pending` means no result has been recorded yet; `error` retains the failure.
 `runtime_peers_disabled` means Fabric must be restarted with `--runtime-peers`
 before runtime membership can be managed. Existing static peers still work.

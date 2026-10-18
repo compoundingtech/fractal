@@ -3,8 +3,8 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
-use st3::GitChangesStore;
 use st3::PublicationFactsStore;
+use st3::GitChangesStore;
 use st3::cli_output;
 use st3::{cli_print as print, cli_println as println};
 
@@ -37,27 +37,26 @@ use st3::model::{
     LaunchStartRequest, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
     MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
     MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
-    MissionRunReportRequest, MissionRunReportView, MissionRunView, MissionSpec, MissionState,
-    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult,
-    PersonAskRequest, PersonStepResponse, PlannerSpec, PlanningApprovalRequest,
-    PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningSessionView,
-    ReplicaRecordView, ReplicationPeerStatus, ReplicationRepairRequest, ReplicationStatus,
-    ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionProposalView,
-    RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode,
-    SessionInputRequest, SessionScreen, SessionSignalRequest, StatusResponse, StepRunView,
-    SubscriptionRequestDecision, SubscriptionRequestView, WorkExtendRequest, WorkRequest,
-    WorkRetryRequest, WorkWakeRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunView, MissionSpec, MissionState, OperationalRepairApplyRequest,
+    OperationalRepairPlan, OperationalRepairResult, PersonAskRequest, PersonStepResponse,
+    PlannerSpec, PlanningApprovalRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest,
+    PlanningSessionView, ReplicaRecordView, ReplicationPeerStatus, ReplicationRepairRequest,
+    ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest,
+    RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse,
+    SessionInputMode, SessionInputRequest, SessionScreen, SessionSignalRequest, StatusResponse,
+    StepRunView, SubscriptionRequestDecision, SubscriptionRequestView, WorkExtendRequest,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use st3::reconcile::Reconciler;
 use st3::store::Store;
 use st3_client::{
-    API_VERSION as CLIENT_V0_API_VERSION, AssistantGrantPolicy, AssistantMinimalReadMode,
-    AssistantPairingBegin, AssistantPrincipal, AssistantReadTrustRequest, AssistantScope,
-    Client as GeneratedClient, ClientError as GeneratedClientError, Envelope as ClientEnvelope,
-    ErrorCode as ClientErrorCode, EventPage as ClientEventPage, EventType as ClientEventType,
-    Fence as ClientFence, Page as ClientPage, PairingBegin, PersonPairingBegin,
-    Resource as ClientResource, TargetParameters as ClientTargetParameters,
-    TerminalInputMode as ClientTerminalInputMode,
+    API_VERSION as CLIENT_V0_API_VERSION, Client as GeneratedClient,
+    ClientError as GeneratedClientError, Envelope as ClientEnvelope, ErrorCode as ClientErrorCode,
+    EventPage as ClientEventPage, EventType as ClientEventType, Fence as ClientFence,
+    Page as ClientPage, PairingBegin, PersonPairingBegin, AssistantGrantPolicy, AssistantReadTrustRequest,
+    AssistantMinimalReadMode, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
+    Resource as ClientResource,
+    TargetParameters as ClientTargetParameters, TerminalInputMode as ClientTerminalInputMode,
     TerminalInputParameters as ClientTerminalInputParameters,
     TerminalScreen as ClientTerminalScreen, TimelineBody as ClientTimelineBody,
     TimelineEntry as ClientTimelineEntry, TimelinePage as ClientTimelinePage, catch_up_estimate,
@@ -68,18 +67,18 @@ use tokio::sync::{Notify, watch};
 use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
-mod actor_contract;
-mod change_cli;
 mod cli_help;
-mod completion;
+mod setup;
+mod onboarding;
+mod change_cli;
 mod directive_note;
+mod completion;
 mod doctor_cli;
+mod fractal;
 #[cfg(test)]
 mod follow_tests;
-mod fractal;
-mod onboarding;
 mod presentation;
-mod setup;
+mod actor_contract;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -780,10 +779,7 @@ async fn withdraw_fleet_fabric(state_dir: &Path, fleet_id: &str) -> Result<()> {
         status.state == "applied",
         "Fabric withdrawal incomplete ({}): {}; fleet settings kept for retry",
         status.state,
-        status
-            .message
-            .as_deref()
-            .unwrap_or("revocation was not confirmed")
+        status.message.as_deref().unwrap_or("revocation was not confirmed")
     );
     Ok(())
 }
@@ -4395,8 +4391,8 @@ fn cli_main() -> ExitCode {
     // Cargo bakes the target name into each executable. The installed st3 binary cannot
     // enable this with an argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell =
-        (env!("CARGO_BIN_NAME") == "st3-fixture").then(st3::test_support::initialize_fixture);
+    let _fixture_shell = (env!("CARGO_BIN_NAME") == "st3-fixture")
+        .then(st3::test_support::initialize_fixture);
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { st_drivers::reexec::take_resume_environment() };
     if st_drivers::reexec::resume_path(st_drivers::reexec::DRIVER_RESUME_ENV).is_some() {
@@ -4678,7 +4674,8 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             let message = if native_driver {
                 plain_error(&error)
             } else {
-                doctor_cli::human_outage_message(&error).unwrap_or_else(|| plain_error(&error))
+                doctor_cli::human_outage_message(&error)
+                    .unwrap_or_else(|| plain_error(&error))
             };
             eprintln!("st: {message}");
             if refused_command(&error) {
@@ -5617,8 +5614,7 @@ fn gateway_path_for_comparison(socket: &Path) -> Result<PathBuf> {
                                 missing_depth = 1;
                             }
                             Ok(_) => {
-                                return Err(error)
-                                    .context("resolve existing gateway socket ancestor");
+                                return Err(error).context("resolve existing gateway socket ancestor");
                             }
                             Err(error) => {
                                 return Err(error).context("inspect gateway socket ancestor");
@@ -6785,15 +6781,8 @@ async fn follow_mission_run(
         None
     };
     follow_mission_run_to(
-        client,
-        run,
-        json_output,
-        interactive,
-        limit,
-        OutputStyle::stdout(),
-        &mut cli_output::stdout(),
-    )
-    .await
+        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
+    ).await
 }
 
 async fn follow_mission_run_to(
@@ -6828,9 +6817,7 @@ async fn follow_mission_run_to(
         } else {
             String::new()
         };
-        if summary != prior
-            && let Some(page) = &page
-        {
+        if summary != prior && let Some(page) = &page {
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
@@ -6888,7 +6875,9 @@ async fn load_mission_run_tree(
         query.push_str("&after=");
         query.push_str(&urlencoding::encode(after));
     }
-    client.get(&query).await
+    client
+        .get(&query)
+        .await
 }
 
 fn mission_run_follow_succeeded(status: &str) -> bool {
@@ -7106,9 +7095,7 @@ async fn attach_terminal(
                 return terminal_exit(code);
             }
             (None, _) if budget.is_some() => {
-                anyhow::bail!(
-                    "st terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`"
-                );
+                anyhow::bail!("st terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`");
             }
             (None, Some(root)) => {
                 eprintln!(
@@ -7762,11 +7749,7 @@ async fn run_devices(
             );
             print!(
                 "{}",
-                with_device_presence(
-                    &rendered,
-                    clients.as_ref().map(|found| &found.value),
-                    now_ms()
-                )
+                with_device_presence(&rendered, clients.as_ref().map(|found| &found.value), now_ms())
             );
             note_partial_page(&response.value);
             Ok(())
@@ -7847,13 +7830,8 @@ async fn run_devices(
                 AssistantGrantCommand::Revoke { grant } => {
                     client.assistant_grant_revoke(&grant).await?
                 }
-                AssistantGrantCommand::Policy {
-                    grant,
-                    terms,
-                    recipients,
-                } => {
-                    let terms =
-                        SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
+                AssistantGrantCommand::Policy { grant, terms, recipients } => {
+                    let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
                     let mut policy = terms.into_policy();
                     policy.recipient_allowlist = Some(recipients);
                     client.assistant_grant_policy(&grant, &policy).await?
@@ -7884,29 +7862,13 @@ async fn run_devices(
                     policy.recipient_allowlist = Some(current.value.recipient_allowlist);
                     client.assistant_grant_policy(&grant, &policy).await?
                 }
-                AssistantGrantCommand::ReadTrust {
-                    grant,
-                    issuer,
-                    key_id,
-                    attestor_public_key,
-                    shim_public_key,
-                    default_response_bytes,
-                    max_response_bytes,
-                } => {
-                    client
-                        .assistant_grant_read_trust(
-                            &grant,
-                            &AssistantReadTrustRequest {
-                                api_version: CLIENT_V0_API_VERSION.into(),
-                                issuer,
-                                key_id,
-                                attestor_public_key,
-                                shim_public_key,
-                                default_response_bytes: Some(default_response_bytes),
-                                max_response_bytes: Some(max_response_bytes),
-                            },
-                        )
-                        .await?
+                AssistantGrantCommand::ReadTrust { grant, issuer, key_id, attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes } => {
+                    client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
+                        api_version: CLIENT_V0_API_VERSION.into(), issuer, key_id,
+                        attestor_public_key, shim_public_key,
+                        default_response_bytes: Some(default_response_bytes),
+                        max_response_bytes: Some(max_response_bytes),
+                    }).await?
                 }
             };
             print_client_value(&response, json_output)
@@ -8171,9 +8133,7 @@ fn ago(timestamp: &str, now_ms: u128) -> String {
     let Ok(then) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
         return timestamp.to_owned();
     };
-    let seconds = (now_ms as i64 / 1_000)
-        .saturating_sub(then.timestamp())
-        .max(0);
+    let seconds = (now_ms as i64 / 1_000).saturating_sub(then.timestamp()).max(0);
     match seconds {
         0..60 => "just now".into(),
         60..3_600 => format!("{}m ago", seconds / 60),
@@ -8260,8 +8220,8 @@ fn configured_actor(
     if let Some(explicit) = explicit {
         return parse_actor_subject(explicit).map_err(anyhow::Error::msg);
     }
-    if let Some(own) =
-        st_drivers::contracts::env("ST_AGENT").filter(|own| own.starts_with("agent/"))
+    if let Some(own) = st_drivers::contracts::env("ST_AGENT")
+        .filter(|own| own.starts_with("agent/"))
     {
         return Ok(own);
     }
@@ -8511,10 +8471,7 @@ fn attention_heading(item: &st3_client::Attention, now_unix_ms: u128) -> String 
     // The agent whose conversation it belongs to, which a gate or an approval names even though
     // no agent asked it; an older daemon names only the requester.
     if let Some(from) = item.conversation_id.as_ref().or(item.requester_id.as_ref()) {
-        about.push(format!(
-            "from {}",
-            from.strip_prefix("agent/").unwrap_or(from)
-        ));
+        about.push(format!("from {}", from.strip_prefix("agent/").unwrap_or(from)));
     }
     about.push(ago(&item.requested_at, now_unix_ms));
     if item.priority != "normal" {
@@ -8596,8 +8553,7 @@ fn render_alert_sections(
     continuation_command: &str,
 ) -> String {
     let attention = |item: &ClientResource| matches!(item, ClientResource::Attention(_));
-    let alert =
-        |item: &ClientResource| matches!(item, ClientResource::Attention(item) if is_alert(item));
+    let alert = |item: &ClientResource| matches!(item, ClientResource::Attention(item) if is_alert(item));
     let mut alerts = page.clone();
     alerts.items.retain(alert);
     alerts.page.next_cursor = None;
@@ -8615,11 +8571,7 @@ fn render_alert_sections(
         if !output.is_empty() {
             output.push('\n');
         }
-        output.push_str(&render_product_page(
-            "UPDATES",
-            &updates,
-            continuation_command,
-        ));
+        output.push_str(&render_product_page("UPDATES", &updates, continuation_command));
     }
     if let Some(cursor) = page.page.next_cursor.as_deref() {
         use std::fmt::Write as _;
@@ -8810,8 +8762,7 @@ fn render_product_page_headed(
                 );
                 if let Some(person) = &item.person_id {
                     let _ = writeln!(
-                        output,
-                        "  action: st devices --as {} revoke {}",
+                        output, "  action: st devices --as {} revoke {}",
                         person, item.header.id
                     );
                 } else if let Some(grant) = &item.grant_id {
@@ -8920,14 +8871,11 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             }
         }
         SloCommand::Chart { id, over, width } => {
-            let row =
-                st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
             let period_ms = parse_slo_period(&over)?;
             let until = current_unix_ms()? as u64;
             let since = until.saturating_sub(period_ms);
-            let columns = width
-                .unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7))
-                .clamp(10, 400);
+            let columns = width.unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7)).clamp(10, 400);
             let history: Value = client
                 .get(&format!(
                     "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
@@ -8941,8 +8889,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             }
         }
         SloCommand::Explain { id } => {
-            let row =
-                st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
             if json_output {
                 println!("{}", serde_json::to_string_pretty(row)?);
             } else {
@@ -8964,16 +8911,10 @@ fn render_slo_list(rows: &[Value]) -> String {
     };
     let mut output = String::new();
     for (kind, heading) in [
-        (
-            "objective",
-            "OBJECTIVES  a target with windows and an error budget",
-        ),
+        ("objective", "OBJECTIVES  a target with windows and an error budget"),
         ("budget", "BUDGETS  an allowance that resets"),
     ] {
-        let group = rows
-            .iter()
-            .filter(|row| row["kind"] == kind)
-            .collect::<Vec<_>>();
+        let group = rows.iter().filter(|row| row["kind"] == kind).collect::<Vec<_>>();
         if group.is_empty() {
             continue;
         }
@@ -9056,11 +8997,7 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
         .map(|steps| steps.iter().map(Value::as_f64).collect::<Vec<_>>())
         .unwrap_or_default();
     let id = row["id"].as_str().unwrap_or_default();
-    let what = if row["kind"] == "budget" {
-        "allowance left"
-    } else {
-        "error budget left"
-    };
+    let what = if row["kind"] == "budget" { "allowance left" } else { "error budget left" };
     let mut output = String::new();
     let _ = writeln!(output, "{id} · {what} · last {over}");
     let readings = history["samples"].as_u64().unwrap_or(0);
@@ -9083,14 +9020,9 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
             .iter()
             .map(|step| match step {
                 Some(percent) => {
-                    let eighths =
-                        (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
+                    let eighths = (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
                     // Even a spent budget shows its reading as the lowest sliver, never a gap.
-                    let eighths = if line == HEIGHT - 1 {
-                        eighths.max(1)
-                    } else {
-                        eighths
-                    };
+                    let eighths = if line == HEIGHT - 1 { eighths.max(1) } else { eighths };
                     LEVELS[eighths.saturating_sub((HEIGHT - 1 - line) * 8).min(8)]
                 }
                 None if line == HEIGHT - 1 => '·',
@@ -9107,22 +9039,11 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
             .map_or_else(|| "?".to_owned(), |at| at.format("%m-%d %H:%M").to_string())
     };
     let (from, to) = (time(&history["since_ms"]), time(&history["until_ms"]));
-    let gap = (steps.len() + 1)
-        .saturating_sub(from.chars().count() + to.chars().count() + 4)
-        .max(1);
+    let gap = (steps.len() + 1).saturating_sub(from.chars().count() + to.chars().count() + 4).max(1);
     let _ = writeln!(output, "      {from} UTC{}{to}", " ".repeat(gap));
     let low = known.iter().copied().fold(f64::INFINITY, f64::min);
-    let now = steps
-        .iter()
-        .rev()
-        .flatten()
-        .next()
-        .copied()
-        .unwrap_or_default();
-    let _ = writeln!(
-        output,
-        "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading"
-    );
+    let now = steps.iter().rev().flatten().next().copied().unwrap_or_default();
+    let _ = writeln!(output, "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading");
     output
 }
 
@@ -9131,25 +9052,11 @@ fn render_slo_explanation(row: &Value) -> String {
 
     let text = |field: &str| row[field].as_str().unwrap_or_default();
     let mut output = String::new();
-    let _ = writeln!(
-        output,
-        "{}  {} · {}",
-        text("id"),
-        text("kind"),
-        text("status")
-    );
+    let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
     let _ = writeln!(output, "TARGET   {}", text("target"));
     let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
     if let Some(left) = row["remaining_percent"].as_f64() {
-        let _ = writeln!(
-            output,
-            "LEFT     {left:.0}% of the {}",
-            if row["kind"] == "budget" {
-                "allowance"
-            } else {
-                "error budget"
-            }
-        );
+        let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
     }
     if let Some(at) = row["resets_at_unix_ms"]
         .as_u64()
@@ -9325,16 +9232,8 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 output,
                 "EXEMPT  never stopped at {}% · accounts: {} · harnesses: {}",
                 report["limits_policy"]["stop_at_weekly_percent"],
-                if accounts.is_empty() {
-                    "none"
-                } else {
-                    &accounts
-                },
-                if harnesses.is_empty() {
-                    "none"
-                } else {
-                    &harnesses
-                },
+                if accounts.is_empty() { "none" } else { &accounts },
+                if harnesses.is_empty() { "none" } else { &harnesses },
             );
         }
     }
@@ -9687,8 +9586,7 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&result, json_output)
         }
         SubjectCommand::Show(args) => {
-            if args.subject.starts_with("custom/")
-                && !args.kdl
+            if args.subject.starts_with("custom/") && !args.kdl
                 && let Ok(result) = client
                     .get::<Value>(&format!(
                         "/v1/client/custom-subjects/{}",
@@ -10229,14 +10127,11 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
         }
         Err(error) if st3::client::daemon_unreachable(&error).is_some() => {
             if json_output {
-                let message =
-                    doctor_cli::human_outage_message(&error).unwrap_or_else(|| plain_error(&error));
-                print_value(
-                    &json!({"status": "fail", "checks": [{
-                        "name": "daemon", "status": "fail", "message": message
-                    }]}),
-                    true,
-                )?;
+                let message = doctor_cli::human_outage_message(&error)
+                    .unwrap_or_else(|| plain_error(&error));
+                print_value(&json!({"status": "fail", "checks": [{
+                    "name": "daemon", "status": "fail", "message": message
+                }]}), true)?;
             }
             Err(error)
         }
@@ -10469,9 +10364,7 @@ fn render_caught_up(caught_up: &CaughtUp, now: u128) -> String {
 }
 
 /// Envelopes this node admitted beyond a writer's high water, which the fleet fenced, or None.
-fn render_fenced_admissions(
-    residue: &[smallclaims::store::FleetAdmissionResidue],
-) -> Option<String> {
+fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue]) -> Option<String> {
     let fenced = residue
         .iter()
         .filter(|item| item.reason == "admitted-beyond-high-water")
@@ -10765,9 +10658,7 @@ fn render_replication_peers(
 fn arrival_estimate(sync: &st3::model::ReplicationPeerSync) -> String {
     // The lower of the catch-up and receive rates: nothing arriving is not catching up either.
     if sync.peer_only_envelopes != 0
-        && sync
-            .closing_rate_per_second()
-            .is_some_and(|rate| rate <= 0.0)
+        && sync.closing_rate_per_second().is_some_and(|rate| rate <= 0.0)
     {
         return "not catching up".into();
     }
@@ -10785,10 +10676,7 @@ fn peer_graphs_equal(peer: &ReplicationPeerStatus, local_graph_digest: &str) -> 
 /// presented as current.
 fn compared_ago(peer: &ReplicationPeerStatus, now: u128) -> String {
     peer.projection_compared_at_unix_ms
-        .or(peer
-            .sync
-            .as_ref()
-            .and_then(|sync| sync.graph_compared_at_unix_ms))
+        .or(peer.sync.as_ref().and_then(|sync| sync.graph_compared_at_unix_ms))
         .map(|at| relative_time(at, now))
         .unwrap_or_else(|| "at the last exchange".into())
 }
@@ -10830,11 +10718,7 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
     for member in &status.participants {
         output.push_str(&format!(
             "  machine_version  {member}: {}\n",
-            status
-                .machine_version
-                .get(member)
-                .map(String::as_str)
-                .unwrap_or("not advertised")
+            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
         ));
     }
     if !status.excused.is_empty() {
@@ -11076,11 +10960,7 @@ async fn upload_attachment(
             if let Some(note) = &prepared.note {
                 eprintln!("{note}");
             }
-            (
-                prepared.bytes,
-                prepared.media_type.to_owned(),
-                prepared.name,
-            )
+            (prepared.bytes, prepared.media_type.to_owned(), prepared.name)
         }
     };
     let uploaded = generated_client(endpoint, Some(actor))?
@@ -11153,9 +11033,9 @@ async fn run_rules(
 ) -> Result<()> {
     use smallclaims::rules::{Mode, NamedRule};
     let person = |actor: Option<String>| -> Result<String> {
-        actor.or_else(|| config.person.clone()).context(
-            "rules are set by a person: set person in config.toml or pass --as person/NAME",
-        )
+        actor
+            .or_else(|| config.person.clone())
+            .context("rules are set by a person: set person in config.toml or pass --as person/NAME")
     };
     let set = |actor: &str, name: &str, rule: smallclaims::rules::Rule| {
         let request = st3::api::RuleSetRequest {
@@ -11175,9 +11055,7 @@ async fn run_rules(
                 return print_value(&rules, true);
             }
             if rules.is_empty() {
-                println!(
-                    "no rules: every principal may write what its person may (st rules lockdown sets the presets)"
-                );
+                println!("no rules: every principal may write what its person may (st rules lockdown sets the presets)");
             }
             for rule in rules {
                 println!(
@@ -12332,15 +12210,12 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
             match introducer {
                 Some('[') => {
                     for next in characters.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&next) {
-                            break;
-                        }
+                        if ('\u{40}'..='\u{7e}').contains(&next) { break; }
                     }
                 }
                 Some(']') => {
                     while let Some(next) = characters.next() {
-                        if next == '\u{7}' || (next == '\u{1b}' && characters.next() == Some('\\'))
-                        {
+                        if next == '\u{7}' || (next == '\u{1b}' && characters.next() == Some('\\')) {
                             break;
                         }
                     }
@@ -12352,9 +12227,7 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
         if character.is_whitespace() {
             space = written;
         } else if !character.is_control() {
-            if space {
-                output.push(' ');
-            }
+            if space { output.push(' '); }
             output.push(character);
             written = true;
             space = false;
@@ -12372,11 +12245,7 @@ fn render_client_agent(
     let mut output = String::new();
     let _ = writeln!(output, "AGENT  {}", agent.header.id);
     let _ = writeln!(output, "NAME         {}", agent.name);
-    match agent
-        .down_since
-        .as_deref()
-        .filter(|_| agent.state == "down")
-    {
+    match agent.down_since.as_deref().filter(|_| agent.state == "down") {
         Some(since) => {
             let _ = writeln!(output, "STATE        down · no session since {since}");
         }
@@ -12391,16 +12260,15 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
-    if agent.blocked_on.as_deref() == Some("human") && agent.ask.as_deref() == Some("permission") {
+    if agent.blocked_on.as_deref() == Some("human")
+        && agent.ask.as_deref() == Some("permission")
+    {
         let _ = writeln!(output, "AWAITING     approval");
     }
     if let Some(todo) = &agent.todo {
         let snapshot = &todo.snapshot;
         let _ = write!(output, "Todo         ");
-        if let Some(active) = snapshot
-            .phases
-            .iter()
-            .flat_map(|phase| &phase.tasks)
+        if let Some(active) = snapshot.phases.iter().flat_map(|phase| &phase.tasks)
             .find(|task| task.status == st3_client::HarnessTaskStatus::InProgress)
         {
             output.push_str("▶ ");
@@ -12408,15 +12276,9 @@ fn render_client_agent(
             output.push_str(" · ");
         }
         let totals = &snapshot.totals;
-        let total = u128::from(totals.pending)
-            + u128::from(totals.in_progress)
-            + u128::from(totals.completed)
-            + u128::from(totals.blocked);
-        let _ = write!(
-            output,
-            "{}/{total} done · {} blocked",
-            totals.completed, totals.blocked
-        );
+        let total = u128::from(totals.pending) + u128::from(totals.in_progress)
+            + u128::from(totals.completed) + u128::from(totals.blocked);
+        let _ = write!(output, "{}/{total} done · {} blocked", totals.completed, totals.blocked);
         if totals.abandoned > 0 {
             let _ = write!(output, " · {} abandoned", totals.abandoned);
         }
@@ -12433,22 +12295,11 @@ fn render_client_agent(
         let _ = writeln!(output, "FAULT        {fault}");
     }
     if let Some(handoff) = &agent.handoff {
-        let pending = if handoff.pending_sources.is_empty() {
-            String::new()
-        } else {
-            format!(" · waiting for {}", handoff.pending_sources.join(", "))
-        };
-        let _ = writeln!(
-            output,
-            "HANDOFF      {} → {}{pending}",
-            handoff.phase, handoff.destination
-        );
+        let pending = if handoff.pending_sources.is_empty() { String::new() }
+            else { format!(" · waiting for {}", handoff.pending_sources.join(", ")) };
+        let _ = writeln!(output, "HANDOFF      {} → {}{pending}", handoff.phase, handoff.destination);
         if !handoff.overridden_sources.is_empty() {
-            let _ = writeln!(
-                output,
-                "SOURCE OFFLINE {} · override recorded",
-                handoff.overridden_sources.join(", ")
-            );
+            let _ = writeln!(output, "SOURCE OFFLINE {} · override recorded", handoff.overridden_sources.join(", "));
         }
     }
     if let Some(suspension) = &agent.suspension {
@@ -12528,27 +12379,14 @@ fn render_client_agent(
         let phase = operation["phase"].as_str().unwrap_or("unknown");
         let id = operation["operation_id"].as_str().unwrap_or("unknown");
         let running = operation["worker_running"] == true;
-        let _ = writeln!(
-            output,
-            "START        {phase} · {id}{}",
-            if running && phase == "revoked" {
-                " · launch worker still running"
-            } else {
-                ""
-            }
-        );
-        let _ = writeln!(
-            output,
-            "START JOBS   {} running · {} revoked and still running",
+        let _ = writeln!(output, "START        {phase} · {id}{}",
+            if running && phase == "revoked" { " · launch worker still running" } else { "" });
+        let _ = writeln!(output, "START JOBS   {} running · {} revoked and still running",
             operation["running_jobs"].as_u64().unwrap_or(0),
-            operation["revoked_running_jobs"].as_u64().unwrap_or(0)
-        );
-        let _ = writeln!(
-            output,
-            "START OPEN   {} unresolved · {} revoked and unresolved",
+            operation["revoked_running_jobs"].as_u64().unwrap_or(0));
+        let _ = writeln!(output, "START OPEN   {} unresolved · {} revoked and unresolved",
             operation["unresolved_jobs"].as_u64().unwrap_or(0),
-            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0)
-        );
+            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0));
     }
     if let Some(owner) = &agent.owner_run_id {
         let _ = writeln!(output, "MISSION      {owner}");
@@ -12796,8 +12634,8 @@ fn render_client_agents(
 /// The process may still act as a non-agent subject, such as its exec or a person its work names.
 fn reject_foreign_agent_actor(actor: &str) -> Result<()> {
     let own = st_drivers::contracts::env("ST_AGENT");
-    let mission_run =
-        st_drivers::contracts::env("ST_MISSION_RUN").filter(|value| !value.is_empty());
+    let mission_run = st_drivers::contracts::env("ST_MISSION_RUN")
+        .filter(|value| !value.is_empty());
     match foreign_agent_actor(actor, own.as_deref(), mission_run.as_deref()) {
         Some(message) => anyhow::bail!(message),
         None => Ok(()),
@@ -12826,8 +12664,8 @@ fn foreign_agent_actor(
 }
 
 fn normalize_message_subject(value: &str) -> String {
-    let mission_run =
-        st_drivers::contracts::env("ST_MISSION_RUN").filter(|value| !value.is_empty());
+    let mission_run = st_drivers::contracts::env("ST_MISSION_RUN")
+        .filter(|value| !value.is_empty());
     normalize_message_subject_in_run(value, mission_run.as_deref())
 }
 
@@ -14423,8 +14261,7 @@ fn harness_activity_state(activity: st_drivers::harness_state::Activity) -> &'st
     match activity {
         st_drivers::harness_state::Activity::Ready => "ready",
         st_drivers::harness_state::Activity::Idle => "idle",
-        st_drivers::harness_state::Activity::Active
-        | st_drivers::harness_state::Activity::Child => "working",
+        st_drivers::harness_state::Activity::Active | st_drivers::harness_state::Activity::Child => "working",
         st_drivers::harness_state::Activity::Ended => "ended",
         st_drivers::harness_state::Activity::Unknown => "indeterminate",
     }
@@ -14916,13 +14753,7 @@ async fn publish_harness_activity(
             Value::String(observed.blocked_on.as_str().into()),
         ),
         ("ask".into(), Value::String(observed.ask.as_str().into())),
-        (
-            "background_jobs".into(),
-            observed
-                .background_jobs
-                .map(Value::from)
-                .unwrap_or(Value::Null),
-        ),
+        ("background_jobs".into(), observed.background_jobs.map(Value::from).unwrap_or(Value::Null)),
         (
             "input_buffer".into(),
             Value::String(observed.input_buffer.as_str().into()),
@@ -15403,10 +15234,7 @@ fn accept_managed_channel_frame(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 ) -> Result<bool> {
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
-        let frame_type = frame
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
             "timeline" | "context" | "turn" | "subagent" => observer.is_some(),
@@ -15470,31 +15298,20 @@ fn prepare_channel_todo_outbox(root: &Path, subject: &str, incarnation: &str) ->
 
 fn todo_runtime_has_ended(actual: &Value, incarnation: &str) -> bool {
     let fields = actual.get("fields").unwrap_or(actual);
-    fields["incarnation_id"]
-        .as_str()
-        .is_some_and(|current| current != incarnation)
-        || matches!(
-            fields["status"].as_str(),
-            Some("absent" | "stopped" | "exited" | "vanished")
-        )
+    fields["incarnation_id"].as_str().is_some_and(|current| current != incarnation)
+        || matches!(fields["status"].as_str(), Some("absent" | "stopped" | "exited" | "vanished"))
 }
 
 // Wall-clock minute boundaries can be one second apart; confirmations need a full period.
 const CHANNEL_TODO_END_CONFIRMATION_GAP: Duration = Duration::from_secs(60);
 
 async fn remove_confirmed_ended_channel_todo_outbox(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
-    dir: &Path,
+    client: &Client, subject: &str, incarnation: &str, dir: &Path,
     end_seen: &mut Option<tokio::time::Instant>,
 ) -> Result<bool> {
-    let status: Result<StatusResponse> = client
-        .get(&format!(
-            "/v1/status?subject={}",
-            urlencoding::encode(subject),
-        ))
-        .await;
+    let status: Result<StatusResponse> = client.get(&format!(
+        "/v1/status?subject={}", urlencoding::encode(subject),
+    )).await;
     let status = match status {
         Ok(status) => status,
         Err(error) => {
@@ -15502,10 +15319,7 @@ async fn remove_confirmed_ended_channel_todo_outbox(
             return Err(error);
         }
     };
-    let ended = status
-        .subjects
-        .first()
-        .and_then(|seat| seat.actual.as_ref())
+    let ended = status.subjects.first().and_then(|seat| seat.actual.as_ref())
         .is_some_and(|actual| todo_runtime_has_ended(actual, incarnation));
     if !ended {
         *end_seen = None;
@@ -16069,8 +15883,7 @@ fn native_delivery_control_report(
     let mut report: Value = serde_json::from_str(&native_delivery_report(transport, None))
         .expect("native delivery reports are JSON");
     // A deliberate graph hold is normal control, independent of mailbox readiness.
-    let unavailable = gate
-        .blocked_reason()
+    let unavailable = gate.blocked_reason()
         .filter(|reason| *reason == DeliveryBlockReason::ControlUnavailable);
     report["ready"] = json!(unavailable.is_none());
     report["reason"] = json!(unavailable.map(|reason| reason.description()));
@@ -16196,10 +16009,7 @@ async fn publish_provider_capacity_diagnostic(
         fields.insert("retry_after_unix_ms".into(), Value::from(retry_after));
     }
     let work: Vec<StepRunView> = client
-        .get(&format!(
-            "/v1/work?actor={}&caller=capacity-diagnostics",
-            urlencoding::encode(subject)
-        ))
+        .get(&format!("/v1/work?actor={}&caller=capacity-diagnostics", urlencoding::encode(subject)))
         .await?;
     if let Some(step) = work.into_iter().find(|step| {
         matches!(step.status.as_str(), "claimed" | "working")
@@ -16299,10 +16109,7 @@ async fn renew_claimed_work(
     retry: &mut st3::client::DriverRetry,
 ) -> Result<()> {
     let work: Vec<StepRunView> = client
-        .get(&format!(
-            "/v1/work?actor={}&view=renewal",
-            urlencoding::encode(subject)
-        ))
+        .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     update_renewal_retry_lease(retry, &work, subject, current_unix_ms()?);
     // Most resident seats hold no work. Only a held claim needs the status reduction
@@ -16374,9 +16181,7 @@ fn update_renewal_retry_lease(
         retry.clear_lease_margin();
     } else if let Some(expiry) = held.filter_map(|step| step.claim_expires_at_unix_ms).min() {
         let remaining = expiry.saturating_sub(now_ms);
-        retry.lease_margin(Duration::from_millis(
-            remaining.min(u128::from(u64::MAX)) as u64
-        ));
+        retry.lease_margin(Duration::from_millis(remaining.min(u128::from(u64::MAX)) as u64));
     }
 }
 
@@ -16781,9 +16586,7 @@ async fn check_claude_attachment(
 ) -> Result<()> {
     let fence = &mailbox.fence;
     let mut checked = checked_claude_attachment(client, subject, incarnation, fence).await;
-    state
-        .claude_readiness_fallback
-        .observe_attachment(&checked, current_unix_ms()? as u64);
+    state.claude_readiness_fallback.observe_attachment(&checked, current_unix_ms()? as u64);
     // Readiness is independent of diagnostic publication. A rejected or uncertain
     // POST must not silence a current subscription's readiness report.
     report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
@@ -17171,9 +16974,7 @@ async fn provider_task_settled(task: &tokio::task::JoinHandle<Result<()>>) -> bo
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), settled)
-        .await
-        .is_ok()
+    tokio::time::timeout(Duration::from_secs(5), settled).await.is_ok()
 }
 
 struct NativeMailbox {
@@ -17644,9 +17445,7 @@ async fn forward_projected_messages_reporting(
             state_dir,
             identity,
             runtime_id,
-        } => st_drivers::codex_app_server::consumed_delivery_filenames(
-            state_dir, identity, runtime_id,
-        ),
+        } => st_drivers::codex_app_server::consumed_delivery_filenames(state_dir, identity, runtime_id),
         NativeDeliveryReceipts::ClaudeChannel {
             agent_dir,
             incarnation,
@@ -18070,91 +17869,77 @@ fn retry_projection_contention_observed(
     state_dir: PathBuf,
     mut on_poll: impl FnMut(bool) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(st3::task_cpu::account(
-        "replication.retry_projection",
-        async move {
-            let mut schedule = ProjectionContentionRetry::default();
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                let Some(store) = store.upgrade() else { break };
-                let generation = store.projection_contention_generation();
-                let attempt = schedule.poll(
-                    tokio::time::Instant::now(),
-                    generation,
-                    store.replication_projection_deferred(),
-                );
-                on_poll(schedule.due.is_some());
-                let Some(attempt) = attempt else { continue };
-                // Only this task schedules these attempts. The existing projection mutex also
-                // serializes them with receive/wake passes. Store ownership ends at attempt return.
-                let result = store
-                    .connection
-                    .write_workers()
-                    .spawn_blocking(move || {
-                        st3::task_cpu::profiled_blocking("replication.retry_projection", || {
-                            let result = store.project_replication_backlog_unless_catching_up();
-                            (
-                                result,
-                                store.projection_contention_generation(),
-                                store.replication_projection_deferred(),
-                            )
-                        })
-                    })
-                    .await;
-                let still_deferred = match &result {
-                    Ok((_, _, deferred)) => Some(*deferred),
-                    Err(_) => None,
-                };
-                let (recovered, retry, generation, outcome) = match result {
-                    // Own success cannot advance contention generation. Retain the pre-call
-                    // watermark, so an external contention racing the success is observed on
-                    // the next poll rather than cancelled as part of the completed episode.
-                    Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
-                    Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
-                    Ok((Ok(Some(false)), current, _)) => {
-                        (false, current != generation, current, "deferred")
-                    }
-                    Ok((Err(error), current, _)) => {
-                        let busy = error
-                            .downcast_ref::<smallclaims::Error>()
-                            .is_some_and(|error| error.is_sqlite_contention());
-                        (
-                            false,
-                            busy,
-                            current,
-                            if busy {
-                                "sqlite-contention"
-                            } else {
-                                "other-error"
-                            },
-                        )
-                    }
-                    Err(_) => (false, false, generation, "worker-failed"),
-                };
-                schedule.finish(tokio::time::Instant::now(), generation, retry);
-                eprintln!(
-                    "st3: projection contention retry {}",
-                    json!({
-                        "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
-                        "projection_deferred_after_attempt": still_deferred,
-                        "stop_reason": if schedule.due.is_some() { None } else if recovered {
-                            Some("recovered")
-                        } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
-                    })
-                );
-                if recovered {
-                    st3::performance::record_wake("projection-contention-retry", None);
-                    notify.notify_one();
-                    event_notify
-                        .send_modify(|generation| *generation = generation.saturating_add(1));
-                    let _ = fs::write(
-                        state_dir.join("replication.wake"),
-                        format!("{}\n", uuid::Uuid::now_v7()),
-                    );
+    tokio::spawn(st3::task_cpu::account("replication.retry_projection", async move {
+        let mut schedule = ProjectionContentionRetry::default();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(store) = store.upgrade() else { break };
+            let generation = store.projection_contention_generation();
+            let attempt = schedule.poll(
+                tokio::time::Instant::now(), generation, store.replication_projection_deferred());
+            on_poll(schedule.due.is_some());
+            let Some(attempt) = attempt else { continue };
+            // Only this task schedules these attempts. The existing projection mutex also
+            // serializes them with receive/wake passes. Store ownership ends at attempt return.
+            let result = store.connection.write_workers().spawn_blocking(move || {
+                st3::task_cpu::profiled_blocking("replication.retry_projection", || {
+                let result = store.project_replication_backlog_unless_catching_up();
+                (result, store.projection_contention_generation(), store.replication_projection_deferred())
+                })
+            })
+            .await;
+            let still_deferred = match &result {
+                Ok((_, _, deferred)) => Some(*deferred),
+                Err(_) => None,
+            };
+            let (recovered, retry, generation, outcome) = match result {
+                // Own success cannot advance contention generation. Retain the pre-call
+                // watermark, so an external contention racing the success is observed on
+                // the next poll rather than cancelled as part of the completed episode.
+                Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
+                Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
+                Ok((Ok(Some(false)), current, _)) => {
+                    (false, current != generation, current, "deferred")
                 }
+                Ok((Err(error), current, _)) => {
+                    let busy = error
+                        .downcast_ref::<smallclaims::Error>()
+                        .is_some_and(|error| error.is_sqlite_contention());
+                    (
+                        false,
+                        busy,
+                        current,
+                        if busy {
+                            "sqlite-contention"
+                        } else {
+                            "other-error"
+                        },
+                    )
+                }
+                Err(_) => (false, false, generation, "worker-failed"),
+            };
+            schedule.finish(tokio::time::Instant::now(), generation, retry);
+            eprintln!(
+                "st3: projection contention retry {}",
+                json!({
+                    "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
+                    "projection_deferred_after_attempt": still_deferred,
+                    "stop_reason": if schedule.due.is_some() { None } else if recovered {
+                        Some("recovered")
+                    } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
+                })
+            );
+            if recovered {
+                st3::performance::record_wake("projection-contention-retry", None);
+                notify.notify_one();
+                event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+                let _ = fs::write(
+                    state_dir.join("replication.wake"),
+                    format!("{}\n", uuid::Uuid::now_v7()),
+                );
             }
-        },
-    ))
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -18370,28 +18155,15 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
     let result = tokio::task::spawn_blocking(move || -> Result<()> {
         let initial = worker.signature_migration()?;
         let mut phase = initial.phase.clone();
-        if !initial.done() {
-            eprintln!(
-                "st3: signature bootstrap starting (legacy selected={}, available={}): {}",
-                initial.serving_legacy,
-                initial.serving_legacy && initial.legacy_fault.is_none(),
-                initial.progress_description()
-            );
-        }
+        if !initial.done() { eprintln!("st3: signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description()); }
         loop {
             let page_started = std::time::Instant::now();
             let report = worker.advance_signature_migration()?;
             if report.phase != phase {
-                eprintln!(
-                    "st3: signature bootstrap phase {}: {}",
-                    report.phase,
-                    report.progress_description()
-                );
+                eprintln!("st3: signature bootstrap phase {}: {}",report.phase,report.progress_description());
                 phase = report.phase.clone();
             }
-            if let Some(reason) = report.unavailable_reason()
-                && report.fault.is_some()
-            {
+            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
                 anyhow::bail!("{reason}");
             }
             if report.phase == "judging" {
@@ -18403,30 +18175,18 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
             std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
             if worker.signature_migration()?.done() {
                 let complete = worker.signature_migration()?;
-                if !initial.done() {
-                    eprintln!(
-                        "st3: signature candidate authority activated: {}",
-                        complete.progress_description()
-                    );
-                }
+                if !initial.done() { eprintln!("st3: signature candidate authority activated: {}",complete.progress_description()); }
                 loop {
                     let retired_started = std::time::Instant::now();
-                    if !worker.retire_legacy_signature_page()? {
-                        break;
-                    }
-                    std::thread::sleep(
-                        retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK,
-                    );
+                    if !worker.retire_legacy_signature_page()? { break; }
+                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                 }
                 return Ok(());
             }
         }
-    })
-    .await;
+    }).await;
     if !matches!(result, Ok(Ok(()))) {
-        if let Err(error) =
-            store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}"))
-        {
+        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
             eprintln!("st3: signature migration fault could not be persisted: {error:#}");
         }
         eprintln!("st3: signature candidate migration stopped: {result:?}");
@@ -18463,15 +18223,11 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
 async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = page_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::profiled_blocking("maintenance.coordination_counts", || {
-                    page_store.advance_coordination_counts()
-                })
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("maintenance.coordination_counts", || {
+                page_store.advance_coordination_counts()
             })
-            .await;
+        }).await;
         match result {
             Ok(Ok(true)) => return,
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -18592,13 +18348,10 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
             changed.send_replace(());
         }
     });
-    tokio::spawn(st3::task_cpu::account(
-        "maintenance.response_expiry",
-        async move {
-            let _observer = observer;
-            expire_completed_responses(store, receiver).await;
-        },
-    ))
+    tokio::spawn(st3::task_cpu::account("maintenance.response_expiry", async move {
+        let _observer = observer;
+        expire_completed_responses(store, receiver).await;
+    }))
 }
 
 async fn expire_completed_responses(
