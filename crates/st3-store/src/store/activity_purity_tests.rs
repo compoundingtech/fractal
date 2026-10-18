@@ -154,7 +154,7 @@ fn last_activity_uses_numeric_time_and_preserves_historical_frontiers() {
             .connection
             .write()
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE accepted_at_unix_ms='11'",
+                /* sqlite-large-value: allow-for-now lv-hd702d048bc20 owner=st3_store::store::activity_purity_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE accepted_at_unix_ms='11'",
                 [wide.to_string()],
             )
             .unwrap();

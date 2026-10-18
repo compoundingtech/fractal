@@ -162,7 +162,7 @@ impl Store {
         // every agent, run and generation claim the store holds and sorts them.
         let connection = self.readers.get();
         Ok(connection
-            .query_row(AGENT_STATUS_INDEX_QUERY, [snapshot_index], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h69dd4be22526 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ AGENT_STATUS_INDEX_QUERY, [snapshot_index], |row| row.get(0))
             .optional()?
             .unwrap_or_default())
     }
@@ -246,11 +246,18 @@ impl Store {
         faults
     }
 
-    /// An agents WS window inherits the queue deadline from its selected or complete projection.
-    pub fn agent_roster_valid_until(&self, index: u64) -> Option<u128> {
-        self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned").iter().rev()
-            .find(|entry| entry.index == index && !entry.history)
+    /// An agents WS window inherits the queue deadline from its selected or complete projection;
+    /// an exact agent window only from that agent's own projection, never the fleet's.
+    pub fn agent_roster_valid_until(&self, index: u64, agent: Option<&str>) -> Option<u128> {
+        let Some(agent) = agent else {
+            return self.smalltalk.agent_resources_cache.lock()
+                .expect("agent resources cache poisoned").iter().rev()
+                .find(|entry| entry.index == index && !entry.history)
+                .and_then(|entry| entry.valid_until_unix_ms);
+        };
+        self.smalltalk.exact_agent_resources_cache.lock()
+            .expect("exact agent resources cache poisoned").iter().rev()
+            .find(|entry| entry.index == index && !entry.history && exact_agent_entry(entry, agent))
             .and_then(|entry| entry.valid_until_unix_ms)
     }
 
@@ -294,7 +301,7 @@ impl Store {
             return Ok((changed > bound).then(|| "cards changed".to_owned()));
         }
         let connection = self.readers.get();
-        let names = connection.prepare_cached(RANGE_SUBJECTS)?
+        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h47d832d68747 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         let names = if history { names } else {
@@ -465,17 +472,18 @@ impl Store {
 
     /// Queue selection changes at lease expiry even when the claim frontier is unchanged.
     /// Scan only on a cache miss, inside the same SQLite snapshot as the queue projection.
-    pub fn agent_queue_valid_until(&self, now: u128) -> Result<Option<u128>> {
+    pub fn agent_queue_valid_until(&self, now: u128, agent: Option<&str>) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT lease_expires_at_unix_ms FROM step_runs
              WHERE agentless=0 AND status IN ('claimed','working','verifying')
                AND status NOT IN ('completed','failed','cancelled')
+               AND (?1 IS NULL OR assignee=?1 OR lease_owner=?1)
                AND lease_expires_at_unix_ms IS NOT NULL
                AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)",
         )?;
         let mut deadline = None;
-        for row in statement.query_map([], |row| row.get::<_, String>(0))? {
+        for row in statement.query_map([agent], |row| row.get::<_, String>(0))? {
             if let Some(expiry) = row?.parse::<u128>().ok().filter(|expiry| *expiry > now) {
                 deadline = Some(deadline.map_or(expiry, |previous: u128| previous.min(expiry)));
             }
@@ -509,7 +517,7 @@ impl Store {
             Some(previous) if self.agent_page_refs_unchanged(previous.index, index, &previous.items)? => {
                 (previous.items, previous.valid_until_unix_ms)
             }
-            _ => (Arc::new(build()?), self.agent_queue_valid_until(now)?),
+            _ => (Arc::new(build()?), self.agent_queue_valid_until(now, None)?),
         };
         let mut cache = self.smalltalk.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned");
@@ -548,12 +556,39 @@ impl Store {
         self.cached_agent_resources_folding(index, history, Some(selected), true, build)
     }
 
+    /// One agent's card for an exact agent selector. It folds in its own small cache, keyed by
+    /// the agent: it never borrows, narrows or evicts a fleet publication, and a fleet read never
+    /// starts from it. Its deltas and queue deadline read only that agent's inputs.
+    pub fn cached_exact_agent_resources(
+        &self,
+        index: u64,
+        history: bool,
+        agent: &str,
+        build: impl FnOnce(Option<(&BTreeSet<String>, &[Value])>) -> Result<Vec<Value>>,
+    ) -> Result<Vec<Value>> {
+        let selected = BTreeSet::from([agent.to_owned()]);
+        self.fold_agent_resources(index, history, Some(&selected), false, Some(agent), build)
+    }
+
     pub fn cached_agent_resources_folding(
         &self,
         index: u64,
         history: bool,
         selected: Option<&BTreeSet<String>>,
         chunk: bool,
+        build: impl FnOnce(Option<(&BTreeSet<String>, &[Value])>) -> Result<Vec<Value>>,
+    ) -> Result<Vec<Value>> {
+        self.fold_agent_resources(index, history, selected, chunk, None, build)
+    }
+
+    /// `exact` folds one agent's card in the exact-agent cache; `None` folds in the roster cache.
+    fn fold_agent_resources(
+        &self,
+        index: u64,
+        history: bool,
+        selected: Option<&BTreeSet<String>>,
+        chunk: bool,
+        exact: Option<&str>,
         build: impl FnOnce(Option<(&BTreeSet<String>, &[Value])>) -> Result<Vec<Value>>,
     ) -> Result<Vec<Value>> {
         // Cold presentation reads current desired/queue tables even for historical status
@@ -586,9 +621,14 @@ impl Store {
             selected.is_none_or(|names| names.contains(item["id"].as_str().unwrap_or_default()))
         }).cloned().collect::<Vec<_>>();
         let fault_retries = self.agent_roster_fault_retries(history);
-        let cache = self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned");
-        if let Some(entry) = cache.iter().rev().filter(valid)
+        let resources = match exact {
+            Some(_) => &self.smalltalk.exact_agent_resources_cache,
+            None => &self.smalltalk.agent_resources_cache,
+        };
+        // The exact cache holds one entry per agent: only this agent's entries are its rows.
+        let own = |entry: &&runtime::AgentResourcesEntry| exact.is_none_or(|agent| exact_agent_entry(entry, agent));
+        let cache = resources.lock().expect("agent resources cache poisoned");
+        if let Some(entry) = cache.iter().rev().filter(valid).filter(own)
             .find(|entry| entry.index == index && entry.local == local && entry.history == history)
             && agent_resources_entry_hits(entry, now, index, local, history, selected)
             && selected.map_or(fault_retries.is_empty(), |names| names.is_disjoint(&fault_retries)) {
@@ -602,7 +642,7 @@ impl Store {
         }
         // Expired entries are diff sources only, never hits: refreshing their queue metadata
         // is sufficient to discover the cards moved by a deadline without dropping the fleet.
-        let previous = cache.iter()
+        let previous = cache.iter().filter(own)
             .filter(|entry| entry.index <= index && entry.local <= local && entry.history == history)
             .max_by_key(|entry| (entry.index, entry.local)).cloned();
         drop(cache);
@@ -633,7 +673,7 @@ impl Store {
                 if delta.membership {
                     crate::otel::roster_phase("membership", || -> Result<()> {
                     let connection = self.readers.get();
-                    let names = connection.prepare_cached(RANGE_SUBJECTS)?
+                    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h33072374f786 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                         .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
@@ -673,7 +713,7 @@ impl Store {
                     }
                     (Some(covered), None) => {
                         let connection = self.readers.get();
-                        let names = connection.prepare_cached(RANGE_SUBJECTS)?
+                        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h34134c873b67 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                         let names = if history { names } else {
@@ -702,7 +742,7 @@ impl Store {
                         }
                     }
                     queue_metadata = Some(metadata);
-                    self.agent_queue_valid_until(now)?
+                    self.agent_queue_valid_until(now, exact)?
                 } else {
                     previous.valid_until_unix_ms
                 };
@@ -767,24 +807,34 @@ impl Store {
                 crate::otel::roster_attribute("st.roster.publication_cut", index as i64);
                 Ok(runtime::AgentResourcesEntry {
                     index, local, history, covered: selected.cloned(),
-                    valid_until_unix_ms: declaration_restart_valid_until(self.agent_queue_valid_until(now)?, &items, now),
+                    valid_until_unix_ms: declaration_restart_valid_until(self.agent_queue_valid_until(now, exact)?, &items, now),
                     items: Arc::new(items),
                     published_at_unix_ms: now_ms(),
                 })
             }
         }
         })?;
-        let mut cache = self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned");
+        let mut cache = resources.lock().expect("agent resources cache poisoned");
         // All endpoint callers hold admission. Direct internal readers may still race; never
         // replace a complete published projection with a partial one.
-        let published = cache.iter().rev().filter(valid)
+        let published = cache.iter().rev().filter(valid).filter(own)
             .find(|entry| entry.index == index && entry.local == local && entry.history == history)
             .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected)
                 && selected.map_or(fault_retries.is_empty(), |names| names.is_disjoint(&fault_retries)))
             .map(|entry| Arc::clone(&entry.items));
         let complete = entry.covered.is_none();
-        let items = if let Some(published) = published { published } else {
+        let items = if let Some(published) = published { published } else if exact.is_some() {
+            // An agent's newer card replaces its older ones; the least recently folded agent
+            // leaves first. No fleet publication lives here to protect.
+            cache.retain(|old| !(own(&old) && old.history == history
+                && (old.index, old.local) <= (index, local)));
+            let items = Arc::clone(&entry.items);
+            cache.push_back(entry);
+            if cache.len() > EXACT_AGENT_RESOURCES_CACHE {
+                cache.pop_front();
+            }
+            items
+        } else {
             // Fault retries can assemble partial chunks at the publication's exact cut.
             // Keep that complete publication readable until the replacement is complete.
             cache.retain(|old| old.index != index || old.local != local || old.history != history
@@ -822,6 +872,31 @@ impl Store {
         selected: Option<&BTreeSet<String>>,
     ) -> Result<Option<Arc<Vec<Value>>>> {
         Ok(self.agent_resources_published_at(index, history, selected)?.map(|(items, _)| items))
+    }
+
+    /// The warm pin for an exact agent selector: that agent's own card at this graph cut and
+    /// local frontier, from the exact-agent cache only. A fleet publication never answers it.
+    pub fn exact_agent_resources_cached_at(
+        &self,
+        index: u64,
+        history: bool,
+        agent: &str,
+    ) -> Result<Option<Arc<Vec<Value>>>> {
+        if self.agent_roster_fault_retries(history).contains(agent)
+            || index < current_index(&self.readers.get())? {
+            return Ok(None);
+        }
+        let now = now_ms();
+        let local = crate::performance::task("roster/frontier-read", || {
+            roster_local_frontier(&self.readers.get(), index)
+        })?;
+        let selected = BTreeSet::from([agent.to_owned()]);
+        Ok(self.smalltalk.exact_agent_resources_cache.lock()
+            .expect("exact agent resources cache poisoned").iter().rev()
+            .find(|entry| exact_agent_entry(entry, agent)
+                && entry.index == index && entry.local == local && entry.history == history)
+            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, Some(&selected)))
+            .map(|entry| Arc::clone(&entry.items)))
     }
 
     /// The matching warm pin for page refs: membership, ordering and queue metadata for exactly
@@ -1099,7 +1174,7 @@ impl Store {
         loop {
             let connection = self.connection.write_background();
             let removed = connection.execute(
-                "DELETE FROM local_usage_responses WHERE rowid IN (
+                /* sqlite-large-value: allow-for-now lv-h6f30f2bfb800 owner=st3_store::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_usage_responses WHERE rowid IN (
                     SELECT rowid FROM local_usage_responses WHERE observed_at_unix_ms < ?1 LIMIT ?2
                  )",
                 params![older_than_unix_ms.min(i64::MAX as u128) as i64, chunk],
@@ -1160,7 +1235,7 @@ impl Store {
         let mut names = match owner {
             Some(owner) => BTreeSet::from([owner.to_owned()]),
             None => connection
-                .prepare_cached(RUNTIME_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h15df084b217b owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
                 .query_map([index], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
@@ -1224,7 +1299,7 @@ impl Store {
 
     pub fn agent_declaration_revisions(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc4eed90eb9f7 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.id FROM claims WHERE claims.subject=?1 AND claims.kind='intent.desired'
              ORDER BY {CANONICAL_ORDER_DESC}"
         ))?;
@@ -1352,7 +1427,7 @@ impl Store {
     /// generation is no longer current. They must not observe, deliver, or start work.
     pub fn retired_owned_intake_subjects(&self) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(RETIRED_OWNED_INTAKE_SUBJECTS)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc58f8bca0077 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ RETIRED_OWNED_INTAKE_SUBJECTS)?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<BTreeSet<_>, _>>()
@@ -1404,7 +1479,7 @@ impl Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            "DELETE FROM desired
+            /* sqlite-large-value: allow-for-now lv-h4614ccc7d8b8 owner=st3_store::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
              WHERE owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
@@ -1438,7 +1513,7 @@ impl Store {
             return Ok(BTreeMap::new());
         }
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hcc34789d3047 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM json_each(?1) subjects
              CROSS JOIN (
                  SELECT 'harness.todo.observed' AS kind
@@ -1466,6 +1541,17 @@ impl Store {
         Ok(observations)
     }
 
+    /// Suspension ancestry selected at a client snapshot; stopped declarations have none.
+    pub fn suspension_lineage_at(&self, subject: &str, at: Option<u64>) -> Result<Vec<String>> {
+        let connection = self.readers.get();
+        let Some(row) = desired_row_at(&connection, subject, at)?.filter(|row| row.kind == "agent") else {
+            return Ok(Vec::new());
+        };
+        // Replication can deliver a predecessor after its successor; the snapshot walks only the
+        // ancestry it held.
+        desired_lineage_from_at_tx(&connection, row.claim_id, same_declared_launch, at)
+    }
+
     /// Suspension follows all non-launch edits, independently of process retry budgets.
     pub fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
@@ -1475,8 +1561,25 @@ impl Store {
         desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
     }
 
-    pub fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
-        desired_lineage_from_tx(&self.readers.get(), token.to_owned(), same_declared_launch)
+    /// Suspension ancestry from `token`, over the claims accepted at or before `at`.
+    pub fn suspension_lineage_from_at(&self, token: &str, at: Option<u64>) -> Result<Vec<String>> {
+        desired_lineage_from_at_tx(&self.readers.get(), token.to_owned(), same_declared_launch, at)
+    }
+
+    /// The kind of the declaration selected at a client snapshot.
+    pub fn selected_desired_kind_at(&self, subject: &str, at: Option<u64>) -> Result<Option<String>> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        desired_row_at(&connection, subject, at).map(|row| row.map(|row| row.kind))
+    }
+
+    /// `latest_actual_value` at a client snapshot.
+    pub fn latest_actual_value_at(&self, subject: &str, at: Option<u64>) -> Result<Option<Value>> {
+        if at.is_none() {
+            return self.latest_actual_value(subject);
+        }
+        smallclaims::touched::note_read(|| subject.to_owned());
+        latest_actual_at(&self.readers.get(), subject, at)
     }
 
     /// Commit one restored move against the exact declaration its resume request named.
@@ -1498,7 +1601,7 @@ impl Store {
             }
             if current.claim_id != expected { return Err(St3Error::new("stale-fence", "seat declaration changed during transfer")); }
             let latest: String = transaction.query_row(
-                &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                /* sqlite-large-value: allow-for-now lv-h735adf06726c owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                 [subject], |row| row.get(0)).map_err(internal)?;
             if latest != operation { return Err(St3Error::new("stale-fence", "another suspension request replaced this move")); }
             let mut desired: DesiredSubject = serde_json::from_value(current_claim.body.clone()).map_err(internal)?;
@@ -1828,7 +1931,7 @@ impl Store {
                    AND json_extract(body, '$.fields.capability_hash')=?1
                  ORDER BY store_index DESC LIMIT 1",
             )?
-            .query_row([digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h1c6cebdfd830 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
             .optional()?)
     }
 
@@ -1848,7 +1951,7 @@ impl Store {
                    AND json_extract(body, '$.fields.incarnation_id')=?2
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                    AND after_store_index<=?3 ORDER BY id DESC LIMIT 1")?.query_row(
-                params![agent, incarnation, snapshot_index], |row| row.get(0),
+                /* sqlite-large-value: allow-for-now lv-h0089217fcd70 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             if let Some(time) = local {
                 times.push(time.max(0) as u128);
@@ -1860,7 +1963,7 @@ impl Store {
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                    AND store_index<=?3
                  ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1")?.query_row(
-                params![agent, incarnation, snapshot_index], |row| row.get(0),
+                /* sqlite-large-value: allow-for-now lv-ha21e429f8e30 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             times.extend(replicated.and_then(|time| time.parse::<u128>().ok()));
         }
@@ -1872,8 +1975,8 @@ impl Store {
             "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_to_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
         ] {
             let time: Option<String> = connection
-                .prepare_cached(query)?
-                .query_row(params![agent, snapshot_index], |row| row.get(0))
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd00f988e95f2 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ query)?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h81aea6ba2165 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, snapshot_index], |row| row.get(0))
                 .optional()?;
             times.extend(time.and_then(|time| time.parse::<u128>().ok()));
         }
@@ -1909,14 +2012,14 @@ impl Store {
         };
         self.readers
             .get()
-            .prepare_cached(&canonical_sql(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h64da96f27b95 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
                 "SELECT accepted_at_unix_ms, store_index
              FROM claims INDEXED BY claims_incarnation_accepted_index
              WHERE subject=?1 AND {INCARNATION_OF_CLAIM}=?2
              ORDER BY CANONICAL_ASC(claims)
              LIMIT 1"
             )))?
-            .query_row(params![subject, incarnation], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h5853cbd5b306 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![subject, incarnation], |row| {
                 let time: String = row.get(0)?;
                 Ok((time.parse::<u128>().unwrap_or(u128::MAX), row.get(1)?))
             })
@@ -1981,7 +2084,7 @@ impl Store {
     ) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        let id: Option<String> = connection.query_row(&canonical_sql(
+        let id: Option<String> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hbbd95e9e69f8 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id FROM claims INDEXED BY claims_harness_auth_diagnostic_index
              WHERE subject=?1 AND kind='harness.diagnostic'
                AND json_extract(body, '$.fields.incarnation_id')=?2
@@ -2051,6 +2154,20 @@ impl Store {
         current_harness_at(&connection, subject, None)
     }
 
+    /// Incarnation-bound terminal evidence at the same snapshot as the client projection.
+    pub fn terminal_harness_at(
+        &self,
+        subject: &str,
+        at_index: u64,
+    ) -> Result<Option<crate::model::CurrentHarnessView>> {
+        // The ended harness is read from the seat's own claims, so the evaluation that reads
+        // it must be revisited when one arrives.
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        Ok(harness_fold_at(&connection, subject, Some(at_index), true, false, true)?
+            .filter(|harness| harness.state == "ended"))
+    }
+
     /// The seat's harness for the one question the login attention item asks: does it need a
     /// login? A seat that does not returns without the observation fold, which is what a
     /// full `current_harness` costs, so an attention read no longer folds every seat that ever
@@ -2108,6 +2225,14 @@ fn record_roster_counts(changed: usize, covered: usize, refolded: usize) {
     crate::otel::roster_attribute("st.roster.covered", covered as i64);
     crate::otel::roster_attribute("st.roster.refolded", refolded as i64);
     crate::otel::roster_attribute("st.roster.cards", covered as i64);
+}
+
+/// How many agents' exact-selector cards stay folded; each entry holds one card.
+pub(super) const EXACT_AGENT_RESOURCES_CACHE: usize = 64;
+
+/// Whether an exact-agent cache entry holds exactly `agent`'s card.
+fn exact_agent_entry(entry: &runtime::AgentResourcesEntry, agent: &str) -> bool {
+    entry.covered.as_ref().is_some_and(|covered| covered.len() == 1 && covered.contains(agent))
 }
 
 /// The run that one run still waits for: its `after` run, until its `after-run` step completes.

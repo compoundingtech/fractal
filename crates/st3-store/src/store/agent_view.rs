@@ -40,7 +40,7 @@ pub fn definitions() -> Vec<Box<dyn View>> {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-struct Event {
+pub struct Event {
     claim: String,
     subject: String,
     kind: String,
@@ -59,19 +59,19 @@ impl Event {
     }
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
-struct Field {
+pub struct Field {
     rank: Vec<u8>,
     value: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Run {
+pub struct Run {
     first: Option<String>,
     last: Option<String>,
     uniform: bool,
     since: u128,
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
-struct Summary {
+pub struct Summary {
     state: Option<Event>,
     fields: BTreeMap<String, Field>,
     auth: Option<Event>,
@@ -208,7 +208,7 @@ impl Summary {
 // Composition is associative; heartbeats explicitly excluded by the canonical oracle
 // are identities. Source pointers are local row IDs, never canonical winner ranks.
 #[derive(Clone)]
-struct Machine(Vec<(u16, u64)>);
+pub struct Machine(Vec<(u16, u64)>);
 impl Default for Machine {
     fn default() -> Self {
         Self((0..MACHINE_STATES).map(|s| (s as u16, 0)).collect())
@@ -425,8 +425,8 @@ impl View for AgentView {
         }
     }
     fn create_schema(&self, connection: &Connection) -> Result<()> {
-        connection.execute_batch(ordered::SCHEMA)?;
-        connection.execute_batch("CREATE TABLE IF NOT EXISTS local_agent_harness_rows(subject TEXT PRIMARY KEY, observed TEXT);")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h03a9086f9f9c owner=st3_store::store::agent_view TODO=trace-statement-and-value-representation */ ordered::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h750995aab32e owner=st3_store::store::agent_view TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_agent_harness_rows(subject TEXT PRIMARY KEY, observed TEXT);")?;
         Ok(())
     }
     fn affected_keys(
@@ -505,7 +505,7 @@ impl View for AgentView {
             .optional()?;
         let changed = old.as_deref() != Some(&next);
         if changed {
-            transaction.execute("INSERT INTO local_agent_harness_rows VALUES(?1,?2) ON CONFLICT(subject) DO UPDATE SET observed=excluded.observed",params![key,next])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h050679df3f91 owner=st3_store::store::agent_view TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_agent_harness_rows VALUES(?1,?2) ON CONFLICT(subject) DO UPDATE SET observed=excluded.observed",params![key,next])?;
         }
         Ok(Some(changed))
     }
@@ -762,7 +762,7 @@ mod tests {
     use crate::store::tests::{exchange_from, exchange_of, receive_and_project};
     use smallclaims::ivm::{Readiness, SourceCut, Views};
     struct Fixture {
-        store: Store,
+        pub store: Store,
         views: Views,
     }
     impl Fixture {

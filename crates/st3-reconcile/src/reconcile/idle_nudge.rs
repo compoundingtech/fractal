@@ -23,6 +23,7 @@
 //! polls.
 use super::waits::{Wait, WaitAction, describe_age, step_waits};
 use super::*;
+use crate::IdleHoldsStore;
 use crate::store::WORK_NUDGED_KIND;
 use serde_json::json;
 

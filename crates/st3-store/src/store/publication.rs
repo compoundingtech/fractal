@@ -37,9 +37,9 @@ pub fn launched_member(
            AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} ORDER BY facts.sort_key DESC LIMIT 1"
     );
     let shared: Option<(u64, String)> = connection
-        .prepare_cached(&query)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4ff7aca2196e owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ &query)?
         .query_row(
-            params![subject, origin, incarnation, at.min(i64::MAX as u64)],
+            /* sqlite-large-value: allow-for-now lv-hdcc1bda2b61b owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![subject, origin, incarnation, at.min(i64::MAX as u64)],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -56,7 +56,7 @@ pub fn launched_member(
                  ORDER BY facts.observation_id DESC LIMIT 1",
             )?
             .query_row(
-                params![subject, incarnation, at.min(i64::MAX as u64)],
+                /* sqlite-large-value: allow-for-now lv-h0bab41f6da05 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![subject, incarnation, at.min(i64::MAX as u64)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
@@ -78,9 +78,9 @@ pub fn launched_member(
     else {
         return Ok(None);
     };
-    let body: Option<String> = connection.prepare_cached(&format!(
+    let body: Option<String> = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9216952901e2 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ &format!(
         "SELECT body FROM claims WHERE id=?1 AND subject=?2 AND kind='intent.desired' AND {UNREPAIRED_CLAIM}"
-    ))?.query_row(params![token,subject], |row| row.get(0)).optional()?;
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-he8f2102e6081 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![token,subject], |row| row.get(0)).optional()?;
     Ok(body
         .and_then(|body| serde_json::from_str::<DesiredSubject>(&body).ok())
         .and_then(|desired| desired.member))
@@ -104,7 +104,7 @@ pub fn check(
     // Seek the next origin prefix instead of DISTINCT's walk over every historical row.
     // One runtime per origin prevents a stopped peer from hiding a running incarnation.
     let mut origins = connection.prepare_cached(
-        "WITH RECURSIVE origins(origin) AS (
+        /* sqlite-large-value: allow-for-now lv-h8b6d1cbccbd1 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ "WITH RECURSIVE origins(origin) AS (
             SELECT MIN(origin) FROM local_publication_claims
                 INDEXED BY local_publication_runtime_lookup
                 WHERE subject=?1 AND kind='runtime.observed'
@@ -132,9 +132,9 @@ pub fn check(
     };
     for origin in origins {
         let body: Option<String> = connection
-            .prepare_cached(&query)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6420933834b6 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ &query)?
             .query_row(
-                params![proposed.subject, origin, at.min(i64::MAX as u64)],
+                /* sqlite-large-value: allow-for-now lv-h4d01c55c44c5 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![proposed.subject, origin, at.min(i64::MAX as u64)],
                 |row| row.get(0),
             )
             .optional()?;
@@ -178,27 +178,6 @@ pub fn check(
 }
 
 impl Store {
-    pub fn publication_cache_epoch(&self) -> Option<(i64, bool)> {
-        *self
-            .smalltalk
-            .publication_cache_epoch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    pub fn publication_evidence_epoch(&self, subject: &str) -> Result<(u64, i64, bool)> {
-        smallclaims::touched::note_read(|| subject.to_owned());
-        Ok(self
-            .readers
-            .get()
-            .prepare_cached(
-                "SELECT (SELECT COALESCE(MAX(store_index),0) FROM claims WHERE subject=?1),
-                    (SELECT COALESCE(MAX(id),0) FROM local_observations WHERE subject=?1),
-                    (SELECT phase=3 FROM local_publication_bootstrap WHERE singleton=1)
-                        AND NOT EXISTS(SELECT 1 FROM local_publication_pending)",
-            )?
-            .query_row([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?)
-    }
     pub fn publication_action(
         &self,
         proposed: &DesiredSubject,
@@ -237,77 +216,18 @@ impl Store {
             reason,
         }))
     }
-    pub fn publication_launch(
-        &self,
-        subject: &str,
-        incarnation: &str,
-    ) -> Result<Option<MemberSpec>> {
-        launched_member(
-            &self.readers.get(),
-            subject,
-            &self.origin,
-            incarnation,
-            i64::MAX as u64,
-            &self.origin,
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::publication_tests_shared::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::publication_tests_shared::{declaration, observe, publish};
+use super::*;
     use crate::graph::parse_intent;
-
-    fn declaration(command: &str) -> NormalizedIntent {
-        parse_intent(&format!("version 2\nagent \"example/worker\" {{ workspace \"/tmp\"; command \"{command}\"; }}"), "node").unwrap()
-    }
-
-    fn publish(store: &Store, intent: &NormalizedIntent, key: &str) -> ApplyResponse {
-        let preview = store
-            .mission(
-                intent,
-                IntentInput {
-                    kdl: String::new(),
-                    source_name: None,
-                },
-            )
-            .unwrap();
-        store.apply(intent, &preview.subject_tokens, key).unwrap()
-    }
-
-    fn observe(store: &Store, incarnation: &str, token: Option<&str>) {
-        if let Some(token) = token {
-            store
-                .append_claim(&ClaimInput {
-                    subject: "agent/example/worker".into(),
-                    kind: "runtime.action.succeeded".into(),
-                    actor: None,
-                    fields: BTreeMap::from([
-                        ("action".into(), json!("start")),
-                        ("incarnation_id".into(), json!(incarnation)),
-                        ("desired_token".into(), json!(token)),
-                    ]),
-                    evidence: vec![],
-                    expected_subject: None,
-                    idempotency_key: None,
-                })
-                .unwrap();
-        }
-        store
-            .append_claim(&ClaimInput {
-                subject: "agent/example/worker".into(),
-                kind: "runtime.observed".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("status".into(), json!("running")),
-                    ("incarnation_id".into(), json!(incarnation)),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-    }
 
     #[test]
     fn publication_check_uses_launch_not_selected_declaration() {
@@ -443,142 +363,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn publication_check_stopped_origin_cannot_hide_another_origins_running_seat() {
-        let local = Store::open_memory("node").unwrap();
-        let peer = Store::open_memory("peer").unwrap();
-        let original = declaration("true");
-        let applied = publish(&peer, &original, "peer-original");
-        peer.append_claim(&ClaimInput {
-            subject: "agent/example/worker".into(),
-            kind: "runtime.action.succeeded".into(),
-            actor: Some("agent/example/writer".into()),
-            fields: BTreeMap::from([
-                ("action".into(), json!("start")),
-                ("incarnation_id".into(), json!("peer-inc")),
-                (
-                    "desired_token".into(),
-                    json!(applied.subject_tokens["agent/example/worker"][0]),
-                ),
-            ]),
-            evidence: vec![],
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
-        peer.append_claim(&ClaimInput {
-            subject: "agent/example/worker".into(),
-            kind: "runtime.observed".into(),
-            actor: None,
-            fields: BTreeMap::from([
-                ("status".into(), json!("running")),
-                ("incarnation_id".into(), json!("peer-inc")),
-            ]),
-            evidence: vec![],
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
-        local
-            .import_replication("peer", &peer.export_replication(0).unwrap())
-            .unwrap();
-        local
-            .append_claim(&ClaimInput {
-                subject: "agent/example/worker".into(),
-                kind: "runtime.observed".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("status".into(), json!("stopped")),
-                    ("incarnation_id".into(), json!("node-inc")),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        while !local.advance_publication_evidence().unwrap() {}
-        let proposed = declaration("false");
-        let judgment = check(
-            &local.readers.get(),
-            &proposed.subjects["agent/example/worker"],
-            u64::MAX,
-            "node",
-        )
-        .unwrap();
-        assert!(matches!(judgment.interruption, Interruption::Restart(_)));
-        assert_eq!(judgment.incarnation.as_deref(), Some("peer-inc"));
-    }
-
-    #[test]
-    #[ignore = "process-wide SQL counters: run alone with --exact --ignored --test-threads=1"]
-    fn publication_check_cost_is_independent_of_unrelated_and_old_incarnation_history() {
-        use smallclaims::sqlite::work;
-        let measure = |count: u64| {
-            let store = Store::open_memory("node").unwrap();
-            let intent = declaration("true");
-            let applied = publish(&store, &intent, "original");
-            observe(
-                &store,
-                "current",
-                Some(&applied.subject_tokens["agent/example/worker"][0]),
-            );
-            let mut connection = store.connection.write();
-            let tx = connection.transaction().unwrap();
-            tx.execute(
-                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
-                VALUES ('noise-batch','node',100000,'synthetic','1')",
-                [],
-            )
-            .unwrap();
-            for index in 0..count {
-                let (subject, kind, body) = match index % 3 {
-                    0 => (
-                        "agent/unrelated",
-                        "harness.observed",
-                        json!({"fields":{"state":"idle"}}),
-                    ),
-                    1 => (
-                        "agent/example/worker",
-                        "runtime.observed",
-                        json!({"fields":{"status":"running","incarnation_id":"old"}}),
-                    ),
-                    _ => (
-                        "agent/example/worker",
-                        "runtime.action.succeeded",
-                        json!({"fields":{"action":"start","incarnation_id":"old","desired_token":"missing"}}),
-                    ),
-                };
-                tx.execute("INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
-                    VALUES (?1,?2,'noise-batch',?3,?4,'node',?5,'[]','1')",
-                    params![100000 + index, format!("noise-{index}"), subject, kind, body.to_string()]).unwrap();
-            }
-            tx.commit().unwrap();
-            drop(connection);
-            while !store.advance_publication_evidence().unwrap() {}
-            let connection = store.readers.get();
-            let before = work::total();
-            let started = std::time::Instant::now();
-            let result = check(
-                &connection,
-                &intent.subjects["agent/example/worker"],
-                u64::MAX,
-                "node",
-            )
-            .unwrap();
-            let elapsed = started.elapsed();
-            let cost = work::total() - before;
-            assert_eq!(result.interruption, Interruption::None);
-            assert_eq!(result.incarnation.as_deref(), Some("current"));
-            println!("publication check history={count}: {cost:?}, elapsed={elapsed:?}");
-            assert!(elapsed < std::time::Duration::from_millis(100));
-            cost
-        };
-        let small = measure(1000);
-        let large = measure(10000);
-        assert!(
-            small.vm_steps > 0 && large.vm_steps <= small.vm_steps + 100,
-            "small={small:?}, large={large:?}"
-        );
-        assert_eq!(large.fullscan_steps, 0);
-    }
 }

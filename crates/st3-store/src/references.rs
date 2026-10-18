@@ -124,7 +124,7 @@ fn runs<'a>(missions: &[&'a MissionSpec]) -> Vec<Vec<&'a MissionSpec>> {
     runs
 }
 
-struct Scope<'a> {
+pub struct Scope<'a> {
     /// The subjects the missions' own declarations create in a run, under [`PROOF_RUN`].
     run: BTreeSet<String>,
     /// The publication being checked, whose subjects and missions resolve references too.

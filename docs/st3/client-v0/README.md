@@ -499,8 +499,14 @@ The optional `agent_messages` field adds a **daily estimate**, also shown by `st
 the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
 Receipts and duplicate send claims add no messages. Bodies are never classified. Counts are
-maintained in the writer transaction and backfilled once on upgrade. Full UTC days use daily
-recipient counters; the first and last partial days use an indexed send-time range.
+backfilled atomically on the first usage-estimate request after upgrade, not during daemon
+startup. That first request can take longer; it never returns partially backfilled counts.
+Until then, daily counters are not maintained; the first request rebuilds them from every
+retained send. Once initialized, counts are maintained in each writer transaction. Full UTC
+days use daily recipient counters; the first and last partial days use an indexed send-time
+range.
+An estimate inside an already-pinned read snapshot with an uninitialized cache folds that
+snapshot's retained sends directly instead of writing or observing a later commit.
 
 `AgentMessageEstimate.days` contains at most the latest 31 UTC calendar days intersecting the
 period, including zero-message days. Each row names `day_start_ms`, the clipped `since_ms` and
@@ -1640,8 +1646,16 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `forbidden`, `unsupported-capability`, `validation-failed`, `idempotency-conflict`, `stale-fence`,
 `cursor-gap`, `page-cursor-expired`, `projection-detail-too-large`,
 `projection-detail-invalid-source`, `rate-limited`, `runtime-not-local`,
-`runtime-authority-indeterminate`, `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
+`runtime-authority-indeterminate`, `runtime-list-not-ready`, `runtime-list-ended`,
+`remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
 `response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
+
+Current runtime lists return HTTP 503 `runtime-list-not-ready` with `retryable: true`
+until their first complete publication. `runtime-list-ended` is HTTP 503 with
+`retryable: false` and requires daemon restart. Both codes are typed in the generated clients.
+An embedded `api::router` owns routes, not daemon background tasks: its owner calls
+`start_published_lists` before serving and can await `wait_published_lists_at_least` for a
+seeded store cut. A bare router refuses unpublished runtime reads rather than folding on demand.
 
 Revoking a pairing from a non-issuer returns HTTP 409 with `code: issuer-required`,
 `retryable: false`, and `details.issuer_host_id` naming the authoritative issuer.
@@ -1900,7 +1914,20 @@ An optional `subject: ArrangementId` selects only that arrangement (zero or one 
 `has_more: false`), so a selected Sidebar cannot fall outside a busy owner's byte/count
 window. Its owner must equal `person`; mismatches are refused. Snapshots, upserts and
 retirement removals retain the ordinary collection semantics. Omitting the filter
-keeps owner-wide prefix windows unchanged.
+keeps owner-wide prefix windows and additionally invalidates the complete owner
+inventory: a changed owner revision sends an existing `changes` frame even if
+`upserts` and `removes` are empty and `order`/`has_more` are unchanged. Its `snapshot`
+names the same read snapshot as that revision and prefix. Create, rename, retire,
+layout edits and replicated materialization are covered, including older admitted claims
+projected after newer local edits. Owner-local counters commit with those projection
+writes; replay/rebuild advances touched owners. Other owners and unrelated routine
+global commits do not send inventory notices. Revisions are compared for inequality,
+so a database reset can cause one extra notice. A notice can retain the previous
+snapshot ID/index when projection changes without a new claim; never discard it on
+that basis. Clients needing complete discovery paginate
+the HTTP list after the initial snapshot and every owner-wide changes frame, including
+empty ones, rather than inferring absence from the prefix. See
+[current collection subscriptions](collections.md) for the exact contract.
 Arrangement list and stream windows also fit a byte budget: the 1,048,576-byte response
 ceiling reserves 128,000 bytes for the envelope. A byte-shortened window sets `has_more`
 and retains full resources, not truncated registers or placements. A replicated full

@@ -163,7 +163,7 @@ impl Operator for DelegatingOperator {
         let probe = self.cell.probe.load(Ordering::Relaxed);
         let result = if probe {
             tx.execute(
-                "INSERT INTO test_terminal_operator_probe(payload) VALUES(zeroblob(65536))",
+                /* sqlite-large-value: allow-for-now lv-h4e0b2b8e8342 owner=st3_store::store::terminal_gate_evidence::native_source::transaction_hooks::operator_error TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_operator_probe(payload) VALUES(zeroblob(65536))",
                 [],
             )
             .map(|_| false)

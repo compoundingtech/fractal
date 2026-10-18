@@ -11,7 +11,7 @@ fn recently_ended_mission_valid_until(
     now: u128,
 ) -> Result<Option<u128>> {
     let mut statement = connection.prepare(
-        "WITH latest AS (
+        /* sqlite-large-value: allow-for-now lv-hf0fc4fe0767b owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ "WITH latest AS (
             SELECT mission_id,status,updated_at_unix_ms,ROW_NUMBER() OVER (
                 PARTITION BY mission_id ORDER BY created_at_unix_ms DESC,id DESC
             ) AS position FROM mission_runs
@@ -91,7 +91,7 @@ impl Store {
                 let subject = format!("mission-run/{id}");
                 let reason: Option<String> = connection
                     .query_row(
-                        &canonical_sql("SELECT COALESCE(json_extract(body,'$.fields.reason'),
+                        /* sqlite-large-value: allow-for-now lv-hb7f1fd7bd939 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT COALESCE(json_extract(body,'$.fields.reason'),
                                      json_extract(body,'$.fields.summary'))
                      FROM claims WHERE subject=?1 AND kind='mission-run.state'
                        AND COALESCE(json_extract(body,'$.fields.reason'),json_extract(body,'$.fields.summary')) IS NOT NULL
@@ -195,7 +195,7 @@ impl Store {
             WHERE mission_id IN (SELECT CASE WHEN value LIKE 'mission/%'
                 THEN substr(value,9) ELSE value END FROM json_each(?1))
         )";
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd95aac5f4b8b owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &format!(
             "{newest}, preview AS (
                 SELECT s.*,ROW_NUMBER() OVER (
                     PARTITION BY s.run_id ORDER BY s.created_at_unix_ms,s.step_path
@@ -240,7 +240,7 @@ impl Store {
 
         // Decimal-text comparison preserves the full u128 clock range, unlike SQLite's
         // signed INTEGER cast. Only person_work::current consults acceptance time here.
-        let mut statement = connection.prepare(&canonical_sql(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfd8255e31968 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "{newest}
              SELECT claims.id,claims.store_index,claims.batch_id,claims.subject,claims.kind,
                     claims.origin,claims.actor,claims.body,claims.predecessors,claims.accepted_at_unix_ms
@@ -257,7 +257,7 @@ impl Store {
         if asks.is_empty() {
             return Ok(until);
         }
-        let mut statement = connection.prepare(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8c5f7a3ac315 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &format!(
             "{newest} SELECT id FROM newest WHERE position<=3"
         ))?;
         let runs = statement
@@ -349,7 +349,7 @@ impl Store {
                AND (?5 IS NULL OR c.actor=?5 OR s.assignee=?5 OR s.lease_owner=?5)
              ORDER BY c.store_index DESC LIMIT ?6"
         );
-        let mut statement = connection.prepare(&sql)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h839ea7f2c066 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &sql)?;
         let rows = statement.query_map(
             params![
                 before.min(i64::MAX as u64),
@@ -431,7 +431,7 @@ impl Store {
             .unwrap();
         let at = now_ms().to_string();
         transaction.execute(
-            "WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<249999)
+            /* sqlite-large-value: allow-for-now lv-hf1fbdecd0144 owner=st3_store::store::operations TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<249999)
              INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
              SELECT 'fixture-heartbeat-' || n,?1,'agent/example/observer','harness.observed',
                     'fixture',?2,'[]',?3 FROM seq",
@@ -446,12 +446,12 @@ impl Store {
             } else {
                 "terminal"
             };
-            transaction.execute("INSERT INTO mission_runs SELECT ?1,mission_id,initial_revision,?2,root_revision,?1,NULL,workspace,requester,inputs,mode,?3,?4,?5,?5 FROM mission_runs WHERE id=?6",
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h2e8903702e77 owner=st3_store::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs SELECT ?1,mission_id,initial_revision,?2,root_revision,?1,NULL,workspace,requester,inputs,mode,?3,?4,?5,?5 FROM mission_runs WHERE id=?6",
                 params![id,generation,status,phase,at,run.id]).unwrap();
-            transaction.execute("INSERT INTO run_generations SELECT ?1,?2,revision,NULL,?3,actor,reason,?4,?4 FROM run_generations WHERE id=?5",
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h6596c88a31f3 owner=st3_store::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations SELECT ?1,?2,revision,NULL,?3,actor,reason,?4,?4 FROM run_generations WHERE id=?5",
                 params![generation,id,status,at,run.generation.trim_start_matches("run-generation/")]).unwrap();
             let step = format!("step-run/{generation}/build");
-            transaction.execute("INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms)
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hd98fd742283a owner=st3_store::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms)
                 SELECT ?1,?2,?3,step_path,definition_hash,?4,attempt,'agent/example/builder',available_to,agentless,title,goals,?5,?5 FROM step_runs WHERE subject=?6",
                 params![step,id,generation,status,at,run.steps[0].subject]).unwrap();
             let reason = if i % 8 == 2 {
@@ -463,7 +463,7 @@ impl Store {
                 (format!("mission-run/{id}"), "mission-run.state"),
                 (step, "step-run.state"),
             ] {
-                transaction.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?2,?3,?4,'fixture',?5,'[]',?6)",
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hb50dc455ead3 owner=st3_store::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?2,?3,?4,'fixture',?5,'[]',?6)",
                     params![format!("fixture-{kind}-{i}"),batch,subject,kind,json!({"fields":{"status":status,"phase":phase,"reason":reason}}).to_string(),at]).unwrap();
             }
         }

@@ -218,7 +218,7 @@ impl Store {
         let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
         let mut statement = connection.prepare(
-            "WITH ids AS (
+            /* sqlite-large-value: allow-for-now lv-h9ce2460afeb1 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH ids AS (
                 SELECT mission_id FROM mission_definitions
                 UNION SELECT mission_id FROM mission_runs
              ), run_states AS (
@@ -294,7 +294,7 @@ impl Store {
              JOIN claims c ON c.id=d.claim_id WHERE d.mission_id IN ({placeholders})"
         );
         let bare = ids.iter().map(|id| id.trim_start_matches("mission/"));
-        let mut statement = connection.prepare(&sql)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he8c8a96f10dc owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?;
         statement
             .query_map(rusqlite::params_from_iter(bare), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -326,7 +326,7 @@ impl Store {
         let connection = self.connection.write();
         connection
             .execute(
-                "INSERT OR IGNORE INTO planning_sessions(id, mission_id, request_ref, workspace, requester, planner, planner_spec_json, status, target_run_id, source_generation_id, created_at_unix_ms, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hd6bf7819b302 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO planning_sessions(id, mission_id, request_ref, workspace, requester, planner, planner_spec_json, status, target_run_id, source_generation_id, created_at_unix_ms, updated_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'planning', ?8, ?9, ?10, ?10)",
                 params![id, mission, request_ref, workspace, requester, planner, serde_json::to_string(planner_config).map_err(internal)?, target_run.map(|run| run.strip_prefix("mission-run/").unwrap_or(run)), source_generation.map(generation_id_from_subject), now],
             )
@@ -456,20 +456,20 @@ impl Store {
         let now = now_ms().to_string();
         transaction
             .execute(
-                "INSERT INTO planning_candidates(session_id, variant, revision, markdown_ref, kdl_ref, mission_revision, submitted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-ha0683531a60e owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO planning_candidates(session_id, variant, revision, markdown_ref, kdl_ref, mission_revision, submitted_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![id, variant, revision, markdown_ref, kdl_ref, mission_revision, now],
             )
             .map_err(internal)?;
         transaction
             .execute(
-                "DELETE FROM planning_previews WHERE session_id=?1 AND variant=?2",
+                /* sqlite-large-value: allow-for-now lv-h235320a61d1a owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1 AND variant=?2",
                 params![id, variant],
             )
             .map_err(internal)?;
         transaction
             .execute(
-                "UPDATE planning_sessions SET status='review', updated_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-hf896c4912fb5 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE planning_sessions SET status='review', updated_at_unix_ms=?2 WHERE id=?1",
                 params![id, now],
             )
             .map_err(internal)?;
@@ -496,7 +496,7 @@ impl Store {
         let connection = self.connection.write();
         connection
             .execute(
-                "INSERT INTO planning_previews(session_id, variant, candidate_revision, hash, store_index, graph, diff, mission_response, created_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h6dbec63f9b68 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO planning_previews(session_id, variant, candidate_revision, hash, store_index, graph, diff, mission_response, created_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(session_id, variant) DO UPDATE SET candidate_revision=excluded.candidate_revision, hash=excluded.hash,
                    store_index=excluded.store_index, graph=excluded.graph, diff=excluded.diff,
@@ -593,13 +593,13 @@ impl Store {
         }
         connection
             .execute(
-                "UPDATE planning_sessions SET status=?2, published_revision=?3, updated_at_unix_ms=?4 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h73a375b08fe5 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE planning_sessions SET status=?2, published_revision=?3, updated_at_unix_ms=?4 WHERE id=?1",
                 params![id, status, published_revision, now_ms().to_string()],
             )
             .map_err(internal)?;
         if status == "revision-requested" {
             connection
-                .execute("DELETE FROM planning_previews WHERE session_id=?1", [id])
+                .execute(/* sqlite-large-value: allow-for-now lv-h000bbb3da098 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM planning_previews WHERE session_id=?1", [id])
                 .map_err(internal)?;
         }
         planning_session_view_tx(&connection, id)
@@ -869,7 +869,7 @@ impl Store {
         let now = now_ms();
         transaction
             .execute(
-                "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hf473e6b602b5 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', 'normal', ?12, ?12)",
                 params![run_id, mission.id, mission.revision, generation_id, root_revision, root_run_id, parent_step_run, request.workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, now.to_string()],
             )
@@ -878,7 +878,7 @@ impl Store {
             insert_mission_deadline_tx(&transaction, &run_id, mission.timeout_ms, Some(now))?;
         transaction
             .execute(
-                "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h034c707c5f4c owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
                  VALUES (?1, ?2, ?3, NULL, 'running', ?4, 'initial mission run', ?5, ?5)",
                 params![generation_id, run_id, mission.revision, requester, now.to_string()],
             )
@@ -913,7 +913,7 @@ impl Store {
             let constraints = interpolate_goals(&constraints, &step_variables)?;
             transaction
                 .execute(
-                    "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, created_at_unix_ms, updated_at_unix_ms, constraints)
+                    /* sqlite-large-value: allow-for-now lv-ha40aca118e21 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, created_at_unix_ms, updated_at_unix_ms, constraints)
                      VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 1, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)",
                     params![step_subject, run_id, generation_id, step.path, step.definition_hash, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, now.to_string(), constraints],
                 )
@@ -971,7 +971,7 @@ impl Store {
         let view = mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-hc53874ccccbd owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(&request.idempotency_key),
                     serde_json::to_string(&view).map_err(internal)?
@@ -980,7 +980,7 @@ impl Store {
             .map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO mission_run_requests(operation_id, request_hash) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h81dad04cbe21 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_requests(operation_id, request_hash) VALUES (?1, ?2)",
                 params![opaque_cache_key(&request.idempotency_key), request_hash],
             )
             .map_err(internal)?;
@@ -1091,7 +1091,7 @@ impl Store {
                 };
                 transaction
                     .execute(
-                        "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                        /* sqlite-large-value: allow-for-now lv-h64459c808d57 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                         params![
                             opaque_cache_key(idempotency_key),
                             serde_json::to_string(&output).map_err(internal)?
@@ -1278,7 +1278,7 @@ impl Store {
         let connection = self.readers.get();
         let id = connection
             .query_row(
-                &canonical_sql(
+                /* sqlite-large-value: allow-for-now lv-h7b1cbf285f54 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
                     "SELECT p.id FROM revision_proposals p
                  JOIN mission_runs r ON r.id=p.run_id
                      JOIN claims created ON created.subject='revision-proposal/' || p.id
@@ -1421,7 +1421,7 @@ impl Store {
         let transaction = connection.transaction().map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO revision_proposals(id, run_id, source_generation_id, candidate_revision, actor, reason, status, cutover, compatible_steps, reviewers, approvals, preview_hash, created_at_unix_ms, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hed8694e71b3b owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO revision_proposals(id, run_id, source_generation_id, candidate_revision, actor, reason, status, cutover, compatible_steps, reviewers, approvals, preview_hash, created_at_unix_ms, updated_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '[]', ?11, ?12, ?12)",
                 params![
                     proposal_id,
@@ -1442,7 +1442,7 @@ impl Store {
         if status == "draining" {
             transaction
                 .execute(
-                    "UPDATE mission_runs SET phase='revision-draining', updated_at_unix_ms=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-hb3dff7211bed owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining', updated_at_unix_ms=?2 WHERE id=?1",
                     params![run_id, now.to_string()],
                 )
                 .map_err(internal)?;
@@ -1473,7 +1473,7 @@ impl Store {
         if status == "draining" {
             transaction
                 .execute(
-                    "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h8f8488b876f7 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
                     params![run_id, record.accepted_at_unix_ms.to_string()],
                 )
                 .map_err(internal)?;
@@ -1482,7 +1482,7 @@ impl Store {
         let view = revision_proposal_view_tx(&transaction, &proposal_id).map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-hf238293ba74a owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&view).map_err(internal)?
@@ -1538,7 +1538,7 @@ impl Store {
             };
             transaction
                 .execute(
-                    "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                    /* sqlite-large-value: allow-for-now lv-h0dd25acf34a1 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                     params![
                         opaque_cache_key(idempotency_key),
                         serde_json::to_string(&response).map_err(internal)?
@@ -1598,7 +1598,7 @@ impl Store {
         let now = now_ms();
         transaction
             .execute(
-                "UPDATE revision_proposals SET approvals=?2, status=?3, updated_at_unix_ms=?4 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h1babada8a5aa owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE revision_proposals SET approvals=?2, status=?3, updated_at_unix_ms=?4 WHERE id=?1",
                 params![
                     proposal_id,
                     serde_json::to_string(&proposal.approvals).map_err(internal)?,
@@ -1610,7 +1610,7 @@ impl Store {
         if status == "draining" {
             transaction
                 .execute(
-                    "UPDATE mission_runs SET phase='revision-draining', updated_at_unix_ms=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h346ec21814d9 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining', updated_at_unix_ms=?2 WHERE id=?1",
                     params![proposal.run.strip_prefix("mission-run/").unwrap_or(&proposal.run), now.to_string()],
                 )
                 .map_err(internal)?;
@@ -1630,7 +1630,7 @@ impl Store {
         if status == "draining" {
             transaction
                 .execute(
-                    "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h21e469bba28c owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
                     params![
                         proposal
                             .run
@@ -1664,7 +1664,7 @@ impl Store {
             let connection = self.connection.write();
             connection
                 .execute(
-                    "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                    /* sqlite-large-value: allow-for-now lv-hf0d05e73a3ab owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                     params![
                         opaque_cache_key(idempotency_key),
                         serde_json::to_string(&response).map_err(internal)?
@@ -1693,7 +1693,7 @@ impl Store {
         let connection = self.connection.write();
         connection
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h28a627d89b38 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&response).map_err(internal)?
@@ -1755,13 +1755,13 @@ impl Store {
         let now = now_ms();
         transaction
             .execute(
-                "UPDATE revision_proposals SET status='cancelled', updated_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-he19eb8b3f5df owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE revision_proposals SET status='cancelled', updated_at_unix_ms=?2 WHERE id=?1",
                 params![proposal_id, now.to_string()],
             )
             .map_err(internal)?;
         let phase_changed = transaction
             .execute(
-                "UPDATE mission_runs SET phase='normal', updated_at_unix_ms=?2 WHERE id=?1 AND phase='revision-draining'",
+                /* sqlite-large-value: allow-for-now lv-he1c0ea9031b0 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='normal', updated_at_unix_ms=?2 WHERE id=?1 AND phase='revision-draining'",
                 params![run_id, now.to_string()],
             )
             .map_err(internal)?;
@@ -1780,7 +1780,7 @@ impl Store {
         if phase_changed > 0 {
             transaction
                 .execute(
-                    "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h79272fc1fc31 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
                     params![run_id, record.accepted_at_unix_ms.to_string()],
                 )
                 .map_err(internal)?;
@@ -1789,7 +1789,7 @@ impl Store {
         let view = revision_proposal_view_tx(&transaction, proposal_id).map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h40307158d481 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&view).map_err(internal)?
@@ -2082,7 +2082,7 @@ impl Store {
         let view = mission_run_view_tx(&transaction, &current.id).map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id,response) VALUES(?1,?2)",
+                /* sqlite-large-value: allow-for-now lv-h27ef7a62367c owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response) VALUES(?1,?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&view).map_err(internal)?
@@ -2176,13 +2176,13 @@ impl Store {
         let generation = generation_id_from_subject(&current.generation).to_owned();
         transaction
             .execute(
-                "UPDATE mission_runs SET status=?2, updated_at_unix_ms=?3 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h96d098e1928c owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2, updated_at_unix_ms=?3 WHERE id=?1",
                 params![run_id, status, now.to_string()],
             )
             .map_err(internal)?;
         transaction
             .execute(
-                "UPDATE run_generations SET status=?2, updated_at_unix_ms=?3 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h8a93e71145ba owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET status=?2, updated_at_unix_ms=?3 WHERE id=?1",
                 params![generation, status, now.to_string()],
             )
             .map_err(internal)?;
@@ -2219,7 +2219,7 @@ impl Store {
         let view = mission_run_view_tx(&transaction, run_id).map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h18caeb95adc4 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&view).map_err(internal)?
@@ -2371,7 +2371,7 @@ impl Store {
         };
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h0481904beef9 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&view).map_err(internal)?
@@ -2457,20 +2457,20 @@ impl Store {
         .map_err(internal)?;
         transaction
             .execute(
-                "INSERT OR IGNORE INTO mission_revisions(mission_id, revision, state, body, claim_id, created_index) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                /* sqlite-large-value: allow-for-now lv-h87bc8058e505 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id, revision, state, body, claim_id, created_index) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![retired.id, retired.revision, mission_state_name(&retired.state), serde_json::to_string(&retired).map_err(internal)?, claim.id, claim.store_index],
             )
             .map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO mission_definitions(mission_id, revision, state, claim_id) VALUES (?1, ?2, ?3, ?4)
+                /* sqlite-large-value: allow-for-now lv-h7230f0b04bcb owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_definitions(mission_id, revision, state, claim_id) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(mission_id) DO UPDATE SET revision=excluded.revision, state=excluded.state, claim_id=excluded.claim_id",
                 params![retired.id, retired.revision, mission_state_name(&retired.state), claim.id],
             )
             .map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h2710d286bed7 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&retired).map_err(internal)?
@@ -2625,7 +2625,7 @@ impl Store {
         successor_variables.insert("ST_RUN_GENERATION".into(), generation_id.clone());
         transaction
             .execute(
-                "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h11d7ad72ae55 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?7)",
                 params![generation_id, run_id, mission.revision, predecessor_id, actor, reason, now.to_string()],
             )
@@ -2674,7 +2674,7 @@ impl Store {
                 .map(|value| value.to_string());
             transaction
                 .execute(
-                    "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported, blocked_reason, not_before_unix_ms, readiness_epoch, created_at_unix_ms, updated_at_unix_ms, constraints, lease_owner, lease_incarnation, lease_expires_at_unix_ms)
+                    /* sqlite-large-value: allow-for-now lv-hff0da0210fe5 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported, blocked_reason, not_before_unix_ms, readiness_epoch, created_at_unix_ms, updated_at_unix_ms, constraints, lease_owner, lease_incarnation, lease_expires_at_unix_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, ?18, ?19, ?20, ?21)",
                     params![subject, run_id, generation_id, step.path, step.definition_hash, status, attempt, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, worker_reported, blocked_reason, not_before, carried.map(|old| old.readiness_epoch).unwrap_or(0), now.to_string(), constraints, lease_owner, lease_incarnation, lease_expires.map(|expiry| expiry.to_string())],
                 )
@@ -2725,13 +2725,13 @@ impl Store {
         )?;
         transaction
             .execute(
-                "UPDATE run_generations SET status='superseded', updated_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h1fed19b537af owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET status='superseded', updated_at_unix_ms=?2 WHERE id=?1",
                 params![predecessor_id, now.to_string()],
             )
             .map_err(internal)?;
         transaction
             .execute(
-                "UPDATE mission_runs SET current_generation_id=?2, status='running', phase='normal', updated_at_unix_ms=?3 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h1a9fa4a955fa owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id=?2, status='running', phase='normal', updated_at_unix_ms=?3 WHERE id=?1",
                 params![run_id, generation_id, now.to_string()],
             )
             .map_err(internal)?;
@@ -2796,7 +2796,7 @@ impl Store {
         if let Some(proposal) = proposal {
             let changed = transaction
                 .execute(
-                    "UPDATE revision_proposals
+                    /* sqlite-large-value: allow-for-now lv-h8117d8ad60d0 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE revision_proposals
                      SET status='applied', successor_generation_id=?2, updated_at_unix_ms=?3
                      WHERE id=?1 AND source_generation_id=?4
                        AND status IN ('pending-approval','draining')",
@@ -2827,7 +2827,7 @@ impl Store {
         let view = mission_run_view_tx(&transaction, run_id).map_err(internal)?;
         transaction
             .execute(
-                "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h911b2e20e26c owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                 params![
                     opaque_cache_key(idempotency_key),
                     serde_json::to_string(&view).map_err(internal)?
@@ -2868,7 +2868,7 @@ impl Store {
     /// Unlike `mission_runs`, this avoids per-step queue and loop history scans.
     pub fn mission_run_headers(&self) -> Result<Vec<MissionRunView>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(MISSION_RUN_HEADER_SELECT)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h982087d6b28e owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ MISSION_RUN_HEADER_SELECT)?;
         statement
             .query_map([], mission_run_header_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -2879,7 +2879,7 @@ impl Store {
     pub fn open_mission_run_headers(&self) -> Result<Vec<MissionRunView>> {
         let connection = self.readers.get();
         connection
-            .prepare_cached(&open_mission_run_headers_query())?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd5a4e18b5e64 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &open_mission_run_headers_query())?
             .query_map([], mission_run_header_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
@@ -2901,7 +2901,7 @@ impl Store {
             .map(|id| id.trim_start_matches("mission/"))
             .collect::<Vec<_>>();
         connection
-            .prepare_cached(&sql)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hfe4b3ae6eb7a owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?
             .query_map([serde_json::to_string(&ids)?], mission_run_header_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
@@ -2932,7 +2932,7 @@ impl Store {
         } else {
             "?1 IS NULL AND"
         };
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-ha7977990a7bb owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.subject, claims.accepted_at_unix_ms, claims.actor,
                     json_extract(claims.body, '$.fields.status'),
                     json_extract(claims.body, '$.fields.phase'),
@@ -3152,7 +3152,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                &canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+                /* sqlite-large-value: allow-for-now lv-h9544584e2d55 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
                 [subject],
                 |row| row.get(0),
             )
@@ -3355,7 +3355,7 @@ impl Store {
                 let draining = connection
                     .prepare_cached("SELECT phase FROM mission_runs WHERE id=?1")?
                     .query_row(
-                        [view.run.strip_prefix("mission-run/").unwrap_or(&view.run)],
+                        /* sqlite-large-value: allow-for-now lv-h476f7ec0686b owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ [view.run.strip_prefix("mission-run/").unwrap_or(&view.run)],
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?
@@ -3413,10 +3413,18 @@ impl Store {
     /// One current-step scan for the whole roster. This avoids replaying wake
     /// history or querying the step table separately for every agent card.
     pub fn agent_work_queues(&self) -> Result<BTreeMap<String, AgentWorkQueue>> {
+        self.agent_work_queues_for(None)
+    }
+
+    /// Build queue previews from the same selector, reading only one agent's inputs when named.
+    pub(crate) fn agent_work_queues_for(
+        &self,
+        selected_agent: Option<&str>,
+    ) -> Result<BTreeMap<String, AgentWorkQueue>> {
         crate::performance::task("agent_work_queues", || -> Result<BTreeMap<String, AgentWorkQueue>> {
         let connection = self.readers.get();
-        let orders = seat_run_orders_tx(&connection, None)?;
-        let rows = seat_step_rows_tx(&connection, None)?;
+        let orders = seat_run_orders_tx(&connection, selected_agent)?;
+        let rows = seat_step_rows_tx(&connection, selected_agent)?;
         let mut seats = BTreeMap::<&str, Vec<SeatStep<'_>>>::new();
         for row in &rows {
             let step = row.seat_step();
@@ -3425,6 +3433,9 @@ impl Store {
                 .flatten()
                 .collect::<BTreeSet<_>>()
             {
+                if selected_agent.is_some_and(|selected| selected != agent) {
+                    continue;
+                }
                 seats.entry(agent).or_default().push(step);
             }
         }
@@ -3628,7 +3639,7 @@ impl Store {
                 } else {
                     work_at_snapshot_query(open_only)
                 };
-                let mut statement = connection.prepare_cached(&query)?;
+                let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4f80a2549f6c owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &query)?;
                 let rows = statement.query_map(
                     params![actor.as_deref(), include_terminal, include_agentless],
                     step_run_from_row,
@@ -3638,7 +3649,7 @@ impl Store {
             Some(selected) => {
                 // The same filter, over the selected steps by their subject.
                 let query = selected_work_at_snapshot_query(open_only);
-                let mut statement = connection.prepare_cached(&query)?;
+                let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hac87532c2a88 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &query)?;
                 let rows = statement.query_map(
                     params![
                         actor.as_deref(),
@@ -3839,7 +3850,7 @@ impl Store {
                  FROM step_runs
                  WHERE subject=?3 AND (agentless=0 OR (?1 AND ?2 IS NULL))",
             )?
-            .query_row(params![true, actor.as_deref(), subject], step_run_from_row)
+            .query_row(/* sqlite-large-value: allow-for-now lv-h0c947569f092 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ params![true, actor.as_deref(), subject], step_run_from_row)
             .optional()?;
         let Some(mut view) = view else {
             return Ok(None);
@@ -4515,10 +4526,10 @@ impl Store {
                     && request.evidence.is_empty();
                 let last_replicated_expiry = if quiet_renewal {
                     transaction
-                        .prepare_cached(&last_replicated_lease_query())
+                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h32a48b812e5e owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &last_replicated_lease_query())
                         .map_err(internal)?
                         .query_row(
-                            [&subject],
+                            /* sqlite-large-value: allow-for-now lv-h216973640994 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ [&subject],
                             |row| row.get::<_, Option<u64>>(0),
                         )
                         .optional()
@@ -4535,7 +4546,7 @@ impl Store {
                     .saturating_add(u32::from(status == "ready" && current.status != "ready"));
                 transaction
                     .execute(
-                        "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
+                        /* sqlite-large-value: allow-for-now lv-h1908dce334e1 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
                                 lease_expires_at_unix_ms=?6, blocked_reason=CASE WHEN ?10 THEN ?7 ELSE blocked_reason END, readiness_epoch=?8,
                                 updated_at_unix_ms=?9 WHERE subject=?1",
                         params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
@@ -4604,14 +4615,14 @@ impl Store {
                     .map_err(claim_append_error)?;
                     transaction
                         .execute(
-                            "DELETE FROM local_work_lease_renewals WHERE subject=?1",
+                            /* sqlite-large-value: allow-for-now lv-hdf3b868bfbd4 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_work_lease_renewals WHERE subject=?1",
                             [&subject],
                         )
                         .map_err(internal)?;
                 } else {
                     transaction
                         .execute(
-                            "INSERT INTO local_work_lease_renewals
+                            /* sqlite-large-value: allow-for-now lv-h063b2caeabd0 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_work_lease_renewals
                              (subject, attempt, lease_owner, lease_incarnation, lease_expires_at_unix_ms, updated_at_unix_ms)
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                              ON CONFLICT(subject) DO UPDATE SET attempt=excluded.attempt,
@@ -4635,7 +4646,7 @@ impl Store {
                 }
                 transaction
                     .execute(
-                        "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                        /* sqlite-large-value: allow-for-now lv-h96055cfdeff8 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                         params![
                             opaque_cache_key(&request.idempotency_key),
                             serde_json::to_string(&view).map_err(internal)?
@@ -4723,7 +4734,7 @@ impl Store {
                 let now = now_ms();
                 let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
                 transaction.execute(
-                    "UPDATE step_runs SET status=?2, blocked_reason=?3,
+                    /* sqlite-large-value: allow-for-now lv-he8c4a82fd871 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, blocked_reason=?3,
                             lease_owner=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_owner END,
                             lease_incarnation=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_incarnation END,
                             lease_expires_at_unix_ms=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_expires_at_unix_ms END,
@@ -4809,7 +4820,7 @@ impl Store {
                 let next_attempt = attempt.saturating_add(1);
                 let now = now_ms();
                 transaction.execute(
-                    "UPDATE step_runs SET status='pending', attempt=?2, goals=?3, worker_reported=0,
+                    /* sqlite-large-value: allow-for-now lv-h8460f9aaf5b9 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='pending', attempt=?2, goals=?3, worker_reported=0,
                             lease_owner=NULL, lease_incarnation=NULL, lease_expires_at_unix_ms=NULL,
                             blocked_reason=?4, not_before_unix_ms=NULL, activated_at_unix_ms=NULL,
                             updated_at_unix_ms=?5 WHERE subject=?1",
@@ -4932,7 +4943,7 @@ impl Store {
             }
             let latest: Option<String> = connection
                 .query_row(
-                    &canonical_sql("SELECT documents.hash FROM documents WHERE documents.name = ?1 AND documents.created_index<=?2 ORDER BY binding_key DESC LIMIT 1"),
+                    /* sqlite-large-value: allow-for-now lv-h92a5309dc47b owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT documents.hash FROM documents WHERE documents.name = ?1 AND documents.created_index<=?2 ORDER BY binding_key DESC LIMIT 1"),
                     params![name, store_index],
                     |row| row.get(0),
                 )
@@ -5419,7 +5430,7 @@ impl Store {
         store_index: u64,
     ) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let subjects = connection.prepare_cached(&RUNTIME_ID_SUBJECTS)?
+        let subjects = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h60d7a2b17770 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &RUNTIME_ID_SUBJECTS)?
             .query_map(params![runtime_id, store_index, owner], |row| row.get::<_, String>(0))?
             .collect::<Result<BTreeSet<_>, _>>()?;
         Ok(subjects)
@@ -5432,12 +5443,12 @@ impl Store {
     ) -> Result<Option<ClaimRecord>> {
         let connection = self.readers.get();
         connection
-            .prepare_cached(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf3b03421dda2 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='workspace.observed' AND claims.origin=?2
              ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1",
             ))?
-            .query_row(params![subject, host], smallclaims::store::claim_from_row)
+            .query_row(/* sqlite-large-value: allow-for-now lv-h663e900e3c37 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ params![subject, host], smallclaims::store::claim_from_row)
             .optional()
             .map_err(Into::into)
     }
@@ -5615,7 +5626,7 @@ impl Store {
     /// survives a revision keeps running.
     pub fn terminal_owned_runtime_subjects(&self) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(TERMINAL_OWNED_RUNTIME_SUBJECTS)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha8a69e47ce1d owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ TERMINAL_OWNED_RUNTIME_SUBJECTS)?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<BTreeSet<_>, _>>()
@@ -5656,7 +5667,7 @@ impl Store {
         let mut records = BTreeMap::new();
         {
             let mut statement = connection.prepare(
-                &canonical_sql("SELECT body FROM claims WHERE kind='intent.desired' ORDER BY CANONICAL_ASC(claims)"),
+                /* sqlite-large-value: allow-for-now lv-hd44dc62051d3 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT body FROM claims WHERE kind='intent.desired' ORDER BY CANONICAL_ASC(claims)"),
             )?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             for row in rows {
@@ -5694,7 +5705,7 @@ impl Store {
         }
         {
             let mut statement = connection.prepare(
-                &canonical_sql("SELECT subject, body FROM claims WHERE kind='gate.requested' ORDER BY CANONICAL_ASC(claims)"),
+                /* sqlite-large-value: allow-for-now lv-h46349928aa7c owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT subject, body FROM claims WHERE kind='gate.requested' ORDER BY CANONICAL_ASC(claims)"),
             )?;
             let rows = statement.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -5725,7 +5736,7 @@ impl Store {
         // `pending_subscription_mission_requests`.
         connection
             .query_row(
-                &canonical_sql(
+                /* sqlite-large-value: allow-for-now lv-h394f6b3fd718 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
                     "SELECT json_extract(request.body, '$.fields.attempt')
                  FROM claims request
                  WHERE request.subject=?1
@@ -5834,7 +5845,7 @@ impl Store {
                 let batch_id = format!("batch/{}/{sequence}/{batch_hash}", self.origin);
                 transaction
                     .execute(
-                        "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
+                        /* sqlite-large-value: allow-for-now lv-h5a6b45f461bc owner=st3_store::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
                             batch_id,
@@ -6616,7 +6627,7 @@ impl Store {
                 };
                 transaction
                     .execute(
-                        "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
+                        /* sqlite-large-value: allow-for-now lv-hc2a83c3a5f53 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
                         params![
                             opaque_cache_key(&idempotency_key),
                             serde_json::to_string(&outcome).map_err(internal)?
@@ -6688,7 +6699,7 @@ impl Store {
 
     pub fn pending_schedule_work_requests(&self, subject: &str) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h104510a179ca owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT request.id, request.store_index, request.batch_id, request.subject,
                     request.kind, request.origin, request.actor, request.body,
                     request.predecessors, request.accepted_at_unix_ms
@@ -6716,7 +6727,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                &canonical_sql(
+                /* sqlite-large-value: allow-for-now lv-hf4b559045995 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
                     "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
                         predecessors, accepted_at_unix_ms
                  FROM claims WHERE subject=?1 AND kind='schedule.work-started'
@@ -6734,7 +6745,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                Self::SCHEDULE_ACTIVE_STARTED_RUN_QUERY,
+                /* sqlite-large-value: allow-for-now lv-h6805f5cb2c1e owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ Self::SCHEDULE_ACTIVE_STARTED_RUN_QUERY,
                 [subject],
                 |row| row.get(0),
             )
@@ -6758,7 +6769,7 @@ impl Store {
         let through = match through_claim {
             Some(claim) => connection
                 .prepare_cached("SELECT store_index FROM claims WHERE id=?1")?
-                .query_row([claim], |row| row.get::<_, u64>(0))
+                .query_row(/* sqlite-large-value: allow-for-now lv-h5305da87222a owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ [claim], |row| row.get::<_, u64>(0))
                 .optional()?
                 .map_or(through, |index| index.min(through)),
             None => through,
@@ -6768,8 +6779,8 @@ impl Store {
             let mut span = [None, None];
             for (slot, order) in span.iter_mut().zip(["ASC", "DESC"]) {
                 *slot = connection
-                    .prepare_cached(&incarnation_claim_time_query(order))?
-                    .query_row(params![subject, incarnation, through], |row| {
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbd9dc3a00ac1 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &incarnation_claim_time_query(order))?
+                    .query_row(/* sqlite-large-value: allow-for-now lv-h37208c05c567 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ params![subject, incarnation, through], |row| {
                         row.get::<_, String>(0)
                     })
                     .optional()?
@@ -6814,7 +6825,7 @@ impl Store {
     ) -> Result<BTreeMap<String, ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b2657ae5cdc owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject,
                     claims.kind, claims.origin, claims.actor, claims.body,
                     claims.predecessors, claims.accepted_at_unix_ms
@@ -6843,7 +6854,7 @@ impl Store {
         };
         smallclaims::touched::note_read(|| actor.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h55ca859b8145 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT body FROM claims
              WHERE subject=?1 AND kind='runtime.observed'
              ORDER BY CANONICAL_DESC(claims)",
@@ -6951,14 +6962,14 @@ impl Store {
         }
         reapply_local_work_lease_renewals_tx(&transaction)?;
         transaction.execute(
-            "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hcec053fd2ff7 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
              ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
             params![current_index_tx(&transaction)?, now_ms().to_string()],
         )?;
         transaction.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('canonical_replay_settled', ?1)",
+            /* sqlite-large-value: allow-for-now lv-hfdd0716275c1 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('canonical_replay_settled', ?1)",
             [now_ms().to_string()],
         )?;
         transaction.commit()?;
@@ -7705,7 +7716,7 @@ fn renew_nested_ancestor_leases_tx(
     let expiry = now.saturating_add(600_000);
     transaction
         .execute(
-            "UPDATE step_runs
+            /* sqlite-large-value: allow-for-now lv-hbb9889254591 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
              SET lease_expires_at_unix_ms=?1, updated_at_unix_ms=?2
              WHERE generation_id=?3
                AND substr(?4, 1, length(step_path) + 1)=step_path || '/'
@@ -7823,7 +7834,7 @@ fn retry_step_tx(
     let now = now_ms();
     let not_before = now.saturating_add(backoff_ms as u128);
     transaction.execute(
-        "UPDATE step_runs SET status='pending', attempt=?2, worker_reported=0, lease_owner=NULL,
+        /* sqlite-large-value: allow-for-now lv-ha0063a571e3a owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='pending', attempt=?2, worker_reported=0, lease_owner=NULL,
                 lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, blocked_reason=?3,
                 not_before_unix_ms=?4, activated_at_unix_ms=NULL, updated_at_unix_ms=?5 WHERE subject=?1",
         params![subject, attempt.saturating_add(1), reason, not_before.to_string(), now.to_string()])?;
@@ -7966,11 +7977,11 @@ fn set_mission_run_state_tx(
         return Ok(false);
     }
     transaction.execute(
-        "UPDATE mission_runs SET status=?2, phase=?3, updated_at_unix_ms=?4 WHERE id=?1",
+        /* sqlite-large-value: allow-for-now lv-ha04e093f2241 owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2, phase=?3, updated_at_unix_ms=?4 WHERE id=?1",
         params![run, status, phase, now.to_string()],
     )?;
     transaction.execute(
-        "UPDATE run_generations SET status=?2, updated_at_unix_ms=?3
+        /* sqlite-large-value: allow-for-now lv-hbd74df5d200b owner=st3_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET status=?2, updated_at_unix_ms=?3
          WHERE id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
         params![run, status, now.to_string()],
     )?;
@@ -8520,7 +8531,7 @@ fn predicate_value_matches(found: &Value, operator: &str, expected: &Value) -> b
 /// Current held and ready agent steps, for every seat or for one seat.
 fn seat_step_rows_tx(connection: &Connection, agent: Option<&str>) -> Result<Vec<RosterStepRow>> {
     let snapshot_unix_ms = now_ms();
-    let mut statement = connection.prepare_cached(SEAT_STEP_ROWS)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfacf322d08e0 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ SEAT_STEP_ROWS)?;
     let mut rows = statement
         .query_map(params![agent, snapshot_unix_ms.to_string()], |row| {
             let mut status: String = row.get(3)?;

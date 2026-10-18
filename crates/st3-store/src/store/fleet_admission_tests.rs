@@ -244,18 +244,18 @@ fn runtime_authority_preserves_append_fields_nulls_and_other_actual_kinds() {
 fn subject_kind_lookup_seeks_distinct_kinds_at_pinned_cuts() {
     let connection = Connection::open_in_memory().unwrap();
     connection.execute_batch(
-        "CREATE TABLE claims(subject TEXT,kind TEXT,store_index INTEGER);
+        /* sqlite-large-value: allow-for-now lv-h67aa12ca730d owner=st3_store::store::fleet_admission_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(subject TEXT,kind TEXT,store_index INTEGER);
              CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);",
     ).unwrap();
     let mut prior = None;
     for count in [32, 512, 7_900] {
-        connection.execute("DELETE FROM claims", []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h18b56f8e723b owner=st3_store::store::fleet_admission_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims", []).unwrap();
         connection.execute_batch(&format!(
-            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{count})
+            /* sqlite-large-value: allow-for-now lv-ha461ea0c1c07 owner=st3_store::store::fleet_admission_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{count})
                  INSERT INTO claims SELECT 'agent/worker','harness.diagnostic',i FROM n;
                  INSERT INTO claims VALUES ('agent/worker','runtime.future',{});", count + 1,
         )).unwrap();
-        let mut statement = connection.prepare(SUBJECT_KINDS_AT_QUERY).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0e5d07d19df7 owner=st3_store::store::fleet_admission_tests TODO=trace-statement-and-value-representation */ SUBJECT_KINDS_AT_QUERY).unwrap();
         let kinds = statement.query_map(params!["agent/worker", count], |row| row.get::<_, String>(0))
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(kinds, ["harness.diagnostic"]);
@@ -265,7 +265,7 @@ fn subject_kind_lookup_seeks_distinct_kinds_at_pinned_cuts() {
         let kinds = statement.query_map(params!["agent/worker", count + 1], |row| row.get::<_, String>(0))
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(first_unknown_kind(kinds), Some("runtime.future".into()));
-        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {SUBJECT_KINDS_AT_QUERY}"))
+        let plan = connection.prepare(/* sqlite-large-value: allow-for-now lv-haf60fa7a7c85 owner=st3_store::store::fleet_admission_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {SUBJECT_KINDS_AT_QUERY}"))
             .unwrap().query_map(params!["agent/worker", 1], |row| row.get::<_, String>(3))
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
         assert!(plan.contains("kind>?") && plan.contains("store_index<?"), "{plan}");
@@ -277,7 +277,7 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
     let mut connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY, subject TEXT, kind TEXT, body TEXT);
+            /* sqlite-large-value: allow-for-now lv-h23e041741780 owner=st3_store::store::fleet_admission_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY, subject TEXT, kind TEXT, body TEXT);
                  CREATE INDEX claims_subject_index ON claims(subject,store_index);
                  CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
                  CREATE INDEX claims_operation_index ON claims(json_extract(body,'$._operation.id'))
@@ -290,7 +290,7 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
     for n in 0..18 {
         transaction
             .execute(
-                "INSERT INTO operations VALUES (?1,'conflict')",
+                /* sqlite-large-value: allow-for-now lv-h140081296abe owner=st3_store::store::fleet_admission_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations VALUES (?1,'conflict')",
                 [format!("op/{n:02}")],
             )
             .unwrap();
@@ -298,14 +298,14 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
     for n in 1..=10_000 {
         transaction
             .execute(
-                "INSERT INTO claims VALUES (?1,'agent/worker','runtime.observed','{}')",
+                /* sqlite-large-value: allow-for-now lv-h3a0948ab1e54 owner=st3_store::store::fleet_admission_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES (?1,'agent/worker','runtime.observed','{}')",
                 [n],
             )
             .unwrap();
     }
     transaction
         .execute_batch(
-            "INSERT INTO claims VALUES
+            /* sqlite-large-value: allow-for-now lv-he117bf25918b owner=st3_store::store::fleet_admission_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES
                    (10001,'agent/other','runtime.observed','{\"_operation\":{\"id\":\"op/00\"}}'),
                    (10002,'agent/worker','runtime.observed','{\"_operation\":{\"id\":\"op/17\"}}'),
                    (10003,'agent/worker','runtime.observed','{\"_operation\":{\"id\":\"op/01\"}}');",
@@ -313,7 +313,7 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
         .unwrap();
     transaction.commit().unwrap();
     let plan = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {CONFLICT_CLAIM_QUERY}"))
+        .prepare(/* sqlite-large-value: allow-for-now lv-hc3c16b500b30 owner=st3_store::store::fleet_admission_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {CONFLICT_CLAIM_QUERY}"))
         .unwrap()
         .query_map(params!["agent/worker", 10001], |row| row.get::<_, String>(3))
         .unwrap()
@@ -326,7 +326,7 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
         "{plan}"
     );
     connection
-        .prepare_cached(CONFLICT_CLAIM_QUERY)
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4c66ce3b8151 owner=st3_store::store::fleet_admission_tests TODO=trace-statement-and-value-representation */ CONFLICT_CLAIM_QUERY)
         .unwrap()
         .reset_status(rusqlite::StatementStatus::VmStep);
     assert_eq!(
@@ -334,7 +334,7 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
         None
     );
     let cost = connection
-        .prepare_cached(CONFLICT_CLAIM_QUERY)
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1da8dd9fa79f owner=st3_store::store::fleet_admission_tests TODO=trace-statement-and-value-representation */ CONFLICT_CLAIM_QUERY)
         .unwrap()
         .get_status(rusqlite::StatementStatus::VmStep);
     assert!(
@@ -350,7 +350,7 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
         Some("idempotency-conflict:op/01".into())
     );
     connection
-        .execute("UPDATE operations SET state='active'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h0daec372e1d6 owner=st3_store::store::fleet_admission_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='active'", [])
         .unwrap();
     assert_eq!(
         has_unknown_claim_at(&connection, "agent/worker", Some(10003)).unwrap(),
@@ -1151,12 +1151,12 @@ fn legacy_unreferenced_blobs_are_staged_without_losing_bytes() {
         let connection = store.connection.lock().unwrap();
         connection
             .execute(
-                "INSERT INTO blobs VALUES(?1,?2,?3)",
+                /* sqlite-large-value: allow-for-now lv-h18976b87a2d9 owner=st3_store::store::fleet_admission_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO blobs VALUES(?1,?2,?3)",
                 params![hash, bytes.as_slice(), bytes.len()],
             )
             .unwrap();
         connection
-            .execute("DELETE FROM meta WHERE key='staged_blob_scope'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-h97723997cee4 owner=st3_store::store::fleet_admission_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='staged_blob_scope'", [])
             .unwrap();
     }
     drop(store);
@@ -1187,7 +1187,7 @@ fn arrangement_checkpoint_inputs_have_distinct_rules() {
     let connection = store.readers.get();
     for table in ["arrangements", "arrangement_registers"] {
         let count: u64 = connection
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h3a2d490fc0fa owner=st3_store::store::fleet_admission_tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
     }

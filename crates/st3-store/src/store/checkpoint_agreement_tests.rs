@@ -691,7 +691,7 @@ fn a_trim_that_would_change_the_graph_waits_for_a_person() {
     let previous_operations = birch
         .readers
         .get()
-        .prepare(&previous_operations)
+        .prepare(/* sqlite-large-value: allow-for-now lv-h8ff01ab763fa owner=st3_store::store::checkpoint_agreement_tests TODO=trace-statement-and-value-representation */ &previous_operations)
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
@@ -706,7 +706,7 @@ fn a_trim_that_would_change_the_graph_waits_for_a_person() {
     let current_operations = birch
         .readers
         .get()
-        .prepare(&projection_digest::operation_rows())
+        .prepare(/* sqlite-large-value: allow-for-now lv-h1f0cfbb120da owner=st3_store::store::checkpoint_agreement_tests TODO=trace-statement-and-value-representation */ &projection_digest::operation_rows())
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
@@ -830,7 +830,7 @@ fn a_repaired_original_held_by_one_node_does_not_split_the_verifications() {
             .unwrap();
         connection
             .execute(
-                "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
+                /* sqlite-large-value: allow-for-now lv-h18fb9e9f5299 owner=st3_store::store::checkpoint_agreement_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
                 [&record_ref],
             )
             .unwrap();
@@ -849,7 +849,7 @@ fn a_repaired_original_held_by_one_node_does_not_split_the_verifications() {
         .connection
         .lock()
         .unwrap()
-        .execute("DELETE FROM claims WHERE id=?1", [&original])
+        .execute(/* sqlite-large-value: allow-for-now lv-hf2d9f09804d1 owner=st3_store::store::checkpoint_agreement_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&original])
         .unwrap();
     sync(&[&alder, &birch, &cedar]);
     for node in [&alder, &cedar] {
@@ -1042,7 +1042,7 @@ fn a_trim_that_stops_anywhere_finishes_the_same_after_a_restart() {
         let reclaim_before = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
         assert!(alder.checkpoint_step(&context).is_err(), "{fault:?}");
         if fault == TrimFault::AfterTombstoneChunk(1) {
-            let count = |sql: &str| -> u64 { alder.readers.get().query_row(sql, [], |row| row.get(0)).unwrap() };
+            let count = |sql: &str| -> u64 { alder.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-hd3901bef1503 owner=st3_store::store::checkpoint_agreement_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
             let recorded = count("SELECT (SELECT COUNT(*) FROM checkpoint_envelopes) + (SELECT COUNT(*) FROM checkpoint_claims)");
             let deleted = count("SELECT COUNT(*) FROM checkpoint_envelopes AS tombstone WHERE NOT EXISTS (
                 SELECT 1 FROM replica_envelopes AS held WHERE held.writer=tombstone.writer
@@ -1101,7 +1101,7 @@ fn a_plan_that_changes_after_an_interrupted_recording_leaves_no_tombstones_behin
     assert!(recorded(&alder) > 0, "the crash left tombstones recorded");
     let manifest = birch.checkpoint_manifest(&checkpoint, cut).unwrap();
     alder.connection.write().execute(
-        "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+        /* sqlite-large-value: allow-for-now lv-he29a57a68f84 owner=st3_store::store::checkpoint_agreement_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
         [&manifest.claims[0].id],
     ).unwrap();
     assert_eq!(kinds(&step(&alder, &context)), ["manifest-needed"]);
@@ -1431,6 +1431,6 @@ fn the_agent_card_fold_matches_per_subject_reductions_after_a_trim() {
     assert!(trimmed, "the fixture reached a trim");
     for node in [&alder, &birch] {
         let indexes = (0..=node.index().unwrap()).collect::<Vec<_>>();
-        super::card_fold_tests::assert_card_fold_parity(node, &indexes);
+        crate::store::card_fold_tests_shared::assert_card_fold_parity(node, &indexes);
     }
 }

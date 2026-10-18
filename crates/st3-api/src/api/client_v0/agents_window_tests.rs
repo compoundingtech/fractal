@@ -55,7 +55,7 @@ async fn agents_window_first_snapshot_matches_full_json_and_display_order() {
     for limit in [1, 5, 50, 100, 200] {
         state.store.forget_current_views();
         let before = state.store.agent_resources_refolded_cards_for_test();
-        let (snapshot, items, has_more) = collection_items(&state, &session, &request(limit, None),
+        let (snapshot, items, has_more, _) = collection_items(&state, &session, &request(limit, None),
             Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap()).await.unwrap();
         assert_eq!(state.store.agent_resources_refolded_cards_for_test() - before,
             limit.min(138), "fold only visible cards, not the has_more witness");
@@ -80,7 +80,7 @@ async fn agents_window_status_filters_still_consider_every_live_card() {
     let session = ClientSession::local(None).unwrap();
     for status in ["running", "desired", "stopped", "failed"] {
         state.store.forget_current_views();
-        let (snapshot, items, has_more) = collection_items(&state, &session, &request(5, Some(status)),
+        let (snapshot, items, has_more, _) = collection_items(&state, &session, &request(5, Some(status)),
             Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap()).await.unwrap();
         let oracle = Store::open(&root.path().join("graph.db"), "node").unwrap();
         let (expected, expected_more) = oracle.read_snapshot(|_| Ok(old_window(&oracle, &snapshot, 5, Some(status)))).unwrap();
@@ -96,14 +96,14 @@ async fn agents_window_reorders_after_new_membership_without_reusing_old_prefix(
     let windows = collection_windows::Windows::attach(&state.store);
     let query = request(2, None);
     let slots = Arc::new(tokio::sync::Semaphore::new(1));
-    let (before, old_items, old_more) = collection_items_with_windows(&state, &session, &query,
+    let (before, old_items, old_more, _) = collection_items_with_windows(&state, &session, &query,
         slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
-    let (_, warm_items, warm_more) = collection_items_with_windows(&state, &session, &query,
+    let (_, warm_items, warm_more, _) = collection_items_with_windows(&state, &session, &query,
         slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
     assert_eq!(warm_items, old_items);
     assert_eq!(warm_more, old_more);
     append_runtime(&state.store, "agent/000-inserted", "running");
-    let (after, items, has_more) = collection_items_with_windows(&state, &session, &query,
+    let (after, items, has_more, _) = collection_items_with_windows(&state, &session, &query,
         slots.acquire_owned().await.unwrap(), windows).await.unwrap();
     assert!(after.store_index > before.store_index);
     assert_eq!(items[0]["id"], "agent/000-inserted");

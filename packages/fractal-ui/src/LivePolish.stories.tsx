@@ -97,7 +97,7 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   await expect(getComputedStyle(send).opacity).toBe('1')
   await expect(send.getBoundingClientRect().width).toBe(32)
   if (args.scheme === 'light') await expect(getComputedStyle(dock).backgroundColor).toBe('rgb(252, 252, 252)')
-  const advanced = await mount(<meta.render {...args} now={args.now + 1000} />)
+  const advanced = await mount(<meta.render {...args} now={(args.now ?? clock) + 1000} />)
   await expect(within(advanced.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent(args.state._tag === 'Working' ? 'Working · 13s' : 'Waiting for your answer · 4h 27m')
   const restoredDock = within(advanced.getByRole('region', { name: 'Composer dock example' })).getByTestId('workbench-composer-dock')
   await waitFor(() => {

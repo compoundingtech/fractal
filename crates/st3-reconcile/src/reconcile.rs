@@ -1,5 +1,9 @@
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
+use crate::EvidenceStore;
+use crate::OwnedSetsStore;
+use crate::PublicationStore;
+use crate::{GithubStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::panic::AssertUnwindSafe;
@@ -470,8 +474,17 @@ pub fn member_environment(
     executable: &Path,
     recorder: Option<&Path>,
 ) -> Result<BTreeMap<String, String>> {
-    let mut environment =
-        st_runtime::overlay_environment(crate::environment::snapshot()?, declared, executable)?;
+    // Alias-family resolution lives in environment::{overlay,remove_aliases}.
+    let mut inherited = crate::environment::snapshot()?;
+    for name in ["ST_AGENT", "ST_SUPERVISOR", "ST3_SUBJECT"] {
+        if !declared.contains_key(name)
+            && !st_drivers::contracts::fractal_env_name(name)
+                .is_some_and(|new| declared.contains_key(&new))
+        {
+            crate::environment::remove_aliases(&mut inherited, name);
+        }
+    }
+    let mut environment = crate::environment::overlay(inherited, declared, executable)?;
     record_member_commands(&mut environment, recorder)?;
     Ok(environment)
 }
@@ -1252,18 +1265,21 @@ pub fn overlay_runtime_environment(
     member: &mut BTreeMap<String, String>,
     runtime: &BTreeMap<String, String>,
 ) {
+    crate::environment::normalize_aliases(member);
+    let mut runtime = runtime.clone();
+    crate::environment::normalize_aliases(&mut runtime);
     for (key, value) in runtime {
-        if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV {
-            member.insert(key.clone(), value.clone());
+        if matches!(key.as_str(), "ST_ACCESS_MODE" | "FRACTAL_ACCESS_MODE"
+            | "ST_CODEX_ASKS" | "FRACTAL_CODEX_ASKS")
+        {
+            member.insert(key, value);
         } else {
-            member.entry(key.clone()).or_insert_with(|| value.clone());
+            member.entry(key).or_insert(value);
         }
     }
     if is_person_terminal(subject) {
-        member.insert(
-            st_runtime::PRIORITY_ENV.into(),
-            st_runtime::SeatPriority::Normal.as_str().into(),
-        );
+        crate::environment::set(member, st_runtime::PRIORITY_ENV,
+            st_runtime::SeatPriority::Normal.as_str().into());
     }
 }
 
@@ -6978,6 +6994,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 workspace.display()
             );
         }
+        // Resolve authored Fractal-only selectors before cleanup and native-session selection.
+        let normalized_member = member.environment.keys().any(|name| name.starts_with("FRACTAL_"))
+            .then(|| {
+                let mut member = member.clone();
+                crate::environment::normalize_aliases(&mut member.environment);
+                member
+            });
+        let member = normalized_member.as_ref().unwrap_or(member);
         let mut launch_member = member.clone();
         overlay_runtime_environment(
             &subject.subject,
@@ -7009,7 +7033,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::rollout::RESUME_PATH_ENV,
         ] {
             if !member.environment.contains_key(variable) {
-                launch_member.environment.remove(variable);
+                crate::environment::remove_aliases(&mut launch_member.environment, variable);
             }
         }
         // Only a resume names a native session. A daemon started inside a resumed seat inherits
@@ -7018,9 +7042,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .environment
             .contains_key(crate::suspension::RESUME_ENV)
         {
-            launch_member
-                .environment
-                .remove(crate::suspension::RESUME_ENV);
+            crate::environment::remove_aliases(
+                &mut launch_member.environment, crate::suspension::RESUME_ENV);
         }
         // The import claim has no incarnation: it is a bootstrap selector, not
         // evidence that a driver has bound the session. Once a driver binds, normal
@@ -7041,29 +7064,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &member.environment[crate::rollout::RESUME_PATH_ENV],
             )?;
         if import_bound {
-            launch_member
-                .environment
-                .remove(crate::suspension::RESUME_ENV);
-            launch_member
-                .environment
-                .remove(crate::rollout::RESUME_PATH_ENV);
+            crate::environment::remove_aliases(&mut launch_member.environment, crate::suspension::RESUME_ENV);
+            crate::environment::remove_aliases(&mut launch_member.environment, crate::rollout::RESUME_PATH_ENV);
         }
         // Every other relaunch of a seat continues the native session its harness last bound,
         // so a restart, a hangup or a changed declaration never loses the conversation.
-        launch_member
-            .environment
-            .remove(crate::suspension::CONTINUE_ENV);
-        launch_member
-            .environment
-            .remove(crate::suspension::CONTINUE_PATH_ENV);
+        crate::environment::remove_aliases(&mut launch_member.environment, crate::suspension::CONTINUE_ENV);
+        crate::environment::remove_aliases(&mut launch_member.environment, crate::suspension::CONTINUE_PATH_ENV);
         let selector_scope = crate::native_resume::selection_scope(member);
-        launch_member
-            .environment
-            .remove(crate::suspension::SELECTOR_SCOPE_ENV);
+        crate::environment::remove_aliases(&mut launch_member.environment, crate::suspension::SELECTOR_SCOPE_ENV);
         if let Some(scope) = &selector_scope {
-            launch_member
-                .environment
-                .insert(crate::suspension::SELECTOR_SCOPE_ENV.into(), scope.clone());
+            crate::environment::set(&mut launch_member.environment, crate::suspension::SELECTOR_SCOPE_ENV, scope.clone());
         }
         let continued = if subject.kind == "agent"
             && !launch_member
@@ -7085,45 +7096,27 @@ impl<R: RuntimeControl> Reconciler<R> {
             None
         };
         if let Some((session, path)) = continued {
-            launch_member
-                .environment
-                .insert(crate::suspension::CONTINUE_ENV.into(), session);
+            crate::environment::set(&mut launch_member.environment, crate::suspension::CONTINUE_ENV, session);
             if let Some(path) = path {
-                launch_member
-                    .environment
-                    .insert(crate::suspension::CONTINUE_PATH_ENV.into(), path);
+                crate::environment::set(&mut launch_member.environment, crate::suspension::CONTINUE_PATH_ENV, path);
             }
         }
         crate::native_seed::omit_seed_for_native_resume(&mut launch_member);
-        launch_member
-            .environment
-            .insert("ST3_ENDPOINT".into(), self.endpoint.clone());
-        launch_member.environment.insert(
-            "ST3_DRIVER_STATE_DIR".into(),
-            self.driver_state_dir.to_string_lossy().into_owned(),
-        );
-        launch_member
-            .environment
-            .insert("ST3_SUBJECT".into(), subject.subject.clone());
+        crate::environment::set(&mut launch_member.environment, "ST3_ENDPOINT", self.endpoint.clone());
+        crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
+            self.driver_state_dir.to_string_lossy().into_owned());
+        crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.subject.clone());
         if subject.kind == "agent" {
-            launch_member
-                .environment
-                .insert("ST_AGENT".into(), subject.subject.clone());
-            launch_member
-                .environment
-                .insert("ST3_MAILBOX_TRANSPORT".into(), "push".into());
+            crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.subject.clone());
+            crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
         } else if let Some(owner) = member.tags.get("st3.agent") {
-            launch_member
-                .environment
-                .insert("ST_AGENT".into(), owner.clone());
+            crate::environment::set(&mut launch_member.environment, "ST_AGENT", owner.clone());
         } else {
-            launch_member.environment.remove("ST_AGENT");
+            crate::environment::remove_aliases(&mut launch_member.environment, "ST_AGENT");
         }
         let executable = launch_executable()?;
         let st_binary = self.st_binary.as_ref().unwrap_or(&executable);
-        launch_member
-            .environment
-            .insert("ST3_BIN".into(), st_binary.to_string_lossy().into_owned());
+        crate::environment::set(&mut launch_member.environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());
         if let crate::model::LaunchSpec::Argv(argv) = &mut launch_member.launch
             && argv.first().map(String::as_str) == Some("st3")
         {
@@ -7158,10 +7151,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         // Capture the token before starting; a publication during start must not relabel the launch.
         let desired_token = self.launch_token(&subject.subject)?;
-        launch_member.environment.insert(
-            crate::suspension::LAUNCH_DESIRED_TOKEN_ENV.into(),
-            desired_token.clone(),
-        );
+        crate::environment::set(&mut launch_member.environment, crate::suspension::LAUNCH_DESIRED_TOKEN_ENV,
+            desired_token.clone());
         let guard = || -> Result<()> {
             self.store.owned_desired_guard(subject)?;
             if member
@@ -7388,7 +7379,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         launch: &mut MemberSpec,
     ) -> Result<()> {
-        launch.environment.remove("ST3_ACCOUNT");
+        crate::environment::remove_aliases(&mut launch.environment, "ST3_ACCOUNT");
         if subject.kind != "agent" {
             return Ok(());
         }
@@ -7396,7 +7387,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // No binding: the harness keeps its login, but a login that is a declared account's
             // directory still belongs to that account.
             if let Some(name) = self.declared_login_account(subject, member, launch) {
-                launch.environment.insert("ST3_ACCOUNT".into(), name);
+                crate::environment::set(&mut launch.environment, "ST3_ACCOUNT", name);
             }
             return Ok(());
         };
@@ -7425,9 +7416,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         launch
             .environment
             .insert(variable.into(), directory.to_string_lossy().into_owned());
-        launch
-            .environment
-            .insert("ST3_ACCOUNT".into(), seat.account.name);
+        crate::environment::set(&mut launch.environment, "ST3_ACCOUNT", seat.account.name);
         Ok(())
     }
 
@@ -7681,7 +7670,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .insert(suspended::RESUME_ENV.into(), session);
                 if agent.starts_with("agent/import/omp/") {
                     // A cold resume names the suspension's session, not the import.
-                    resumed.environment.remove(crate::rollout::RESUME_PATH_ENV);
+                    crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 }
                 if let Err(error) =
                     self.perform_start(subject, &resumed, "a suspended seat was resumed")
@@ -18186,6 +18175,12 @@ pub mod tests {
         let mut declared = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "normal".to_string())]);
         overlay_runtime_environment("agent/example/worker", &mut declared, &runtime);
         assert_eq!(declared[PRIORITY_ENV], "normal");
+        for value in ["normal", ""] {
+            let mut declared = BTreeMap::from([("FRACTAL_SEAT_PRIORITY".into(), value.into())]);
+            overlay_runtime_environment("agent/example/worker", &mut declared, &runtime);
+            assert_eq!(declared[PRIORITY_ENV], value);
+            assert_eq!(declared["FRACTAL_SEAT_PRIORITY"], value);
+        }
     }
 
     #[test]
@@ -18643,7 +18638,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
 
     #[test]
     fn unchanged_plain_harness_reapply_keeps_previous_build_revisions_and_running_seats() {
-        let fixture: Value = serde_json::from_str(include_str!(
+        let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-he6b9d3eedfcd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
             "../../st3-daemon/tests/fixtures/harness-access-previous-build.json"
         )).unwrap();
         let source = fixture["source"].as_str().unwrap();
@@ -22002,7 +21997,7 @@ mission "feedback-review" state="ready" {
             {
                 let mut writer = store.connection.write();
                 let tx = writer.transaction().unwrap();
-                tx.execute("DELETE FROM local_publication_starts", [])
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h3ba9f26e1ed8 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_starts", [])
                     .unwrap();
                 tx.rollback().unwrap();
             }
@@ -22016,32 +22011,32 @@ mission "feedback-review" state="ready" {
                 let tx = writer.transaction().unwrap();
                 match mutation {
                     "local-trim" => {
-                        tx.execute("DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h9f826e5caec4 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
                     }
                     "shared-trim" => {
-                        tx.execute("DELETE FROM claims WHERE id=?1", [&receipt.id])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-he7e152c041a8 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&receipt.id])
                             .unwrap();
                     }
                     "definition-trim" => {
                         // Native trimming retires operation identities before their
                         // canonical claims. Preserve that foreign-key ordering here.
                         tx.execute(
-                            "DELETE FROM operations WHERE canonical_claim_id=?1",
+                            /* sqlite-large-value: allow-for-now lv-h68e30ed2b008 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE canonical_claim_id=?1",
                             [&token],
                         )
                         .unwrap();
-                        tx.execute("DELETE FROM claims WHERE id=?1", [&token])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h9f7299386c3e owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&token])
                             .unwrap();
                     }
                     "definition-repair" => {
                         tx.execute(
-                            "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+                            /* sqlite-large-value: allow-for-now lv-hf78d437f20fa owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
                             [&token],
                         )
                         .unwrap();
                     }
                     "replay" => {
-                        tx.execute("DELETE FROM local_publication_bootstrap", [])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h4fe1ade331da owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_bootstrap", [])
                             .unwrap();
                     }
                     _ => unreachable!(),
@@ -22313,6 +22308,36 @@ mission "feedback-review" state="ready" {
             Some(std::env::current_exe().unwrap())
         );
         assert!(!members[0].environment.contains_key("PATH"));
+    }
+
+    #[test]
+    fn fractal_only_authored_resume_selectors_survive_launch_selection() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let transcript = workspace.path().join("native.jsonl");
+        apply_source(&store, &format!(r#"
+version 2
+agent "worker" {{
+  workspace {:?}
+  harness "omp" {{}}
+  env {{
+    FRACTAL_NATIVE_RESUME_SESSION "requested-session"
+    FRACTAL_NATIVE_RESUME_PATH {:?}
+  }}
+}}
+"#, workspace.path().to_str().unwrap(), transcript.to_str().unwrap()), "fractal-resume");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store, runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let members = runtime.started_members.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(members.len(), 1);
+        let env = &members[0].environment;
+        assert_eq!(env[crate::suspension::RESUME_ENV], "requested-session");
+        assert_eq!(env["FRACTAL_NATIVE_RESUME_SESSION"], "requested-session");
+        assert_eq!(env[crate::rollout::RESUME_PATH_ENV], transcript.to_str().unwrap());
+        assert_eq!(env["FRACTAL_NATIVE_RESUME_PATH"], transcript.to_str().unwrap());
+        assert!(!env.contains_key(crate::suspension::CONTINUE_ENV));
+        assert!(!env.contains_key("FRACTAL_NATIVE_CONTINUE_SESSION"));
     }
 
     fn account_source(logins: &Path, workspace: &Path, harness_body: &str) -> String {
@@ -27138,9 +27163,9 @@ schedule "cycle" {{
             "step_path" => "'ghost'".into(),
             _ => column.clone(),
         }).collect::<Vec<_>>().join(",");
-        connection.execute(&format!("INSERT INTO step_runs ({}) SELECT {select} FROM step_runs LIMIT 1", columns.join(",")), []).unwrap();
-        connection.execute("DELETE FROM meta WHERE key='occurrence_creation_projection_rules'", []).unwrap();
-        connection.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES
+        connection.execute(&format!(/* sqlite-large-value: allow-for-now lv-h477443b3b34f owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs ({}) SELECT {select} FROM step_runs LIMIT 1", columns.join(",")), []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h6c9aeb7c32a1 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='occurrence_creation_projection_rules'", []).unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7b22422f1cd5 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES
             ('canonical_shared_projection_rules','2'), ('work_extended_projection_rules','1');").unwrap();
         drop(connection);
         let upgraded = Store::open(&copy, "ivory").unwrap();
@@ -33800,7 +33825,7 @@ observer "repo" {
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-h89c5142ff1d1 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![(now_ms() - 3_600_001).to_string(), old.id],
             )
             .unwrap();
@@ -34291,7 +34316,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
             crate::store::configure_projection_writer(&connection).unwrap();
             connection
                 .execute(
-                    "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                    /* sqlite-large-value: allow-for-now lv-h6ce76ec8b9fb owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                     rusqlite::params![
                         (now_ms() - FAULT_ATTENTION_AFTER_MS - 1).to_string(),
                         fault.id
@@ -39134,9 +39159,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     fn assert_claude_prompt_screen_resolution(restart: bool, see_dialog: bool) {
         let fixture = |name: &str| -> String {
             match name {
-                "claude-working.txt" => include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt"),
-                "claude-permission-dialog.txt" => include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-dialog.txt"),
-                "claude-permission-refused.txt" => include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-refused.txt"),
+                "claude-working.txt" => /* sqlite-large-value: allow-for-now lv-h77d3068340d4 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt"),
+                "claude-permission-dialog.txt" => /* sqlite-large-value: allow-for-now lv-h4d12287f9727 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-dialog.txt"),
+                "claude-permission-refused.txt" => /* sqlite-large-value: allow-for-now lv-h396d9bae4905 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-refused.txt"),
                 _ => unreachable!("{name}"),
             }
             .into()
@@ -39239,8 +39264,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// screen moves on.
     #[test]
     fn a_screen_only_prompt_is_an_alert_and_its_answer_is_pressed_into_the_dialog_once() {
-        let mcp = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-mcp-server.txt");
-        let working = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let mcp = /* sqlite-large-value: allow-for-now lv-h37971c4ddd6b owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-mcp-server.txt");
+        let working = /* sqlite-large-value: allow-for-now lv-h17575a2c74b2 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39347,7 +39372,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// back for the person to finish in the terminal, saying why, and offers no answer.
     #[test]
     fn a_screen_prompt_answer_the_terminal_refused_part_way_goes_back_to_the_person() {
-        let trust = include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-trust.txt");
+        let trust = /* sqlite-large-value: allow-for-now lv-hbb8d5d2da8d1 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-trust.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39434,8 +39459,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// while the dialog is on screen: Claude does not take a hook's allow for a plan.
     #[test]
     fn a_plan_approved_from_a_client_is_approved_in_its_dialog_once() {
-        let plan = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
-        let working = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let plan = /* sqlite-large-value: allow-for-now lv-h27368ac5df4c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
+        let working = /* sqlite-large-value: allow-for-now lv-h4534ae01fadd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39515,7 +39540,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     #[test]
     fn codex_update_skip_is_once_per_episode_and_requires_current_screen_and_incarnation() {
         let menu =
-            include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt");
+            /* sqlite-large-value: allow-for-now lv-h2963143a3b13 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt");
         for case in [
             "skip",
             "send-failed",
@@ -39679,19 +39704,19 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         for (driver, screen, code) in [
             (
                 "claude",
-                include_str!(
+                /* sqlite-large-value: allow-for-now lv-h8f0e65b36c60 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                     "../../st-drivers/tests/fixtures/blocking-screens/claude-wide-footer.txt"
                 ),
                 "provider-auth-expired",
             ),
             (
                 "codex",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt"),
+                /* sqlite-large-value: allow-for-now lv-h70d6fd0f599c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt"),
                 "provider-auth-expired",
             ),
             (
                 "codex",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt")
+                /* sqlite-large-value: allow-for-now lv-h493f3f1745e7 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt")
                     .split("enter continue")
                     .next()
                     .unwrap(),
@@ -39699,12 +39724,12 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ),
             (
                 "pi",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/pi-no-key.txt"),
+                /* sqlite-large-value: allow-for-now lv-h91fbd820cdba owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/pi-no-key.txt"),
                 "provider-auth-expired",
             ),
             (
                 "omp",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/omp-no-key.txt"),
+                /* sqlite-large-value: allow-for-now lv-hb9d750a6c83c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/omp-no-key.txt"),
                 "provider-auth-expired",
             ),
         ] {
@@ -39800,13 +39825,13 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
 
             if driver == "claude" {
                 for login_screen in [
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-h4f3ec5adc2f4 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/claude-login.txt"
                     ),
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-he9ec12118b27 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/claude-authenticating.txt"
                     ),
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-h3ad4136f5595 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/claude-code-prompt.txt"
                     ),
                 ] {
@@ -39904,11 +39929,11 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
 
             if driver == "codex" {
                 let next = if code == "provider-auth-expired" {
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-h339947247d46 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt"
                     ).split("enter continue").next().unwrap()
                 } else {
-                    include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt")
+                    /* sqlite-large-value: allow-for-now lv-hae98777c5efd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt")
                 };
                 runtime
                     .screens
@@ -40488,7 +40513,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .lock()
             .unwrap()
             .execute_batch(
-                "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
+                /* sqlite-large-value: allow-for-now lv-h1ed1b65f008c owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
                  WHEN NEW.kind='message.sent'
                  BEGIN SELECT RAISE(ABORT, 'injected session-start failure'); END;",
             )
@@ -40503,7 +40528,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .connection
             .lock()
             .unwrap()
-            .execute_batch("DROP TRIGGER fail_session_start")
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-h36ce2ba3fbe2 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_session_start")
             .unwrap();
         reconciler
             .deliver_session_start(&desired.subject, "worker-three")
@@ -43404,7 +43429,7 @@ mission "gated" state="ready" {
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hf5e65e6d2b33 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![
                     (now_ms() - WORK_WAKE_EXHAUST_GRACE_MS - 1).to_string(),
                     sent.id

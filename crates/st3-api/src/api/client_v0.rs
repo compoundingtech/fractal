@@ -1,3 +1,5 @@
+use crate::EvidenceStore;
+use crate::PublishedViewsStore;
 use super::*;
 use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
@@ -5,6 +7,8 @@ use axum::http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use std::collections::BTreeSet;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+pub(super) mod published_runtimes;
 
 /// Socket ownership ends this root only after the first data frame reaches the client.
 struct FirstFrame {
@@ -142,7 +146,6 @@ mod agents_window_tests;
 const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
 const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
 const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
-const TERMINAL_CAPABILITY_PROTOCOL_PREFIX: &str = "st3.cap.";
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 
 pub async fn request_latency(
@@ -169,6 +172,8 @@ pub struct CollectionSubscribe {
     /// Follow one arrangement instead of the owner's bounded prefix window.
     subject: Option<String>,
     actor: Option<String>,
+    /// Follow exactly one current agent instead of the fleet window.
+    agent: Option<String>,
     status: Option<String>,
     /// Usage period boundaries; an omitted end follows new usage through the current time.
     since_ms: Option<u64>,
@@ -206,6 +211,8 @@ struct CollectionSubscription {
     cursor: Option<collection_ivm::Delivered>,
     order: Vec<String>,
     has_more: bool,
+    /// Same-snapshot owner projection counter; only owner-wide arrangements use it.
+    owner_revision: Option<u64>,
     /// The roster publication revision when this window's last read began. An agents window
     /// rereads once a later roster is published, even at the same graph index.
     roster_revision: u64,
@@ -336,14 +343,12 @@ pub async fn collection_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [COLLECTION_SUBPROTOCOL] {
-        return Err(validation(
-            "the collection WebSocket requires exactly st3.client.collections.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, COLLECTION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the collection WebSocket requires exactly one supported collections protocol"))?
+        .to_owned();
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     Ok(websocket
-        .protocols([COLLECTION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
 }
 
@@ -433,7 +438,7 @@ pub async fn collection_items(
     session: &ClientSession,
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<(ClientSnapshot, Vec<Value>, bool), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
     collection_items_with_windows(state, session, request, read_permit, None).await
 }
 
@@ -443,7 +448,7 @@ async fn collection_items_with_windows(
     request: &CollectionSubscribe,
     read_permit: tokio::sync::OwnedSemaphorePermit,
     windows: Option<Arc<collection_windows::Windows>>,
-) -> Result<(ClientSnapshot, Vec<Value>, bool), ApiError> {
+) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError> {
     if !matches!(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary"
@@ -465,6 +470,7 @@ async fn collection_items_with_windows(
             "subject filters are supported for arrangements only",
         ));
     }
+    validate_agent_selector(&request.collection, request.agent.as_deref())?;
     let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
     if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit) {
         return Err(validation("collection limit must be 1 through 200"));
@@ -526,11 +532,12 @@ async fn collection_items_with_windows(
     if request.collection == "devices" && person.as_deref().is_none_or(|person| !person.starts_with("person/")) {
         return Err(forbidden("device inventory requires an explicitly authenticated person"));
     }
-    let prepared = windows.as_ref().and_then(|windows| windows.prepare(state, current, request));
+    let prepared = windows.as_ref().and_then(|windows| windows.prepare(/* sqlite-large-value: allow-for-now lv-h44cb483ab5a2 owner=st3_api::api::client_v0 TODO=trace-statement-and-value-representation */ state, current, request));
     let state = state.clone();
     let session = session.clone();
     let request = request.clone();
     let actor = request.actor.clone();
+    let selected_agent = request.agent.clone();
     let subject = request.subject.clone();
     let status = request.status.clone();
     let collection = request.collection.clone();
@@ -541,7 +548,7 @@ async fn collection_items_with_windows(
     let traced = matches!(collection.as_str(), "agents" | "summary") && first_frame_current();
     let roster_telemetry = matches!(collection.as_str(), "agents" | "summary") && crate::otel::export_enabled();
     let mut roster_attributes = None;
-    let (snapshot, mut items, mut has_more) = loop {
+    let (snapshot, mut items, mut has_more, owner_revision) = loop {
         // Summary reads the published roster once a refresher keeps one; only a store without
         // one folds it here, behind the shared admission.
         gates.admit(&state.store, prepared.as_ref(),
@@ -556,6 +563,7 @@ async fn collection_items_with_windows(
         let session = session.clone();
         let request = request.clone();
         let actor = actor.clone();
+        let selected_agent = selected_agent.clone();
         let subject = subject.clone();
         let status = status.clone();
         let collection = collection.clone();
@@ -600,13 +608,24 @@ async fn collection_items_with_windows(
                     Ok(current) => current,
                     Err(error) => return Ok(Err(error)),
                 };
-                // A miss of this exact cut serves the newest published roster under that
-                // roster's own snapshot, past the window cache, and wakes its refresher.
-                // Every served roster says when it was published.
+                // An exact agent selector reads its own selected projection: one card folds
+                // in the caller's snapshot, so it neither waits for nor reads the fleet roster.
                 let mut published = None;
                 let mut published_at = None;
                 let mut roster_path = "exact_cold";
-                let cached_agents = if collection == "agents" {
+                let cached_agents = if collection == "agents" && let Some(agent) = &selected_agent {
+                    if admitted {
+                        None
+                    } else {
+                        let Some(cards) = store.exact_agent_resources_cached_at(index, false, agent)? else {
+                            return Ok(Ok(None));
+                        };
+                        Some(cards)
+                    }
+                } else if collection == "agents" {
+                    // A miss of this exact cut serves the newest published roster under that
+                    // roster's own snapshot, past the window cache, and wakes its refresher.
+                    // Every served roster says when it was published.
                     store.note_agent_roster_read();
                     match store.agent_resources_published_at(index, false, None)? {
                         Some((cards, at)) => {
@@ -754,6 +773,14 @@ async fn collection_items_with_windows(
                     None => client_snapshot_at(&state, index),
                 };
                 let at = snapshot.created_at.clone();
+                // Inventory invalidation is owner-scoped, independent of truncation and
+                // cached prefix equality. Read its projection counter under this same fence.
+                let owner_revision = if collection == "arrangements" && subject.is_none() {
+                    Some(store.arrangement_inventory_revision(
+                        person.as_deref().expect("explicit arrangement owner"))?)
+                } else {
+                    None
+                };
                 // Share one bounded fleet projection across subscriber window sizes.
                 // Uncached reads retain the same bounded cut as the shared projection.
                 let projection_limit = if matches!(collection.as_str(), "missions" | "attention") {
@@ -816,6 +843,10 @@ async fn collection_items_with_windows(
                             let keep = if status.is_none() { limit + 1 } else { usize::MAX };
                             match &cached_agents {
                                 Some(cards) => cards.iter().take(keep).cloned().collect(),
+                                None if let Some(agent) = &selected_agent => {
+                                    folded.set(true);
+                                    client_exact_agent_resources(&store, false, index, agent)?
+                                }
                                 None if status.is_none() => {
                                     folded.set(true);
                                     return client_agent_window_cards(&store, index, limit)
@@ -898,7 +929,7 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
-                Ok(Ok(Some((snapshot, items, has_more))))
+                Ok(Ok(Some((snapshot, items, has_more, owner_revision))))
             });
             Ok::<_, anyhow::Error>((result?, read_permit, admission))
             })??;
@@ -922,7 +953,7 @@ async fn collection_items_with_windows(
         has_more |= end < items.len();
         items.truncate(end);
     }
-    Ok((snapshot, items, has_more))
+    Ok((snapshot, items, has_more, owner_revision))
 }
 
 /// Membership and display order come from the existing shallow page refs. The next
@@ -963,6 +994,31 @@ fn collection_window_label(collection: &str) -> &'static str {
         "terminals" => "stream collection/terminals",
         _ => "stream collection/invalid",
     }
+}
+
+/// Advertised in `/v1/client/capabilities`: an agents subscription may select one exact agent.
+/// Clients send `agent` only to a daemon that grants it; an older one ignores the selector.
+pub const EXACT_AGENT_SELECTOR_CAPABILITY: &str = "collection.agents.exact-selector";
+/// The longest exact agent selector; it is part of the shared window key.
+const MAX_AGENT_SELECTOR_BYTES: usize = 256;
+
+fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<(), ApiError> {
+    if let Some(agent) = agent {
+        if collection != "agents" {
+            return Err(validation("agent filters are supported for agents only"));
+        }
+        if !agent.starts_with("agent/") || agent.len() == "agent/".len()
+            || agent.chars().any(char::is_whitespace)
+        {
+            return Err(validation("agent must be a full agent ID"));
+        }
+        if agent.len() > MAX_AGENT_SELECTOR_BYTES {
+            return Err(validation(format!(
+                "agent must be at most {MAX_AGENT_SELECTOR_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn send_collection(socket: &mut WebSocket, value: Value) -> bool {
@@ -1015,10 +1071,10 @@ enum Refreshed {
 async fn deliver_collection(
     socket: &mut WebSocket,
     subscription: &mut CollectionSubscription,
-    read: Result<(ClientSnapshot, Vec<Value>, bool), ApiError>,
+    read: Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>,
 ) -> Refreshed {
     let request = &subscription.request;
-    let (snapshot, mut items, has_more) = match read {
+    let (snapshot, mut items, has_more, owner_revision) = match read {
         Ok(read) => read,
         Err(error) => {
             let retryable = client_error_retryable(error.status, Some(&error.code));
@@ -1078,6 +1134,7 @@ async fn deliver_collection(
             && removes.is_empty()
             && order == subscription.order
             && has_more == subscription.has_more
+            && owner_revision == subscription.owner_revision
         {
             true
         } else {
@@ -1094,11 +1151,12 @@ async fn deliver_collection(
     subscription.previous = Arc::new(current);
     subscription.order = order;
     subscription.has_more = has_more;
+    subscription.owner_revision = owner_revision;
     Refreshed::Current
 }
 
 enum CollectionRead {
-    Legacy(Result<(ClientSnapshot, Vec<Value>, bool), ApiError>),
+    Legacy(Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>),
     Ivm(Box<Result<collection_ivm::Candidate, ApiError>>),
 }
 
@@ -1117,7 +1175,7 @@ async fn deliver_ivm_collection(
         Output::Window(window) => {
             let delivered = subscription.delivered;
             if candidate.replace { subscription.delivered = false; }
-            let result = deliver_collection(socket, subscription, Ok(window)).await;
+            let result = deliver_collection(socket, subscription, Ok((window.0, window.1, window.2, None))).await;
             if !matches!(result, Refreshed::Current) { subscription.delivered = delivered; }
             result
         }
@@ -1728,7 +1786,7 @@ pub async fn collection_stream_socket_with_reader<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, None, None, read).await;
 }
@@ -1746,7 +1804,7 @@ pub async fn collection_stream_socket_with_sources<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
 {
     collection_stream_socket_with_context(socket, state, session, presence, sources, None, read).await;
 }
@@ -1764,7 +1822,7 @@ async fn collection_stream_socket_with_context<F, Fut>(
         + Clone
         + Send
         + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
 {
     collection_stream_socket_with_admission(
         socket, state, session, presence, (sources, upgrade), read, open_conversation_subscription,
@@ -1781,7 +1839,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     admit: A,
 ) where
     F: Fn(AppState, ClientSession, CollectionSubscribe, tokio::sync::OwnedSemaphorePermit) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
     A: Fn(AppState, ClientSession, CollectionSubscribe, ConversationAdmissionPermits) -> Admission + Clone + Send + 'static,
     Admission: Future<Output = Result<(String, Option<String>), ApiError>> + Send + 'static,
 {
@@ -1908,6 +1966,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         terminals.remove(&request.id);
                         terminals_opened.remove(&request.id);
                         conversations.stop(&request.id);
+                        if let Err(error) = validate_agent_selector(&request.collection, request.agent.as_deref()) {
+                            if let Some(presence) = &presence { presence.unfollow(&request.id); }
+                            if !send_collection(&mut socket, json!({"kind":"error", "id":request.id,
+                                "code":error.code, "message":error.message})).await { return; }
+                            break 'command;
+                        }
                         // Allocate a fresh token for every accepted subscribe, including terminal
                         // replacements, so queued collection/conversation results cannot reuse it.
                         generation += 1;
@@ -1964,7 +2028,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         refresh.push(request.id.clone());
                         // Collection results and conversation frames share the same generation fence.
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -2905,6 +2969,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"slo", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"owned-sets", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
@@ -3807,20 +3872,32 @@ fn runtime_resources_from_status(
     session: &ClientSession,
     status: crate::model::StatusResponse,
 ) -> anyhow::Result<Vec<Value>> {
+    runtime_resources_from_status_access(&state.store, &snapshot.id, &snapshot.created_at, status,
+        session.allows("terminal.read"), session.allows("terminal.control"))
+}
+
+fn runtime_resources_from_status_access(
+    store: &Store,
+    _snapshot_id: &str,
+    created_at: &str,
+    status: crate::model::StatusResponse,
+    read: bool,
+    control: bool,
+) -> anyhow::Result<Vec<Value>> {
     #[cfg(test)]
     if let Some(count) = RUNTIME_DETAIL_SUBJECT_COUNTS.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&snapshot.id) {
+        .unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(_snapshot_id) {
         *count += status.subjects.len();
     }
     // Each runtime's declaration and observation time, in one statement apiece for the list.
-    let desired_tokens = state.store.selected_desired_tokens(
+    let desired_tokens = store.selected_desired_tokens(
         &status
             .subjects
             .iter()
             .map(|selected| selected.subject.as_str())
             .collect::<Vec<_>>(),
     )?;
-    let claim_times = state.store.claim_acceptance_times(
+    let claim_times = store.claim_acceptance_times(
         &status
             .subjects
             .iter()
@@ -3864,13 +3941,13 @@ fn runtime_resources_from_status(
         if !authoritative {
             runtime_state = "unreachable";
         }
-        let local = authoritative && observed == "running" && actual_origin == state.store.origin();
+        let local = authoritative && observed == "running" && actual_origin == store.origin();
         let incarnation_id = fields.get("incarnation_id").and_then(Value::as_str);
         let desired_revision = desired_tokens.get(&owner_id).cloned();
         let updated_at = claim_times
             .get(actual_claim)
             .map(|accepted_at| client_timestamp(*accepted_at))
-            .unwrap_or_else(|| snapshot.created_at.clone());
+            .unwrap_or_else(|| created_at.to_owned());
         let reasons = selected.reason.into_iter().collect::<Vec<_>>();
         values.push(json!({
             "id": format!("runtime/{runtime_id}"),
@@ -3889,9 +3966,9 @@ fn runtime_resources_from_status(
             // Screen fences come from terminal.screen, never from a graph projection.
             "terminal_sequence": null,
             "terminal_access": terminal.then(|| json!({
-                "read": if local && session.allows("terminal.read") { "granted" } else { "unavailable" },
-                "input": if local && session.allows("terminal.control") { "granted" } else { "unavailable" },
-                "resize": if local && session.allows("terminal.control") { "granted" } else { "unavailable" }
+                "read": if local && read { "granted" } else { "unavailable" },
+                "input": if local && control { "granted" } else { "unavailable" },
+                "resize": if local && control { "granted" } else { "unavailable" }
             })),
             "operational": {
                 "layer": selected.projection.layer,
@@ -5172,6 +5249,9 @@ pub async fn runtimes(
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
     require_scope(&session, "read.projections")?;
+    if !query.history {
+        return published_runtimes::page(&state, snapshot, &session, &query);
+    }
     let history = query.history;
     client_snapshot_page(
         &state,
@@ -8028,11 +8108,9 @@ pub async fn conversation_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [CONVERSATION_SUBPROTOCOL] {
-        return Err(validation(
-            "the conversation WebSocket requires exactly st3.client.conversation.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, CONVERSATION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the conversation WebSocket requires exactly one supported conversation protocol"))?
+        .to_owned();
     let session_id = conversation_session_id(&state, &id)?;
     let snapshot = new_client_snapshot(&state);
     let remote = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
@@ -8059,7 +8137,7 @@ pub async fn conversation_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("conversation", format!("conversation:{id}"));
     Ok(websocket
-        .protocols([CONVERSATION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             conversation_stream_socket(socket, state, session, session_id, query.after, remote, (upgrade, first_frame)).await
@@ -8616,7 +8694,7 @@ pub async fn pairing_begin(
             "the pairing person must match the authenticated Unix person",
         ));
     }
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || request.device_name.trim().is_empty()
         || request.device_name.len() > 120
         || !request.person_id.starts_with("person/")
@@ -8804,7 +8882,7 @@ pub async fn pairing_complete(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PairingComplete>,
 ) -> Result<Json<Value>, ApiError> {
-    if request.api_version != CLIENT_API_VERSION || request.device_public_key.len() < 32 {
+    if !super::wire_names::api_version(&request.api_version) || request.device_public_key.len() < 32 {
         return Err(validation(
             "the pairing completion has an invalid version or public key",
         ));
@@ -9329,29 +9407,14 @@ pub async fn terminal_stream(
         .map(str::trim)
         .filter(|protocol| !protocol.is_empty())
         .collect::<Vec<_>>();
-    let normative_count = protocols
-        .iter()
-        .filter(|protocol| **protocol == TERMINAL_SUBPROTOCOL)
-        .count();
-    let secondary = protocols
-        .iter()
-        .filter(|protocol| **protocol != TERMINAL_SUBPROTOCOL)
-        .copied()
-        .collect::<Vec<_>>();
-    let stream_capability = secondary
-        .first()
-        .and_then(|protocol| protocol.strip_prefix(TERMINAL_CAPABILITY_PROTOCOL_PREFIX))
-        .filter(|capability| !capability.is_empty());
-    if normative_count != 1 || secondary.len() != 1 || stream_capability.is_none() {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "validation-failed".into(),
-            message: format!(
-                "the terminal WebSocket must request exactly `{TERMINAL_SUBPROTOCOL}` plus one `st3.cap.*` capability protocol"
-            ),
-            details: Box::default(),
-        });
-    }
+    let (selected, stream_capability) =
+        super::wire_names::terminal_protocol(&protocols, TERMINAL_SUBPROTOCOL, false)
+            .ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "validation-failed".into(),
+                message: "the terminal WebSocket requires one supported terminal protocol plus one capability protocol".into(),
+                details: Box::default(),
+            })?;
     let follow = prepare_terminal_follow(
         &state,
         &session,
@@ -9362,7 +9425,7 @@ pub async fn terminal_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("terminal", format!("terminal:{id}"));
     Ok(websocket
-        .protocols([TERMINAL_SUBPROTOCOL])
+        .protocols([selected.to_owned()])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             follow.run(state, TerminalSink::Socket(Box::new(socket)), upgrade, first_frame).await
@@ -12135,7 +12198,7 @@ fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
 ) -> Result<(), ApiError> {
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
     {
@@ -12610,6 +12673,198 @@ mod published_attention_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn published_runtimes_refresher_publishes_after_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        observe_published_runtime(&state, "agent/published-before", "running", false);
+        let mut changes = state.store.published_runtime_list().subscribe();
+        super::super::published_lists::start_published_lists(&state);
+        let first_cut = state.store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), changes.wait_for(|_| {
+            state.store.published_runtime_list().newest().is_some_and(|p| p.cut >= first_cut)
+        })).await.unwrap().unwrap();
+        observe_published_runtime(&state, "agent/published-after", "running", false);
+        let next_cut = state.store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), changes.wait_for(|_| {
+            state.store.published_runtime_list().newest().is_some_and(|p| p.cut >= next_cut)
+        })).await.unwrap().unwrap();
+        let publication = state.store.published_runtime_list().newest().unwrap();
+        assert_eq!(publication.rows.items.len(), 2);
+        assert!(published_runtimes::fold(&state.store, Some(&publication)).unwrap().is_none(),
+            "an unchanged store index does not rebuild the list");
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_readiness_errors_survive_http_encoding() {
+        for ended in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            if ended {
+                let list = state.store.published_runtime_list();
+                let _wake = list.start();
+                list.end();
+            }
+            let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+            let error = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Query(ClientListQuery::default())).await.unwrap_err();
+            let response = super::super::response_body::Context {
+                state, client_request: true, observation_report: false,
+                request_id: "request/runtime-readiness".into(), client_snapshot: None,
+                server: None, roster: false,
+            }.wrap(error.into_response()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
+            assert_eq!(envelope["retryable"], !ended);
+            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["details"], json!({}));
+        }
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_repeated_first_pages_keep_existing_cursors() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for subject in ["agent/cache-a", "agent/cache-b", "agent/cache-c"] {
+            observe_published_runtime(&state, subject, "running", false);
+        }
+        publish_runtimes_once(&state);
+        let snapshot = new_client_snapshot(&state);
+        let query = ClientListQuery { limit: Some(1), ..ClientListQuery::default() };
+        let other = client_page_read(&state, &snapshot, "runtime-cache-probe",
+            vec![json!({"id":"first"}), json!({"id":"second"})], &query, true).unwrap();
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+        let (_, Json(first)) = runtimes(State(state.clone()), Extension(snapshot.clone()),
+            Extension(session.clone()), Query(query.clone())).await.unwrap();
+        let original = first.page.next_cursor.unwrap();
+        for _ in 0..33 {
+            let (_, Json(repeated)) = runtimes(State(state.clone()), Extension(snapshot.clone()),
+                Extension(session.clone()), Query(query.clone())).await.unwrap();
+            assert_eq!(repeated.page.next_cursor.as_deref(), Some(original.as_str()),
+                "identical first pages reuse the original cache entry and expiry");
+        }
+        let cursor = decode_client_cursor(&original).unwrap();
+        let (_, Json(next)) = runtimes(State(state.clone()), Extension(cursor.snapshot),
+            Extension(session), Query(ClientListQuery { cursor: Some(original), ..query.clone() })).await.unwrap();
+        assert_eq!(next.items[0]["owner_id"], "agent/cache-b");
+        let next_other = client_page_read(&state, &snapshot, "runtime-cache-probe", Vec::new(),
+            &ClientListQuery { cursor: other.page.next_cursor, ..query }, true).unwrap();
+        assert_eq!(next_other.items[0]["id"], "second");
+    }
+
+    fn observe_published_runtime(state: &AppState, subject: &str, status: &str, terminal: bool) {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({
+                "status": status, "runtime_id": subject, "incarnation_id": "one", "terminal": terminal
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn publish_runtimes_once(state: &AppState) {
+        let list = state.store.published_runtime_list();
+        let _wake = list.start();
+        let (base, generation) = list.base();
+        if let Some((publication, _)) = published_runtimes::fold(&state.store, base.as_deref()).unwrap() {
+            assert!(list.publish(publication, generation).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_match_legacy_and_freeze_cursors_across_republish() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada",
+            &["read.projections", "terminal.read"]);
+        for (subject, status, terminal) in [
+            ("exec/runtime-c", "running", true),
+            ("agent/runtime-a", "running", false),
+            ("agent/runtime-b", "running", false),
+            ("exec/runtime-old", "stopped", true),
+        ] {
+            observe_published_runtime(&state, subject, status, terminal);
+        }
+        publish_runtimes_once(&state);
+        let snapshot = new_client_snapshot(&state);
+        let expected = runtime_resources(&state, false, &snapshot, &session).unwrap();
+        assert_eq!(expected.len(), 3);
+        let query = ClientListQuery { limit: Some(1), ..ClientListQuery::default() };
+        let (Extension(first_snapshot), Json(first)) = runtimes(State(state.clone()),
+            Extension(snapshot), Extension(session.clone()), Query(query.clone())).await.unwrap();
+        assert_eq!(first.items, expected[..1]);
+        observe_published_runtime(&state, "agent/runtime-0", "running", false);
+        observe_published_runtime(&state, "agent/runtime-b", "stopped", false);
+        publish_runtimes_once(&state);
+        let mut got = first.items;
+        let mut cursor = first.page.next_cursor;
+        while let Some(encoded) = cursor {
+            let continuation = decode_client_cursor(&encoded).unwrap();
+            let (Extension(next_snapshot), Json(next)) = runtimes(State(state.clone()),
+                Extension(continuation.snapshot), Extension(session.clone()),
+                Query(ClientListQuery { cursor: Some(encoded), ..query.clone() })).await.unwrap();
+            assert_eq!(next_snapshot.id, first_snapshot.id);
+            got.extend(next.items);
+            cursor = next.page.next_cursor;
+        }
+        assert_eq!(got, expected);
+        let (_, Json(newest)) = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Query(ClientListQuery::default())).await.unwrap();
+        assert_eq!(newest.items, runtime_resources(&state, false, &new_client_snapshot(&state), &session).unwrap());
+        let (_, Json(history)) = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Query(ClientListQuery { history: true, ..ClientListQuery::default() })).await.unwrap();
+        assert_eq!(history.items, runtime_resources(&state, true, &new_client_snapshot(&state), &session).unwrap());
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_not_ready_never_reduces_on_request() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        observe_published_runtime(&state, "agent/not-ready", "running", false);
+        let snapshot = new_client_snapshot(&state);
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let error = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
+            Query(ClientListQuery::default())).await.unwrap_err();
+        assert_eq!(work.finish(), smallclaims::sqlite::work::SqliteWork::default());
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "runtime-list-not-ready");
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_page_cost_is_flat_with_historical_population() {
+        for historical in [10, 2000] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            for index in 0..historical {
+                let subject = format!("agent/old-{index:04}");
+                observe_published_runtime(&state, &subject, "running", false);
+                observe_published_runtime(&state, &subject, "stopped", false);
+            }
+            for index in 0..110 {
+                observe_published_runtime(&state, &format!("agent/live-{index:04}"), "running", false);
+            }
+            publish_runtimes_once(&state);
+            let snapshot = new_client_snapshot(&state);
+            let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+            let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+            let started = Instant::now();
+            let (_, Json(page)) = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
+                Query(ClientListQuery { limit: Some(100), ..ClientListQuery::default() })).await.unwrap();
+            let elapsed = started.elapsed();
+            let cost = work.finish();
+            assert_eq!(cost, smallclaims::sqlite::work::SqliteWork::default(),
+                "published reads must execute zero SQLite VM steps or status queries at population {historical}");
+            assert_eq!(page.items.len(), 100);
+            assert!(page.page.has_more);
+            assert!(elapsed < Duration::from_millis(100), "published read took {elapsed:?}");
+            println!("published runtimes historical={historical} page=100 elapsed_us={} sqlite={cost:?}", elapsed.as_micros());
+        }
+    }
 
     #[tokio::test]
     async fn request_latency_keeps_scope_and_routes_with_a_memory_only_cost_snapshot() {
@@ -13114,7 +13369,7 @@ mission "queue-parity" state="ready" {
         assert_eq!(terminal_error_close_code("stale-incarnation"), 1008);
     }
 
-    fn assert_collection_frame_conforms(frame: &Value) {
+    pub(super) fn assert_collection_frame_conforms(frame: &Value) {
         let mut schema: Value = serde_json::from_str(include_str!(
             "../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
         ))
@@ -13136,6 +13391,355 @@ mission "queue-parity" state="ready" {
         let mut bad_retry = frame.clone();
         bad_retry["retryable"] = json!("yes");
         assert!(!validator.is_valid(&bad_retry));
+    }
+
+    fn agent_selector_observe(state: &AppState, agent: &str, kind: &str, fields: Value) {
+        state.store.append_claim(&ClaimInput {
+            subject: agent.into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_agent_selector_isolates_cards_status_and_http_detail() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for agent in ["agent/a", "agent/z"] {
+            agent_selector_observe(&state, agent, "runtime.observed",
+                json!({"status":"running","runtime_id":agent,"incarnation_id":"one"}));
+            agent_selector_observe(&state, agent, "harness.observed",
+                json!({"state":"idle","driver":"codex","incarnation_id":"one"}));
+        }
+        let session = ClientSession::local(None).unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let windows = collection_windows::Windows::attach(&state.store);
+        let mut request: CollectionSubscribe = serde_json::from_value(json!({
+            "kind":"subscribe","id":"details","collection":"agents","agent":"agent/z","limit":1,
+        })).unwrap();
+        let before = state.store.agent_resources_refolded_cards_for_test();
+        let (_, selected, more, _) = collection_items_with_windows(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["id"], "agent/z");
+        assert!(!more);
+        assert_eq!(state.store.agent_resources_refolded_cards_for_test(), before + 1);
+        let snapshot = new_client_snapshot(&state);
+        let Json(detail) = client_agents_detail(State(state.clone()), Extension(snapshot),
+            AxumPath("agent/z".into()), Query(ClientListQuery::default())).await.unwrap();
+        assert_eq!(detail, selected[0]);
+        assert_eq!(state.store.agent_resources_refolded_cards_for_test(), before + 1);
+        request.agent = Some("agent/a".into());
+        let (_, other, _, _) = collection_items_with_windows(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
+        assert_eq!(other[0]["id"], "agent/a");
+        request.agent = None;
+        let (_, fleet, more, _) = collection_items_with_windows(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
+        assert_eq!(fleet[0]["id"], "agent/a");
+        assert!(more);
+        let folded = state.store.agent_resources_refolded_cards_for_test();
+        let builds = state.store.agent_resources_builds_for_test();
+        agent_selector_observe(&state, "agent/a", "harness.observed",
+            json!({"state":"working","driver":"codex","incarnation_id":"one"}));
+        request.agent = Some("agent/z".into());
+        let (_, unchanged, more, _) = collection_items_with_windows(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
+        assert_eq!(unchanged, selected);
+        assert!(!more);
+        assert_eq!(state.store.agent_resources_refolded_cards_for_test(), folded);
+        assert_eq!(state.store.agent_resources_builds_for_test(), builds);
+        request.status = selected[0]["state"].as_str().map(str::to_owned);
+        let (_, matching, more, _) = collection_items_with_windows(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
+        assert_eq!(matching, selected);
+        assert!(!more);
+        request.status = Some("stopped".into());
+        let (_, filtered, more, _) = collection_items_with_windows(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
+        assert!(filtered.is_empty());
+        assert!(!more);
+        request.status = None;
+        request.agent = Some("agent/absent".into());
+        let (_, absent, more, _) = collection_items_with_windows(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
+        assert!(absent.is_empty());
+        assert!(!more);
+        for agent in ["z", "person/example", "agent/", "agent/bad id"] {
+            request.agent = Some(agent.into());
+            let error = collection_items(&state, &session, &request,
+                slots.clone().acquire_owned().await.unwrap()).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        request.agent = Some("agent/z".into());
+        for collection in ["work", "attention", "missions", "glasses", "arrangements"] {
+            request.collection = collection.into();
+            let error = collection_items(&state, &session, &request,
+                slots.clone().acquire_owned().await.unwrap()).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_agent_selector_cards_equal_fleet_window_cards_at_the_same_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = r#"
+version 2
+mission "differential" state="ready" {
+  concurrent-runs
+  goal "Give one agent a queue preview."
+  step "work" { assigned-to "agent/example/queued" }
+}
+"#;
+        let intent = crate::graph::parse_intent(source, &state.node).unwrap();
+        let planned = state.store.mission(&intent, IntentInput {
+            kdl: source.into(),
+            source_name: None,
+        }).unwrap();
+        state.store.apply(&intent, &planned.subject_tokens, "differential-fixture").unwrap();
+        for agent in ["agent/example/idle", "agent/example/usage", "agent/example/queued",
+            "agent/example/helpers", "agent/example/stopped"]
+        {
+            agent_selector_observe(&state, agent, "runtime.observed",
+                json!({"status":"running","runtime_id":agent,"incarnation_id":"one"}));
+            agent_selector_observe(&state, agent, "harness.observed",
+                json!({"state":"idle","driver":"codex","incarnation_id":"one"}));
+        }
+        agent_selector_observe(&state, "agent/example/usage", "harness.observed",
+            json!({"state":"working","driver":"codex","incarnation_id":"one"}));
+        agent_selector_observe(&state, "agent/example/usage", "harness.usage",
+            json!({"driver":"codex","semantics":"response","incarnation_id":"one",
+                "total_tokens":30,"input_tokens":20,"output_tokens":10}));
+        agent_selector_observe(&state, "agent/example/usage", "harness.usage",
+            json!({"driver":"codex","semantics":"context_occupancy","incarnation_id":"one",
+                "context_used_tokens":1200,"context_window_tokens":200000}));
+        agent_selector_observe(&state, "agent/example/stopped", "runtime.observed",
+            json!({"status":"stopped","runtime_id":"agent/example/stopped","incarnation_id":"one"}));
+        for index in 0..2 {
+            let run = state.store.create_mission_run(&MissionRunRequest {
+                mission: "differential".into(),
+                revision: None,
+                workspace: root.path().display().to_string(),
+                requester: Some("person/alex".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: format!("differential-run-{index}"),
+            }).unwrap();
+            if index == 0 {
+                state.store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
+            } else {
+                state.store.move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
+                    agent: "agent/example/queued".into(),
+                    run: run.subject.clone(),
+                    placement: "top".into(),
+                    anchor: None,
+                    reason: Some("Give the queue preview a move.".into()),
+                    actor: "person/alex".into(),
+                    idempotency_key: "differential-move".into(),
+                }).unwrap();
+            }
+        }
+        // The single-agent overlay reads open_subagents(id) with an expiry filter; the fleet
+        // reads running_subagents(now). Running, lapsed and ended subagents must agree.
+        let now = client_now_ms() as u64;
+        for (id, lease) in [("running", now + 600_000), ("lapsed", now - 1), ("finished", now + 600_000)] {
+            agent_selector_observe(&state, "agent/example/helpers", "subagent.appeared", json!({
+                "subagent_id":id, "driver":"claude", "incarnation_id":"one",
+                "subagent_type":"Explore", "description":"map the code", "session_id":"session-1",
+                "started_at_unix_ms":1_790_931_600_000_u64, "lease_expires_at_unix_ms":lease,
+            }));
+        }
+        agent_selector_observe(&state, "agent/example/helpers", "subagent.ended",
+            json!({"subagent_id":"finished", "outcome":"completed"}));
+
+        let session = ClientSession::local(None).unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let windows = collection_windows::Windows::attach(&state.store);
+        let read = |agent: Option<&str>| {
+            let request: CollectionSubscribe = serde_json::from_value(json!({
+                "kind":"subscribe","id":"differential","collection":"agents",
+                "agent":agent,"limit":CLIENT_MAX_PAGE_ITEMS,
+            })).unwrap();
+            let (state, session, slots, windows) = (state.clone(), session.clone(), slots.clone(), windows.clone());
+            async move {
+                let (_, items, more, _) = collection_items_with_windows(&state, &session, &request,
+                    slots.acquire_owned().await.unwrap(), windows).await.unwrap();
+                assert!(!more);
+                items
+            }
+        };
+        let index = state.store.index().unwrap();
+        let ids = ["agent/example/helpers", "agent/example/idle", "agent/example/queued",
+            "agent/example/usage"];
+        // Exact cards folded cold, before any fleet read, then again from their own cache.
+        let mut cold = Vec::new();
+        for id in ids {
+            cold.push(read(Some(id)).await);
+        }
+        let fleet = read(None).await;
+        let mut listed = fleet.iter().map(|card| card["id"].as_str().unwrap()).collect::<Vec<_>>();
+        listed.sort_unstable();
+        assert_eq!(listed, ids, "the fleet holds every current agent and not the stopped one");
+        let card = |id: &str| fleet.iter().find(|card| card["id"] == id).unwrap();
+        assert_eq!(card("agent/example/helpers")["subagents"].as_array().unwrap().len(), 1);
+        assert_eq!(card("agent/example/helpers")["subagents"][0]["id"], "running");
+        assert!(card("agent/example/queued")["next_work_id"].is_string());
+        assert!(card("agent/example/usage")["usage"].is_object(), "{}", card("agent/example/usage"));
+        assert_eq!(card("agent/example/usage")["harness_state"], "working");
+        for (id, cold) in ids.into_iter().zip(cold) {
+            assert_eq!(cold, [card(id).clone()], "cold exact card for {id}");
+            assert_eq!(read(Some(id)).await, [card(id).clone()], "warm exact card for {id}");
+        }
+        assert!(read(Some("agent/example/stopped")).await.is_empty());
+        assert_eq!(state.store.index().unwrap(), index, "every read saw the same snapshot");
+    }
+
+    #[tokio::test]
+    async fn exact_agent_selector_is_advertised_and_its_length_is_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = ClientSession::local(None).unwrap();
+        let advertised = capabilities(&state, &session).into_iter()
+            .filter(|capability| capability["id"] == EXACT_AGENT_SELECTOR_CAPABILITY)
+            .collect::<Vec<_>>();
+        assert_eq!(advertised, [json!({"id":EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":"granted"})]);
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let mut request: CollectionSubscribe = serde_json::from_value(json!({
+            "kind":"subscribe","id":"details","collection":"agents","limit":1,
+        })).unwrap();
+        let longest = format!("agent/{}", "a".repeat(MAX_AGENT_SELECTOR_BYTES - "agent/".len()));
+        request.agent = Some(longest.clone());
+        let (_, absent, more, _) = collection_items(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap()).await.unwrap();
+        assert!(absent.is_empty());
+        assert!(!more);
+        request.agent = Some(format!("{longest}a"));
+        let error = collection_items(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap()).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.message.contains("at most 256 bytes"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn exact_agent_selector_stream_ignores_other_agent_and_delivers_selected_changes() {
+        exact_agent_selector_stream_fixture(false).await;
+    }
+
+    #[tokio::test]
+    async fn exact_agent_selector_stream_fleet_first_ignores_other_agent_and_delivers_selected_changes() {
+        exact_agent_selector_stream_fixture(true).await;
+    }
+
+    async fn exact_agent_selector_stream_fixture(fleet_first: bool) {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for agent in ["agent/a", "agent/z"] {
+            agent_selector_observe(&state, agent, "runtime.observed",
+                json!({"status":"running","runtime_id":agent,"incarnation_id":"one"}));
+            agent_selector_observe(&state, agent, "harness.observed",
+                json!({"state":"idle","driver":"codex","incarnation_id":"one"}));
+        }
+        let warmed_counts = if fleet_first {
+            let cards = state.store.read_snapshot(|index| {
+                client_agent_resources_cached(&state.store, false, index)
+            }).unwrap();
+            assert_eq!(cards.len(), 2);
+            Some((state.store.agent_resources_refolded_cards_for_test(),
+                state.store.agent_resources_builds_for_test()))
+        } else {
+            None
+        };
+        let writer = state.clone();
+        let (completed, mut completions) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route("/stream", axum::routing::get(
+            move |upgrade: WebSocketUpgrade| {
+                let state = state.clone();
+                let completed = completed.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| {
+                        let windows = collection_windows::Windows::attach(&state.store);
+                        collection_stream_socket_with_reader(socket, state,
+                            ClientSession::local(None).unwrap(), None,
+                            move |state, session, request, permit| {
+                                let windows = windows.clone();
+                                let completed = completed.clone();
+                                async move {
+                                    let result = collection_items_with_windows(
+                                        &state, &session, &request, permit, windows).await;
+                                    completed.send(()).unwrap();
+                                    result
+                                }
+                            })
+                    })
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+        socket.send(Message::Text(json!({"kind":"subscribe","id":"details",
+            "collection":"agents","agent":"agent/z","limit":1}).to_string().into())).await.unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        let snapshot: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_collection_frame_conforms(&snapshot);
+        assert_eq!(snapshot["kind"], "snapshot");
+        assert_eq!(snapshot["order"], json!(["agent/z"]));
+        assert_eq!(snapshot["items"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["has_more"], false);
+        completions.recv().await.unwrap();
+        let folded = writer.store.agent_resources_refolded_cards_for_test();
+        let builds = writer.store.agent_resources_builds_for_test();
+        if let Some(counts) = warmed_counts {
+            assert_eq!((folded, builds), (counts.0 + 1, counts.1 + 1),
+                "the selected snapshot folds only its own card and never borrows the warm fleet rows");
+        }
+        agent_selector_observe(&writer, "agent/a", "harness.observed",
+            json!({"state":"working","driver":"codex","incarnation_id":"one"}));
+        signal_changed(&writer);
+        tokio::time::timeout(Duration::from_secs(5), completions.recv()).await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), socket.next()).await.is_err(),
+            "an unrelated agent change must not emit a frame");
+        assert_eq!(writer.store.agent_resources_refolded_cards_for_test(), folded);
+        assert_eq!(writer.store.agent_resources_builds_for_test(), builds);
+        agent_selector_observe(&writer, "agent/z", "harness.observed",
+            json!({"state":"working","driver":"codex","incarnation_id":"one"}));
+        signal_changed(&writer);
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        let changes: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_collection_frame_conforms(&changes);
+        assert_eq!(changes["kind"], "changes");
+        assert_eq!(changes["upserts"].as_array().unwrap().len(), 1);
+        assert_eq!(changes["upserts"][0]["id"], "agent/z");
+        assert_eq!(changes["upserts"][0]["harness_state"], "working");
+        assert_eq!(changes["order"], json!(["agent/z"]));
+        assert_eq!(changes["has_more"], false);
+        assert_eq!(writer.store.agent_resources_refolded_cards_for_test(), folded + 1);
+        agent_selector_observe(&writer, "agent/z", "runtime.observed",
+            json!({"status":"stopped","runtime_id":"agent/z","incarnation_id":"one"}));
+        signal_changed(&writer);
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        let removed: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_collection_frame_conforms(&removed);
+        assert_eq!(removed["kind"], "changes");
+        assert_eq!(removed["removes"], json!(["agent/z"]));
+        assert_eq!(removed["order"], json!([]));
+        assert_eq!(removed["has_more"], false);
+        agent_selector_observe(&writer, "agent/z", "runtime.observed",
+            json!({"status":"running","runtime_id":"agent/z","incarnation_id":"two"}));
+        signal_changed(&writer);
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        let returned: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_collection_frame_conforms(&returned);
+        assert_eq!(returned["kind"], "changes");
+        assert_eq!(returned["upserts"][0]["id"], "agent/z");
+        assert_eq!(returned["order"], json!(["agent/z"]));
+        assert_eq!(returned["has_more"], false);
+        socket.close(None).await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -13207,12 +13811,12 @@ mission "queue-parity" state="ready" {
         let session = ClientSession::local(None).unwrap();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let windows = collection_windows::Windows::attach(&state.store);
-        let (_, expected, _) = collection_items_with_windows(&state, &session, &request,
+        let (_, expected, _, _) = collection_items_with_windows(&state, &session, &request,
             semaphore.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         let builds = state.store.agent_resources_builds_for_test();
         let _cold_builder = state.store.admit_agent_resources("other").await;
         let start = std::time::Instant::now();
-        let (_, actual, _) = tokio::time::timeout(std::time::Duration::from_secs(1),
+        let (_, actual, _, _) = tokio::time::timeout(std::time::Duration::from_secs(1),
             collection_items_with_windows(&state, &session, &request,
                 semaphore.acquire_owned().await.unwrap(), windows)).await
             .expect("warm WS roster must not wait for a cold builder").unwrap();
@@ -13285,7 +13889,7 @@ mission "queue-parity" state="ready" {
             assert_eq!(body["value"]["answer"], 42);
             drop(held_window);
             drop(held_roster);
-            let (_, rows, _) = tokio::time::timeout(Duration::from_secs(5), read).await
+            let (_, rows, _, _) = tokio::time::timeout(Duration::from_secs(5), read).await
                 .expect("the collection must complete after its gate is released").unwrap();
             if gate == "roster" {
                 assert_eq!(rows[0]["kind"], "summary");
@@ -13362,7 +13966,7 @@ mission "queue-parity" state="ready" {
         let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["value"]["items"][0]["id"], "agent/cycle-roster");
-        let (_, rows, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
+        let (_, rows, _, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
             .expect("collection work must complete after the cold HTTP page").unwrap();
         assert_eq!(rows[0]["kind"], "summary");
         assert_eq!(state.store.agent_resources_builds_for_test(), 1);
@@ -13409,7 +14013,7 @@ mission "queue-parity" state="ready" {
             )).await.expect("an unrelated API query must run during the agents miss retry").unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         drop(roster);
-        let (_, rows, has_more) = tokio::time::timeout(Duration::from_secs(5), collection).await
+        let (_, rows, has_more, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
             .expect("the agents retry must consume the released roster admission").unwrap();
         let (_, Json(page)) = client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default())).await.unwrap();
@@ -13461,7 +14065,7 @@ mission "queue-parity" state="ready" {
             assert!(!task.is_finished());
             drop(next_socket);
             drop(held_reader);
-            let (_, rows, has_more) = tokio::time::timeout(Duration::from_secs(5), task).await
+            let (_, rows, has_more, _) = tokio::time::timeout(Duration::from_secs(5), task).await
                 .expect("paired authority preparation must finish after reader capacity is returned")
                 .unwrap().unwrap();
             assert!(rows.is_empty());
@@ -13485,7 +14089,7 @@ mission "queue-parity" state="ready" {
         })).unwrap();
         let socket = Arc::new(tokio::sync::Semaphore::new(1));
         let windows = collection_windows::Windows::attach(&state.store);
-        let (_, expected, expected_more) = collection_items_with_windows(
+        let (_, expected, expected_more, _) = collection_items_with_windows(
             &state, &session, &request, socket.clone().acquire_owned().await.unwrap(), windows.clone(),
         ).await.unwrap();
         let held_reader = state.store.readers.try_admit_read().unwrap();
@@ -13499,7 +14103,7 @@ mission "queue-parity" state="ready" {
         drop(held_reader);
         // Keep the later waiter queued throughout the collection's physical query.
         // Discarding the FIFO grant assigns it to that unpolled waiter and deadlocks here.
-        let (_, actual, actual_more) = tokio::time::timeout(Duration::from_secs(5), collection).await
+        let (_, actual, actual_more, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
             .expect("the collection must use its FIFO turn before the later queued read").unwrap();
         assert_eq!(actual, expected);
         assert_eq!(actual_more, expected_more);
@@ -13550,7 +14154,7 @@ mission "queue-parity" state="ready" {
             drop(held_socket);
             drop(held_window);
             drop(held_roster);
-            let (_, rows, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
+            let (_, rows, _, _) = tokio::time::timeout(Duration::from_secs(5), collection).await
                 .expect("the granted-reader retry must complete once its gate is free").unwrap();
             assert_eq!(rows[0]["kind"], "summary");
         }
@@ -13580,7 +14184,7 @@ mission "queue-parity" state="ready" {
                     windows,
                 )
             });
-        let (_, expected, _) = collection_items_with_windows(&state, &session, &request,
+        let (_, expected, _, _) = collection_items_with_windows(&state, &session, &request,
             semaphore.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         // Saturate the single reader slot from a plain thread, as an escaped long reader would.
         let (release, held) = std::sync::mpsc::channel::<()>();
@@ -13605,7 +14209,7 @@ mission "queue-parity" state="ready" {
             "the socket gate must be free while the collection waits for its reader");
         drop(release);
         holder.join().unwrap().unwrap();
-        let (_, actual, _) = tokio::time::timeout(std::time::Duration::from_secs(10), task).await
+        let (_, actual, _, _) = tokio::time::timeout(std::time::Duration::from_secs(10), task).await
             .expect("the collection completes once the reader frees")
             .unwrap();
         assert_eq!(actual, expected);
@@ -13644,7 +14248,7 @@ mission "queue-parity" state="ready" {
             }
             let mut expected = None;
             for reader in readers {
-                let (snapshot, items, has_more) = reader.await.unwrap();
+                let (snapshot, items, has_more, _) = reader.await.unwrap();
                 assert_eq!(snapshot.store_index, state.store.index().unwrap());
                 assert!(!has_more);
                 assert_eq!(items.len(), 1);
@@ -14252,7 +14856,7 @@ mission "queue-parity" state="ready" {
             "kind":"subscribe", "id":"summary", "collection":"summary",
         })).unwrap();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        let (_, items, _) = tokio::time::timeout(Duration::from_secs(2),
+        let (_, items, _, _) = tokio::time::timeout(Duration::from_secs(2),
             collection_items_with_windows(&state, &ClientSession::local(None).unwrap(), &request,
                 semaphore.acquire_owned().await.unwrap(),
                 collection_windows::Windows::attach(&state.store)))

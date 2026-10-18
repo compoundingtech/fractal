@@ -11,7 +11,7 @@ pub struct DailyUsage {
     pub unpriced: u64,
 }
 const ALLOWANCES: &str = "doc/usage/agent-message-allowances";
-const SCHEMA: &str = r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6d2b3ebed355 owner=st3_store::store::agent_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS agent_message_sends (
     subject TEXT PRIMARY KEY,
     sent_ms INTEGER NOT NULL,
@@ -52,19 +52,41 @@ END;
 "#;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(SCHEMA)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h07fcf2b8b85c owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ SCHEMA)?;
     Ok(())
 }
 
-pub fn open(transaction: &Transaction<'_>) -> Result<()> {
-    let filled: bool = transaction.query_row(
+fn ready(transaction: &Transaction<'_>) -> Result<bool> {
+    Ok(transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
         [],
         |row| row.get(0),
-    )?;
+    )?)
+}
+
+// Opening the daemon never pays for the optional usage estimate's historical backfill, but
+// coordination metadata still bootstraps in bounded pages.
+pub fn open(transaction: &Transaction<'_>) -> Result<()> {
+    if ready(transaction)? {
+        flush_with_coordination(transaction, true, true)?;
+    }
+    coordination::initialize(transaction)?;
+    // A corrupt historical body must leave counts incomplete without preventing startup.
+    // Roll back this entire bounded page, including any counts preceding the bad body.
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-ha567eaf1f68b owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ "SAVEPOINT coordination_startup")?;
+    if let Err(error) = coordination::backfill(transaction) {
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ab404618ea0 owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ "ROLLBACK TO coordination_startup")?;
+        eprintln!("st3: WARN coordination bootstrap remains incomplete: {error}");
+    }
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf3a17772f919 owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ "RELEASE coordination_startup")?;
+    Ok(())
+}
+
+fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
+    let filled = ready(transaction)?;
     if !filled {
         transaction.execute_batch(
-            "DELETE FROM agent_message_sends;
+            /* sqlite-large-value: allow-for-now lv-h81db080b4047 owner=st3_store::store::agent_messages TODO=prepare-body-and-predecessor-values */ "DELETE FROM agent_message_sends;
              DELETE FROM agent_message_days;
              INSERT OR IGNORE INTO local_agent_message_pending
              SELECT DISTINCT subject FROM claims WHERE kind='message.sent';",
@@ -72,19 +94,10 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     }
     // The older allowance cache can prime all history. New coordination metadata must
     // still bootstrap in bounded pages rather than piggyback on that legacy rebuild.
-    flush_with_coordination(transaction, filled)?;
-    coordination::initialize(transaction)?;
-    // A corrupt historical body must leave counts incomplete without preventing startup.
-    // Roll back this entire bounded page, including any counts preceding the bad body.
-    transaction.execute_batch("SAVEPOINT coordination_startup")?;
-    if let Err(error) = coordination::backfill(transaction) {
-        transaction.execute_batch("ROLLBACK TO coordination_startup")?;
-        eprintln!("st3: WARN coordination bootstrap remains incomplete: {error}");
-    }
-    transaction.execute_batch("RELEASE coordination_startup")?;
+    flush_with_coordination(transaction, filled, true)?;
     if !filled {
         transaction.execute(
-            "INSERT INTO meta(key,value) VALUES('agent_message_days_v1','1')",
+            /* sqlite-large-value: allow-for-now lv-h25642ab8e771 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('agent_message_days_v1','1')",
             [],
         )?;
     }
@@ -148,7 +161,10 @@ pub fn synthetic(fields: &Value) -> bool {
 }
 
 pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
-    let synced = flush_with_coordination(transaction, true)?;
+    // Before the lazy usage backfill has run, sends still sync coordination metadata, but the
+    // day counts wait for the first estimate, which rebuilds them from every retained send.
+    let counts = ready(transaction)?;
+    let synced = flush_with_coordination(transaction, true, counts)?;
     coordination::cover_synced_sends(transaction, &synced)
 }
 
@@ -156,6 +172,7 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
 fn flush_with_coordination(
     transaction: &Transaction<'_>,
     coordination_live: bool,
+    count_sends: bool,
 ) -> Result<BTreeSet<String>> {
     let pending = transaction
         .prepare_cached("SELECT subject FROM local_agent_message_pending")?
@@ -193,20 +210,20 @@ fn flush_with_coordination(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if current != desired {
+        if count_sends && current != desired {
             transaction.execute(
-                "DELETE FROM agent_message_sends WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-hf5d965fad59a owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM agent_message_sends WHERE subject=?1",
                 [&subject],
             )?;
             if let Some((at, recipient)) = desired {
                 transaction.execute(
-                    "INSERT INTO agent_message_sends VALUES(?1,?2,?3)",
+                    /* sqlite-large-value: allow-for-now lv-hc00cfd430db8 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO agent_message_sends VALUES(?1,?2,?3)",
                     params![subject, at, recipient],
                 )?;
             }
         }
         transaction.execute(
-            "DELETE FROM local_agent_message_pending WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h7dc294f64b3e owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_agent_message_pending WHERE subject=?1",
             [&subject],
         )?;
     }
@@ -240,9 +257,44 @@ pub fn windows(since: u64, until: u64) -> Vec<(u64, u64)> {
         .collect()
 }
 
+// A caller's pinned snapshot cannot be initialized by a later writer commit. Fold that
+// snapshot's retained sends instead, with the same earliest-send arbitration and eligibility.
+fn snapshot_sends(connection: &Connection) -> Result<Vec<(u64, String)>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT sent_ms,body FROM (
+             SELECT CAST(accepted_at_unix_ms AS INTEGER) AS sent_ms,body,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY subject ORDER BY CAST(accepted_at_unix_ms AS INTEGER),id
+                    ) AS rank
+             FROM claims WHERE kind='message.sent'
+         ) WHERE rank=1"
+    )?;
+    let mut rows = statement.query([])?;
+    let mut sends = Vec::new();
+    while let Some(row) = rows.next()? {
+        let body: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+        if eligible(&body["fields"]) {
+            sends.push((row.get(0)?, body["fields"]["to"].as_str().unwrap().to_owned()));
+        }
+    }
+    Ok(sends)
+}
+
 impl Store {
     pub fn agent_message_estimate(&self, days: &[DailyUsage]) -> Result<Value> {
+        // Complete the migration atomically on the first estimate request, never return
+        // partially backfilled counts. Subsequent writes maintain the ready index as before.
+        let ready: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
+            [],
+            |row| row.get(0),
+        )?;
+        let pinned = self.readers.has_pinned_reader();
+        if !ready && !pinned {
+            self.connection.batched(ensure_ready).map_err(anyhow::Error::msg)??;
+        }
         let connection = self.readers.get();
+        let snapshot_sends = (!ready && pinned).then(|| snapshot_sends(&connection)).transpose()?;
         let calibration: Option<(String, Vec<u8>)> = connection
             .query_row(
                 "SELECT d.hash,b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash
@@ -278,7 +330,15 @@ impl Store {
         } in days
         {
             let day = since / DAY_MS * DAY_MS;
-            let counts = if since == day && until == day.saturating_add(DAY_MS) {
+            let counts = if let Some(sends) = &snapshot_sends {
+                let mut counts = BTreeMap::<String, u64>::new();
+                for (sent_ms, recipient) in sends {
+                    if since <= *sent_ms && *sent_ms < until {
+                        *counts.entry(recipient.clone()).or_default() += 1;
+                    }
+                }
+                counts.into_iter().collect()
+            } else if since == day && until == day.saturating_add(DAY_MS) {
                 connection
                     .prepare_cached(
                         "SELECT recipient,count FROM agent_message_days WHERE day_ms=?1",
@@ -371,6 +431,98 @@ mod tests {
             })
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires an exclusively owned copied corpus in ST3_AGENT_MESSAGES_CORPUS"]
+    fn copied_corpus_lazy_backfill_benchmark() {
+        let path = std::env::var("ST3_AGENT_MESSAGES_CORPUS").unwrap();
+        let mut connection = Connection::open(path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute("DELETE FROM meta WHERE key='agent_message_days_v1'", []).unwrap();
+        let started = std::time::Instant::now();
+        ensure_ready(&transaction).unwrap();
+        let eager = started.elapsed();
+        let expected = transaction.prepare(
+            "SELECT day_ms,recipient,count FROM agent_message_days ORDER BY day_ms,recipient"
+        ).unwrap().query_map([], |row| Ok((
+            row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        transaction.rollback().unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute("DELETE FROM meta WHERE key='agent_message_days_v1'", []).unwrap();
+        let started = std::time::Instant::now();
+        open(&transaction).unwrap();
+        let lazy_open = started.elapsed();
+        let started = std::time::Instant::now();
+        ensure_ready(&transaction).unwrap();
+        let lazy_first_estimate = started.elapsed();
+        let actual = transaction.prepare(
+            "SELECT day_ms,recipient,count FROM agent_message_days ORDER BY day_ms,recipient"
+        ).unwrap().query_map([], |row| Ok((
+            row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(actual, expected);
+        println!("eager_open={eager:?} lazy_open={lazy_open:?} first_estimate={lazy_first_estimate:?} messages={}",
+            actual.iter().map(|(_, _, count)| count).sum::<u64>());
+        transaction.rollback().unwrap();
+    }
+
+    #[test]
+    fn first_estimate_in_pinned_snapshot_does_not_write_or_see_later_sends() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("pinned.sqlite3"), "node").unwrap();
+        let fields = json!({"from":"agent/alder","to":"agent/birch","status":"sent"});
+        send(&store, "message/old", DAY_MS + 1, fields.clone());
+        let day = [(DAY_MS, 2 * DAY_MS, 1_000_000, 0)];
+        let pinned = store.read_snapshot(|_| {
+            std::thread::scope(|scope| {
+                scope.spawn(|| send(&store, "message/new", DAY_MS + 2, fields));
+            });
+            estimate_days(&store, &day)
+        }).unwrap();
+        assert_eq!(pinned["days"][0]["messages"], 1);
+        let ready: bool = store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert!(!ready);
+        assert_eq!(estimate_days(&store, &day).unwrap()["days"][0]["messages"], 2);
+    }
+
+    #[test]
+    fn legacy_open_defers_estimate_backfill_without_losing_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lazy.sqlite3");
+        let fields = json!({"from":"agent/alder","to":"agent/birch","status":"sent"});
+        {
+            let store = Store::open(&path, "node").unwrap();
+            send(&store, "message/old", DAY_MS + 1, fields.clone());
+            store.connection.batched(|tx| {
+                tx.execute("DELETE FROM meta WHERE key='agent_message_days_v1'", [])?;
+                tx.execute("DELETE FROM agent_message_sends", [])?;
+                tx.execute("DELETE FROM local_agent_message_pending", [])?;
+                Ok::<_, anyhow::Error>(())
+            }).unwrap().unwrap();
+        }
+        let store = Store::open(&path, "node").unwrap();
+        let counts: (u64, u64) = store.readers.get().query_row(
+            "SELECT (SELECT COUNT(*) FROM agent_message_sends),
+                    (SELECT COUNT(*) FROM local_agent_message_pending)",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        assert_eq!(counts, (0, 0));
+        send(&store, "message/new", DAY_MS + 2, fields);
+        let day = [(DAY_MS, 2 * DAY_MS, 1_000_000, 0)];
+        assert_eq!(estimate_days(&store, &day).unwrap()["days"][0]["messages"], 2);
+        store.connection.batched(|tx| {
+            tx.execute("DELETE FROM claims WHERE subject='message/old'", [])?;
+            flush(tx)
+        }).unwrap().unwrap();
+        assert_eq!(estimate_days(&store, &day).unwrap()["days"][0]["messages"], 1);
+        drop(store);
+        let reopened = Store::open(&path, "node").unwrap();
+        assert_eq!(estimate_days(&reopened, &day).unwrap()["days"][0]["messages"], 1);
     }
 
     #[test]
@@ -581,9 +733,9 @@ mod tests {
         }).unwrap();
         let peer = Store::open_memory("peer").unwrap();
         let exchange =
-            super::super::tests::exchange_from(&source, &peer.replication_inventory().unwrap());
-        super::super::tests::receive_and_project(&peer, "node", &exchange);
-        super::super::tests::receive_and_project(&peer, "node", &exchange);
+            crate::store::tests_shared::exchange_from(&source, &peer.replication_inventory().unwrap());
+        crate::store::tests_shared::receive_and_project(&peer, "node", &exchange);
+        crate::store::tests_shared::receive_and_project(&peer, "node", &exchange);
         let until = now_ms() as u64 + 1;
         let (_, expected) = source.usage_period_report(0, until).unwrap();
         assert_eq!(peer.usage_period_report(0, until).unwrap().1, expected);

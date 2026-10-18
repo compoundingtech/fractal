@@ -1,5 +1,6 @@
 //! `st gh`: a seat's watches on GitHub issues and pull requests.
 
+use crate::WatchesStore;
 use crate::github_http::GithubAuth;
 use super::*;
 use crate::github_watch::ThreadRef;

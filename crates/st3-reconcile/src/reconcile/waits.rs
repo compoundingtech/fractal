@@ -15,6 +15,7 @@
 //! Expected-by times are only what a source states today (a watch's deadline, a retry's time);
 //! forecasts from a stage's history can fill it in later.
 use super::*;
+use crate::IdleHoldsStore;
 
 /// How long a pull request must stay out of the merge queue before leaving it counts. GitHub
 /// reports a queued pull request out of the queue for a minute or two while the queue rebuilds.

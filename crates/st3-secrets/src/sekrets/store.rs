@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::policy::Policy;
 
-const SCHEMA: &str = "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h7e36840a6c86 owner=st3_secrets::sekrets::store TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS profiles (
   id TEXT PRIMARY KEY,
   owner TEXT NOT NULL,
@@ -176,7 +176,7 @@ impl GatewayStore {
         let db = Connection::open(root.join("sekrets.db"))
             .with_context(|| format!("open the sekrets store in {}", root.display()))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
-        db.execute_batch(SCHEMA)?;
+        db.execute_batch(/* sqlite-large-value: allow-for-now lv-hbbca1d760d5f owner=st3_secrets::sekrets::store TODO=trace-statement-and-value-representation */ SCHEMA)?;
         Ok(Self {
             root: root.to_path_buf(),
             db,
@@ -209,12 +209,12 @@ impl GatewayStore {
         }
         if default {
             tx.execute(
-                "UPDATE profiles SET is_default = 0 WHERE owner = ?1",
+                /* sqlite-large-value: allow-for-now lv-h64bf682bda98 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE profiles SET is_default = 0 WHERE owner = ?1",
                 [owner],
             )?;
         }
         tx.execute(
-            "INSERT INTO profiles (id, owner, description, policy, is_default, created_at, updated_at)
+            /* sqlite-large-value: allow-for-now lv-h0f467fe87e52 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO profiles (id, owner, description, policy, is_default, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
             params![id, owner, description, serde_json::to_string(policy)?, default, now],
         )?;
@@ -276,10 +276,10 @@ impl GatewayStore {
 
     pub fn remove_profile(&mut self, id: &str) -> Result<()> {
         let tx = self.db.transaction()?;
-        tx.execute("DELETE FROM profiles WHERE id = ?1", [id])?;
-        tx.execute("DELETE FROM profile_env WHERE profile = ?1", [id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-ha807d3b67c76 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM profiles WHERE id = ?1", [id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc57979140096 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM profile_env WHERE profile = ?1", [id])?;
         tx.execute(
-            "UPDATE grants SET revoked_at = ?2, revoked_by = 'profile removed'
+            /* sqlite-large-value: allow-for-now lv-h53250c43f122 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE grants SET revoked_at = ?2, revoked_by = 'profile removed'
              WHERE profile = ?1 AND revoked_at IS NULL",
             params![id, now_unix_ms()],
         )?;
@@ -294,7 +294,7 @@ impl GatewayStore {
 
     pub fn set_policy(&mut self, id: &str, policy: &Policy) -> Result<()> {
         self.db.execute(
-            "UPDATE profiles SET policy = ?2, updated_at = ?3 WHERE id = ?1",
+            /* sqlite-large-value: allow-for-now lv-h12f9f37469ba owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE profiles SET policy = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, serde_json::to_string(policy)?, now_unix_ms()],
         )?;
         Ok(())
@@ -303,7 +303,7 @@ impl GatewayStore {
     pub fn put(&mut self, profile: &str, name: &str, value: &str) -> Result<()> {
         check_env_name(name)?;
         self.db.execute(
-            "INSERT INTO profile_env (profile, name, value, set_at) VALUES (?1, ?2, ?3, ?4)
+            /* sqlite-large-value: allow-for-now lv-h3b3d812cbdf7 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO profile_env (profile, name, value, set_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (profile, name) DO UPDATE SET value = excluded.value, set_at = excluded.set_at",
             params![profile, name, value, now_unix_ms()],
         )?;
@@ -312,7 +312,7 @@ impl GatewayStore {
 
     pub fn unset(&mut self, profile: &str, name: &str) -> Result<bool> {
         Ok(self.db.execute(
-            "DELETE FROM profile_env WHERE profile = ?1 AND name = ?2",
+            /* sqlite-large-value: allow-for-now lv-habb8b8756457 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM profile_env WHERE profile = ?1 AND name = ?2",
             params![profile, name],
         )? > 0)
     }
@@ -339,7 +339,7 @@ impl GatewayStore {
         let id = format!("grant/{}", uuid::Uuid::now_v7().simple());
         let now = now_unix_ms();
         self.db.execute(
-            "INSERT INTO grants (id, profile, grantee, policy, until_ms, granted_by, created_at)
+            /* sqlite-large-value: allow-for-now lv-h29d6231b10be owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO grants (id, profile, grantee, policy, until_ms, granted_by, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id,
@@ -370,7 +370,7 @@ impl GatewayStore {
 
     pub fn revoke_grant(&mut self, id: &str, by: &str) -> Result<bool> {
         Ok(self.db.execute(
-            "UPDATE grants SET revoked_at = ?2, revoked_by = ?3 WHERE id = ?1 AND revoked_at IS NULL",
+            /* sqlite-large-value: allow-for-now lv-ha7b135d9aa4f owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE grants SET revoked_at = ?2, revoked_by = ?3 WHERE id = ?1 AND revoked_at IS NULL",
             params![id, now_unix_ms(), by],
         )? > 0)
     }
@@ -381,7 +381,7 @@ impl GatewayStore {
     }
 
     fn grants_where(&self, condition: &str, values: impl rusqlite::Params) -> Result<Vec<Grant>> {
-        let mut statement = self.db.prepare(&format!(
+        let mut statement = self.db.prepare(/* sqlite-large-value: allow-for-now lv-h2bccaf19f03e owner=st3_secrets::sekrets::store TODO=trace-statement-and-value-representation */ &format!(
             "SELECT id, profile, grantee, policy, until_ms, granted_by, created_at
              FROM grants WHERE {condition} ORDER BY created_at"
         ))?;
@@ -417,7 +417,7 @@ impl GatewayStore {
 
     pub fn register_daemon(&mut self, uid: u32, person: &str, node: &str, key: &str) -> Result<()> {
         self.db.execute(
-            "INSERT INTO daemons (uid, person, node, key, registered_at) VALUES (?1, ?2, ?3, ?4, ?5)
+            /* sqlite-large-value: allow-for-now lv-hb0ae92497fe6 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO daemons (uid, person, node, key, registered_at) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (uid) DO UPDATE SET person = excluded.person, node = excluded.node,
                key = excluded.key, registered_at = excluded.registered_at",
             params![uid, person, node, key, now_unix_ms()],
@@ -439,7 +439,7 @@ impl GatewayStore {
 
     pub fn lock(&mut self, scope: &str, by: &str, reason: Option<&str>) -> Result<()> {
         self.db.execute(
-            "INSERT INTO locks (scope, locked_by, reason, at) VALUES (?1, ?2, ?3, ?4)
+            /* sqlite-large-value: allow-for-now lv-h060ea505ac12 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO locks (scope, locked_by, reason, at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (scope) DO UPDATE SET locked_by = excluded.locked_by,
                reason = excluded.reason, at = excluded.at",
             params![scope, by, reason, now_unix_ms()],
@@ -450,7 +450,7 @@ impl GatewayStore {
     pub fn unlock(&mut self, scope: &str) -> Result<bool> {
         Ok(self
             .db
-            .execute("DELETE FROM locks WHERE scope = ?1", [scope])?
+            .execute(/* sqlite-large-value: allow-for-now lv-he55ab36a7cbf owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM locks WHERE scope = ?1", [scope])?
             > 0)
     }
 
@@ -503,7 +503,7 @@ impl GatewayStore {
         detail: &serde_json::Value,
     ) -> Result<i64> {
         self.db.execute(
-            "INSERT INTO log (at, caller_person, owner_person, event, actor, profile, detail)
+            /* sqlite-large-value: allow-for-now lv-hc89240760d71 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO log (at, caller_person, owner_person, event, actor, profile, detail)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 now_unix_ms(),
@@ -523,7 +523,7 @@ impl GatewayStore {
     pub fn trim_log(&mut self, keep_ms: i64) -> Result<usize> {
         Ok(self
             .db
-            .execute("DELETE FROM log WHERE at < ?1", [now_unix_ms() - keep_ms])?)
+            .execute(/* sqlite-large-value: allow-for-now lv-h3c5476002523 owner=st3_secrets::sekrets::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM log WHERE at < ?1", [now_unix_ms() - keep_ms])?)
     }
 
     pub fn log_for(&self, person: &str, after: i64, limit: i64) -> Result<Vec<LogEntry>> {
