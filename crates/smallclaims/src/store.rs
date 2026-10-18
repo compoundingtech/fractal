@@ -812,6 +812,8 @@ pub struct Store {
     /// transaction. Only tests change them.
     pub trim_fault: Mutex<Option<checkpoint_trim::TrimFault>>,
     pub trim_chunk_envelopes: AtomicUsize,
+    /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
+    pub trim_pause_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
     /// The runtime whose projections this store keeps.
@@ -1067,6 +1069,7 @@ impl Store {
             shared_memory,
             trim_fault: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
+            trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
             runtime,
         })

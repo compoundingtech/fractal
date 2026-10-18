@@ -1033,6 +1033,7 @@ fn a_trim_that_stops_anywhere_finishes_the_same_after_a_restart() {
         stable_pair(&alder, &birch, &context);
         assert_eq!(kinds(&step(&birch, &context)), ["trimmed"]);
         alder.set_trim_chunk_envelopes(2);
+        alder.set_trim_pause(std::time::Duration::ZERO);
         if fault == TrimFault::AfterTombstoneChunk(1) {
             // Slow enough that recording takes several chunks, so the crash leaves some
             // tombstones recorded and others not.
@@ -1086,6 +1087,7 @@ fn a_plan_that_changes_after_an_interrupted_recording_leaves_no_tombstones_behin
     let checkpoint = stable_pair(&alder, &birch, &context);
     assert_eq!(kinds(&step(&birch, &context)), ["trimmed"]);
     alder.set_trim_chunk_envelopes(2);
+    alder.set_trim_pause(std::time::Duration::ZERO);
     alder.set_trim_row_cost(std::time::Duration::from_millis(12));
     alder.set_trim_fault(Some(TrimFault::AfterTombstoneChunk(1)));
     assert!(alder.checkpoint_step(&context).is_err());

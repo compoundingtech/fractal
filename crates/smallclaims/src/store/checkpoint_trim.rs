@@ -30,18 +30,10 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 // Releasing a writer loan alone does not reserve any disk time: a quiet foreground queue
 // lets a large trim reacquire it immediately, continuously rewriting table/index/WAL pages.
 // Rest outside the loan for at least 100 ms and four times the preceding writer hold
-// (including COMMIT). This limits sustained trim duty to at most one fifth while preserving
-// progress and the existing per-chunk proof/rollback boundary. A slow statement can still
-// exceed the chunk budget; this pacing is not a hard statement or request-latency bound.
-const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
-
-fn pause_trim_chunk(held: std::time::Duration) {
-    std::thread::sleep(trim_pause_duration(held));
-}
-
-fn trim_pause_duration(held: std::time::Duration) -> std::time::Duration {
-    held.saturating_mul(4).max(TRIM_MIN_PAUSE)
-}
+// (including COMMIT), capped at five seconds per rest. In the uncapped regime this reserves
+// four times the acquired-loan work for other traffic. A slow statement can still exceed the
+// chunk budget; this pacing is not a hard statement or request-latency bound.
+pub(super) const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A condition a test injects into a trim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +200,28 @@ impl Tombstones for (&super::checkpoint_staging::StagedSet, &super::checkpoint_s
 }
 
 impl Store {
+    /// Set the minimum chunk rest. Tests only; zero disables both the floor and multiplier.
+    pub fn set_trim_pause(&self, pause: std::time::Duration) {
+        self.trim_pause_micros.store(
+            u64::try_from(pause.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+    }
+
+    fn trim_pause_duration(&self, held: std::time::Duration) -> std::time::Duration {
+        let micros = self.trim_pause_micros.load(Ordering::Acquire);
+        if micros == 0 {
+            return std::time::Duration::ZERO;
+        }
+        held.saturating_mul(4)
+            .max(std::time::Duration::from_micros(micros))
+            .min(std::time::Duration::from_secs(5))
+    }
+
+    fn pause_trim_chunk(&self, held: std::time::Duration) {
+        std::thread::sleep(self.trim_pause_duration(held));
+    }
+
     /// Arm a fault in the next trim. Tests only.
     pub fn set_trim_fault(&self, fault: Option<TrimFault>) {
         *self
@@ -609,7 +623,7 @@ impl Store {
             if deleted == 0 {
                 return Ok(forgotten);
             }
-            pause_trim_chunk(held);
+            self.pause_trim_chunk(held);
         }
     }
 
@@ -777,7 +791,7 @@ impl Store {
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
-                pause_trim_chunk(held);
+                self.pause_trim_chunk(held);
             }
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
@@ -890,7 +904,7 @@ impl Store {
             deleted_claims += claims.len();
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
-            pause(trim_pause_duration(held));
+            pause(self.trim_pause_duration(held));
         }
         drop(delete);
         self.stop_for_trim_fault(TrimFault::BeforeFinish)?;
@@ -983,7 +997,7 @@ impl Store {
             if finished {
                 return Ok(rows);
             }
-            pause_trim_chunk(held);
+            self.pause_trim_chunk(held);
         }
     }
 }

@@ -569,6 +569,7 @@ impl World {
                 _ => TrimFault::BeforeFinish,
             };
             self.nodes[index].store.set_trim_chunk_envelopes(2);
+            self.nodes[index].store.set_trim_pause(std::time::Duration::ZERO);
             self.nodes[index].store.set_trim_fault(Some(fault));
             self.note(format!(
                 "{} will crash at {fault:?}",

@@ -200,4 +200,13 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
         actions.last(),
         Some(CheckpointAction::Trimmed { claims: 3, .. })
     ));
+    assert_eq!(
+        store.trim_pause_duration(Duration::from_secs(7)),
+        Duration::from_secs(5)
+    );
+    store.set_trim_pause(Duration::ZERO);
+    assert_eq!(
+        store.trim_pause_duration(Duration::from_secs(7)),
+        Duration::ZERO
+    );
 }
