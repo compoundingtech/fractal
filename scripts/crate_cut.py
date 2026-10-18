@@ -204,6 +204,10 @@ def load(src, store_type="Store", nodes=None, fixed=None):
                     if pm:
                         target = os.path.normpath(os.path.join(os.path.dirname(rel), pm.group(1)))
                         MODULE_PATH_OVERRIDE[target] = module_path(rel) + [it.name]
+    for rel, (text, items) in parsed.items():
+        for it in items:
+            if it.kind == "mod" and any(re.fullmatch(r"#\[cfg\(test\)\]", at.strip()) for at in it.attrs):
+                TEST_ONLY_MODULES.add(tuple(module_path(rel)) + (it.name,))
     for rel in module_files(src):
         FILE_USES[rel] = "\n".join(it.text for it in parsed[rel][1] if it.kind == "use")
     for rel in module_files(src):
@@ -593,6 +597,7 @@ WIDEN = re.compile(r"pub\((?:crate|super|self|in [A-Za-z_:]+)\)")
 
 
 MODULE_PATH_OVERRIDE = {}  # file -> module path, for files declared with #[path = "..."]
+TEST_ONLY_MODULES = set()  # module paths (tuples) declared with a plain `#[cfg(test)]`: they do not exist in a test-support build
 
 
 def module_path(rel):
@@ -1057,19 +1062,31 @@ def _widen_item_edits(text, it):
     return edits
 
 
+def _available(path):
+    """Whether the module exists in a test-support build: no module on the way is `#[cfg(test)]` alone."""
+    return not any(tuple(path[:k]) in TEST_ONLY_MODULES for k in range(1, len(path) + 1))
+
+
 def _shared_base(rel):
-    """The module a file's shared module sits in: next to the file, except for a top-level file, whose shared
-    module is its child (a sibling would be a second top-level module that depends on it both ways)."""
+    """The module a file's shared module sits in: next to the file when that exists in a test-support build,
+    else in the nearest ancestor that does. A top-level file's shared module is its child (a sibling would be
+    a second top-level module that depends on it both ways)."""
     p = module_path(rel)
-    return p if len(p) == 1 else p[:-1]
+    if len(p) == 1:
+        return p
+    base = p[:-1]
+    while base and not _available(base):
+        base = base[:-1]
+    return base
 
 
 def _shared_name(rel, container):
     p = module_path(rel)
+    base = _shared_base(rel)
     suffix = ("_" + "_".join(container)) if container else ""
     if len(p) == 1:
         return "shared" + suffix
-    return p[-1] + suffix + "_shared"
+    return "_".join(p[len(base):]) + suffix + "_shared"
 
 
 def _shared_path(rel, container):
@@ -1293,26 +1310,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                     nt = pat.sub(lambda m, target=target: dest_root + target[len("crate"):] + "::" + m.group(1), nt)
                 if nt != t:
                     Path(f).write_text(nt)
-    # a shared module is only reachable if every module on the way to it exists in a test-support build
-    done = set()
-    for (rel, cont) in shares:
-        parts = module_path(rel)
-        for k in range(len(parts) - 1, 0, -1):
-            child = parts[k - 1]
-            parent = ("/".join(parts[: k - 1]) + ".rs") if k > 1 else "lib.rs"
-            if (parent, child) in done:
-                continue
-            done.add((parent, child))
-            ppath = os.path.join(src_dir, parent)
-            if not os.path.exists(ppath):
-                continue
-            ptext = Path(ppath).read_text()
-            dec = next((x for x in ri.parse(ptext) if x.kind == "mod" and x.name == child and x.text.rstrip().endswith(";")), None)
-            if dec is None:
-                continue
-            for a_, b_, rep in sorted(set(_widen_item_edits(ptext, dec)), reverse=True):
-                ptext = ptext[:a_] + rep + ptext[b_:]
-            Path(ppath).write_text(ptext)
+
 
 
 def apply_cut(args, nodes, files, tfiles, order):
