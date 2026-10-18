@@ -12,6 +12,9 @@ const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-vers
 // breakage fails on main instead of at tag time (the daily release publishes those artifacts).
 // After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
 // the tag trigger above, and a tag made with the workflow token starts no workflow in any case.
+// BRANCH-ONLY (st/stui/hangup-backport): a Darwin-only build for workflow_dispatch. pick-runner,
+// installer and assemble are skipped, the Linux build is gone, and the publish jobs keep their own
+// main/tag conditions. Never merge this to main.
 export default githubWorkflow(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Smalltalk tag release",
@@ -65,8 +68,9 @@ export default githubWorkflow(readyPRJobs(auditCaches({
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
-    "pick-runner": priorityRunnerJob,
+    "pick-runner": { ...priorityRunnerJob, "if": "false" },
     "installer": {
+      "if": "false",
       "name": "installer (${{ matrix.runner }})",
       "strategy": {
         "fail-fast": false,
@@ -105,10 +109,6 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         "matrix": {
           "include": [
             {
-              "runner": 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}',
-              "target": "x86_64-unknown-linux-gnu"
-            },
-            {
               "runner": "macos-15",
               "target": "aarch64-apple-darwin"
             }
@@ -116,7 +116,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         }
       },
       "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}",
-      "timeout-minutes": 90,
+      "timeout-minutes": 40,
       "env": {
         "MACOSX_DEPLOYMENT_TARGET": "15.0",
         CI_NATIVE_SNAPSHOT: '1',
@@ -190,6 +190,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       ]
     },
     "assemble": {
+      "if": "false",
       "name": "release-assemble",
       "needs": [
         "build",

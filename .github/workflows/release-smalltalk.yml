@@ -47,7 +47,7 @@ concurrency:
 jobs:
   pick-runner:
     name: pick-runner
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -196,6 +196,7 @@ jobs:
           CACHE_REASON: Only reads organization runner metadata; checks out and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   installer:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
     name: "installer (${{ matrix.runner }})"
     strategy:
       fail-fast: false
@@ -223,7 +224,6 @@ jobs:
         env:
           CACHE_REASON: Runs isolated installer fixtures without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   build:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
@@ -232,12 +232,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: "namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}"
-            target: x86_64-unknown-linux-gnu
           - runner: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 40
     env:
       MACOSX_DEPLOYMENT_TARGET: "15.0"
       CI_NATIVE_SNAPSHOT: "1"
@@ -355,6 +353,7 @@ jobs:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Cargo release","outcome":"${{ steps.cache-4.outcome }}","hit":"${{ steps.cache-4.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the pinned Zig compiler","outcome":"${{ steps.cache-5.outcome }}","hit":"${{ steps.cache-5.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   assemble:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
     name: release-assemble
     needs: [build, installer]
     runs-on: ubuntu-latest
@@ -391,7 +390,6 @@ jobs:
         env:
           CACHE_REASON: Downloads verified build artifacts; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   publishEdge:
     name: release-publish-edge
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
