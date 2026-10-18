@@ -86,6 +86,18 @@ class Trace(unittest.TestCase):
         self.assertEqual(result['uncovered_reads'], ['elsewhere/b.sh', 'helpers/a.sh'])
         self.assertEqual(result['unresolved_calls'], 1)
 
+    def test_a_whole_tree_lane_leaves_nothing_under_the_root_uncovered_but_unplaced_calls_are_still_counted(self):
+        doc = json.loads(json.dumps(LANES))
+        doc['lanes']['unit']['tree_inputs'] = ['.']
+        self.lanes.write_text(json.dumps(doc))
+        self.rules = trace.load_rules(type('A', (), {'lanes_file': str(self.lanes), 'lane': 'unit'}))
+        r = self.root
+        result = self.analyze(f'10 openat(AT_FDCWD</>, "{r}/anything/at/all.rs", O_RDONLY) = 3',
+                              f'10 stat("{r}/looked-for", {{}}) = -1 ENOENT (No such file or directory)',
+                              '12 openat(8, "unnamed", O_RDONLY) = 6')
+        self.assertEqual((result['uncovered_reads'], result['uncovered_absence_probes'], result['unresolved_calls'], result['whole_tree_lane']),
+                         ([], [], 1, True))
+
     def test_unfinished_and_resumed_calls_are_joined_by_pid(self):
         r = self.root
         result = self.analyze(f'20 openat(AT_FDCWD</>, "{r}/helpers/t.sh", O_RDONLY <unfinished ...>',
@@ -108,6 +120,8 @@ class Trace(unittest.TestCase):
         self.assertEqual(self.run_main(closed)[0], 2)
 
     @unittest.skipUnless(shutil.which('strace'), 'strace is not installed')
+    @unittest.skipIf(any(line.startswith('TracerPid:') and line.split()[1] != '0' for line in open('/proc/self/status')),
+                     'already traced: ptrace cannot be nested (this test runs inside a lane trace)')
     def test_a_real_strace_run_reports_what_the_command_read(self):
         Path(self.root, 'helpers').mkdir()
         Path(self.root, 'helpers/x.sh').write_text('x')
