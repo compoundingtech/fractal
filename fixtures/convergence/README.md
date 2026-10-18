@@ -37,6 +37,12 @@ After merging main, regenerate v4 with
 `cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v4.json`.
 The generator serializes the complete merged registry; do not hand-edit the snapshot.
 
+The fixed v4 seed characterization has only seed 5 without a checkpoint trim;
+the other 16 fixed seeds trim, including seed 34. The diagnostic kinds and their
+`client` subject generation change the shared RNG stream, so v3's `[5, 34]`
+characterization does not apply. Keep the exact per-seed trim assertion when
+updating this characterization for a new corpus.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&st3_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation
