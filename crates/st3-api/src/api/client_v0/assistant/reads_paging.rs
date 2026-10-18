@@ -94,6 +94,9 @@ fn read_page(
             .ok_or_else(|| published_view_not_ready("attention"))?;
         let marker = format!("assistant-attention:{cut}:{published_at}");
         check_source(&cursor, &marker)?;
+        if cursor.is_some() && offset >= rows.len() {
+            return Err(client_page_expired("the attention cursor is outside its source publication"));
+        }
         let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
         let end = offset.saturating_add(limit).min(rows.len());
         let items = rows.get(offset..end).unwrap_or_default().iter()
@@ -116,6 +119,9 @@ fn read_page(
         if cut < index { state.store.request_agent_roster_refresh(); }
         let marker = format!("assistant-agents:{cut}:{published_at}");
         check_source(&cursor, &marker)?;
+        if cursor.is_some() && offset >= cards.len() {
+            return Err(client_page_expired("the agent cursor is outside its source publication"));
+        }
         let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
         let end = offset.saturating_add(limit).min(cards.len());
         let mut selected = cards.get(offset..end).unwrap_or_default().to_vec();

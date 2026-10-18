@@ -9,7 +9,7 @@ async fn rich_source_pages_resume_after_the_last_delivered_item_without_loss() {
         let state = state(root.path());
         let suffix = "bounded-rich-source-".repeat(6);
         let declarations = (0..12).map(|index| format!(
-            "agent \"worker-{index:02}-{suffix}\" {{ workspace \"/tmp\"; command \"true\"; restart always; }}\nmission \"mission-{index:02}-{suffix}\" state=\"ready\" {{ goal \"source paging\"; }}"
+            "agent \"worker-{index:02}-{suffix}\" {{ workspace \"/tmp\"; command \"true\"; restart always; }}"
         )).collect::<Vec<_>>().join("\n");
         let intent = crate::graph::parse_internal_intent(
             &format!("version 2\n{declarations}"), "reads-fixture",
@@ -17,7 +17,7 @@ async fn rich_source_pages_resume_after_the_last_delivered_item_without_loss() {
         state.store.apply_internal(&intent, "rich-source-envelope").unwrap();
         for index in 0..12 {
             state.store.ask_person(&serde_json::from_value(json!({
-                "person": OWNER, "actor": format!("agent/worker-00-{suffix}"),
+                "person": OWNER, "actor": format!("agent/reads-fixture.worker-00-{suffix}"),
                 "title": format!("question {index}: {}", "決定\n\"".repeat(30)),
                 "reason": "Grüße 決定", "new_run": format!("rich-page-{index}"),
                 "idempotency_key": format!("rich-page-{index}")

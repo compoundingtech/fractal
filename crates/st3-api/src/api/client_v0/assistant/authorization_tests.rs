@@ -580,6 +580,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart always; }
                 "idempotency_key":format!("budget-{index}")
             })).unwrap()).unwrap();
         }
+        crate::api::refresh_attention_list(&fixture.state.store).unwrap();
         for mode in ["approval-once", "caller-bound-allow"] {
             projection_read_mode(&mut fixture, mode).await;
             let first_query = "?max_response_bytes=16384&limit=1";
