@@ -343,7 +343,7 @@ const styles = stylex.create({
   syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
   syntaxKeyword: { color: status.runningFg },
   syntaxString: { color: textColor.fgMuted },
-  syntaxLiteral: { color: status.attention },
+  syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
   syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
   syntaxDeleted: { color: status.dangerFg },
   blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
