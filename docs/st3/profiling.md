@@ -429,12 +429,12 @@ request durations.
 
 ### Isolated native message-selector cost receipts
 
-The ignored native controls in `crates/st3/src/api/client_messages_selector_tests.rs`
+The ignored native controls in `crates/st3-api/src/api/client_messages_selector_tests.rs`
 use fresh temporary stores, not daemon databases. Run them in the admitted native
 proof lane with the same optimized build, filesystem and durability settings for
 both designs; retain the exact source/build identity, command, machine/filesystem,
 complete stderr JSON and exit status. Focused Cargo filters (with
-`cargo test --release -p st3 --lib FILTER -- --ignored --nocapture --test-threads=1`):
+`cargo test --release -p st3-api --lib FILTER -- --ignored --nocapture --test-threads=1`):
 
 - `benchmark_client_messages_selector_scaling`: 128/1,280/12,800 real messages,
   each with 32 metadata claims, explicit native rebuild and first/next pages.
@@ -510,6 +510,36 @@ The repository's database-size/daily-growth targets do not allocate an acceptabl
 selector-versus-baseline WAL amplification percentage. That limit and disposition
 of adverse write/WAL receipts require the public contract owner's explicit decision;
 these controls deliberately do not invent a WAL ceiling or a waiver.
+
+#### Production-size offline-copy receipt
+
+`api::client_messages_selector_tests::production_copy::benchmark_client_messages_selector_production_copy`
+is a separate ignored control; the older 118k-claim migration-copy control is unchanged.
+Set `ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY` to an explicitly supplied,
+checkpointed offline database and `TMPDIR` to a scratch filesystem with room for
+two fresh database copies, derived indexes and WAL. The input is opened read-only;
+neither copy is a daemon store. A completed selector projection is rejected as
+initial online-build evidence rather than silently rebuilt.
+
+The receipt records source counts/bytes and Git HEAD, every observed online
+backfill transaction's BEGIN-through-COMMIT duration and work/COMMIT split,
+distribution/max and 100 ms counts, and physical WAL start/peak/growth relative
+to the original database bytes against the 20% bar. Real foreground
+send/delivered/read/close lifecycles compete with the independent background
+writer loans. One lifecycle is offered per loan through a capacity-one channel
+(coalescing offers while busy); intervals and actual transaction overlaps are
+reported, not assumed. WAL samples include those competing writes.
+
+After the build, isolated send/close segments report individual physical WAL
+deltas and latency, and compare against a second source-only copy with the same
+foreground workload replayed before measurement. FULL durability is retained;
+automatic build checkpoints are disabled by the production backfill guard.
+One JSON receipt is emitted, including adverse bars and operational errors;
+inspect top-level and nested `error` fields, `errors`, overlap counts and bar
+results even when the test exits successfully. This control deliberately does
+not assert the performance bars before printing the receipt.
+The separate ignored `benchmark_client_messages_selector_production_copy_smoke`
+uses only its own small fresh offline store and asserts receipt completeness.
 
 
 ## Raw terminal cold opens

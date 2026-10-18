@@ -602,6 +602,41 @@ impl BackfillStats {
     }
 }
 
+// Opt-in, thread-local receipts for the ignored production-copy control. Normal
+// test-support users allocate nothing; production builds contain none of this.
+#[cfg(any(test, feature = "test-support"))]
+struct ChunkReceipts {
+    wal_path: std::path::PathBuf,
+    samples: Vec<Value>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CHUNK_RECEIPTS: std::cell::RefCell<Option<ChunkReceipts>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_chunk_receipt(started: std::time::Instant, started_at: u128, processed: usize, budget: &FoldBudget) {
+    let elapsed = started.elapsed();
+    let finished_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_micros());
+    CHUNK_RECEIPTS.with_borrow_mut(|recording| {
+        if let Some(recording) = recording {
+            let wal = std::fs::metadata(&recording.wal_path);
+            recording.samples.push(json!({
+                "transaction": recording.samples.len(), "phase": budget.phase,
+                "started_at_unix_us": started_at, "finished_at_unix_us": finished_at,
+                "wall_ms": elapsed.as_secs_f64() * 1_000.0,
+                "work_ms": budget.work.as_secs_f64() * 1_000.0,
+                "commit_ms": budget.commit.as_secs_f64() * 1_000.0,
+                "processed_subjects": processed, "fold_subjects": budget.subjects, "claims": budget.claims,
+                "wal_bytes": wal.as_ref().ok().map(std::fs::Metadata::len),
+                "wal_sample_error": wal.err().map(|error| error.to_string()),
+            }));
+        }
+    });
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BackfillPhase {
@@ -664,6 +699,8 @@ fn backfill_incomplete(connection: &Connection) -> Result<bool> {
 fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(usize, bool, FoldBudget)>> {
     #[cfg(any(test, feature = "test-support"))]
     let started = std::time::Instant::now();
+    #[cfg(any(test, feature = "test-support"))]
+    let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_micros();
     let transaction = connection.transaction()?;
     let saved: Option<String> = transaction.prepare_cached("SELECT value FROM meta WHERE key=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-hfb64ab33598e owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [BACKFILL_MARKER], |row| row.get(0)).optional()?;
@@ -758,6 +795,8 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
         budget.commit = commit_started.elapsed();
         budget.commit_finished_at_unix_us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_micros();
     }
+    #[cfg(any(test, feature = "test-support"))]
+    record_chunk_receipt(started, started_at, processed, &budget);
     Ok(Some((processed, complete, budget)))
 }
 
@@ -1228,6 +1267,23 @@ FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.i
     #[cfg(any(test, feature = "test-support"))]
     pub fn client_messages_selector_benchmark_drain(&self) -> Result<BackfillStats> {
         open_chunks(&mut self.connection.write(), false)
+    }
+
+    /// Arm receipts on the calling thread only; call maintenance on that thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn client_messages_benchmark_start_chunk_receipts(&self) -> Result<()> {
+        let database: String = self.readers.get().query_row("PRAGMA database_list", [], |row| row.get(2))?;
+        let mut wal_path = std::ffi::OsString::from(database);
+        wal_path.push("-wal");
+        CHUNK_RECEIPTS.with_borrow_mut(|recording| {
+            *recording = Some(ChunkReceipts { wal_path: wal_path.into(), samples: Vec::new() });
+        });
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn client_messages_benchmark_take_chunk_receipts(&self) -> Vec<Value> {
+        CHUNK_RECEIPTS.with_borrow_mut(|recording| recording.take().map_or_else(Vec::new, |recording| recording.samples))
     }
 
     #[cfg(any(test, feature = "test-support"))]

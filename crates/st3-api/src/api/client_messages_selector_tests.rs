@@ -841,3 +841,327 @@ async fn client_message_cursor_issued_during_projection_lag_pins_published_front
     assert!(client_message_resources_at(&state.store,None,true,None,now).unwrap()
         .iter().any(|item|item["id"]=="message/selector-unpublished"));
 }
+
+// Kept separate from the historical 118k-copy control: this receipt exercises
+// independent production background loans and real, competing foreground writes.
+mod production_copy {
+    use super::*;
+    use std::sync::{Barrier, mpsc};
+
+    fn unix_us() -> u128 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()
+    }
+
+    fn summary(samples: &[Value], field: &str) -> Value {
+        let mut times: Vec<f64> = samples.iter().filter_map(|sample| sample[field].as_f64()).collect();
+        times.sort_by(f64::total_cmp);
+        let percentile = |p: usize| {
+            if times.is_empty() { None } else { Some(times[(times.len() * p).div_ceil(100) - 1]) }
+        };
+        json!({"samples": times.len(), "p50_ms": percentile(50), "p95_ms": percentile(95),
+            "max_ms": times.last(), "samples_at_or_over_100ms": times.iter().filter(|time| **time >= 100.0).count()})
+    }
+
+    fn counts(path: &Path) -> anyhow::Result<(u64, u64)> {
+        anyhow::ensure!(storage(path)["wal_bytes"] == 0,
+            "input must be an explicitly supplied checkpointed offline copy with no WAL");
+        let connection = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(connection.query_row("SELECT (SELECT COUNT(*) FROM claims), (SELECT COUNT(*) FROM message_index)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)))?)
+    }
+
+    fn append(store: &Store, namespace: &str, index: usize, kind: &str) -> Value {
+        let input = ClaimInput {
+            subject: format!("message/production-copy-{namespace}-{index}"), kind: kind.into(),
+            actor: Some(if kind == "message.sent" { ACTOR } else { PERSON }.into()),
+            fields: if kind == "message.sent" {
+                sent_fields(index)
+            } else {
+                BTreeMap::from([("status".into(), json!(kind.strip_prefix("message.").unwrap()))])
+            },
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        };
+        let started_at = unix_us();
+        let start = Instant::now();
+        let result = store.append_claim(&input);
+        let elapsed = start.elapsed();
+        json!({"kind": kind, "message": index, "started_at_unix_us": started_at,
+            "finished_at_unix_us": unix_us(), "wall_ms": elapsed.as_secs_f64() * 1_000.0,
+            "error": result.err().map(|error| error.to_string())})
+    }
+
+    fn checkpoint(store: &Store, path: &Path) -> anyhow::Result<Value> {
+        let before = storage(path);
+        let start = Instant::now();
+        let (busy, log, checkpointed): (u64, i64, i64) = store.connection.write()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let after = storage(path);
+        let receipt = json!({"before_storage": before, "after_storage": after,
+            "wall_ms": start.elapsed().as_secs_f64() * 1_000.0,
+            "busy": busy, "log_frames": log, "checkpointed_frames": checkpointed});
+        anyhow::ensure!(busy == 0 && after["wal_bytes"] == 0, "segment checkpoint did not truncate: {receipt}");
+        Ok(receipt)
+    }
+
+    // This segment has no competing maintenance/writer, so WAL attribution is
+    // honest. Per-operation deltas and burst totals include the physical header.
+    fn isolated_segment(store: &Store, path: &Path, namespace: &str, burst: usize) -> Value {
+        let mut receipt = json!({"burst": burst, "classes": {}, "setup_samples": []});
+        let result: anyhow::Result<()> = (|| {
+            for kind in ["message.sent", "message.closed"] {
+                if kind == "message.closed" {
+                    for index in 0..burst {
+                        for setup in ["message.delivered", "message.read"] {
+                            let sample = append(store, namespace, index, setup);
+                            let failed = !sample["error"].is_null();
+                            receipt["setup_samples"].as_array_mut().unwrap().push(sample);
+                            anyhow::ensure!(!failed, "isolated lifecycle setup failed");
+                        }
+                    }
+                }
+                let start_checkpoint = checkpoint(store, path)?;
+                let mut samples = Vec::with_capacity(burst);
+                let mut previous_wal = 0;
+                for index in 0..burst {
+                    let mut sample = append(store, namespace, index, kind);
+                    let wal = storage(path)["wal_bytes"].as_u64().unwrap();
+                    sample["wal_bytes_after_commit"] = json!(wal);
+                    sample["wal_bytes_delta"] = json!(wal.saturating_sub(previous_wal));
+                    previous_wal = wal;
+                    let failed = !sample["error"].is_null();
+                    samples.push(sample);
+                    if failed { break; }
+                }
+                let failed = samples.iter().any(|sample| !sample["error"].is_null());
+                receipt["classes"][kind] = json!({"commit_inclusive": summary(&samples, "wall_ms"),
+                    "samples": samples, "wal_bytes": previous_wal,
+                    "wal_bytes_per_commit": previous_wal as f64 / burst as f64,
+                    "start_checkpoint": start_checkpoint, "post_burst_storage": storage(path)});
+                anyhow::ensure!(!failed, "isolated append failed");
+                receipt["classes"][kind]["end_checkpoint"] = checkpoint(store, path)?;
+            }
+            Ok(())
+        })();
+        receipt["error"] = json!(result.err().map(|error| error.to_string()));
+        receipt
+    }
+
+    fn run(source: &Path, burst: usize, smoke: bool) -> Value {
+        let mut receipt = json!({
+            "benchmark": "client_messages_selector_production_copy", "smoke": smoke,
+            "receipt_version": 1, "transaction_target_ms": 100, "wal_growth_bar_percent": 20,
+            "source_open_flags": "READ_ONLY", "mutated_database": "fresh temporary copies only",
+            "duration_scope": "background chunk BEGIN through durable COMMIT; foreground append_claim includes writer admission",
+            "wal_scope": "physical WAL file growth, including concurrent writes; not cumulative bytes written; isolated segments have no competing writer",
+            "errors": []
+        });
+        let result: anyhow::Result<()> = (|| {
+            let source = source.canonicalize()?;
+            let input_metadata = fs::metadata(&source)?;
+            let source_counts = counts(&source)?;
+            let bytes = input_metadata.len();
+            receipt["source_copy"] = json!(source);
+            receipt["claims"] = json!(source_counts.0);
+            receipt["messages"] = json!(source_counts.1);
+            receipt["input_bytes"] = json!(bytes);
+            receipt["head_sha"] = json!(std::process::Command::new("git").args(["rev-parse", "HEAD"])
+                .output().ok().filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned()));
+            let root = tempfile::tempdir()?;
+            let path = root.path().join("production-selectors.sqlite");
+            let baseline_path = root.path().join("production-source-only.sqlite");
+            let copy_started = Instant::now();
+            fs::copy(&source, &path)?;
+            receipt["copy_ms"] = json!(copy_started.elapsed().as_secs_f64() * 1_000.0);
+            anyhow::ensure!(counts(&path)? == source_counts, "fresh copy count mismatch");
+            let open_started = Instant::now();
+            let store = Arc::new(Store::open(&path, "selector-production-benchmark")?);
+            receipt["store_open_ms"] = json!(open_started.elapsed().as_secs_f64() * 1_000.0);
+            // Use the real guard across separate background loans and competing
+            // foreground writes. Never call the monolithic benchmark drain.
+            let guard = store.client_message_backfill_checkpoint_guard()?;
+            receipt["initial_backfill_pending"] = json!(guard.is_some());
+            anyhow::ensure!(guard.is_some(), "source has no initial selector backfill; not online migration evidence");
+            let start_storage = storage(&path);
+            let io_policy = {
+                let writer = store.connection.write();
+                json!({"synchronous": writer.pragma_query_value(None, "synchronous", |row| row.get::<_, u32>(0))?,
+                    "wal_autocheckpoint": writer.pragma_query_value(None, "wal_autocheckpoint", |row| row.get::<_, u32>(0))?})
+            };
+            receipt["io_policy"] = io_policy.clone();
+            anyhow::ensure!(io_policy["synchronous"] == 2 && io_policy["wal_autocheckpoint"] == 0,
+                "measurement requires FULL durability and no automatic build checkpoint");
+            store.client_messages_benchmark_start_chunk_receipts()?;
+            let start = Arc::new(Barrier::new(2));
+            // Capacity-one offers bound foreground load without holding or
+            // serializing either writer's real admission/transaction boundary.
+            let (offer, requests) = mpsc::sync_channel(1);
+            let namespace = format!("{}-online", unix_us());
+            let foreground_namespace = namespace.clone();
+            let build_started_at = unix_us();
+            let (foreground, build_result, build_finished_at, end_storage) = std::thread::scope(|scope| {
+                let foreground_store = Arc::clone(&store);
+                let foreground_start = Arc::clone(&start);
+                let foreground = scope.spawn(move || {
+                    let mut samples = Vec::new();
+                    foreground_start.wait();
+                    let mut index = 0;
+                    while requests.recv().is_ok() {
+                        for kind in ["message.sent", "message.delivered", "message.read", "message.closed"] {
+                            let sample = append(&foreground_store, &foreground_namespace, index, kind);
+                            let failed = !sample["error"].is_null();
+                            samples.push(sample);
+                            if failed { return samples; }
+                        }
+                        index += 1;
+                        std::thread::yield_now();
+                    }
+                    samples
+                });
+                start.wait();
+                let build_result: anyhow::Result<()> = (|| {
+                    loop {
+                        // Coalesce offers while a lifecycle is still in flight.
+                        // A failed receiver is recorded in foreground samples.
+                        let _ = offer.try_send(());
+                        let more = store.maintain_client_message_selectors()?;
+                        if !more {
+                            anyhow::ensure!(!store.client_message_selectors_pending()?,
+                                "online build is blocked on canonical projection; no progress fabricated");
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                    Ok(())
+                })();
+                let build_finished_at = unix_us();
+                let end_storage = storage(&path);
+                drop(offer);
+                (foreground.join(), build_result, build_finished_at, end_storage)
+            });
+            let chunks = store.client_messages_benchmark_take_chunk_receipts();
+            let mut foreground = match foreground {
+                Ok(samples) => samples,
+                Err(_) => {
+                    receipt["errors"].as_array_mut().unwrap().push(json!("foreground writer panicked"));
+                    Vec::new()
+                }
+            };
+            for sample in &mut foreground {
+                sample["overlaps_build"] = json!(sample["started_at_unix_us"].as_u64().unwrap() < build_finished_at as u64
+                    && sample["finished_at_unix_us"].as_u64().unwrap() > build_started_at as u64);
+                sample["overlapping_chunk_transactions"] = json!(chunks.iter().filter(|chunk|
+                    sample["started_at_unix_us"].as_u64().unwrap() < chunk["finished_at_unix_us"].as_u64().unwrap()
+                    && sample["finished_at_unix_us"].as_u64().unwrap() > chunk["started_at_unix_us"].as_u64().unwrap()).count());
+            }
+            let wal_start = start_storage["wal_bytes"].as_u64().unwrap();
+            let wal_peak = chunks.iter().filter_map(|chunk| chunk["wal_bytes"].as_u64())
+                .chain([wal_start, end_storage["wal_bytes"].as_u64().unwrap()]).max().unwrap();
+            let growth = wal_peak.saturating_sub(wal_start);
+            let growth_percent = 100.0 * growth as f64 / bytes as f64;
+            receipt["online_build"] = json!({"started_at_unix_us": build_started_at,
+                "finished_at_unix_us": build_finished_at, "transactions": chunks,
+                "transaction_distribution": summary(&chunks, "wall_ms"), "start_storage": start_storage,
+                "end_storage_before_checkpoint": end_storage, "wal_start_bytes": wal_start,
+                "wal_peak_bytes": wal_peak, "wal_peak_minus_start_bytes": growth,
+                "wal_denominator_original_database_bytes": bytes, "wal_growth_percent": growth_percent,
+                "wal_growth_bar_met": growth_percent <= 20.0,
+                "wal_peak_sampling": "after every build chunk and at build boundaries; checkpoints disabled",
+                "error": build_result.as_ref().err().map(ToString::to_string)});
+            receipt["foreground"] = json!({"samples": foreground, "classes": {},
+                "workload": "real send/delivered/read/close lifecycle offered per background loan, capacity-one coalescing; queued/in-flight lifecycle completes after build",
+                "setup_included_in_raw_samples": true});
+            for kind in ["message.sent", "message.closed"] {
+                let class: Vec<Value> = foreground.iter().filter(|sample| sample["kind"] == kind).cloned().collect();
+                let overlap: Vec<Value> = class.iter().filter(|sample| sample["overlaps_build"] == true).cloned().collect();
+                receipt["foreground"]["classes"][kind] = json!({"all": summary(&class, "wall_ms"),
+                    "overlapping_build": summary(&overlap, "wall_ms"),
+                    "all_calls_under_100ms": class.iter().all(|sample| sample["wall_ms"].as_f64().unwrap() < 100.0)});
+            }
+            drop(guard);
+            build_result?;
+            anyhow::ensure!(!foreground.iter().any(|sample| !sample["error"].is_null()), "foreground append failed");
+            // The drain can finish before the last foreground lifecycle. Drain
+            // any residual finalizer work before the isolated write segments.
+            while store.maintain_client_message_selectors()? {}
+            store.client_messages_benchmark_prepare_io()?;
+            let isolated_namespace = format!("{}-isolated", unix_us());
+            let selectors = isolated_segment(&store, &path, &isolated_namespace, burst);
+            receipt["isolated_selector_enabled"] = selectors;
+            drop(store);
+            fs::copy(&source, &baseline_path)?;
+            anyhow::ensure!(counts(&baseline_path)? == source_counts, "baseline copy count mismatch");
+            let baseline = Store::open(&baseline_path, "selector-production-benchmark")?;
+            baseline.client_messages_selector_benchmark_set_enabled(false)?;
+            // Mirror the online workload before comparing isolated segments:
+            // both designs must have the same authoritative claim/message load.
+            let mut mirrored = 0;
+            for sample in &foreground {
+                let sample = append(&baseline, &namespace,
+                    usize::try_from(sample["message"].as_u64().unwrap())?, sample["kind"].as_str().unwrap());
+                anyhow::ensure!(sample["error"].is_null(), "source-only workload alignment failed: {sample}");
+                mirrored += 1;
+            }
+            receipt["source_only_alignment_appends"] = json!(mirrored);
+            baseline.client_messages_benchmark_prepare_io()?;
+            receipt["isolated_source_only"] = isolated_segment(&baseline, &baseline_path,
+                &isolated_namespace, burst);
+            for kind in ["message.sent", "message.closed"] {
+                let selectors = &receipt["isolated_selector_enabled"]["classes"][kind];
+                let source_only = &receipt["isolated_source_only"]["classes"][kind];
+                if let (Some(with), Some(without)) = (selectors["wal_bytes"].as_u64(), source_only["wal_bytes"].as_u64()) {
+                    receipt["isolated_delta"][kind] = json!({"wal_bytes_delta": i128::from(with) - i128::from(without),
+                        "wal_growth_percent": if without == 0 { None } else { Some(100.0 * (with as f64 / without as f64 - 1.0)) },
+                        "selector_p95_ms": selectors["commit_inclusive"]["p95_ms"],
+                        "baseline_p95_ms": source_only["commit_inclusive"]["p95_ms"],
+                        "selector_max_ms": selectors["commit_inclusive"]["max_ms"],
+                        "baseline_max_ms": source_only["commit_inclusive"]["max_ms"]});
+                }
+            }
+            receipt["source_unchanged"] = json!(counts(&source)? == source_counts
+                && fs::metadata(&source)?.len() == input_metadata.len()
+                && fs::metadata(&source)?.modified()? == input_metadata.modified()?);
+            Ok(())
+        })();
+        receipt["error"] = json!(result.err().map(|error| error.to_string()));
+        receipt
+    }
+
+    #[test]
+    #[ignore = "explicit offline production-copy receipt; never discovers daemon storage"]
+    fn benchmark_client_messages_selector_production_copy() {
+        let receipt = match std::env::var_os("ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY") {
+            Some(source) => run(Path::new(&source), 128, false),
+            None => json!({"benchmark": "client_messages_selector_production_copy",
+                "error": "set ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY to a checkpointed offline input"}),
+        };
+        // Bars and operational failures are data, not assertions that erase the
+        // only adverse receipt. Consumers must inspect error fields and bars.
+        eprintln!("{receipt}");
+    }
+
+    #[test]
+    #[ignore = "small fresh offline-copy smoke for the production receipt"]
+    fn benchmark_client_messages_selector_production_copy_smoke() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("small-offline.sqlite");
+        let store = Store::open(&source, "production-copy-smoke").unwrap();
+        for index in 0..64 {
+            let sample = append(&store, "smoke-source", index, "message.sent");
+            assert!(sample["error"].is_null(), "{sample}");
+        }
+        store.client_messages_selector_benchmark_set_enabled(false).unwrap();
+        store.client_messages_selector_benchmark_set_enabled(true).unwrap();
+        store.client_messages_benchmark_checkpoint().unwrap();
+        drop(store);
+        let receipt = run(&source, 4, true);
+        eprintln!("{receipt}");
+        assert!(receipt["error"].is_null(), "{receipt}");
+        assert_eq!(receipt["claims"], 64);
+        assert!(receipt["online_build"]["transaction_distribution"]["samples"].as_u64().unwrap() > 0);
+        assert!(receipt["foreground"]["classes"]["message.sent"]["overlapping_build"]["samples"].as_u64().unwrap() > 0);
+        assert!(receipt["isolated_selector_enabled"]["error"].is_null(), "{receipt}");
+        assert!(receipt["isolated_source_only"]["error"].is_null(), "{receipt}");
+        assert_eq!(receipt["source_unchanged"], true);
+    }
+}
