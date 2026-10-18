@@ -1501,6 +1501,118 @@ def cmd_sweep(args):
     return 0
 
 
+
+def _manifest_text(m):
+    out = ["{"]
+    keys = list(m)
+    for i, k in enumerate(keys):
+        v = m[k]
+        comma = "," if i < len(keys) - 1 else ""
+        if isinstance(v, list):
+            if not v:
+                out.append(f"  {json.dumps(k)}: []{comma}")
+                continue
+            out.append(f"  {json.dumps(k)}: [")
+            for j, e in enumerate(v):
+                out.append("    " + json.dumps(e, ensure_ascii=False) + ("," if j < len(v) - 1 else ""))
+            out.append("  ]" + comma)
+        else:
+            out.append(f"  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}{comma}")
+    out.append("}")
+    return "\n".join(out) + "\n"
+
+
+def cmd_inventory(args):
+    """Carry the SQLite large-value inventory (docs/st3/large-values.md) over a code move.
+
+    A site's id and owner come from its path, so moving code changes them; the adjacent marker comment still
+    names the old id, which says which record the site is. This rewrites the marker and the record (id, path,
+    owner, line_hint), re-derives the declaration catalog and the dependency-crate list, and moves the manual
+    flows that follow their function. Nothing is accepted that the guard (scripts/check-sqlite-large-values)
+    does not accept; a site without a marker, or whose fingerprint changed, is reported and left alone."""
+    import bisect
+    import sqlite_large_values as slv
+
+    root = Path(".")
+    mpath = root / slv.MANIFEST
+    manifest = json.loads(mpath.read_text())
+    cache = {}
+    sites, markers = slv.scan(root, cache)
+    contents = {p: v[0] for p, v in cache.items()}
+    old = {e["id"]: e for e in manifest["sites"]}
+    by_path = collections.defaultdict(list)
+    for m in markers:
+        by_path[m[0]].append(m)
+    ends = {p: [m[2] for m in ms] for p, ms in by_path.items()}
+    remap = {}
+    edits = collections.defaultdict(list)
+    unmatched = []
+    for site in sites:
+        if site.id in old and old[site.id]["path"] == site.path:
+            continue
+        idx = bisect.bisect_right(ends.get(site.path, []), site.start) - 1
+        marker = by_path[site.path][idx] if idx >= 0 else None
+        if marker is None or marker[3] is None or contents[site.path][marker[2] : site.start].strip():
+            unmatched.append(site)
+            continue
+        oid = marker[3]["id"]
+        if oid not in old or old[oid]["fingerprint"] != site.fingerprint or oid in remap:
+            unmatched.append(site)
+            continue
+        remap[oid] = site
+        edits[site.path].append((marker[1], marker[2], "/* sqlite-large-value: allow-for-now %s owner=%s TODO=%s */" % (site.id, site.owner, marker[3]["todo"])))
+    entries = []
+    for e in manifest["sites"]:
+        s = remap.get(e["id"])
+        if s is not None:
+            e = dict(e, id=s.id, path=s.path, owner=s.owner, line_hint=s.line)
+        entries.append(e)
+    manifest["sites"] = sorted(entries, key=lambda e: (e["path"], e["id"]))
+    # manual flows follow their function
+    flows = []
+    for flow in manifest.get("flows", []):
+        found = None
+        candidates = [flow["path"]] + [p for p, (src, _) in cache.items() if p != flow["path"] and ("fn " + flow["function"]) in src]
+        for path in candidates:
+            if path not in cache:
+                continue
+            try:
+                cur = slv.flow_site(path, cache[path][0], flow["function"])
+            except ValueError:
+                continue
+            if cur["fingerprint"] == flow["fingerprint"]:
+                found = cur
+                break
+        if found is None:
+            flows.append(flow)
+            continue
+        if found["id"] != flow["id"] or found["path"] != flow["path"]:
+            src = cache[found["path"]][0]
+            comments = [t for t in cache[found["path"]][1] if t.kind == "comment" and t.end <= found["start"]]
+            last = comments[-1] if comments else None
+            if last is not None and slv.FLOW_MARKER.fullmatch(last.text) and not src[last.end : found["start"]].strip():
+                edits[found["path"]].append((last.start, last.end, "/* sqlite-large-value-flow: allow-for-now %s owner=%s TODO=%s */" % (found["id"], found["owner"], flow["todo"])))
+            flow = dict(flow, id=found["id"], path=found["path"], owner=found["owner"])
+        flows.append(flow)
+    manifest["flows"] = flows
+    for path, es in edits.items():
+        text = Path(path).read_text()
+        for a, b, rep in sorted(es, reverse=True):
+            text = text[:a] + rep + text[b:]
+        Path(path).write_text(text)
+    # the catalogs are derived from the (rewritten) sources
+    cache = {}
+    sites, _ = slv.scan(root, cache)
+    manifest["declarations"] = slv.declarations(root, sites, {p: v[0] for p, v in cache.items()})
+    manifest["sqlite_crates"] = slv.sqlite_crates(root)
+    mpath.write_text(_manifest_text(manifest))
+    problems = slv.findings(root, manifest)
+    print("inventory: %d sites moved, %d unmatched, %d problems left" % (len(remap), len(unmatched), len(problems)))
+    for p in problems[:12]:
+        print("  " + p)
+    return 1 if problems else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1508,6 +1620,7 @@ def main(argv=None):
     pf.add_argument("--roots", required=True, help="comma-separated source dirs whose items may be made pub")
     pf.add_argument("--all-targets", action="store_true")
     pf.add_argument("--rounds", type=int, default=12)
+    sub.add_parser("inventory", help="carry the SQLite large-value inventory over a code move")
     ps = sub.add_parser("sweep", help="remove the dead code a cut leaves in the lower crates")
     ps.add_argument("--roots", required=True)
     ps.add_argument("--rounds", type=int, default=4)
@@ -1532,6 +1645,8 @@ def main(argv=None):
         return cmd_fix(args)
     if args.cmd == "sweep":
         return cmd_sweep(args)
+    if args.cmd == "inventory":
+        return cmd_inventory(args)
     config = load_config(args.config)
     pins = [l.strip() for l in open(args.pins)] if args.pins and os.path.exists(args.pins) else []
     nodes, files, tfiles = load(args.src)
