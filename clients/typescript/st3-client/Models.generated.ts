@@ -2718,7 +2718,7 @@ export type TimelineMessageBody = {
   sender_class?: "external-assistant";
   tags?: Array<string>;
   title?: string;
-  to?: ParticipantRef;
+  to?: TimelineRecipientRef;
 };
 
 export type TimelinePage = {
@@ -2728,6 +2728,8 @@ export type TimelinePage = {
   page: PageInfo;
   session_id: Id;
 };
+
+export type TimelineRecipientRef = string;
 
 export type TimelineRedactionBody = {
   blocks?: Array<TimelineBlock>;

@@ -218,6 +218,61 @@ async fn pairing_caller_bound_rich_reads_and_budget_do_not_silently_truncate() {
 }
 
 #[tokio::test]
+async fn assistant_message_and_agent_reply_decode_from_real_session_timeline() {
+    let h = Harness::new();
+    h.state.store.append_claim(&ClaimInput {
+        subject: AGENT.into(), kind: "runtime.observed".into(), actor: Some(AGENT.into()),
+        fields: serde_json::from_value(json!({
+            "status": "running", "runtime_id": "assistant-thread-runtime",
+            "incarnation_id": "assistant-thread-runtime:i1", "terminal": false
+        })).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: Some("assistant-thread-runtime".into()),
+    }).unwrap();
+    let paired = h.pair().await;
+    let send = h.message(AGENT, "timeline-assistant-send").await;
+    let (status, sent) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &send).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let original = sent["value"]["affected_ids"].as_array().unwrap().iter()
+        .filter_map(Value::as_str).find(|id| id.starts_with("message/")).unwrap();
+    // Native agent replies preserve the assistant principal as their recipient.
+    let reply = h.owner("POST", "/v1/messages", &json!({
+        "idempotency_key": "timeline-agent-reply", "from": AGENT, "to": "assistant/chatgpt",
+        "in_reply_to": original, "content": "Acknowledged.", "tags": [], "attachments": []
+    })).await;
+    let reply_id = reply["value"]["subject"].as_str().unwrap_or_else(|| panic!("reply receipt: {reply}"));
+    assert_eq!(reply["value"]["to"], "assistant/chatgpt");
+    // The read-side representation grants no new assistant write authority.
+    let forbidden = h.message("assistant/chatgpt", "timeline-assistant-recipient-denied").await;
+    let (status, refusal) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &forbidden).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+    assert_eq!(h.state.store.messages(Some("assistant/chatgpt"), true).unwrap().len(), 1);
+
+    let sessions = h.owner("GET", "/v1/client/sessions", &()).await;
+    let session_id = sessions["value"]["items"].as_array().unwrap().iter()
+        .find(|session| session["owner_id"] == AGENT).unwrap()["id"].as_str().unwrap();
+    let timeline = h.owner("GET", &format!("/v1/client/sessions/{session_id}/timeline"), &()).await;
+    let items = timeline["value"]["items"].as_array().unwrap();
+    let original_entry = items.iter().find(|entry| entry["body"]["message_id"] == original).unwrap();
+    let reply_entry = items.iter().find(|entry| entry["body"]["message_id"] == reply_id).unwrap();
+    assert_eq!(original_entry["body"]["from"], "assistant/chatgpt");
+    assert_eq!(original_entry["body"]["to"], AGENT);
+    assert_eq!(reply_entry["body"]["from"], AGENT);
+    assert_eq!(reply_entry["body"]["to"], "assistant/chatgpt");
+    assert_eq!(reply_entry["body"]["reply_to"], original);
+
+    // Validate the actual API serializer output against the source of the generated codecs,
+    // then decode both entries with the generated Rust SDK. No timeline fixture is fabricated.
+    let validator = super::client_v0_contract::contract_validator("TimelineEntry");
+    for entry in [original_entry, reply_entry] {
+        validator.validate(entry).unwrap_or_else(|error| panic!("timeline wire contract: {error}"));
+        let decoded: st3_client::TimelineEntry = serde_json::from_value(entry.clone()).unwrap();
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert_eq!(encoded["body"]["from"], entry["body"]["from"]);
+        assert_eq!(encoded["body"]["to"], entry["body"]["to"]);
+    }
+}
+
+#[tokio::test]
 async fn typed_owner_approval_executes_a_durable_answer_and_stale_episode_is_rejected() {
     let h = Harness::new();
     let ask = h.ask("answer-ask", "Answer through approval");

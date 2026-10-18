@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
-test('assistant senders decode timeline messages without becoming recipients or actors', async () => {
+test('assistant senders and reply recipients decode without widening actors or signers', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = {
         id: 'timeline-entry/assistant-message', sequence: 1, revision: 1,
@@ -30,7 +30,19 @@ test('assistant senders decode timeline messages without becoming recipients or 
         for (const from of ['assistant/', 'assistant/with space', 'daemon/example']) {
             assert.throws(() => decode({ ...wire, body: { ...wire.body, from } }));
         }
-        assert.throws(() => decode({ ...wire, body: { ...wire.body, to: 'assistant/chatgpt' } }));
+        const reply = decode({
+            ...wire, role: 'assistant',
+            body: {
+                message_id: 'message/reply', reply_to: wire.body.message_id,
+                from: 'agent/example', to: 'assistant/chatgpt',
+            },
+        });
+        const encodedReply = Schema.encodeSync(Rich.TimelineEntry)(reply);
+        assert.equal(encodedReply.body.to, 'assistant/chatgpt');
+        assert.equal(encodedReply.body.reply_to, wire.body.message_id);
+        assert.throws(() => Rich.decodeUnknownSync(Rich.MessageProvenance, mode)({
+            verdict: 'unsigned', signer: 'assistant/chatgpt',
+        }));
         assert.throws(() => Rich.decodeUnknownSync(Rich.ParticipantRef, mode)('assistant/chatgpt'));
         assert.throws(() => Rich.decodeUnknownSync(Rich.ActorRef, mode)('assistant/chatgpt'));
     }
