@@ -12987,12 +12987,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
             self.runtime.observe_exec(runtime_id)?
         };
-        Ok(observation.is_some_and(|item| {
-            !matches!(
-                item.status.as_str(),
-                "stopped" | "absent" | "exited" | "vanished"
-            )
-        }))
+        let ended = |status: Option<&str>| {
+            matches!(status, Some("stopped" | "absent" | "exited" | "vanished"))
+        };
+        Ok(match observation {
+            Some(item) => !ended(Some(item.status.as_str())),
+            // A process launched moments ago has no observation yet. As for a remote one, only a
+            // recorded end proves it stopped.
+            None => !actual.is_some_and(|actual| {
+                ended(actual_field(&actual, "status").and_then(Value::as_str))
+            }),
+        })
     }
 
     fn step_declarations_hold(&self, run: &MissionRunView, step_subject: &str) -> Result<bool> {
@@ -29140,6 +29145,109 @@ mission "orchid/timeout" state="ready" timeout="1ms" {
             ("cancelled", "terminal")
         );
         assert!(terminal.steps.iter().all(|step| step.status == "cancelled"));
+    }
+
+    #[test]
+    fn a_cancelled_runs_final_exec_started_but_not_yet_observed_keeps_its_step() {
+        final_exec_during_cancellation(false);
+    }
+
+    #[test]
+    fn a_cancelled_runs_final_exec_that_disappears_without_an_exit_still_ends_its_step() {
+        final_exec_during_cancellation(true);
+    }
+
+    /// A final exec launched during cancellation keeps its step until its end is proven: by an
+    /// observed exit, or, when its process is gone with no exit recorded (a crash or a kill), by
+    /// the vanished observation the member reconciler records for it.
+    fn final_exec_during_cancellation(gone_without_exit: bool) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+mission "orchid/final-launch" state="ready" timeout="1m" {
+  goal "Keep final work that has just been started."
+  step "wait" { agentless }
+  finally {
+    step "report" {
+      agentless
+      exec "final-worker" { command "sleep 60"; restart "never" }
+      gate "the report is posted" { field "state" "resource/orchid/report" is "ready" }
+    }
+  }
+}
+"#,
+            "final-launch-mission",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "orchid/final-launch".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "final-launch-run".into(),
+            })
+            .unwrap();
+        store
+            .request_mission_run_cancellation(&run.id, "no longer needed")
+            .unwrap();
+        // Starts run on launch workers: until one has spawned the process, the exec is recorded
+        // as starting and the runtime has no observation of it.
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let started = || {
+            runtime.started_members.lock().unwrap().iter()
+                .find(|member| member.runtime_id.ends_with("final-worker"))
+                .map(|member| member.runtime_id.clone())
+        };
+        let report = || {
+            store.mission_run(&run.id).unwrap().unwrap().steps.into_iter()
+                .find(|step| step.step == "report").unwrap()
+        };
+        let observe = |runtime_id: &str, status: &str| {
+            runtime.execs.lock().unwrap().insert(runtime_id.into(), RuntimeObservation {
+                runtime_id: runtime_id.into(),
+                terminal: false,
+                status: status.into(),
+                exit_code: (status == "exited").then_some(0),
+                incarnation_id: Some("final-worker-generation".into()),
+            });
+        };
+        let mut runtime_id = None;
+        for _ in 0..8 {
+            reconciler.reconcile_once().unwrap();
+            if let Some(id) = started() {
+                runtime_id = Some(id);
+                break;
+            }
+        }
+        let runtime_id = runtime_id.expect("cancellation runs the final exec");
+        // The launch has spawned it now.
+        observe(&runtime_id, "running");
+        let waiting = report();
+        assert_eq!(waiting.status, "working", "a starting exec is not proof of no process: {waiting:?}");
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(report().status, "working");
+        assert!(!runtime.stops.lock().unwrap().contains(&runtime_id), "the final exec was stopped");
+        if gone_without_exit {
+            runtime.execs.lock().unwrap().remove(&runtime_id);
+        } else {
+            observe(&runtime_id, "exited");
+        }
+        // Either is proof the process ended: then the processless shortcut still cancels the step.
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(report().status, "cancelled");
     }
 
     #[tokio::test]
