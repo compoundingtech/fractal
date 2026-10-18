@@ -1,5 +1,5 @@
 //! Isolated real router/store coverage; no daemon, subprocess, ambient profile, or managed agent.
-use st3::SeatsStoreCore;
+use st3::{SeatsStore as _, SeatsStoreCore};
 use std::{path::PathBuf, sync::Arc};
 
 use axum::{Router, body::Body, http::{Request, StatusCode}};
