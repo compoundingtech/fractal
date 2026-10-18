@@ -1586,10 +1586,11 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v3, seeds 5 and 34
-/// never reach a trim; every other fixed seed must. This list is tied to the corpus because
-/// claim generation consumes the same RNG as the schedule.
-const NEVER_TRIMS: &[u64] = &[5, 34];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v3 including
+/// person rename and reassignment claims, seeds 5, 21 and 233 never reach a trim; every other
+/// fixed seed must. This list is tied to the corpus because claim generation consumes the
+/// same RNG as the schedule.
+const NEVER_TRIMS: &[u64] = &[5, 21, 233];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
