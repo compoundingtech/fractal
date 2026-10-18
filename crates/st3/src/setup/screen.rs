@@ -145,6 +145,11 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
         login: start.args.service.unwrap_or(true),
         login_note,
         linger: lingering_offered(),
+        work_root: start
+            .config
+            .work_root()
+            .map(|root| root.display().to_string())
+            .unwrap_or_default(),
         rows,
         codex,
     }
@@ -493,6 +498,8 @@ async fn stages(
     next.node = form.machine.clone();
     next.codex_work_without_asking = form.codex;
     next.validate()?;
+    let should_start = !daemon_ready(&next).await && start.args.start.unwrap_or(true);
+    st3::service::preflight(form.login && should_start)?;
 
     reporter.step("Saving your name and this machine's name");
     merge_config(&start.path, &next)?;
@@ -511,7 +518,7 @@ async fn stages(
     };
     check_login_path(&executable);
 
-    if !daemon_ready(&next).await && start.args.start.unwrap_or(true) {
+    if should_start {
         reporter.step("Starting st");
         start_daemon(
             &next,
@@ -548,14 +555,15 @@ async fn stages(
     }
 
     // The Assistant starts while the screen is still up, once something is ready to run it.
-    let (harness, started) = {
+    let (harness, ready, started) = {
         let shared = shared.lock().expect("result lock");
-        (shared.ready.first().cloned(), shared.started_assistant)
+        (shared.ready.first().cloned(), shared.ready.clone(), shared.started_assistant)
     };
     if let (Some(harness), false) = (harness, started) {
         if daemon_ready(&next).await {
             reporter.step("Starting the Assistant");
-            let subject = crate::onboarding::start(&next, &harness, start.args.onboarding).await?;
+            let subject =
+                crate::onboarding::start(&next, &harness, &ready, start.args.onboarding).await?;
             let mut shared = shared.lock().expect("result lock");
             shared.started_assistant = true;
             shared.harness = Some(harness);
