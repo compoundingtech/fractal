@@ -1038,8 +1038,6 @@ mod tests {
         evicted.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
         assert!(evicted.cursor.is_some());
         INDEXES
-            .get()
-            .unwrap()
             .lock()
             .unwrap()
             .remove(&(Arc::as_ptr(&state.store) as usize, "person/alex".to_owned(), false, None));
