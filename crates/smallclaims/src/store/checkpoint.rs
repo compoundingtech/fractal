@@ -654,6 +654,7 @@ fn open_checkpoint_copy(copy: &Path) -> Result<Connection> {
 /// Admission needs a claim's blobs, so every node that holds the sealed claims holds these, while
 /// the blobs of later claims depend on what has arrived since the cut. A trim deletes no blob.
 fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h346bd8caeba9 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ super::canonical::PROOF_COPY_LEGACY_POSITIONS)?;
     connection.execute_batch(
         /* sqlite-large-value: allow-for-now lv-h67cd460ba33d owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
          DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
@@ -1819,5 +1820,102 @@ mod memory_tests {
             "the overwritten copy pages belong in a disk rollback journal"
         );
         transaction.rollback().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod proof_position_tests {
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// The proof copy's numbering of the sealed set, after keeping only that set.
+    fn proof_order(copy: &Path, sealed: &[String]) -> Vec<String> {
+        let connection = open_checkpoint_copy(copy).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT);
+                 INSERT INTO temp.sealed_envelopes VALUES('writer', 1, 'sealed');",
+            )
+            .unwrap();
+        for id in sealed {
+            connection
+                .execute("INSERT INTO temp.sealed_claims VALUES(?1)", [id])
+                .unwrap();
+        }
+        keep_sealed_claims_in_canonical_order(&connection).unwrap();
+        connection
+            .prepare("SELECT id FROM claims ORDER BY store_index")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_proof_copy_orders_the_sealed_set_alone_whatever_duplicates_a_member_holds() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Store::open(&scratch.path().join("store.sqlite3"), "writer", Arc::new(Plain))
+            .unwrap();
+        let sealed = {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            let mut batch = None;
+            let mut ids = Vec::new();
+            for name in ["first", "second", "third"] {
+                let claim = append_claim_record_tx(
+                    &transaction,
+                    "writer",
+                    &format!("note/{name}"),
+                    "example.note",
+                    None,
+                    &json!({"fields": {"name": name}}),
+                    &[],
+                    batch.as_deref(),
+                )
+                .unwrap();
+                batch.get_or_insert(claim.batch_id.clone());
+                ids.push(claim.id);
+            }
+            for (position, id) in ids.iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                            position, raw, state, claim_id, updated_at_unix_ms)
+                         VALUES (?1, 'writer', 1, 'sealed', ?2, X'00', 'valid', ?3, '0')",
+                        params![format!("record/sealed/{position}"), position as i64, id],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+            ids
+        };
+        let plain = scratch.path().join("plain.sqlite3");
+        store
+            .connection
+            .write()
+            .execute("VACUUM INTO ?1", [plain.to_str().unwrap()])
+            .unwrap();
+        // Another member also holds an unsealed duplicate envelope carrying the third claim first.
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                    position, raw, state, claim_id, updated_at_unix_ms)
+                 VALUES ('record/duplicate/0', 'writer', 1, 'duplicate', 0, X'00', 'valid', ?1, '0')",
+                [&sealed[2]],
+            )
+            .unwrap();
+        let with_duplicate = scratch.path().join("duplicate.sqlite3");
+        store
+            .connection
+            .write()
+            .execute("VACUUM INTO ?1", [with_duplicate.to_str().unwrap()])
+            .unwrap();
+        assert_eq!(proof_order(&plain, &sealed), sealed);
+        assert_eq!(proof_order(&with_duplicate, &sealed), sealed);
     }
 }

@@ -60,6 +60,19 @@ WHEN EXISTS (
 END;
 ";
 
+/// A checkpoint proof copy orders its sealed set by the legacy expression over that set alone,
+/// as every member holding the set computes it. Stored positions join every record a member
+/// holds, including duplicate envelopes outside the set, so the copy must not read them.
+/// Run on the copy before it deletes anything.
+pub const PROOF_COPY_LEGACY_POSITIONS: &str = /* sqlite-large-value: allow-for-now lv-hd2150e929695 owner=smallclaims::store::canonical TODO=bound-or-reference-values-and-reclamation */ "
+DROP TRIGGER IF EXISTS claim_positions_record_insert_v1;
+DROP TRIGGER IF EXISTS claim_positions_record_change_v1;
+DROP TRIGGER IF EXISTS claim_positions_record_changed_v1;
+DROP TRIGGER IF EXISTS claim_positions_record_delete_v1;
+DROP TRIGGER IF EXISTS claim_positions_sibling_delete_v1;
+DELETE FROM claim_positions;
+";
+
 /// Store a replicated claim's wire position before its claim row, so the claim's own insert
 /// triggers already order it by the position its record will carry.
 pub fn record_position_tx(transaction: &Connection, claim_id: &str, position: u64) -> Result<()> {
