@@ -88,6 +88,8 @@ pub struct SmalltalkRuntime {
     pub published_missions: published_list::PublishedList<mission_list::MissionRows>,
     /// The current work list, while a refresher keeps it published.
     pub published_work: published_list::PublishedList<work_list::WorkRows>,
+    /// Current runtime resources, built only by the background collection refresher.
+    pub published_runtimes: published_list::PublishedList<runtime_list::RuntimeRows>,
     #[cfg(any(test, feature = "test-support"))]
     pub agent_resources_builds: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
@@ -516,6 +518,7 @@ impl Runtime for SmalltalkRuntime {
         // fold under way, before the windows that read them are told to reread.
         self.published_missions.forget();
         self.published_work.forget();
+        self.published_runtimes.forget();
         self.published_views.invalidate();
         self.agent_page_refs_cache
             .lock()
@@ -1002,38 +1005,17 @@ mod schema_install_tests {
 
 #[cfg(test)]
 mod ivm_attachment_tests {
-    use super::*;
-    use smallclaims::ivm::{Contribution, Definition, Readiness, View, Views, events};
-    use smallclaims::store::canonical;
-    use std::sync::Barrier;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::runtime_ivm_attachment_tests_shared::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::runtime_ivm_attachment_tests_shared::{Shadow, boundary, registry};
+use super::*;
+    use smallclaims::ivm::Readiness;
+    
+    
 
-    struct Shadow;
-    impl View for Shadow {
-        fn definition(&self) -> Definition {
-            Definition {
-                name: "fixture.shadow",
-                fingerprint: "fixture.shadow.v1",
-                kinds: &[],
-                local_kinds: &["fixture.clock"],
-                max_contributions: 1,
-            }
-        }
-        fn contributions(
-            &self,
-            _claim: &ClaimRecord,
-            _rank: &canonical::ClaimKey,
-        ) -> Result<Vec<Contribution>> {
-            Ok(Vec::new())
-        }
-    }
-    fn registry() -> Arc<Views> {
-        Arc::new(Views::new(vec![Box::new(Shadow)]).unwrap())
-    }
-    fn boundary(store: &Store, views: &Views) -> events::Boundary {
-        store
-            .read_snapshot(|_| events::capture(&store.readers.get(), views, "fixture.shadow"))
-            .unwrap()
-    }
     fn admit_agent(store: &Store) {
         let source = "version 2\nagent \"ember\" { workspace \"/tmp\"; command \"true\" }\n";
         let intent = crate::graph::parse_test_intent(source, "alder").unwrap();
@@ -1050,72 +1032,6 @@ mod ivm_attachment_tests {
             .apply(&intent, &plan.subject_tokens, "fixture")
             .unwrap();
         assert!(store.index().unwrap() > 0);
-    }
-
-    #[test]
-    fn ordinary_store_does_not_install_or_attach_shadow_views() {
-        let store = Store::open_memory("alder").unwrap();
-        assert!(store.ivm_views().is_none());
-        assert!(store.ivm_publisher().unwrap().is_none());
-        let installed: bool = store
-            .readers
-            .get()
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ivm_event_state')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(!installed);
-    }
-
-    #[test]
-    fn concurrent_consumers_share_one_store_publisher_and_registry() {
-        let root = tempfile::tempdir().unwrap();
-        let views = registry();
-        let store = Arc::new(
-            Store::open_with_ivm_views(&root.path().join("claims.db"), "alder", views.clone())
-                .unwrap(),
-        );
-        assert!(Arc::ptr_eq(&store.ivm_views().unwrap(), &views));
-        assert!(matches!(
-            boundary(&store, &views).availability.readiness,
-            Readiness::Ready(_)
-        ));
-        let start = Arc::new(Barrier::new(8));
-        let threads = (0..8)
-            .map(|_| {
-                let (store, start) = (store.clone(), start.clone());
-                std::thread::spawn(move || {
-                    start.wait();
-                    store.ivm_publisher().unwrap().unwrap()
-                })
-            })
-            .collect::<Vec<_>>();
-        let publishers = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>();
-        assert!(
-            publishers
-                .iter()
-                .all(|publisher| Arc::ptr_eq(publisher, &publishers[0]))
-        );
-        assert!(Arc::ptr_eq(
-            &store.ivm_publisher().unwrap().unwrap(),
-            &publishers[0]
-        ));
-        let mut socket = publishers[0].subscribe();
-        let mut receipt = publishers[1].subscribe();
-        store
-            .connection
-            .batched(events::rotate_identity)
-            .unwrap()
-            .unwrap();
-        let socket_notice = socket.try_recv().unwrap();
-        let receipt_notice = receipt.try_recv().unwrap();
-        assert_eq!(socket_notice, receipt_notice);
-        assert!(matches!(socket_notice, events::Notice::Committed(_)));
     }
 
     #[test]

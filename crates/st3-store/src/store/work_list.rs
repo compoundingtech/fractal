@@ -123,11 +123,11 @@ pub struct ActorOrders {
     pub unchanged_seats: std::sync::atomic::AtomicUsize,
 }
 
-type OrderCell = Arc<std::sync::OnceLock<Arc<Vec<u32>>>>;
+pub type OrderCell = Arc<std::sync::OnceLock<Arc<Vec<u32>>>>;
 
 /// One actor's registered cell: kept, or overflow until it is built, and how many reads hold
 /// it, counted under the registry's lock so the last one to leave decides its removal.
-struct ActorEntry {
+pub struct ActorEntry {
     actor: String,
     cell: OrderCell,
     kept: bool,

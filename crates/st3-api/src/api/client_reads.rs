@@ -1,3 +1,5 @@
+use crate::EvidenceStore;
+use crate::PublishedViewsStore;
 use super::*;
 
 fn client_launch_approval_resources(
