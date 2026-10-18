@@ -1807,17 +1807,17 @@ impl Store {
             self.copy_store_to_guarded(&copy, vfs.as_ref())?;
             prove_on_scratch_copy(&*self.runtime, &copy, input, vfs.as_ref())
         })();
-        if let Some(vfs) = &vfs {
-            if let Err(close) = vfs.check_closed() {
-                // A live SQLite file could still write after unlink. Keep the owner lock and
-                // marker instead of deleting an open scratch file; only process exit releases
-                // the lock for the next startup sweep.
-                let prior = result.err().map(|error| format!("; also {error}")).unwrap_or_default();
-                std::mem::forget(ownership);
-                return Err(close.context(format!(
-                    "checkpoint proof scratch remains owned until process exit{prior}"
-                )));
-            }
+        if let Some(vfs) = &vfs
+            && let Err(close) = vfs.check_closed()
+        {
+            // A live SQLite file could still write after unlink. Keep the owner lock and
+            // marker instead of deleting an open scratch file; only process exit releases
+            // the lock for the next startup sweep.
+            let prior = result.err().map(|error| format!("; also {error}")).unwrap_or_default();
+            std::mem::forget(ownership);
+            return Err(close.context(format!(
+                "checkpoint proof scratch remains owned until process exit{prior}"
+            )));
         }
         let result = match space.as_ref() { Some(space) => space.explain(result), None => result };
         let cleanup = ownership.finish(&copy);

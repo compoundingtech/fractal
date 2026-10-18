@@ -154,12 +154,13 @@ impl ProofOwnership {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if let Some(stem) = name.strip_suffix(".owner") {
-                if stem.starts_with("proof-") && stem.ends_with(".sqlite3") {
-                    let mut this_proof = Vec::new();
-                    self.remove_set(&self.dir.join(stem), &mut this_proof);
-                    failures.extend(this_proof);
-                }
+            if let Some(stem) = name.strip_suffix(".owner")
+                && stem.starts_with("proof-")
+                && stem.ends_with(".sqlite3")
+            {
+                let mut this_proof = Vec::new();
+                self.remove_set(&self.dir.join(stem), &mut this_proof);
+                failures.extend(this_proof);
             }
         }
         for entry in fs::read_dir(&self.dir)? {
@@ -215,10 +216,10 @@ impl ProofOwnership {
                 failures,
             );
         }
-        if failures.is_empty() {
-            if let Err(error) = File::open(&self.dir).and_then(|dir| dir.sync_all()) {
-                failures.push(format!("sync {}: {error}", self.dir.display()));
-            }
+        if failures.is_empty()
+            && let Err(error) = File::open(&self.dir).and_then(|dir| dir.sync_all())
+        {
+            failures.push(format!("sync {}: {error}", self.dir.display()));
         }
         if failures.is_empty() {
             remove_if_present(
