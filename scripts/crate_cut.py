@@ -826,6 +826,23 @@ def place_tests(nodes, mtests, files, tfiles):
     copied = []
     seen = set()
     test_types = {(n.file, n.container, n.name): n for n in nodes if n.test and n.kind in ("struct", "enum", "union", "type", "trait")}
+
+    def pub_support(rel):
+        parts = module_path(rel)
+        parent = ("/".join(parts[:-1]) + ".rs") if len(parts) > 1 else "lib.rs"
+        for it in (files.get(parent) or tfiles.get(parent) or (None, []))[1]:
+            if it.kind == "mod" and it.name == parts[-1] and it.text.rstrip().endswith(";"):
+                return it.is_pub and any("test-support" in a for a in it.attrs)
+        return False
+
+    def shared_pub(n):
+        """Whether code outside this test module can name the type: pub, in modules that are pub (a
+        prod file, a pub test-support file, or inline modules declared pub)."""
+        if not n.item.is_pub:
+            return False
+        if any(not CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0].rstrip().endswith("pub") for k in range(len(n.container))):
+            return False
+        return n.file in files or pub_support(n.file)
     defs_by_name = collections.defaultdict(list)
     for n in nodes:
         if n.test and n.name:
@@ -841,9 +858,9 @@ def place_tests(nodes, mtests, files, tfiles):
             u = nodes[r]
             if not u.test or u.kind == "method" or u.id in moved_ids or u.fixed is not None or (u.id, k) in seen:
                 continue
-            if u.kind in ("struct", "enum", "union", "type", "trait") and u.item.is_pub:
-                continue  # a pub type is shared with the code that stays: a copy would be a different type
-            if u.kind == "impl" and test_types.get((u.file, u.container, u.merge)) is not None and test_types[(u.file, u.container, u.merge)].item.is_pub:
+            if u.kind in ("struct", "enum", "union", "type", "trait") and shared_pub(u):
+                continue  # a pub type others can reach is shared with the code that stays: a copy would be a different type
+            if u.kind == "impl" and test_types.get((u.file, u.container, u.merge)) is not None and shared_pub(test_types[(u.file, u.container, u.merge)]):
                 continue
             if u.name and (u.file != t.file or u.container != t.container) and len(defs_by_name[u.name]) > 1:
                 continue  # an ambiguous name that probably names something else
@@ -888,7 +905,7 @@ def place_tests(nodes, mtests, files, tfiles):
         if rel in files:
             continue
         parts = module_path(rel)
-        parent = "/".join(parts[:-1]) + ".rs"
+        parent = ("/".join(parts[:-1]) + ".rs") if len(parts) > 1 else "lib.rs"
         if parent not in files and parent not in tfiles:
             print("WARNING: no parent module file %s for test file %s" % (parent, rel))
             continue

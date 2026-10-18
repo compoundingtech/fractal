@@ -140,7 +140,8 @@ def _leading_meta(s, i, n):
             k = s.find("\n", j)
             i = n if k < 0 else k + 1
             continue
-        if s.startswith("/**", j) and not s.startswith("/**/", j):
+        if s.startswith("/*", j):
+            # a plain or doc block comment in front of an item belongs to it
             i = _skip_block_comment(s, j)
             continue
         if s.startswith("#[", j) or s.startswith("#![", j):
