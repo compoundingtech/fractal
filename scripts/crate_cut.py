@@ -1157,7 +1157,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="cr
                     if tuple(absolute[:k]) in shared_of:
                         hit = (k, shared_of[tuple(absolute[:k])])
                         break
-                test_only = any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1])
+                test_only = any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1]) or (len(absolute) > 1 and not _available(absolute[:-1]))
                 if hit is not None:
                     leaf = segs[-1]
                     if leaf == "*":
