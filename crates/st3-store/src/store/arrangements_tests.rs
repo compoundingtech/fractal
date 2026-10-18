@@ -20,6 +20,40 @@ fn create(store: &Store) {
 }
 
 #[test]
+fn inventory_revision_is_transactional_owner_scoped_and_persists_across_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("inventory.sqlite");
+    let store = Store::open(&path, "inventory-revisions").unwrap();
+    assert_eq!(store.arrangement_inventory_revision("person/ada").unwrap(), 0);
+    create(&store);
+    append(&store, json!([{"op":"rename","name":"Renamed"}]));
+    append(&store, json!([{"op":"retire"}]));
+    assert_eq!(store.arrangement_inventory_revision("person/ada").unwrap(), 3);
+    let mut other = input(json!([{"op":"create","name":"Other"}]));
+    other.subject = SUBJECT.replace("person/ada", "person/other");
+    other.actor = Some("person/other".into());
+    other.fields.insert("owner".into(), json!("person/other"));
+    store.append_claim(&other).unwrap();
+    assert_eq!(store.arrangement_inventory_revision("person/ada").unwrap(), 3);
+    assert_eq!(store.arrangement_inventory_revision("person/other").unwrap(), 1);
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        bump_inventory_revisions(&transaction, std::iter::once("person/ada")).unwrap();
+        transaction.rollback().unwrap();
+    }
+    assert_eq!(store.arrangement_inventory_revision("person/ada").unwrap(), 3);
+    // Three claims for one owner still produce one counter upsert in the replay transaction.
+    store.rebuild_claim_projections().unwrap();
+    assert_eq!(store.arrangement_inventory_revision("person/ada").unwrap(), 4);
+    assert_eq!(store.arrangement_inventory_revision("person/other").unwrap(), 2);
+    assert!(store.arrangement(SUBJECT, u64::MAX).unwrap().is_none());
+    drop(store);
+    let reopened = Store::open(&path, "inventory-revisions").unwrap();
+    assert_eq!(reopened.arrangement_inventory_revision("person/ada").unwrap(), 4);
+}
+
+#[test]
 fn historical_status_reads_skip_arrangements_changed_after_the_frontier() {
     let store = Store::open_memory("historical-arrangements").unwrap();
     create(&store);
@@ -191,7 +225,7 @@ fn reads_and_write_validation_do_not_need_claim_history() {
     let mut connection = store.connection.write();
     let transaction = connection.transaction().unwrap();
     // If either path consults edit history this fails, rather than merely asserting query text.
-    transaction.execute_batch("ALTER TABLE claims RENAME TO unavailable_history").unwrap();
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h302d9f583d99 owner=st3_store::store::arrangements_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_history").unwrap();
     assert_eq!(arrangement_at(&transaction,SUBJECT,u64::MAX).unwrap().unwrap(),before);
     assert_eq!(arrangements_at(&transaction,"person/ada",u64::MAX).unwrap(),vec![before.clone()]);
     prepare(&transaction,&input(json!([{"op":"folder.rename","id":A,"name":"New"}]))).unwrap();
@@ -224,7 +258,7 @@ fn heads_survive_reopen_and_an_upgrade_backfills_once() {
     let before = layout(&store);
     {
         let connection = store.connection.write();
-        connection.execute_batch("DELETE FROM arrangement_registers; DELETE FROM arrangements; DELETE FROM meta WHERE key='arrangement_heads_v1'").unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc108e4156d3e owner=st3_store::store::arrangements_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM arrangement_registers; DELETE FROM arrangements; DELETE FROM meta WHERE key='arrangement_heads_v1'").unwrap();
     }
     drop(store);
     let store = Store::open(&path,"node").unwrap();
