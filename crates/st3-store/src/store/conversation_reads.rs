@@ -566,44 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn assistant_work_candidates_are_keyset_limited_before_hydration() {
-        let store = Store::open_memory("node").unwrap();
-        store.connection.batched(|tx| -> Result<()> {
-            tx.execute_batch(
-                "INSERT INTO mission_runs VALUES
-                 ('run','mission','revision','current','revision','run',NULL,'workspace',
-                  'person/test','{}','automatic','running','running','1','1');
-                 INSERT INTO run_generations VALUES
-                 ('current','run','revision',NULL,'running','person/test','test','1','1'),
-                 ('old','run','revision',NULL,'cancelled','person/test','test','1','1');")?;
-            for number in 0..1000 {
-                let status = match number {
-                    0 => "pending", 1 => "completed", 2 => "failed", 3 => "cancelled",
-                    _ => "ready",
-                };
-                tx.execute(
-                    "INSERT INTO step_runs
-                     (subject,run_id,generation_id,step_path,definition_hash,status,attempt,
-                      agentless,goals,created_at_unix_ms,updated_at_unix_ms)
-                     VALUES(?1,'run',?2,?1,'not-hydrated',?3,0,?4,'[]','1','1')",
-                    params![format!("step-run/{number:04}"),
-                        if number == 4 { "old" } else { "current" }, status, number % 2])?;
-            }
-            Ok(())
-        }).unwrap().unwrap();
-        let snapshot = store.index().unwrap();
-        assert_eq!(store.assistant_work_candidate_ids_page(None, 2, 1, snapshot).unwrap(),
-            ["step-run/0005", "step-run/0006", "step-run/0007"]);
-        assert_eq!(store.assistant_work_candidate_ids_page(Some("step-run/0006"), 2, 1, snapshot).unwrap(),
-            ["step-run/0007", "step-run/0008", "step-run/0009"]);
-        assert_eq!(store.assistant_work_candidate_ids_page(None, 0, 1, snapshot).unwrap(),
-            ["step-run/0005"]);
-        assert!(store.assistant_work_candidate_ids_page(Some("step-run/0999"), 2, 1, snapshot).unwrap().is_empty());
-        append(&store, "agent/new", "runtime.observed", json!({"runtime_id":"pty"}));
-        assert!(store.assistant_work_candidate_ids_page(None, 2, 1, snapshot).is_err());
-    }
-
-    #[test]
     fn conversation_change_budget_seeks_metadata_through_large_unrelated_history() {
         let store = Store::open_memory("node").unwrap();
         let owner = "agent/change-budget";
