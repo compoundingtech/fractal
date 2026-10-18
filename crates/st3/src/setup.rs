@@ -16,33 +16,7 @@ mod screen;
 use st3::client::{Client, Endpoint};
 use st3::config::Config;
 
-type Sink = Box<dyn FnMut(String)>;
-
-thread_local! {
-    /// Where this thread's setup output goes instead of the terminal, while the setup screen
-    /// owns it. The caller prints what was said once the screen has gone.
-    static SINK: std::cell::RefCell<Option<Sink>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Say one line to the person: on the terminal, or into the sink when one is set.
-pub(crate) fn said(line: impl Into<String>) {
-    let line = line.into();
-    let unsent = SINK.with(|sink| match sink.borrow_mut().as_mut() {
-        Some(send) => {
-            send(line);
-            None
-        }
-        None => Some(line),
-    });
-    if let Some(line) = unsent {
-        println!("{line}");
-    }
-}
-
-/// Set (or clear) this thread's sink; returns the one it replaced.
-pub(crate) fn capture(sink: Option<Sink>) -> Option<Sink> {
-    SINK.with(|current| std::mem::replace(&mut *current.borrow_mut(), sink))
-}
+pub(crate) use crate::onboarding::{capture, said};
 
 macro_rules! say {
     ($($arg:tt)*) => { said(format!($($arg)*)) };
@@ -237,6 +211,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
             true,
         )?
     };
+    st3::service::preflight(service && start)?;
     // Validate every answer before writing, including the persisted machine identity.
     merge_config(&path, &config)?;
     say!("Saved {}", path.display());
@@ -271,7 +246,13 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
             None
         } else if daemon_ready(&config).await {
             if confirm_assistant(&config, harness, &args)? {
-                let started = crate::onboarding::start(&config, harness, args.onboarding).await?;
+                let started = crate::onboarding::start(
+                    &config,
+                    harness,
+                    std::slice::from_ref(harness),
+                    args.onboarding,
+                )
+                .await?;
                 if started.is_some() {
                     print_assistant_summary(&config, harness)?;
                 }
@@ -763,7 +744,9 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
     let manifest = serde_json::json!({
         "version": 1,
         "source": "setup",
-        "files": [bin.join("st3"), bin.join("st"), bin.join("pty")],
+        "files": crate::fractal::installed_binaries(vec![
+            bin.join("st3"), bin.join("st"), bin.join("pty"),
+        ]),
     });
     let mut pending = tempfile::NamedTempFile::new_in(&data)?;
     pending.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
@@ -847,6 +830,7 @@ async fn start_daemon(
     service: bool,
     linger: bool,
 ) -> Result<()> {
+    st3::service::preflight(service)?;
     if daemon_ready(config).await {
         return Ok(());
     }

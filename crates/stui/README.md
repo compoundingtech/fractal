@@ -1,4 +1,4 @@
-# Smalltalk terminal client
+# Fractal terminal client
 
 `st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
 a mission, a terminal, Now or usage. `st ui --space NAME` opens a named space. `st ui --demo`
@@ -36,8 +36,28 @@ close action as `Ctrl+W` and the tab's right-click menu.
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
 attaches the agent's terminal and `Ctrl+\` leaves it. A drag selects text in one pane and copies
-it on release. Scrolling to the top of a conversation loads the page before it. Now cards show
+it on release.
+
+Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` shows its
+conversation. An agent without a terminal (a session st did not start, a harness without one) opens
+its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
+conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced. A
+device that saved the older `terminal_first` keeps attaching. An alert for the agent shows on top
+of its attached terminal: click it to show it, click an answer to send it, or click
+"open in Now". Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
+answers an alert. When the link to the
+terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ conversation`;
+it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Now cards show
 their own keys; `y` confirms what a card asks, and Enter never does.
+
+A seat can ask the interface to show something with `st ui open agent/NAME` (also `mission/NAME`,
+`mission-run/NAME/RUN` and `machine/NAME`), `--split` and `--below` for a split, `--keep-focus` to leave
+the person where they are. The command writes a small file into the configured person's private state
+directory (`st3/stui/requests-KEY`) and waits for a terminal interface of that person on the same machine
+to answer: opened, not found, or nobody answered, when nothing is left queued. A pane never takes the
+focus from a message being typed, and a subject st has not listed yet is waited for a few seconds, so an
+agent made a moment ago can be opened. A paired device does not read the directory. The
+mission view stays on its mission from step to step; between steps its card says what is up next.
 
 The [terminal tab input reference](../../docs/stui-terminal-tab.md) records the measured
 input modes, query replies, and remaining gaps, including the headless PTY probe.
@@ -56,6 +76,9 @@ The PTY smoke test runs with or without a local daemon or st config. It checks f
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
 binary, pass its path followed by `--ui --no-panic`; the release build has no debug panic hook. The two
+`attach_default_probe` (run by `cargo test -p stui --lib`, beside `terminal_tab_protocols`) drives a
+real terminal tab in PTYs through the default attach, conversation first, an alert over the
+terminal and a dropped link. The two
 QA scripts need a live daemon and the `pty` executable: one opens an agent from `Ctrl+K`, scrolls
 it and drags to copy; the other attaches the agent's terminal and leaves it by `Ctrl+\` and by a
 click on its header. Use a person of their own (such as `person/<qa-name>`) so they mark nothing
@@ -96,6 +119,23 @@ not a latency success. Read/write overhead perturbs the opt-in run. Retain the e
 monotonic launch/key times, exit/result, exact installed source/build, host and ordinary UI
 context separately; process loading before `main` is outside the internal clock. Do not
 equate a subscribe-to-frame `STUI_TIMING_LOG` record with useful presentation.
+
+## Images
+
+Every image in a conversation is a line saying what it is before it loads: a message's
+(`▣ name · type · size  open`), a transcript's (`[image type, size]`), and an ask's on its
+card. Click the line, or press Ctrl+U on the focused row (Ctrl+↑/↓ move the focus), to load it
+inline; again to hide it. Where the terminal draws images (kitty, iTerm2, a sixel terminal,
+also through tmux) the first image on screen loads by itself; elsewhere it draws in half
+blocks. stui asks the terminal itself, once at start, and asks only a terminal that answered
+a status report, so one that answers nothing gets half blocks and no stray bytes.
+
+An image is read, decoded and scaled to at most 1600 pixels on a worker; its terminal
+encoding is built off the draw path, an image the edge of the pane cuts draws the rows still
+on screen, and its pixels leave memory once it is more than a screen away. An owner that
+cannot be reached says so on the image's line, with the way to try again. `open` shows the
+image in this machine's viewer, or saves it under its name to `ST3_DOWNLOADS`, else the XDG
+download directory, else `~/Downloads`.
 
 ## Resource sidebar
 
