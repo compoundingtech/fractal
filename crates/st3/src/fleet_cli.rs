@@ -598,11 +598,6 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
     Ok(())
 }
 
-async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::File> {
-    let state_dir = state_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || st3::config::FleetFile::lock_settings(&state_dir)).await?
-}
-
 async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
     let view: st3::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
     let member = view

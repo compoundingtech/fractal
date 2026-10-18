@@ -750,11 +750,16 @@ fn running_local_runtimes(machines: &Value, node: &str) -> u64 {
         .unwrap_or(0)
 }
 
+async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::File> {
+    let state_dir = state_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || st3::config::FleetFile::lock_settings(&state_dir)).await?
+}
+
 /// Call while holding the fleet settings lock, before retiring a Fabric-enabled worker.
 async fn withdraw_fleet_fabric(state_dir: &Path, fleet_id: &str) -> Result<()> {
-    let socket = st3::fleet::fabric_reconcile::control_socket()
+    let socket = smallclaims::fleet::fabric_reconcile::control_socket()
         .context("resolve Fabric control socket before fleet cleanup")?;
-    let status = st3::fleet::fabric_reconcile::withdraw(state_dir, &socket, fleet_id)
+    let status = smallclaims::fleet::fabric_reconcile::withdraw(state_dir, &socket, fleet_id)
         .await
         .context("withdraw this fleet's Fabric runtime access; fleet settings kept for retry")?;
     anyhow::ensure!(
