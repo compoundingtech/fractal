@@ -69,9 +69,9 @@ function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { schem
     <section aria-label="Answer example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [answer, next], onNew: async () => {} }}><Transcript title="Review answers" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={[{ id: 'critique', items: [answer, next], work: { ...work, calls: [], running: false } }]} /></EmbraceRuntimeProvider></section>
     <section aria-label="Tool row example"><WorkLogV1 turn={work} hideLiveRow /></section>
     <section aria-label="Thinking example"><ThinkingEntry text="Compare **reported rows** with the input, then review the retained selection." /></section>
-    <section aria-label="Cold composer example"><EmbraceRuntimeProvider options={{ messages: [], isDisabled: true, onNew: async () => {} }}><EmbraceComposer variant="C1" disabledReason={hint} /></EmbraceRuntimeProvider></section>
-    <section aria-label="Cold slab composer example"><EmbraceRuntimeProvider options={{ messages: [], isDisabled: true, onNew: async () => {} }}><EmbraceComposer variant="C2" disabledReason={hint} /></EmbraceRuntimeProvider></section>
-    <section aria-label="Retained draft example"><EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><EmbraceComposer variant="C1" disabledReason={locked ? hint : undefined} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Cold composer example"><EmbraceRuntimeProvider options={{ messages: [], isDisabled: true, onNew: async () => {} }}><EmbraceComposer variant="C1" conversationLabel="Cold composer example" disabledReason={hint} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Cold slab composer example"><EmbraceRuntimeProvider options={{ messages: [], isDisabled: true, onNew: async () => {} }}><EmbraceComposer variant="C2" conversationLabel="Cold slab composer example" disabledReason={hint} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Retained draft example"><EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><EmbraceComposer variant="C1" conversationLabel="Retained draft example" disabledReason={locked ? hint : undefined} /></EmbraceRuntimeProvider></section>
   </main>
 }
 const meta = {

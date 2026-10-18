@@ -71,7 +71,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         for id in crate::store::test_envelope_ids("alder-retired", 0..768, &store.origin) {
             transaction
                 .execute(
-                    "INSERT INTO checkpoint_envelopes VALUES (?1, ?2, ?3, 0, ?4)",
+                    /* sqlite-large-value: allow-for-now lv-h67d08b9ee5cc owner=smallclaims::sync::worker_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES (?1, ?2, ?3, 0, ?4)",
                     rusqlite::params![
                         id.writer,
                         id.sequence,
@@ -106,7 +106,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
                 let (parts, body) = request.into_parts();
                 let bytes = to_bytes(body, MAX_EXCHANGE_BYTES).await.unwrap();
                 let decoded = if deflated(&parts.headers) {
-                    inflate(&bytes).unwrap()
+                    inflate(&bytes, "test").unwrap()
                 } else {
                     bytes.to_vec()
                 };
@@ -230,7 +230,7 @@ fn fleet_size_full_inventory_fallback_cost() {
     for id in crate::store::test_envelope_ids("alder-retired", 0..70_000, "lineage") {
         transaction
             .execute(
-                "INSERT INTO checkpoint_envelopes VALUES (?1, ?2, ?3, 0, 'checkpoint/example')",
+                /* sqlite-large-value: allow-for-now lv-hd2b7ba01e655 owner=smallclaims::sync::worker_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES (?1, ?2, ?3, 0, 'checkpoint/example')",
                 rusqlite::params![id.writer, id.sequence, id.hash],
             )
             .unwrap();
@@ -464,12 +464,22 @@ fn exchange_bodies_deflate_and_refuse_a_body_that_inflates_too_far() {
     let body = serde_json::to_vec(&serde_json::json!({"envelopes": vec!["same"; 1_000]})).unwrap();
     let compressed = deflate(&body).unwrap();
     assert!(compressed.len() * 10 < body.len());
-    assert_eq!(inflate(&compressed).unwrap(), body);
+    assert_eq!(inflate(&compressed, "test").unwrap(), body);
 
     let bomb = deflate(&vec![0_u8; MAX_EXCHANGE_BYTES + 1]).unwrap();
     assert!(bomb.len() < 1024 * 1024);
-    assert!(inflate(&bomb).is_err());
-    assert!(inflate(b"not deflate").is_err());
+    let refused = inflate(&bomb, "the answer to `/v1/peer/exchange` from peer invented-peer")
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        refused,
+        format!(
+            "the exchange body inflates past {MAX_EXCHANGE_BYTES} bytes (the answer to \
+             `/v1/peer/exchange` from peer invented-peer, {} compressed bytes)",
+            bomb.len()
+        )
+    );
+    assert!(inflate(b"not deflate", "test").is_err());
 
     let mut headers = HeaderMap::new();
     assert!(!accepts_deflate(&headers));
@@ -569,7 +579,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
         assert_eq!(deflated(&headers), ask);
         let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let response_body = if ask {
-            inflate(&response_body).unwrap()
+            inflate(&response_body, "test").unwrap()
         } else {
             response_body.to_vec()
         };
@@ -1073,7 +1083,10 @@ mod retry_tests {
         // transport or Fabric process participates; only in-process loopback listeners.
         let fleet_id = "d706eab5-433c-474b-ae43-fd2a7891d85d";
         let auth = FleetAuth::test(fleet_id, &[42; 32]);
-        let local = Arc::new(plain_memory("harbor").unwrap());
+        // Concurrent status reads need the file-backed WAL model, not SQLite's shared-cache
+        // in-memory table locks while the worker commits an exchange.
+        let root = tempfile::tempdir().unwrap();
+        let local = Arc::new(plain_open(&root.path().join("harbor.sqlite3"), "harbor").unwrap());
         let remote = Arc::new(plain_memory("beacon").unwrap());
         for store in [&local, &remote] {
             store.bind_fleet(fleet_id).unwrap();
@@ -1127,7 +1140,7 @@ mod retry_tests {
         let (notify, _) = watch::channel(0);
         let fleet = FleetContext::legacy(BTreeSet::from(["beacon".into()]));
         let dialer = tokio::spawn(dial_peer(
-            Local(local),
+            Local(local.clone()),
             "harbor".into(),
             "beacon".into(),
             routes,
@@ -1135,60 +1148,96 @@ mod retry_tests {
             fleet.clone(),
             notify.subscribe(),
         ));
-        async fn tick() {
-            // Allow signed exchange/store work and socket I/O to settle at this instant.
-            for _ in 0..500 {
+        async fn settled(
+            local: &Store,
+            ready: impl Fn(&crate::replication::ReplicationWorkerStatus) -> bool,
+        ) {
+            // Paused time must not outrun real socket/blocking-store work. Wait for the
+            // worker's completed transition before advancing its retry/cooldown clock.
+            let started = std::time::Instant::now();
+            loop {
+                let worker = local
+                    .replication_sync
+                    .lock()
+                    .unwrap()
+                    .get("beacon")
+                    .and_then(|progress| progress.worker.clone());
+                if worker.as_ref().is_some_and(&ready) {
+                    return;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(30),
+                    "worker did not settle: {worker:?}"
+                );
                 tokio::task::yield_now().await;
             }
-            tokio::time::advance(Duration::from_secs(1)).await;
         }
-        for _ in 0..20 {
-            tick().await;
-            if fleet.activity.read().unwrap().contains_key("beacon") {
-                break;
-            }
-        }
+        settled(&local, |worker| worker.phase == "backoff").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(false)
+        })
+        .await;
         assert!(fleet.activity.read().unwrap().contains_key("beacon"));
         assert!(attempts.lock()[0], "preferred fails first");
         assert_eq!(attempts.lock().last(), Some(&false), "fallback succeeds");
+        let worker = local
+            .replication_status(false, None, &["beacon".into()])
+            .unwrap()
+            .peers
+            .remove(0)
+            .worker
+            .unwrap();
+        assert_eq!(worker.route_is_preferred, Some(false));
+        assert!(worker.preferred_retry_at_unix_ms.is_some());
         preferred_up.store(true, Ordering::SeqCst);
         // Local writes wake the worker throughout cooldown, but neither retry early nor
         // slide the deadline on each successful fallback exchange.
-        for _ in 0..20 {
+        for _ in 0..3 {
+            let before = attempts.lock().len();
             notify.send_modify(|generation| *generation += 1);
-            tick().await;
+            tokio::time::advance(Duration::from_secs(10)).await;
+            settled(&local, |worker| {
+                worker.phase == "idle" && attempts.lock().len() > before
+            })
+            .await;
         }
         assert_eq!(attempts.lock().iter().filter(|&&route| route).count(), 1);
-        for _ in 0..70 {
-            notify.send_modify(|generation| *generation += 1);
-            tick().await;
-            if attempts.lock().last() == Some(&true) {
-                break;
-            }
-        }
+        notify.send_modify(|generation| *generation += 1);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(true)
+        })
+        .await;
         assert_eq!(attempts.lock().last(), Some(&true), "preferred recovers");
+        let worker = local
+            .replication_status(false, None, &["beacon".into()])
+            .unwrap()
+            .peers
+            .remove(0)
+            .worker
+            .unwrap();
+        assert_eq!(worker.route_is_preferred, Some(true));
+        assert_eq!(worker.preferred_retry_at_unix_ms, None);
         preferred_up.store(false, Ordering::SeqCst);
-        let before = attempts.lock().len();
-        for _ in 0..20 {
-            notify.send_modify(|generation| *generation += 1);
-            tick().await;
-            let observed = attempts.lock();
-            if observed.len() > before && observed.last() == Some(&false) {
-                break;
-            }
-        }
+        notify.send_modify(|generation| *generation += 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settled(&local, |worker| worker.phase == "backoff").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(false)
+        })
+        .await;
         assert_eq!(attempts.lock().last(), Some(&false));
         let preferred_before = attempts.lock().iter().filter(|&&route| route).count();
-        for _ in 0..90 {
-            notify.send_modify(|generation| *generation += 1);
-            tick().await;
-            let observed = attempts.lock();
-            if observed.iter().filter(|&&route| route).count() > preferred_before
-                && observed.last() == Some(&false)
-            {
-                break;
-            }
-        }
+        notify.send_modify(|generation| *generation += 1);
+        tokio::time::advance(Duration::from_secs(61)).await;
+        settled(&local, |worker| worker.phase == "backoff").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(false)
+        })
+        .await;
         let observed = attempts.lock();
         assert!(observed.iter().filter(|&&route| route).count() > preferred_before);
         assert_eq!(
@@ -2656,7 +2705,7 @@ async fn worker_phase_status_is_local_and_reports_retry_deadline() {
     let attempt = crate::store::now_ms();
     for phase in ["exchange", "backoff", "idle"] {
         let retry = (phase == "backoff").then_some(Duration::from_secs(30));
-        record_worker(&Local(store.clone()), "cedar", phase, attempt, retry).await;
+        record_worker(&Local(store.clone()), "cedar", phase, attempt, retry, None).await;
         let status = store
             .replication_status(false, None, &["cedar".into()])
             .unwrap();
@@ -2680,6 +2729,63 @@ async fn worker_phase_status_is_local_and_reports_retry_deadline() {
         retry_delay(Duration::from_secs(3600), &fleet, "absent"),
         Duration::from_secs(3600)
     );
+}
+
+#[tokio::test]
+async fn worker_route_status_survives_phase_updates_and_clears_preferred_retry() {
+    let store = Arc::new(plain_memory("birch").unwrap());
+    let backend = Local(store.clone());
+    let attempt = crate::store::now_ms();
+    let index = store.index().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    record_worker(
+        &backend,
+        "cedar",
+        "idle",
+        attempt,
+        None,
+        Some((false, Some(deadline))),
+    )
+    .await;
+    let status = || {
+        serde_json::to_value(
+            store
+                .replication_status(false, None, &["cedar".into()])
+                .unwrap(),
+        )
+        .unwrap()["peers"][0]["worker"]
+            .clone()
+    };
+    let fallback = status();
+    assert_eq!(fallback["route_is_preferred"], false);
+    let retry = fallback["preferred_retry_at_unix_ms"].as_u64().unwrap();
+    assert!(u128::from(retry) > attempt);
+    assert!(u128::from(retry) <= crate::store::now_ms() + 60_000);
+    // A lower-level exchange or probe updates phase without forgetting the chosen route.
+    record_worker(&backend, "cedar", "exchange", attempt, None, None).await;
+    assert_eq!(status()["route_is_preferred"], false);
+    assert_eq!(status()["preferred_retry_at_unix_ms"], retry);
+    // Failover can wrap to the first route before the existing cooldown expires.
+    // Its pending offset-reset timer must not be presented as another preferred-route retry.
+    record_worker(
+        &backend,
+        "cedar",
+        "exchange",
+        attempt,
+        None,
+        Some((true, Some(deadline))),
+    )
+    .await;
+    assert_eq!(status()["route_is_preferred"], true);
+    assert!(status().get("preferred_retry_at_unix_ms").is_none());
+    assert_eq!(store.index().unwrap(), index, "route status is host-local");
+    let legacy: crate::replication::ReplicationWorkerStatus = serde_json::from_value(
+        serde_json::json!({"phase": "idle", "last_attempt_at_unix_ms": attempt,
+            "next_retry_at_unix_ms": null}),
+    )
+    .unwrap();
+    assert_eq!(legacy.route_is_preferred, None);
+    assert_eq!(legacy.preferred_retry_at_unix_ms, None);
 }
 
 #[tokio::test]

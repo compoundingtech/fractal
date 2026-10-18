@@ -1,7 +1,7 @@
 # st data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
-(`crates/st3-daemon/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
+(`crates/st3-store/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
 are listed in `SHARED_TABLES` there and in the production projection digests. Replicated storage tables
 have their own logical authority digests; local physical fields and caches are outside those identities.
 
@@ -15,6 +15,17 @@ Explicit unregistration, pairing revocation/replacement and expiry remove them. 
 or losing this local table loses registrations; recovery requires the phone to register
 again with a valid locally issued pairing, not a graph replay. Full local database backups
 contain these secrets and must remain private; a graph-only backup cannot recover them.
+
+## Large inline values
+
+New storage work must avoid unbounded large inline SQLite objects, including variable
+metadata and index keys. Use a reviewed bounded physical representation or reference
+without reducing the logical input contract or rejecting valid historical data.
+[Large SQLite values](large-values.md) defines the transitional source inventory,
+allow-for-now owner/TODO markers, static guard coverage and cleanup plan. No numeric
+large-value threshold is accepted; the guard checks source-site exceptions, not sizes.
+
+## Retention and local observations
 
 A claim kind of `local` retention (`st schema show KIND`) is an observation that only the node
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
