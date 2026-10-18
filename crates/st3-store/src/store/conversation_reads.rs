@@ -48,7 +48,60 @@ const CONVERSATION_CHANGED: &str = "SELECT
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
+// Seek once per distinct agent rather than grouping or collecting the whole owner set.
+const ASSISTANT_OWNER_IDS_PAGE: &str = "WITH RECURSIVE names(subject) AS (
+    SELECT (SELECT subject FROM claims INDEXED BY claims_subject_index
+            WHERE subject>COALESCE(?2,'agent.') AND subject>='agent/' AND subject<'agent0'
+              AND store_index<=?1 ORDER BY subject LIMIT 1)
+    UNION ALL
+    SELECT (SELECT subject FROM claims INDEXED BY claims_subject_index
+            WHERE subject>names.subject AND subject<'agent0' AND store_index<=?1
+            ORDER BY subject LIMIT 1)
+    FROM names WHERE subject IS NOT NULL LIMIT ?3
+) SELECT subject FROM names WHERE subject IS NOT NULL";
+
+fn conversation_owner_at(connection: &Connection, subject: String, through: u64) -> Result<Owner> {
+    // Reuse the same identity fold for whole-map and bounded discovery readers.
+    let (actual, origin) = match runtime_only_authority(
+        connection,
+        &subject,
+        through,
+        &["runtime_id", "incarnation_id"],
+    )? {
+        Some((actual, origin)) => (Some(actual), Some(origin)),
+        None => {
+            let desired = desired_row_at(connection, &subject, Some(through))?;
+            let member = desired
+                .as_ref()
+                .and_then(|row| row.member.as_deref())
+                .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok());
+            let actual = latest_actual_at(connection, &subject, Some(through))?;
+            let (_, origin, _) = selected_actual_source_at(
+                connection,
+                &subject,
+                Some(through),
+                member.as_ref().map(|member| member.host.as_str()),
+            )?;
+            (actual, origin)
+        }
+    };
+    let fields = actual.as_ref().map(|value| value.get("fields").unwrap_or(value));
+    let incarnation = fields
+        .and_then(|fields| fields["incarnation_id"].as_str())
+        .map(str::to_owned);
+    let runtime = fields
+        .and_then(|fields| fields["runtime_id"].as_str())
+        .map(str::to_owned);
+    Ok(Owner { subject, incarnation, runtime, origin })
+}
+
 impl Store {
+    /// Resolve one conversation identity without constructing the owner collection.
+    pub fn conversation_owner_at(&self, subject: &str, through: u64) -> Result<Owner> {
+        selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
+        conversation_owner_at(&self.readers.get(), subject.to_owned(), through)
+    }
+
     pub fn conversation_local_position(&self) -> Result<u64> {
         Ok(self.readers.get().prepare_cached(
             "SELECT COALESCE(MAX(id),0) FROM local_observations",
@@ -141,53 +194,8 @@ impl Store {
             }
         };
         for subject in names {
-            let connection = self.readers.get();
-            // The fast path inherits absent runtime fields, retains explicit null, and only
-            // applies to one runtime origin. Rival origins and other actual kinds retain the
-            // existing canonical fold and desired-host authority selection.
-            let (actual, origin) = match runtime_only_authority(
-                &connection,
-                &subject,
-                through,
-                &["runtime_id", "incarnation_id"],
-            )? {
-                Some((actual, origin)) => (Some(actual), Some(origin)),
-                None => {
-                    let desired = desired_row_at(&connection, &subject, Some(through))?;
-                    let member = desired
-                        .as_ref()
-                        .and_then(|row| row.member.as_deref())
-                        .and_then(|value| {
-                            serde_json::from_str::<crate::model::MemberSpec>(value).ok()
-                        });
-                    let actual = latest_actual_at(&connection, &subject, Some(through))?;
-                    let (_, origin, _) = selected_actual_source_at(
-                        &connection,
-                        &subject,
-                        Some(through),
-                        member.as_ref().map(|member| member.host.as_str()),
-                    )?;
-                    (actual, origin)
-                }
-            };
-            let fields = actual
-                .as_ref()
-                .map(|value| value.get("fields").unwrap_or(value));
-            let incarnation = fields
-                .and_then(|fields| fields["incarnation_id"].as_str())
-                .map(str::to_owned);
-            let runtime = fields
-                .and_then(|fields| fields["runtime_id"].as_str())
-                .map(str::to_owned);
-            owners.insert(
-                subject.clone(),
-                Owner {
-                    subject,
-                    incarnation,
-                    runtime,
-                    origin,
-                },
-            );
+            let owner = conversation_owner_at(&self.readers.get(), subject, through)?;
+            owners.insert(owner.subject.clone(), owner);
         }
         let owners = Arc::new(owners);
         #[cfg(any(test, feature = "test-support"))]
@@ -219,6 +227,30 @@ impl Store {
             cache.pop_front();
         }
         Ok(owners)
+    }
+
+    /// Lexicographic agent discovery at a claim frontier, including one lookahead entry.
+    /// Only selected subjects are folded; no whole-map cache is built or copied.
+    pub fn assistant_conversation_owners_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<(String, Owner)>> {
+        selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
+        let connection = self.readers.get();
+        let ids = connection
+            .prepare_cached(ASSISTANT_OWNER_IDS_PAGE)?
+            .query_map(params![through, after, limit.saturating_add(1)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|subject| {
+                let owner = conversation_owner_at(&connection, subject, through)?;
+                Ok((owner.subject.clone(), owner))
+            })
+            .collect()
     }
 
     /// Preserve the existing newest-10,000 fleet-send window, but read payloads only for the
@@ -475,6 +507,100 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn assistant_owner_pages_match_historical_fold_without_building_whole_map() {
+        let store = Store::open_memory("node").unwrap();
+        for number in 0..32 {
+            append(&store, &format!("agent/{number:03}"), "runtime.observed",
+                json!({"runtime_id":"pty","incarnation_id":"original"}));
+        }
+        let through = store.index().unwrap();
+        append(&store, "agent/000", "runtime.observed",
+            json!({"runtime_id":null,"incarnation_id":"new"}));
+        append(&store, "agent/future", "runtime.observed", json!({"runtime_id":"future"}));
+        let expected = oracle(&store, through);
+        let mut actual = Owners::new();
+        let mut after = None;
+        loop {
+            let page = store.assistant_conversation_owners_page(after.as_deref(), 3, through).unwrap();
+            assert!(page.len() <= 4);
+            let more = page.len() > 3;
+            for (id, owner) in page.into_iter().take(3) {
+                assert!(after.as_ref().is_none_or(|after| after < &id));
+                after = Some(id.clone());
+                actual.insert(id, owner);
+            }
+            if !more { break; }
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(store.assistant_conversation_owners_page(None, 0, through).unwrap().len(), 1);
+        assert!(store.assistant_conversation_owners_page(Some("agent/zzz"), 3, through).unwrap().is_empty());
+        assert!(store.assistant_conversation_owners_page(None, 3, store.index().unwrap() + 1).is_err());
+        assert!(store.smalltalk.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    }
+
+    #[test]
+    fn assistant_owner_id_selection_is_bounded_before_identity_projection() {
+        let store = Store::open_memory("node").unwrap();
+        let mut costs = Vec::new();
+        store.connection.batched(|tx| -> Result<()> {
+            for number in 0..1000 {
+                append_claim_tx(tx, "node", &format!("agent/{number:05}"), "runtime.observed",
+                    None, &json!({"fields":{"runtime_id":"pty"}}), &[], None)?;
+                if number == 9 || number == 999 {
+                    let mut query = tx.prepare_cached(ASSISTANT_OWNER_IDS_PAGE)?;
+                    query.reset_status(rusqlite::StatementStatus::VmStep);
+                    let ids = query.query_map(params![i64::MAX, Option::<&str>::None, 4],
+                        |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    assert_eq!(ids.len(), 4);
+                    costs.push(query.get_status(rusqlite::StatementStatus::VmStep));
+                }
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        assert!(costs[0] > 0 && costs[1] <= costs[0] * 2,
+            "bounded seeks must not scan every owner: {costs:?}");
+    }
+
+    #[test]
+    fn assistant_work_candidates_are_keyset_limited_before_hydration() {
+        let store = Store::open_memory("node").unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute_batch(
+                "INSERT INTO mission_runs VALUES
+                 ('run','mission','revision','current','revision','run',NULL,'workspace',
+                  'person/test','{}','automatic','running','running','1','1');
+                 INSERT INTO run_generations VALUES
+                 ('current','run','revision',NULL,'running','person/test','test','1','1'),
+                 ('old','run','revision',NULL,'cancelled','person/test','test','1','1');")?;
+            for number in 0..1000 {
+                let status = match number {
+                    0 => "pending", 1 => "completed", 2 => "failed", 3 => "cancelled",
+                    _ => "ready",
+                };
+                tx.execute(
+                    "INSERT INTO step_runs
+                     (subject,run_id,generation_id,step_path,definition_hash,status,attempt,
+                      agentless,goals,created_at_unix_ms,updated_at_unix_ms)
+                     VALUES(?1,'run',?2,?1,'not-hydrated',?3,0,?4,'[]','1','1')",
+                    params![format!("step-run/{number:04}"),
+                        if number == 4 { "old" } else { "current" }, status, number % 2])?;
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        let snapshot = store.index().unwrap();
+        assert_eq!(store.assistant_work_candidate_ids_page(None, 2, 1, snapshot).unwrap(),
+            ["step-run/0005", "step-run/0006", "step-run/0007"]);
+        assert_eq!(store.assistant_work_candidate_ids_page(Some("step-run/0006"), 2, 1, snapshot).unwrap(),
+            ["step-run/0007", "step-run/0008", "step-run/0009"]);
+        assert_eq!(store.assistant_work_candidate_ids_page(None, 0, 1, snapshot).unwrap(),
+            ["step-run/0005"]);
+        assert!(store.assistant_work_candidate_ids_page(Some("step-run/0999"), 2, 1, snapshot).unwrap().is_empty());
+        append(&store, "agent/new", "runtime.observed", json!({"runtime_id":"pty"}));
+        assert!(store.assistant_work_candidate_ids_page(None, 2, 1, snapshot).is_err());
     }
 
     #[test]

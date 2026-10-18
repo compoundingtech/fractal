@@ -336,7 +336,58 @@ fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
             .find_map(|block|block["continuation"]["ref"].as_str())?;
         Some((reference.to_owned(),item["revision"].to_string()))
     }).expect("the long native answer has a content reference");
+    let session = fixture.session();
+    let granted = latest(&fixture.state, session.pairing_grant.as_deref().unwrap(), GRANTED).unwrap().unwrap();
+    let policy = effective(&fixture.state, &granted).unwrap();
+    let binding = credential_digest(&serde_json::to_string(&(
+        fields(&policy).unwrap()["grant_id"].as_str().unwrap(),
+        fields(&policy).unwrap()["policy_revision"].as_u64().unwrap_or(0),
+    )).unwrap());
+    let reference = super::super::reads::conversation_reads::bind_reference(&reference, &binding).unwrap();
     (session_id,reference,revision)
+}
+
+#[tokio::test]
+async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_native_content() {
+    let mut fixture = fixture(&["read.assistant.conversation"], true).await;
+    let text = format!("boundedneedle {}", "word ".repeat(1900));
+    content_source(&mut fixture, &text);
+    let mut handle = None;
+    for (route, query) in [
+        ("conversations", "?max_response_bytes=16384"),
+        ("conversation-detail", "?agent_id=agent%2Freads-codex&max_response_bytes=16384"),
+        ("conversation-timeline", "?agent_id=agent%2Freads-codex&limit=1&max_response_bytes=16384"),
+        ("conversation-search", "?text=boundedneedle&agent_id=agent%2Freads-codex&limit=1&max_response_bytes=16384"),
+    ] {
+        let payload = fixture.payload(route, query);
+        let header = fixture.header(&payload, &fixture.attestor);
+        let (status, value, bytes) = fixture.request(&format!("/v1/client/assistant/{route}{query}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::OK, "{route}: {value}");
+        assert!(bytes <= MAX_RESPONSE_BYTES);
+        if route == "conversations" {
+            handle = value["value"]["items"].as_array().unwrap().iter()
+                .find_map(|item| item["read"].as_object().cloned());
+        }
+    }
+    let handle = handle.expect("discovery returns a complete native content read handle");
+    let query = format!("?{}&max_response_bytes=16384", handle.iter().map(|(key, value)| {
+        let value = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
+        format!("{key}={}", urlencoding::encode(&value))
+    }).collect::<Vec<_>>().join("&"));
+    let payload = fixture.payload("conversation-content", &query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, value, bytes) = fixture.request(&format!("/v1/client/assistant/conversation-content{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(bytes <= MAX_RESPONSE_BYTES);
+    assert!(text.starts_with(value["value"]["text"].as_str().unwrap()));
+
+    let denied = self::fixture(&["read.assistant.agents"], true).await;
+    for route in ["conversations", "conversation-detail", "conversation-timeline", "conversation-search"] {
+        let payload = denied.payload(route, "");
+        let header = denied.header(&payload, &denied.attestor);
+        let (status, value, _) = denied.request(&format!("/v1/client/assistant/{route}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {value}");
+    }
 }
 
 #[tokio::test]

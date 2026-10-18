@@ -804,12 +804,12 @@ pub fn prepare_one(
             }
         }
     }
-    // Plain Codex content also carries internal source-record blocks. Preserve a
-    // separate continuation to its text body rather than exposing the raw record.
+    // Assistant projections also need handles for short chat replies. Preserve a separate
+    // text continuation without changing ordinary native clients' display-block layout.
     if session.conversation_blocks && original["body"]["media_type"] == "text/plain"
-        && original["body"]["text"].as_str().is_some_and(|text| text.len() > VALUE_BYTES)
+        && original["body"]["text"].as_str().is_some_and(|text| text.len() > VALUE_BYTES || session.assistant_content_handles)
         && body.get("blocks").and_then(Value::as_array)
-            .is_none_or(|blocks| blocks.iter().all(|block| block["kind"] == "source_record"))
+            .is_none_or(|blocks| session.assistant_content_handles || blocks.iter().all(|block| block["kind"] == "source_record"))
     {
         let blocks = body.entry("blocks").or_insert_with(|| json!([])).as_array_mut().expect("blocks array");
         blocks.push(json!({"id":format!("{}/text",original["id"].as_str().unwrap_or("content")),

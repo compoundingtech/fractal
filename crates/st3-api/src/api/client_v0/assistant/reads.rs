@@ -1,8 +1,17 @@
-//! Minimal assistant read projections. Each one reuses a native snapshot reader and copies
-//! only allowlisted identifiers, closed enums, counts and timestamps out of it, so titles,
-//! goals, previews, paths and other free text in source rows never reach an assistant.
+//! Assistant reads reuse native readers and copy explicitly allowlisted fields. Metadata
+//! projections omit source prose; conversation projections expose bounded chat text and
+//! grant-policy-bound content references, never native tool bodies or source records.
 //! Content reads return one bounded text range of one exactly named resource.
 use super::*;
+
+#[path = "reads_conversation.rs"]
+pub(super) mod conversation_reads;
+#[path = "reads_discovery.rs"]
+mod discovery;
+
+tokio::task_local! {
+    pub(super) static RESPONSE_REQUEST_ID: String;
+}
 
 /// Default and ceiling of an assistant response, including its whole JSON envelope. The
 /// route enforces the envelope; content sources read no more than this many bytes.
@@ -40,6 +49,7 @@ pub async fn project(
     projection: &str,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     match projection {
         "summary" => {
@@ -61,10 +71,27 @@ pub async fn project(
         },
         "missions" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rows).await,
         "agents" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rows).await,
-        "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
+        "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
+            conversation_reads::project_bound(state, snapshot, projection, parameters, max_bytes, binding).await,
+        "conversation-content" => {
+            let mut parameters = parameters.clone();
+            let reference = required(&parameters, "reference")?;
+            parameters.insert("reference".into(), conversation_reads::unbind_reference(reference, binding)?);
+            let mut value = conversation(state, &parameters, max_bytes).await?;
+            value["reference"] = json!(conversation_reads::bind_reference(parameters["reference"].as_str(), binding)?);
+            Ok((snapshot.clone(), value))
+        },
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
         _ => Err(ApiError::not_found("unknown assistant projection")),
     }
+}
+
+#[cfg(test)]
+pub(super) async fn test_project(
+    state: &AppState, snapshot: &ClientSnapshot, projection: &str,
+    parameters: &BTreeMap<String, String>, max_bytes: usize,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    project(state, snapshot, projection, parameters, max_bytes, "test-grant-policy").await
 }
 
 /// Every parameter is named by the projection; a stated budget must be the one enforced.

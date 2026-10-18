@@ -845,6 +845,21 @@ public struct AssistantPageRequest: Codable, Sendable, Equatable {
     public init(cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
     enum CodingKeys: String, CodingKey { case cursor, limit, maxResponseBytes = "max_response_bytes" }
 }
+public struct AssistantAgentDetailRequest: Codable, Sendable, Equatable {
+    public let agentID: String; public let maxResponseBytes: Int?
+    public init(agentID: String, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case agentID = "agent_id", maxResponseBytes = "max_response_bytes" }
+}
+public struct AssistantConversationTimelineRequest: Codable, Sendable, Equatable {
+    public let agentID: String; public let sessionID, cursor: String?; public let limit, maxResponseBytes: Int?
+    public init(agentID: String, sessionID: String? = nil, cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.sessionID = sessionID; self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case agentID = "agent_id", sessionID = "session_id", cursor, limit, maxResponseBytes = "max_response_bytes" }
+}
+public struct AssistantConversationSearchRequest: Codable, Sendable, Equatable {
+    public let text: String; public let agentID, cursor: String?; public let limit, maxResponseBytes: Int?
+    public init(text: String, agentID: String? = nil, cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.text = text; self.agentID = agentID; self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case text, agentID = "agent_id", cursor, limit, maxResponseBytes = "max_response_bytes" }
+}
 public struct AssistantConversationContentRequest: Codable, Sendable, Equatable {
     public let agentID, sessionID, reference, revision: String; public let start, end: UInt64; public let maxResponseBytes: Int?
     public init(agentID: String, sessionID: String, reference: String, revision: String, start: UInt64, end: UInt64, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.sessionID = sessionID; self.reference = reference; self.revision = revision; self.start = start; self.end = end; self.maxResponseBytes = maxResponseBytes }
@@ -870,7 +885,7 @@ public enum AssistantContentRequest: Codable, Sendable, Equatable {
         switch self { case .conversation(let value): try value.encode(to: encoder); case .terminal(let value): try value.encode(to: encoder) }
     }
 }
-public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content" }
+public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content", conversations, conversationDetail = "conversation-detail", conversationTimeline = "conversation-timeline", conversationSearch = "conversation-search" }
 public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt }
 /// Signed by the pinned attestor (Ed25519) over UTF-8 `st3.scg-read.v1\n` + canonical JSON of this payload.
 public struct ScgReadAuthorizationPayload: Codable, Sendable, Equatable {

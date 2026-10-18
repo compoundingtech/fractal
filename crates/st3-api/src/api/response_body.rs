@@ -2,6 +2,10 @@
 //! Ordinary routes call this on their existing handler worker after its reader loan ends.
 use super::*;
 use axum::body::{Bytes, HttpBody};
+
+/// The server-selected request identifier used by the response envelope.
+#[derive(Clone)]
+pub(crate) struct RequestId(pub String);
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use std::convert::Infallible;
 

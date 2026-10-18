@@ -4761,6 +4761,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "st-chatgpt",
  "st-drivers",
  "st-runtime",
  "st3",

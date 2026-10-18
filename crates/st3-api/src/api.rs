@@ -643,6 +643,10 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/assistant/attention", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/missions", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/agents", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/conversations", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/conversation-detail", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/conversation-timeline", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/conversation-search", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(client_v0::assistant::update_policy))
@@ -981,6 +985,7 @@ async fn response_envelope_unbounded(
     } else {
         new_request_id()
     };
+    request.extensions_mut().insert(response_body::RequestId(request_id.clone()));
     let request_path = request.uri().path().to_owned();
     let request_query = request.uri().query().map(str::to_owned);
     let long_poll = request_query.as_deref().is_some_and(asks_to_wait);
@@ -3589,10 +3594,7 @@ fn managed_session_owner_for_subject_at(
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
     crate::performance::task("conversation/owner", || {
-        let owners = store.conversation_owners_at(snapshot_index)?;
-        let Some(owner) = owners.get(owner) else {
-            return Ok(None);
-        };
+        let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
             return Ok(None);
         };
