@@ -1545,6 +1545,8 @@ def cmd_inventory(args):
         by_path[m[0]].append(m)
     ends = {p: [m[2] for m in ms] for p, ms in by_path.items()}
     remap = {}
+    copies = []
+    current_ids = {x.id for x in sites if x.id in old and old[x.id]["path"] == x.path}
     edits = collections.defaultdict(list)
     unmatched = []
     for site in sites:
@@ -1556,10 +1558,13 @@ def cmd_inventory(args):
             unmatched.append(site)
             continue
         oid = marker[3]["id"]
-        if oid not in old or old[oid]["fingerprint"] != site.fingerprint or oid in remap:
+        if oid not in old or old[oid]["fingerprint"] != site.fingerprint:
             unmatched.append(site)
             continue
-        remap[oid] = site
+        if oid in current_ids or oid in remap:
+            copies.append((oid, site))  # the original is still there: this site is a copy of it
+        else:
+            remap[oid] = site
         edits[site.path].append((marker[1], marker[2], "/* sqlite-large-value: allow-for-now %s owner=%s TODO=%s */" % (site.id, site.owner, marker[3]["todo"])))
     entries = []
     for e in manifest["sites"]:
@@ -1567,6 +1572,8 @@ def cmd_inventory(args):
         if s is not None:
             e = dict(e, id=s.id, path=s.path, owner=s.owner, line_hint=s.line)
         entries.append(e)
+    for oid, s in copies:
+        entries.append(dict(old[oid], id=s.id, path=s.path, owner=s.owner, line_hint=s.line))
     manifest["sites"] = sorted(entries, key=lambda e: (e["path"], e["id"]))
     # manual flows follow their function
     flows = []
@@ -1607,7 +1614,7 @@ def cmd_inventory(args):
     manifest["sqlite_crates"] = slv.sqlite_crates(root)
     mpath.write_text(_manifest_text(manifest))
     problems = slv.findings(root, manifest)
-    print("inventory: %d sites moved, %d unmatched, %d problems left" % (len(remap), len(unmatched), len(problems)))
+    print("inventory: %d sites moved, %d copied, %d unmatched, %d problems left" % (len(remap), len(copies), len(unmatched), len(problems)))
     for p in problems[:12]:
         print("  " + p)
     return 1 if problems else 0
