@@ -154,7 +154,7 @@ impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
-        connection.execute_batch(git_change_tables::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5eb5665e9ea owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
         retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
@@ -336,11 +336,11 @@ impl Runtime for SmalltalkRuntime {
         if !upgraded {
             replay_graph_from_nothing_tx(transaction)?;
             transaction.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version',?1)",
+                /* sqlite-large-value: allow-for-now lv-h0f8067adfa16 owner=st3_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version',?1)",
                 [DERIVED_TABLES_VERSION],
             )?;
             transaction.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2')",
+                /* sqlite-large-value: allow-for-now lv-hfe8506d44696 owner=st3_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2')",
                 [],
             )?;
             if !work_extension_roots_tx(transaction)?.1 {
@@ -592,16 +592,16 @@ pub fn compatibility_digest(registry_digest: &str) -> String {
 fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
     if fresh {
         let transaction = connection.unchecked_transaction()?;
-        transaction.execute_batch(SCHEMA)?;
-        transaction.execute_batch(&RUNTIME_ID_INDEX)?;
-        transaction.execute_batch(arrangements::SCHEMA)?;
-        transaction.execute_batch(retirements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h91f299ff7936 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hac7a83f4ed08 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h48e515fb40e9 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hd3489deb9c17 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.commit()?;
     } else {
-        connection.execute_batch(SCHEMA)?;
-        connection.execute_batch(&RUNTIME_ID_INDEX)?;
-        connection.execute_batch(arrangements::SCHEMA)?;
-        connection.execute_batch(retirements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4b6bb56a214a owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3d9dce1a3af5 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hacb85aef8915 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h01ed68d36a12 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
     }
     Ok(())
 }

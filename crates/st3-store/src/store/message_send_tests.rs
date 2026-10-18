@@ -133,7 +133,7 @@ fn signed_send_commits_once_and_retries_keep_the_original_signature() {
 fn failed_signed_send_rolls_back_its_message_and_temporary_signature() {
     let store = Store::open_memory("node").unwrap();
     store.connection.write().execute_batch(
-        "CREATE TRIGGER reject_fixture_send BEFORE INSERT ON claims
+        /* sqlite-large-value: allow-for-now lv-hafe7a9268997 owner=st3_store::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER reject_fixture_send BEFORE INSERT ON claims
          WHEN NEW.subject='message/local-signed-send' BEGIN SELECT RAISE(ABORT,'injected send failure'); END;",
     ).unwrap();
     let input = request();
@@ -160,7 +160,7 @@ fn failed_signed_send_rolls_back_its_message_and_temporary_signature() {
     store
         .connection
         .write()
-        .execute_batch("DROP TRIGGER reject_fixture_send")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hb3ec307860fa owner=st3_store::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_fixture_send")
         .unwrap();
     assert!(store.append_signed_message(&input, &signature).unwrap().1);
     assert_eq!(
@@ -185,7 +185,7 @@ fn digest_mismatched_message_operation_repair_persists_across_reopen() {
         .connection
         .write()
         .execute(
-            "UPDATE operations SET request_digest='invented-stale-digest' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hbb4b945bb48d owner=st3_store::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET request_digest='invented-stale-digest' WHERE id=?1",
             [&operation],
         )
         .unwrap();
@@ -384,17 +384,17 @@ fn message_operation_reconciliation_matches_replay_for_orders_tombstones_and_rep
                 if number == 1 {
                     let claim: &ClaimRecord = first.as_ref().unwrap();
                     if mode == "checkpoint" {
-                        tx.execute("INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h789631746b77 owner=st3_store::store::message_send_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
                             actor,predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
                             VALUES (?1,'invented-peer',1,'invented-envelope',?2,'message.sent',NULL,'[]',
                             'op/invented-parity',?3,0,'checkpoint/2026-10-01')",
                             params![claim.id, claim.subject, digests[0]]).unwrap();
-                        tx.execute("DELETE FROM operations WHERE id='op/invented-parity'", [])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h0e91a591e430 owner=st3_store::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id='op/invented-parity'", [])
                             .unwrap();
-                        tx.execute("DELETE FROM claims WHERE id=?1", [&claim.id])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-he720c27162e7 owner=st3_store::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id])
                             .unwrap();
                     } else if mode == "repaired" {
-                        tx.execute("INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-he798b60449d9 owner=st3_store::store::message_send_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,
                             raw,state,claim_id,updated_at_unix_ms) VALUES ('record/invented-repair','invented-peer',
                             1,'invented-envelope',0,X'','repaired',?1,'1')", [&claim.id]).unwrap();
                     }
