@@ -2671,7 +2671,9 @@ pub fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
 mod tests {
     use super::*;
     use st3_store::external_sessions::shared_tests_seats::*;
-    use st3_store::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, path_executable, texts, transcript_session, unfurled_timeline};
+    use st3_store::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, texts, transcript_session, unfurled_timeline};
+    #[cfg(target_os = "linux")]
+    use st3_store::external_sessions::shared_tests_seats::path_executable;
 
     #[test]
     fn timeline_send_identity_codex_includes_native_thread_at_timeline_boundary() {
