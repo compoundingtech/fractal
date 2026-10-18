@@ -20,7 +20,7 @@ fn restart_cutover_request(connection: &Connection, subject: &str) -> Result<Opt
     };
     if conflict { return Ok(None); }
     let incarnation = actual["incarnation_id"].as_str();
-    let request = connection.query_row(&canonical_sql(
+    let request = connection.query_row(/* sqlite-large-value: allow-for-now lv-he1fad603f752 owner=st3_store::store::rollouts TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
          FROM claims WHERE subject=?1 AND kind='runtime.action.requested'
             AND origin=?2 AND json_extract(body,'$.fields.action')='apply-restart-cutover'
@@ -434,7 +434,7 @@ fn restart_prepare_message(
         .filter_map(Value::as_str)
         .collect();
     for tag in &message.tags {
-        let Some(request) = tag.strip_prefix(crate::handoff::PREPARE_TAG_PREFIX) else {
+        let Some(request) = tag.strip_prefix(crate::silent::PREPARE_TAG_PREFIX) else {
             continue;
         };
         let Some(prepare) = claim_by_id_tx(connection, request).map_err(internal)? else {
