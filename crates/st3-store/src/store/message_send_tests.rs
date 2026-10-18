@@ -668,9 +668,9 @@ fn assistant_provenance_generic_signed_and_transaction_appends_refuse_forgery() 
 #[test]
 fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admission() {
     let store = Store::open_memory("node").unwrap();
-    store.apply_internal(&crate::graph::parse_test_intent(
+    store.apply(&crate::graph::parse_test_intent(
         "version 2\nagent \"eval.recipient\" { workspace \"/tmp/st-test\"; command \"true\"; restart always; }", "node").unwrap(),
-        "assistant-recipient").unwrap();
+        &BTreeMap::from([("agent/eval.recipient".to_string(), Vec::new())]), "assistant-recipient").unwrap();
     let grant_subject = "custom/client/assistant-v1-native-fixture";
     let grant_id = "assistant-grant/native-fixture";
     let session_actor = format!("assistant/chatgpt/session/{grant_id}");

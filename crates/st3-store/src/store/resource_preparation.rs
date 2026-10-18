@@ -1,8 +1,14 @@
 //! Private, conservative native fence. No SQL hooks, schema, metric labels or public errors.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::resource_preparation_shared_seats::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::resource_preparation_shared_seats::{BEFORE_VALIDATE};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct NativeCut {
+pub struct NativeCut {
     connection: usize,
     file: String,
     changes: u64,
@@ -91,7 +97,7 @@ fn temporary_schema_safe(connection: &Connection) -> bool {
 
 pub struct Fence {
     // Ownership identity only: the numeric claim frontier is NOT a currentness proof.
-    incarnation: Arc<std::sync::atomic::AtomicU64>,
+    pub incarnation: Arc<std::sync::atomic::AtomicU64>,
     owner: Arc<()>,
     path: std::path::PathBuf,
     shared_memory: bool,
@@ -511,10 +517,6 @@ pub fn inputs_with_actuals(
 #[cfg(any(test, feature = "test-support"))]
 pub type ValidateHook = Box<dyn FnMut(&Store, usize)>;
 #[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    pub static BEFORE_VALIDATE: std::cell::RefCell<Option<ValidateHook>> = const { std::cell::RefCell::new(None) };
-}
-#[cfg(any(test, feature = "test-support"))]
 pub fn before_validate(store: &Store, pass: usize) {
     BEFORE_VALIDATE.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
@@ -551,3 +553,6 @@ impl Drop for WriterMeasure<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;

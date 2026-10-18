@@ -1,16 +1,16 @@
 #![allow(unused_imports)]
 use crate::PublicationFactsStore;
-use st3_store::store::terminal_gate_evidence::native_source_shared::*;
+use st3_seats::store::terminal_gate_evidence::native_source_shared::*;
 use super::*;
 use crate::graph::{parse_execution_intent, parse_intent};
 use crate::store::{Store, append_claim_tx, project_mission_run_created, select_replicated_desired, select_replicated_mission};
 use serde_json::json;
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
-use st3_store::store::terminal_gate_evidence::native_source_shared::*;
-use st3_store::store::terminal_gate_evidence::native_source_shared::{Binding, FINGERPRINT, GUARD, NativeSource, RAW_BYTES, ROWS, SOURCE_BYTES, bounded_row, decode, point};
-use st3_store::store::terminal_gate_evidence::native_source_shared::{required};
-use st3_store::store::terminal_gate_evidence::native_source_tests_shared::*;
-use st3_store::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
+use st3_seats::store::terminal_gate_evidence::native_source_shared::*;
+use st3_seats::store::terminal_gate_evidence::native_source_shared::{Binding, FINGERPRINT, GUARD, NativeSource, RAW_BYTES, ROWS, SOURCE_BYTES, bounded_row, decode, point};
+use st3_seats::store::terminal_gate_evidence::native_source_shared::{required};
+use st3_seats::store::terminal_gate_evidence::native_source_tests_shared::*;
+use st3_seats::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
 
 
 #[test]

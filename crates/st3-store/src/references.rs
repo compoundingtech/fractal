@@ -444,58 +444,14 @@ fn subject_references(
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::parse_intent;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::references::seats_shared_tests::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::references::seats_shared_tests::{CYCLE, OBSERVER, SUBSCRIPTION, UNSTORED, WATCHER, cycle_revision, refusals, schedule, watch};
+
     use crate::store::Store;
-
-    const UNSTORED: &str = "5f0c3a9e1d2b4c6a8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d";
-
-    fn refusals(store: &Store, source: &str) -> Vec<String> {
-        store
-            .unresolved_references(&parse_intent(source, "node").unwrap())
-            .unwrap()
-    }
-
-    /// Publishes without the reference checks, as a publication before them did.
-    fn publish(store: &Store, source: &str) -> crate::model::ApplyResponse {
-        store
-            .apply_internal(&parse_intent(source, "node").unwrap(), source)
-            .unwrap()
-    }
-
-    /// A mission whose runs declare `declarations`.
-    fn watch(declarations: &str) -> String {
-        format!(
-            r#"version 2
-mission "watch" state="ready" {{
-  goal "Watch."
-  step "watch" {{ agentless }}
-{declarations}
-}}"#
-        )
-    }
-
-    fn schedule(revision: &str) -> String {
-        watch(&format!(
-            r#"schedule "cycle" {{
-  every "6h"
-  anchor "2026-01-01T00:00:00Z"
-  work {{ mission "cycle@{revision}"; workspace "/tmp/cycles" }}
-}}"#
-        ))
-    }
-
-    const CYCLE: &str = r#"mission "cycle" state="ready" {
-  goal "Complete one cycle."
-  step "work" { agentless }
-}"#;
-
-    fn cycle_revision() -> String {
-        parse_intent(&format!("version 2\n{CYCLE}"), "node")
-            .unwrap()
-            .missions["cycle"]
-            .revision
-            .clone()
-    }
 
     #[test]
     fn unpinned_schedule_refuses_unknown_mission_at_publish() {
@@ -557,74 +513,6 @@ mission "work" state="ready" {
     }
 
     #[test]
-    fn a_pin_to_a_revision_that_is_not_stored_is_refused() {
-        let store = Store::open_memory("node").unwrap();
-        assert_eq!(
-            refusals(&store, &schedule(UNSTORED)),
-            [format!(
-                "mission `mission/watch` declares schedule `schedule/${{ST_MISSION_RUN}}/cycle` runs a mission that is not stored: mission `mission/cycle@{UNSTORED}` is not stored on this host"
-            )]
-        );
-        let uses = |revision: &str| {
-            format!(
-                r#"version 2
-mission "parent" state="ready" {{
-  goal "Run one cycle."
-  step "cycle" {{ uses-mission "cycle@{revision}" }}
-}}"#
-            )
-        };
-        assert_eq!(
-            refusals(&store, &uses(UNSTORED)),
-            [format!(
-                "step `cycle` of mission `mission/parent` uses a mission that is not stored: mission `mission/cycle@{UNSTORED}` is not stored on this host"
-            )]
-        );
-
-        // Published by the same document, or stored, the pin resolves.
-        let revision = cycle_revision();
-        assert_eq!(
-            refusals(&store, &format!("{}\n{CYCLE}", schedule(&revision))),
-            Vec::<String>::new()
-        );
-        publish(&store, &format!("version 2\n{CYCLE}"));
-        assert_eq!(refusals(&store, &schedule(&revision)), Vec::<String>::new());
-        assert_eq!(refusals(&store, &uses(&revision)), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_pin_to_the_claim_that_published_a_revision_names_the_revision() {
-        let store = Store::open_memory("node").unwrap();
-        let published = publish(&store, &format!("version 2\n{CYCLE}"));
-        let revision = cycle_revision();
-        let [claim] = published.claim_ids.as_slice() else {
-            panic!("one claim publishes the mission: {:?}", published.claim_ids);
-        };
-        assert_eq!(
-            refusals(&store, &schedule(claim)),
-            [format!(
-                "mission `mission/watch` declares schedule `schedule/${{ST_MISSION_RUN}}/cycle` runs a mission that is not stored: `mission/cycle@{claim}` pins the ID of the claim that published `mission/cycle@{revision}`, not a mission revision; pin `mission/cycle@{revision}`"
-            )]
-        );
-    }
-
-    const OBSERVER: &str = r#"observer "status" {
-  resource "resource/status"
-  provider "local.file"
-  locator "/tmp/st3-reference-status"
-  field "status"
-}"#;
-
-    const SUBSCRIPTION: &str = r#"subscription "changed" {
-  observer "observer/status"
-  on "status"
-  to "agent/example/watcher"
-  delivery "message"
-}"#;
-
-    const WATCHER: &str = r#"agent "example/watcher" { workspace "/tmp"; command "true" }"#;
-
-    #[test]
     fn a_subscription_to_a_missing_observer_or_mission_is_refused() {
         let store = Store::open_memory("node").unwrap();
         assert_eq!(
@@ -670,34 +558,7 @@ subscription "changed" {{
         );
     }
 
-    #[test]
-    fn st_doctor_lists_references_in_the_graph_that_no_longer_resolve() {
-        let store = Store::open_memory("node").unwrap();
-        assert_eq!(
-            store.unresolved_graph_references().unwrap(),
-            Vec::<String>::new()
-        );
-        publish(
-            &store,
-            &format!(
-                r#"{}
-mission "parent" state="ready" {{
-  goal "Run one cycle."
-  step "cycle" {{ uses-mission "cycle@{UNSTORED}" }}
-}}"#,
-                watch(&format!("{SUBSCRIPTION}\n{OBSERVER}"))
-            ),
-        );
-        assert_eq!(
-            store.unresolved_graph_references().unwrap(),
-            [
-                "mission `mission/watch` declares subscription `subscription/${ST_MISSION_RUN}/changed` has missing delivery target `agent/example/watcher`".to_owned(),
-                format!(
-                    "step `cycle` of mission `mission/parent` uses a mission that is not stored: mission `mission/cycle@{UNSTORED}` is not stored on this host"
-                ),
-            ]
-        );
-        publish(&store, &format!("version 2\n{WATCHER}"));
-        assert_eq!(store.unresolved_graph_references().unwrap().len(), 1);
-    }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod seats_shared_tests;

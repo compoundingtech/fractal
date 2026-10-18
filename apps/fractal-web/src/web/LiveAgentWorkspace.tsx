@@ -5,7 +5,7 @@ import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { AgentActions } from './AgentActions.tsx'
 import { retainPane, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
-import { MISSIONS_REF } from './workspaceView.ts'
+import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -436,7 +436,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                       const id = `${pane.ref}:${pane.presentation ?? 'detail'}`
                       return (
                         <Aria.Button key={id} aria-pressed={id === selectedPane} onPress={() => navigate(current, id)} {...stylex.props(styles.textButton)}>
-                          {byRef.get(pane.ref)?.title ?? pane.ref.split('/').at(-1)}
+                          {paneTabLabel(pane.ref, byRef.get(pane.ref)?.title)}
                         </Aria.Button>
                       )
                     })}

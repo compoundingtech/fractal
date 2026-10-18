@@ -1080,13 +1080,16 @@ def _shared_base(rel):
     return base
 
 
+SHARED_SUFFIX = ""  # a cut on top of another names its shared modules apart from that cut's
+
+
 def _shared_name(rel, container):
     p = module_path(rel)
     base = _shared_base(rel)
     suffix = ("_" + "_".join(container)) if container else ""
     if len(p) == 1:
-        return "shared" + suffix
-    return "_".join(p[len(base):]) + suffix + "_shared"
+        return "shared" + suffix + SHARED_SUFFIX
+    return "_".join(p[len(base):]) + suffix + "_shared" + SHARED_SUFFIX
 
 
 def _shared_path(rel, container):
@@ -1253,6 +1256,8 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                 else:
                     pos = _vis_position(t, 0, code)
                     t = t[:pos] + "pub " + t[pos:]
+            elif u.kind == "macro_call" and t.lstrip().startswith(("thread_local!", "#[")) and "thread_local!" in t:
+                t = re.sub(r"(?m)^(\s*)(?:pub(?:\([^)]*\))?\s+)?static\b", r"\1pub static", t)
             body.append(t)
         # imports of the parent module that only exist for cfg(test) are not there in a test-support build
         extras = []
@@ -1729,8 +1734,22 @@ def _in_trait_block(lines, idx):
     return False
 
 
-def _pub_line(path, line_no):
+def _pub_line(path, line_no, name=None):
+    if not os.path.exists(path):
+        return 0
     lines = Path(path).read_text().split("\n")
+    if name and re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?thread_local!", lines[line_no - 1]):
+        # the statics a thread_local! declares are private until the static itself says otherwise
+        t = "\n".join(lines)
+        at = sum(len(l) + 1 for l in lines[: line_no - 1])
+        end = ri._match_delim(t, t.index("{", at)) if "{" in t[at:] else at
+        pat = re.compile(r"(?m)^(\s*)(?:pub(?:\([^)]*\))?\s+)?static(\s+" + re.escape(name) + r"\b)")
+        body = t[at:end]
+        nb = pat.sub(r"\1pub static\2", body, count=1)
+        if nb != body:
+            Path(path).write_text(t[:at] + nb + t[end:])
+            return 1
+        return 0
     if _in_trait_block(lines, line_no - 1):
         return 0
     ln = lines[line_no - 1]
@@ -1778,6 +1797,7 @@ def fix_once(diags, roots, traits):
     names = set()
     imports = collections.defaultdict(set)
     ambiguities = collections.defaultdict(set)
+    dropped = collections.defaultdict(set)
     for d in diags:
         msg = d["message"]
         code = (d.get("code") or {}).get("code")
@@ -1801,13 +1821,20 @@ def fix_once(diags, roots, traits):
                 ambiguities[prim[0]["file_name"]].add(nm.group(1))
             continue
         if code in ("E0603", "E0624"):
+            pn = re.match(r"\w+ `(\w+)` is private", msg)
+            pname = pn.group(1) if pn else None
             for c in d["children"]:
                 for sp in c["spans"]:
                     if "defined here" in c["message"] or "defined here" in (sp.get("label") or "") or "private" in (sp.get("label") or ""):
-                        edits += _pub_line(sp["file_name"], sp["line_start"])
+                        edits += _pub_line(sp["file_name"], sp["line_start"], pname)
             for sp in d["spans"]:
                 if not sp["is_primary"] and "defined here" in (sp.get("label") or ""):
-                    edits += _pub_line(sp["file_name"], sp["line_start"])
+                    edits += _pub_line(sp["file_name"], sp["line_start"], pname)
+            continue
+        if code == "E0432" and prim and "shared" in prim[0]["file_name"]:
+            # a shared test module re-exported a name whose item has moved up: it is not this crate's to export
+            for sp in prim:
+                dropped[prim[0]["file_name"]].add((sp["byte_start"], sp["byte_end"]))
             continue
         nm = re.match(r"cannot find (?:function|value|type|struct, variant or union type|macro) `(\w+)`", msg)
         if nm:
@@ -1846,6 +1873,24 @@ def fix_once(diags, roots, traits):
             at = m.start() if m else (t.index("\n", t.index("//!")) + 1 if t.startswith("//!") else 0)
             Path(f).write_text(t[:at] + "\n".join(add) + "\n" + t[at:])
             edits += len(add)
+    for f, spans in dropped.items():
+        raw = Path(f).read_bytes()
+        t = raw.decode()
+        cspans = [(len(raw[:a].decode()), len(raw[:b].decode())) for a, b in spans]
+        for it in sorted(ri.parse(t), key=lambda i: -i.start):
+            if it.kind != "use":
+                continue
+            hit = [(a, b) for a, b in cspans if it.start <= a and b <= it.end]
+            parsed = use_paths(it.text) if hit else None
+            if not parsed:
+                continue
+            attrs, vis, paths = parsed
+            gone = {t[a:b].split("::")[-1].split(" as ")[-1].strip() for a, b in hit}
+            keep = [(segs, alias) for segs, alias in paths if (alias or segs[-1]) not in gone and "::".join(segs) not in {t[a:b].strip() for a, b in hit}]
+            code = ri._leading_meta(t, it.start, len(t))[1]
+            t = t[:code] + (render_use(attrs, vis, keep) if keep else "") + t[it.end :]
+            edits += 1
+        Path(f).write_text(t)
     for f, nms in ambiguities.items():
         t = Path(f).read_text()
         m = re.search(r"(?m)^pub use (\w+)::([\w:]+)::\*;$", t)
@@ -2215,6 +2260,8 @@ def main(argv=None):
         path, lay = spec.split("=")
         load(path, nodes=nodes, fixed=config["order"].index(lay) + 1)
     if args.cmd == "apply":
+        if args.above:
+            globals()["SHARED_SUFFIX"] = "_" + args.layer
         below = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] < current]
         above = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] > current]
         if not args.lower:

@@ -1,5 +1,8 @@
 //! One local daemon stream per delivery component. Ownership and receipts are fenced in SQLite,
 //! so an old channel reconnecting after a replacement cannot consume or acknowledge its mail.
+use crate::RolloutsStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
 use super::*;
 use crate::WatchesStore;
 use crate::mailbox::{Fence, Frame, Receipt};

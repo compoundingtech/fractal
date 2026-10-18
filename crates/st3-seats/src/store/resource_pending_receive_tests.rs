@@ -1,3 +1,6 @@
+
+
+
 // Real receipt/admission/open paths on finite synthetic stores. Not incident attribution.
 #[test]
 fn marked_pending_triggers_admit_observer_batches_and_revalidate_after_reopen() {
@@ -77,7 +80,7 @@ observer "github/acme/demo/pull/1" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h299f314afe75 owner=st3_store::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
+            /* sqlite-large-value: allow-for-now lv-h3458ee3a0d6e owner=st3_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
             [resource],
         )
         .unwrap();
@@ -106,12 +109,12 @@ observer "github/acme/demo/pull/1" {
         let connection = target.connection.write();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-he83b080d8828 owner=st3_store::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
+                /* sqlite-large-value: allow-for-now lv-h2f53f09d5b16 owner=st3_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
                 [resource],
             )
             .unwrap();
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-h5229ddccc2f5 owner=st3_store::store::resource_pending_receive_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-hd493c0a77500 owner=st3_seats::store::resource_pending_receive_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'", [])
             .unwrap();
     }
     drop(target);
@@ -121,7 +124,7 @@ observer "github/acme/demo/pull/1" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h5db6a82dee7d owner=st3_store::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
+            /* sqlite-large-value: allow-for-now lv-h83925536e060 owner=st3_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
             [resource],
         )
         .unwrap();
