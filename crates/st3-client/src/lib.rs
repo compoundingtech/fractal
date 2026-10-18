@@ -6,6 +6,7 @@ pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
 mod generated;
+pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
 pub use contract::*;
@@ -38,6 +39,7 @@ pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
 const RAW_TERMINAL_SUBPROTOCOL: &str = "st3.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
@@ -50,8 +52,8 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
         return Ok(path);
     }
 
-    let config_path = xdg_path("XDG_CONFIG_HOME", ".config")?
-        .join("st3")
+    let config_base = xdg_path("XDG_CONFIG_HOME", ".config")?;
+    let config_path = product_dirs::resolve(config_base.join("st3"), config_base.join("fractal"))
         .join("config.toml");
     match std::fs::read_to_string(&config_path) {
         Ok(document) => {
@@ -71,10 +73,12 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         return Ok(PathBuf::from(runtime).join("st3.sock"));
     }
-    Ok(xdg_path("XDG_STATE_HOME", ".local/state")?
-        .join("st3")
-        .join("run")
-        .join("st3.sock"))
+    let state_base = xdg_path("XDG_STATE_HOME", ".local/state")?;
+    Ok(
+        product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
+            .join("run")
+            .join("st3.sock"),
+    )
 }
 
 fn configured_socket(document: &str) -> Result<Option<PathBuf>, ClientError> {
@@ -3267,6 +3271,7 @@ impl Client {
                 self.local_person.as_deref(),
                 None,
             )?;
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
             let protocols = capability.map_or_else(
                 || RAW_TERMINAL_SUBPROTOCOL.to_owned(),
                 |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
@@ -3420,6 +3425,7 @@ impl Client {
                 self.local_person.as_deref(),
                 None,
             )?;
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
                 hyper::header::HeaderValue::from_static("st3.client.collections.v0"),
@@ -3523,6 +3529,7 @@ impl Client {
                 self.local_person.as_deref(),
                 None,
             )?;
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
                 hyper::header::HeaderValue::from_static("st3.client.conversation.v0"),
@@ -3726,6 +3733,7 @@ impl Client {
                     .await
                 }
                 Endpoint::FabricLoopback(base) => {
+                    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                     let mut request = self.http.request(method, format!("{base}{path}")).header(
                         "x-st3-features",
                         "custom-subjects.v1, conversation-blocks.v1",
@@ -3887,6 +3895,7 @@ async fn unix_request(
     tokio::spawn(async move {
         let _ = connection.await;
     });
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -3963,6 +3972,7 @@ fn append_bounded(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(),
     Ok(())
 }
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
 fn websocket_request(
     url: &str,
     credential: Option<&str>,
@@ -4165,6 +4175,7 @@ fn validate_conversation_subprotocol(
         .headers()
         .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|value| value.to_str().ok());
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     if selected != Some("st3.client.conversation.v0") {
         return Err(ClientError::Protocol(format!(
             "conversation WebSocket selected {selected:?}"
@@ -4180,6 +4191,7 @@ fn validate_collection_subprotocol(
         .headers()
         .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|value| value.to_str().ok());
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     if selected != Some("st3.client.collections.v0") {
         return Err(ClientError::Protocol(format!(
             "collection WebSocket selected {selected:?}"
