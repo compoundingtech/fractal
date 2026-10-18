@@ -864,12 +864,28 @@ def place_tests(nodes, mtests, files, tfiles, lower):
     for t in mtests:
         if t.name:
             dest_names[(t.file, t.container)].add(t.name)
+    exports = set()  # (file, container) of lower test modules the moved tests reach into: made pub and gated by test-support
+    imports = collections.defaultdict(set)  # dest (file, container) -> modules to glob-import
+    dev = _dev_dependencies(lower)
+
+    def exportable(u):
+        """Whether the lower module holding `u` can be shared: it does not use a dev-dependency (a non-test
+        build of the lower crate with the test-support feature has none)."""
+        text = (files.get(u.file) or tfiles.get(u.file))[0]
+        return not any(re.search(r"\b" + re.escape(d) + r"(?:::|!)", text) for d in dev)
+
     work = [(t, (t.file, t.container)) for t in mtests]
     while work:
         t, k = work.pop()
         for r in t.refs:
             u = nodes[r]
             if not u.test or u.kind == "method" or u.id in moved_ids or u.fixed is not None or (u.id, k) in seen:
+                continue
+            if exportable(u) and u.kind in ("struct", "enum", "union", "type", "trait", "fn", "const", "static", "impl", "macro_call"):
+                if not (u.kind in ("struct", "enum", "union", "type", "trait", "fn", "const", "static") and shared_pub(u)):
+                    exports.add((u.file, u.container))
+                    imports[k].add((u.file, u.container))
+                seen.add((u.id, k))
                 continue
             if u.kind in ("struct", "enum", "union", "type", "trait", "fn", "const", "static") and shared_pub(u):
                 continue  # pub in a module others can reach: shared with the code that stays (a copied type would be a different type)
@@ -902,6 +918,8 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             inner = render(rel, c, g)
             pad = "    " * len(prefix)
             uses = [u2 for u2 in (_without_names(u, defined[(rel, c)] | {x.name for x in copied if x.name}) for u in uses) if u2]
+            for (frel, fcont) in sorted(imports.get((rel, c), ())):
+                uses.append("use %s::*;" % "::".join([lower] + module_path(frel) + list(fcont)))
             if attrs.rstrip().endswith("pub") and "test-support" in attrs:
                 uses.append("pub use %s::%s::*;" % (lower, "::".join(module_path(rel) + list(c))))
             body = "\n".join(pad + "    " + u for u in uses) + ("\n\n" if uses else "") + inner
@@ -945,8 +963,88 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             text, items = tfiles[rel]
             local = {u.name for u in copied if u.name} | {t.name for t in mtests if t.name}
             uses = [_without_unused_relative(_without_names(it.text, local), body) for it in items if it.kind == "use"]
-            new_files[rel] = "#![allow(unused_imports)]\n" + "\n".join(u for u in uses if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
-    return facade_blocks, new_files, decls, removals, copied, pub_test_mods
+            globs = ["use %s::*;" % "::".join([lower] + module_path(frel) + list(fcont)) for (frel, fcont) in sorted(imports.get((rel, ()), ()))]
+            new_files[rel] = "#![allow(unused_imports)]\n" + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
+    return facade_blocks, new_files, decls, removals, copied, pub_test_mods, exports, imports
+
+
+
+def _dev_dependencies(lower_ident):
+    """The dev-dependency crate names (as identifiers) of the lower crate."""
+    manifest = Path("crates") / lower_ident.replace("_", "-") / "Cargo.toml"
+    if not manifest.exists():
+        return []
+    text = manifest.read_text()
+    if "[dev-dependencies]" not in text:
+        return []
+    section = text.split("[dev-dependencies]", 1)[1].split("\n[", 1)[0]
+    names = [m.group(1).replace("-", "_") for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", section)]
+    return [n for n in names if not n.endswith("_self") and not n.startswith("st3")]
+
+
+TEST_SUPPORT_CFG = '#[cfg(any(test, feature = "test-support"))]'
+
+
+def _widen_item_edits(text, it):
+    """Edits that make one item pub and, if it is gated by plain `cfg(test)`, gated by test-support too."""
+    edits = []
+    code = ri._leading_meta(text, it.start, len(text))[1]
+    for m in re.finditer(r"#\[cfg\(test\)\]", text[it.start : code]):
+        edits.append((it.start + m.start(), it.start + m.end(), TEST_SUPPORT_CFG))
+    vis = ri._VIS.match(text, code)
+    if vis is None:
+        edits.append((code, code, "pub "))
+    elif vis.group(0).strip() != "pub":
+        edits.append((code, vis.end(), "pub "))
+    return edits
+
+
+def apply_exports(exports, src_dir):
+    """Share lower test modules with the moved tests: items pub, gates widened to test-support, and the
+    declarations leading to them pub."""
+    done_decl = set()
+    for rel, cont in sorted(exports):
+        path = os.path.join(src_dir, rel)
+        if not os.path.exists(path):
+            continue
+        text = Path(path).read_text()
+        items = ri.parse(text)
+        edits = []
+        scope = items
+        for name in cont:
+            m = next((x for x in scope if x.kind == "mod" and x.name == name and x.body), None)
+            if m is None:
+                scope = []
+                break
+            edits += _widen_item_edits(text, m)
+            scope = ri.parse_items(text, m.body[0], m.body[1])
+        for it in scope:
+            if it.kind in ("fn", "const", "static", "struct", "enum", "type", "trait", "union"):
+                edits += _widen_item_edits(text, it)
+            elif it.kind == "mod" and it.text.rstrip().endswith(";"):
+                edits += _widen_item_edits(text, it)
+        for a, b, rep in sorted(set(edits), reverse=True):
+            text = text[:a] + rep + text[b:]
+        Path(path).write_text(text)
+        # the declarations on the way from the crate root
+        parts = module_path(rel)
+        for k in range(len(parts), 0, -1):
+            child = parts[k - 1]
+            parent = ("/".join(parts[: k - 1]) + ".rs") if k > 1 else "lib.rs"
+            if (parent, child) in done_decl:
+                continue
+            done_decl.add((parent, child))
+            ppath = os.path.join(src_dir, parent)
+            if not os.path.exists(ppath):
+                continue
+            ptext = Path(ppath).read_text()
+            dec = next((x for x in ri.parse(ptext) if x.kind == "mod" and x.name == child and x.text.rstrip().endswith(";")), None)
+            if dec is None:
+                continue
+            pe = _widen_item_edits(ptext, dec)
+            for a, b, rep in sorted(set(pe), reverse=True):
+                ptext = ptext[:a] + rep + ptext[b:]
+            Path(ppath).write_text(ptext)
 
 
 def apply_cut(args, nodes, files, tfiles, order):
@@ -954,7 +1052,7 @@ def apply_cut(args, nodes, files, tfiles, order):
     moved = [n for n in nodes if n.eff == layer and n.fixed is None and (not n.test or n.kind == "method")]
     mtests = [n for n in nodes if n.eff == layer and n.fixed is None and n.test and n.kind != "method"]
     lower = args.lower.replace("-", "_")
-    facade_blocks, new_test_files, test_decls, test_removals, test_copies, pub_test_mods = place_tests(nodes, mtests, files, tfiles, lower)
+    facade_blocks, new_test_files, test_decls, test_removals, test_copies, pub_test_mods, test_exports, test_imports = place_tests(nodes, mtests, files, tfiles, lower)
     crate_dir = os.path.join("crates", args.crate)
     new_src = os.path.join(crate_dir, "src")
     by_file = collections.defaultdict(list)
@@ -1170,6 +1268,7 @@ def apply_cut(args, nodes, files, tfiles, order):
         new = prune_uses(cur, items_now, pairs)
         if new != cur:
             open(path, "w").write(new)
+    apply_exports(test_exports, args.src_dir)
     for rel, names in macro_imports.items():
         path = os.path.join(new_src, rel)
         if not os.path.exists(path):
