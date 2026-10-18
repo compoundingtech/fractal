@@ -4,7 +4,7 @@ use smallclaims::store::canonical;
 use st3_schema::glasses::MAX_GLASSES;
 
 const VERSION: &str = "1";
-const SCHEMA: &str = r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h4651db874e7c owner=st3_store::store::glass_heads TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS glass_heads (
     subject TEXT PRIMARY KEY,
     person TEXT NOT NULL,
@@ -122,7 +122,7 @@ END;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection
-        .execute_batch(SCHEMA)
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h4599ed1c1b65 owner=st3_store::store::glass_heads TODO=trace-statement-and-value-representation */ SCHEMA)
         .context("creating glass head projection")
 }
 
@@ -143,7 +143,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
-        "DELETE FROM glass_heads;
+        /* sqlite-large-value: allow-for-now lv-h0ddff73a5fa3 owner=st3_store::store::glass_heads TODO=prepare-body-and-predecessor-values */ "DELETE FROM glass_heads;
          DELETE FROM local_glass_head_pending;
          DELETE FROM local_glass_head_dirty;
          INSERT INTO local_glass_head_dirty
@@ -151,7 +151,7 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     )?;
     flush(transaction)?;
     transaction.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('glass_heads_version',?1)",
+        /* sqlite-large-value: allow-for-now lv-hb97963cba76d owner=st3_store::store::glass_heads TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('glass_heads_version',?1)",
         [VERSION],
     )?;
     Ok(())
@@ -184,14 +184,14 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
         let person = st3_schema::glasses::owner(&subject).map_err(anyhow::Error::new)?;
         if kind == "glass.deleted" {
             transaction.execute(
-                "INSERT INTO glass_heads(subject,person,deleted) VALUES(?1,?2,1)
+                /* sqlite-large-value: allow-for-now lv-ha45b0e7768dc owner=st3_store::store::glass_heads TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO glass_heads(subject,person,deleted) VALUES(?1,?2,1)
                  ON CONFLICT(subject) DO UPDATE SET deleted=1",
                 params![subject, person],
             )?;
         } else if kind == "glass.upserted" {
             let key = canonical::sortable_key(&canonical::claim_key(transaction, &id)?);
             transaction.execute(
-                "INSERT INTO glass_heads(subject,person,created_key,head_key,claim_id,deleted)
+                /* sqlite-large-value: allow-for-now lv-hbebfc686d8e4 owner=st3_store::store::glass_heads TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO glass_heads(subject,person,created_key,head_key,claim_id,deleted)
                  VALUES(?1,?2,?3,?3,?4,0) ON CONFLICT(subject) DO UPDATE SET
                  created_key=CASE WHEN created_key IS NULL OR excluded.created_key<created_key
                      THEN excluded.created_key ELSE created_key END,
@@ -204,7 +204,7 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
         }
     }
     transaction.execute_batch(
-        "DELETE FROM local_glass_head_pending;
+        /* sqlite-large-value: allow-for-now lv-h9a17b809713e owner=st3_store::store::glass_heads TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_glass_head_pending;
          DELETE FROM local_glass_head_dirty;",
     )?;
     Ok(())
@@ -218,7 +218,7 @@ fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     )?;
     let created: Option<String> = transaction
         .query_row(
-            &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-he3f44dbb4349 owner=st3_store::store::glass_heads TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id FROM claims WHERE subject=?1 AND kind='glass.upserted'
                  ORDER BY CANONICAL_ASC(claims) LIMIT 1",
             ),
@@ -228,7 +228,7 @@ fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         .optional()?;
     let latest: Option<String> = transaction
         .query_row(
-            &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-he4735fbb6247 owner=st3_store::store::glass_heads TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id FROM claims WHERE subject=?1 AND kind='glass.upserted'
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ),
@@ -237,7 +237,7 @@ fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         )
         .optional()?;
     if created.is_none() && !deleted {
-        transaction.execute("DELETE FROM glass_heads WHERE subject=?1", [subject])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h33463ced428b owner=st3_store::store::glass_heads TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM glass_heads WHERE subject=?1", [subject])?;
         return Ok(());
     }
     let person = st3_schema::glasses::owner(subject).map_err(anyhow::Error::new)?;
@@ -250,7 +250,7 @@ fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         .map(|id| canonical::claim_key(transaction, id).map(|key| canonical::sortable_key(&key)))
         .transpose()?;
     transaction.execute(
-        "INSERT INTO glass_heads(subject,person,created_key,head_key,claim_id,deleted)
+        /* sqlite-large-value: allow-for-now lv-hd0c8feb74ba9 owner=st3_store::store::glass_heads TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO glass_heads(subject,person,created_key,head_key,claim_id,deleted)
          VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(subject) DO UPDATE SET
          person=excluded.person,created_key=excluded.created_key,head_key=excluded.head_key,
          claim_id=excluded.claim_id,deleted=excluded.deleted",
@@ -267,7 +267,7 @@ pub fn current_claims(
     through: u64,
 ) -> Result<Option<Vec<ClaimRecord>>> {
     let mut statement = connection.prepare(
-        "WITH eligible AS (
+        /* sqlite-large-value: allow-for-now lv-ha0e6fa984331 owner=st3_store::store::glass_heads TODO=trace-statement-and-value-representation */ "WITH eligible AS (
              SELECT 1 WHERE MAX(
                  COALESCE((SELECT MAX(store_index) FROM claims),0),
                  COALESCE((SELECT seq FROM sqlite_sequence WHERE name='claims'),0))<=?2

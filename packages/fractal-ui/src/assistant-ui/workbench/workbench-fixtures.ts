@@ -12,7 +12,7 @@ import { semanticCoverageItems, syntheticMarkdown } from '../embrace-fixtures'
 
 type NewMessage = Parameters<NonNullable<ConversationRuntimeOptions['onNew']>>[0]
 /** Only the stateful story host can turn these facts into a resource with a real submit capability. */
-type FixtureThreadSnapshot = Omit<ThreadResource, 'runtime'> & {
+type FixtureThreadSnapshot = Omit<ThreadResource, 'runtime' | 'transcript'> & {
   readonly runtime: Omit<ConversationRuntimeOptions, 'onNew'>
   readonly transcript: ThreadResource['transcript'] & { readonly now: number }
 }

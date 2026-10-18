@@ -2678,6 +2678,27 @@ fn client_agent_resources_cached(
     })
 }
 
+/// One agent's card for an exact agent selector, folded in its own projection rather than
+/// borrowed from the fleet roster.
+fn client_exact_agent_resources(
+    store: &Store,
+    history: bool,
+    snapshot_index: u64,
+    agent: &str,
+) -> anyhow::Result<Vec<Value>> {
+    store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
+        // A selected cold card needs only its own queue metadata, never roster refs.
+        let metadata = changed.filter(|(_, previous)| previous.is_empty())
+            .map(|(subjects, _)| agent_queue_metadata(store, subjects)).transpose()?;
+        let changed = changed.map(|(subjects, previous)| {
+            (subjects, metadata.as_deref().unwrap_or(previous))
+        });
+        let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
+        add_agent_todos(store, &mut items, snapshot_index)?;
+        Ok(items)
+    })
+}
+
 // Freeze membership, ordering and the inexpensive declaration/queue metadata. The expensive
 // status, usage, fault and activity reductions are needed only for the returned page.
 fn client_agent_page_refs(store: &Store, history: bool, index: u64) -> anyhow::Result<Vec<Value>> {
@@ -2688,7 +2709,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
     let connection = store.readers.get();
     let (subjects, desired) = crate::otel::roster_phase("membership", || -> anyhow::Result<_> {
         let mut subjects = connection
-            .prepare_cached(crate::store::RANGE_SUBJECTS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd2b2337a153e owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
             .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
                 row.get::<_, String>(0)
             })?
@@ -3006,10 +3027,20 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// Each seat's running subagents: open, with a lease that runs past this read. A lease runs out
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
-    let mut running = BTreeMap::<String, Vec<Value>>::new();
+    if items.is_empty() {
+        return Ok(());
+    }
+    let now = client_now_ms() as u64;
     let subagents = crate::otel::roster_phase("subagent_leases", || {
-        store.running_subagents(client_now_ms() as u64)
+        if items.len() == 1 {
+            let mut subagents = store.open_subagents(items[0]["id"].as_str().unwrap_or_default())?;
+            subagents.retain(|subagent| !subagent.expired_at(now));
+            Ok(subagents)
+        } else {
+            store.running_subagents(now)
+        }
     })?;
+    let mut running = BTreeMap::<String, Vec<Value>>::new();
     for subagent in subagents {
         running
             .entry(subagent.agent.clone())
@@ -4980,7 +5011,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
         let connection = store.readers.get();
         crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
             Ok(connection
-                .prepare_cached(crate::store::RANGE_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha0efb6efb83f owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
                 .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?)
         })

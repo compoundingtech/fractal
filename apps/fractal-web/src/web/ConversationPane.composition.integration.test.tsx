@@ -442,6 +442,32 @@ describe('ConversationPane composition activation', () => {
     expect(text()).toContain('Loading conversation is taking longer than expected · 11s')
   })
 
+  it('advances contextual running and transcript-header elapsed leaves without rendering the transcript', async () => {
+    source.now = Date.parse(at(0)) + 1000
+    const running: ConversationItem = { _tag: 'Status', id: 'run-status', status: 'running', at: at(1) }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, running], hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: source.now }, observedAt: source.now }
+    await mount()
+    const transcriptRenders = source.transcriptTurns.length
+    const runtimeRenders = source.runtimeItems.length
+    const composerRenders = source.composerProps.length
+    const activity = container.querySelector('[data-testid="live-activity-label"]')!
+    const header = container.querySelector('[data-testid="run-elapsed"]')!
+    expect(activity.textContent).toBe('Working · 1s')
+    expect(header.textContent).toBe('Running · 1s')
+    for (const [elapsed, label] of [[2000, '2s'], [60_000, '1m']] as const) {
+      await act(async () => {
+        source.now = Date.parse(at(0)) + elapsed
+        source.clockListeners.forEach(listener => listener())
+      })
+      expect(activity.textContent).toBe(`Working · ${label}`)
+      expect(header.textContent).toBe(`Running · ${label}`)
+    }
+    expect(source.transcriptTurns).toHaveLength(transcriptRenders)
+    expect(source.runtimeItems).toHaveLength(runtimeRenders)
+    expect(source.composerProps).toHaveLength(composerRenders)
+  })
+
   it('keeps runtime items and transcript turns stable for sixty idle clock, sync and no-op frame updates', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }

@@ -1,4 +1,4 @@
-// Explicit-clock presentation only.
+// Time-bearing leaves support a contextual or explicit clock.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria-components'

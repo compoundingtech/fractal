@@ -192,6 +192,28 @@ it('reveals a slightly future activity timestamp when only the leaf clock catche
   }
 })
 
+it('reveals a future status boundary in ClockedThreadHeader without rendering the header projection', async () => {
+  const now = Atom.make(5000)
+  source = { ...source, now }
+  const at = '1970-01-01T00:00:05.500Z'
+  const suspended = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'suspended', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: at, suspension: { action: 'suspend', blocking: [], operation_id: 'operation/example', phase: 'suspended', suspended_at: at, updated_at: at } })
+  registry.set(agents, observed({ value: [suspended] }))
+  window.history.replaceState(null, '', '/w/agent/example')
+  const projectedRows = vi.spyOn(rowProjection, 'sidebarRow')
+  try {
+    await mount(1440)
+    const header = host.querySelector('section[aria-label="Agent workspace"] header')!
+    expect(header).not.toBeNull()
+    const count = projectedRows.mock.calls.length
+    expect(header.querySelector('time')).toBeNull()
+    await act(async () => registry.set(now, 6000))
+    expect(header.querySelector('time')?.textContent).toBe('0s')
+    expect(projectedRows).toHaveBeenCalledTimes(count)
+  } finally {
+    projectedRows.mockRestore()
+  }
+})
+
 // Both the real data derivation and the kit's SidebarAgentRow DOM participate.
 describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
   it('dismisses the hovered row on navigation while preserving every roster node', async () => {
