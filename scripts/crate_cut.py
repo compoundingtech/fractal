@@ -1212,13 +1212,13 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             names = sorted({n.name for n in ns if n.name})
             if names:
                 stem = module_path(rel)[-1]
-                renames.append((re.compile(r"\b" + re.escape(stem) + r"::(" + "|".join(map(re.escape, names)) + r")\b(?!::)"), stem))
+                renames.append((re.compile(r"\b" + re.escape(stem) + r"::(" + "|".join(map(re.escape, names)) + r")\b(?!::)"), "crate::" + "::".join(_shared_path(rel, ()))))
     if renames:
         for f in _src_files([src_dir]):
             t = Path(f).read_text()
             nt = t
-            for pat, stem in renames:
-                nt = pat.sub(lambda m, stem=stem: stem + "_shared::" + m.group(1), nt)
+            for pat, target in renames:
+                nt = pat.sub(lambda m, target=target: target + "::" + m.group(1), nt)
             if nt != t:
                 Path(f).write_text(nt)
     # a shared module is only reachable if every module on the way to it exists in a test-support build
