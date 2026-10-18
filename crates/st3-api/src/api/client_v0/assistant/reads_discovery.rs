@@ -65,16 +65,17 @@ pub(super) async fn page(
     })).await?;
     let source_more = sources.len() > limit;
     sources.truncate(limit);
-    let mut items = Vec::new();
+    let source_count = sources.len();
+    let mut items = Vec::with_capacity(source_count);
     let mut last = cursor.as_ref().and_then(|cursor| cursor.after_key.as_ref()).map(|(_, id)| id.clone());
-    for (position, (id, source)) in sources.iter().enumerate() {
-        let Some(mut item) = source.clone() else { last = Some(id.clone()); continue; };
+    for (position, (id, source)) in sources.into_iter().enumerate() {
+        let Some(mut item) = source else { last = Some(id); continue; };
         if !work {
             item["read"] = conversation_reads::discovery_read(state, &snapshot, &item, binding).await?;
         }
         items.push(item);
-        let has_more = source_more || position + 1 < sources.len();
-        let candidate = value(state, &snapshot, &collection, projection, &items, Some(id), has_more, limit, expires)?;
+        let has_more = source_more || position + 1 < source_count;
+        let candidate = value(state, &snapshot, &collection, projection, &items, Some(&id), has_more, limit, expires)?;
         let bytes = serde_json::to_vec(&json!({"api_version":CLIENT_API_VERSION,"request_id":request_id,"snapshot":snapshot,"value":candidate}))
             .map_err(ApiError::internal)?.len();
         if bytes > max_bytes {
@@ -82,9 +83,10 @@ pub(super) async fn page(
             if items.is_empty() {
                 return Err(budget_exceeded(format!("single {projection} item `{id}` cannot fit the approved response byte budget")));
             }
-            return Ok((snapshot.clone(), value(state, &snapshot, &collection, projection, &items, last.as_deref(), true, limit, expires)?));
+            let result = value(state, &snapshot, &collection, projection, &items, last.as_deref(), true, limit, expires)?;
+            return Ok((snapshot, result));
         }
-        last = Some(id.clone());
+        last = Some(id);
     }
     let result = value(state, &snapshot, &collection, projection, &items, last.as_deref(), source_more, limit, expires)?;
     Ok((snapshot, result))

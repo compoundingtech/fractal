@@ -24163,6 +24163,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
         };
         let mut remote_request = request.clone();
