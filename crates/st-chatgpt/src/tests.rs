@@ -57,9 +57,10 @@ fn writes_publish_action_identity_constraints() {
         let properties = &published["inputSchema"]["properties"];
         assert_eq!(properties["action_id"]["pattern"], "^action/");
         assert_eq!(properties["action_id"]["description"], "Unique per intended action, e.g. action/<short-slug>; reuse the same value on a retry");
-        assert_eq!(properties["idempotency_key"]["minLength"], 16);
-        assert_eq!(properties["idempotency_key"]["maxLength"], 256);
-        assert_eq!(properties["idempotency_key"]["description"], "16-256 chars; reuse the exact value on retries of the same action");
+        assert_eq!(properties["idempotency_key"]["pattern"], r"^[ -~]{16,256}(?![\s\S])");
+        assert!(properties["idempotency_key"].get("minLength").is_none());
+        assert!(properties["idempotency_key"].get("maxLength").is_none());
+        assert_eq!(properties["idempotency_key"]["description"], "16-256 printable ASCII chars only (stricter than daemon byte-length bounds); reuse the exact value on retries of the same action");
         assert!(properties["fence"]["properties"]["snapshot_id"]["description"].as_str().unwrap().contains("immediately preceding read result"));
     }
 }
@@ -102,8 +103,12 @@ async fn action_identity_violations_fail_before_contacting_gateway() {
         for (field, value, rule) in [
             ("action_id", "test".to_owned(), "^action/"),
             ("action_id", "prefix/action/test".to_owned(), "^action/"),
-            ("idempotency_key", "k".repeat(15), "minLength 16"),
-            ("idempotency_key", "k".repeat(257), "maxLength 256"),
+            ("idempotency_key", "k".repeat(15), "16-256 printable ASCII"),
+            ("idempotency_key", "k".repeat(257), "16-256 printable ASCII"),
+            ("idempotency_key", "\u{e9}".repeat(16), "printable ASCII"),
+            ("idempotency_key", "\u{e9}".repeat(256), "printable ASCII"),
+            ("idempotency_key", format!("{}\n", "k".repeat(16)), "printable ASCII"),
+            ("idempotency_key", format!("{}\t", "k".repeat(16)), "printable ASCII"),
         ] {
             let mut args = write_arguments(name);
             args[field] = json!(value);
@@ -119,9 +124,11 @@ async fn action_identity_violations_fail_before_contacting_gateway() {
 fn action_identity_accepts_inclusive_key_length_bounds() {
     for name in ["st_alert_answer", "st_message_send"] {
         for length in [16, 256] {
-            let mut args = write_arguments(name);
-            args["idempotency_key"] = json!("k".repeat(length));
-            assert!(validate_arguments(name, &args).is_ok(), "{name}: {length}");
+            for character in ['k', ' ', '~'] {
+                let mut args = write_arguments(name);
+                args["idempotency_key"] = json!(character.to_string().repeat(length));
+                assert!(validate_arguments(name, &args).is_ok(), "{name}: {length}: {character}");
+            }
         }
     }
 }

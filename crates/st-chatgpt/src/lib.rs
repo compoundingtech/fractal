@@ -52,18 +52,25 @@ const TOOLS: &[(&str, &str, bool)] = &[
     ("st_message_send", "Send one exact message to an owner-allowlisted agent, authorized by grant scope and the ChatGPT confirmation card.", false),
 ];
 
-// Keep discovery and local admission aligned with st3-api's validate_action_admission.
+// Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
 const ACTION_ID_PREFIX: &str = "action/";
 const IDEMPOTENCY_KEY_MIN_LENGTH: usize = 16;
 const IDEMPOTENCY_KEY_MAX_LENGTH: usize = 256;
+const IDEMPOTENCY_KEY_CHAR_RANGE: std::ops::RangeInclusive<u8> = b' '..=b'~';
+
+fn idempotency_key_pattern() -> String {
+    // Unlike $, the final assertion cannot match before a trailing line terminator.
+    format!("^[{}-{}]{{{IDEMPOTENCY_KEY_MIN_LENGTH},{IDEMPOTENCY_KEY_MAX_LENGTH}}}(?![\\s\\S])",
+        char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.start()), char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.end()))
+}
 
 fn action_id_schema() -> Value {
     json!({"type":"string","pattern":format!("^{ACTION_ID_PREFIX}"),
         "description":"Unique per intended action, e.g. action/<short-slug>; reuse the same value on a retry"})
 }
 fn idempotency_key_schema() -> Value {
-    json!({"type":"string","minLength":IDEMPOTENCY_KEY_MIN_LENGTH,"maxLength":IDEMPOTENCY_KEY_MAX_LENGTH,
-        "description":format!("{IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} chars; reuse the exact value on retries of the same action")})
+    json!({"type":"string","pattern":idempotency_key_pattern(),
+        "description":format!("{IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} printable ASCII chars only (stricter than daemon byte-length bounds); reuse the exact value on retries of the same action")})
 }
 fn fence_schema() -> Value {
     json!({"type":"object","description":"Use the snapshot returned by the preceding read. Copy subject revisions from that snapshot to fence writes against changed resources.",
@@ -132,10 +139,10 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
                 "message":format!("action_id must match ^{ACTION_ID_PREFIX} (start with {ACTION_ID_PREFIX}).")}));
         }
         let key = args["idempotency_key"].as_str().expect("validated idempotency key string");
-        // The daemon enforces UTF-8 byte length, not Unicode scalar count.
-        if !(IDEMPOTENCY_KEY_MIN_LENGTH..=IDEMPOTENCY_KEY_MAX_LENGTH).contains(&key.len()) {
+        if !(IDEMPOTENCY_KEY_MIN_LENGTH..=IDEMPOTENCY_KEY_MAX_LENGTH).contains(&key.len())
+            || !key.bytes().all(|byte| IDEMPOTENCY_KEY_CHAR_RANGE.contains(&byte)) {
             return Err(json!({"code":"invalid-arguments",
-                "message":format!("idempotency_key must satisfy minLength {IDEMPOTENCY_KEY_MIN_LENGTH} and maxLength {IDEMPOTENCY_KEY_MAX_LENGTH} (UTF-8 bytes).")}));
+                "message":format!("idempotency_key must match {}: {IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} printable ASCII chars only.", idempotency_key_pattern())}));
         }
     }
     Ok(())
