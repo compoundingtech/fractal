@@ -809,8 +809,7 @@ pub fn prepare_one(
     if session.conversation_blocks && original["body"]["media_type"] == "text/plain"
         && original["body"]["text"].is_string()
         && body.get("blocks").and_then(Value::as_array)
-            .is_none_or(|blocks| !blocks.iter().any(|block| block["source_type"] == "content"
-                && block["payload"]["body_ref"] == true && block["continuation"]["ref"].is_string()))
+            .is_none_or(|blocks| blocks.iter().all(|block| block["kind"] == "source_record"))
     {
         let blocks = body.entry("blocks").or_insert_with(|| json!([])).as_array_mut().expect("blocks array");
         blocks.push(json!({"id":format!("{}/text",original["id"].as_str().unwrap_or("content")),

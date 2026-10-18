@@ -514,6 +514,8 @@ pub fn enrich_responses(
                 .get("assistant_grant_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            assistant_owner: fields.get("assistant_owner").and_then(Value::as_str).map(str::to_owned),
+            assistant_session_actor: fields.get("assistant_session_actor").and_then(Value::as_str).map(str::to_owned),
             ask,
             status: fields["status"].as_str().unwrap_or("completed").into(),
             summary: summary.into(),
@@ -530,36 +532,7 @@ pub fn enrich_responses(
 }
 
 impl Store {
-    /// A daemon-owned approval ask, projected in the same transaction as its durable claim.
-    pub fn ask_daemon_approval(&self, person: &str, key: &str, proposal: Value) -> Result<StepRunView, St3Error> {
-        let subject = format!("step-run/chatgpt-{key}/ask");
-        let mission_id = format!("chatgpt/{key}");
-        let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal \"Approve ChatGPT proposal\"; step \"ask\" {{ assigned-to {person:?}; goal \"Approve exact proposed action\"; }} }}");
-        let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
-        let mission = intent.missions.remove(&mission_id).ok_or_else(|| St3Error::new("internal","approval mission absent"))?;
-        let input = PersonAskRequest { legacy_request:None, person:person.into(), actor:"daemon/chatgpt-approval".into(),
-            title:"Approve ChatGPT proposal".into(), reason:serde_json::to_string(&proposal).map_err(internal)?,
-            step:None, new_run:Some(mission_id), incarnation:None, idempotency_key:key.into(),
-            request:Some(json!({"version":1,"type":"decision","question":"Execute this exact ChatGPT proposal?",
-                "why_person":"Only the owner authorizes assistant writes.","summary":"Approve the exact typed action in the alert detail; original fences remain mandatory.",
-                "answers":[{"id":"approve","label":"Approve","consequence":"Execute this exact action once, subject to its original fence.","outcome":"accept"},
-                    {"id":"deny","label":"Deny","consequence":"Do not execute the action.","outcome":"decline"}]})) };
-        let structured = canonical_request(&input)?;
-        self.connection.batched(|tx| {
-            if let Some(existing) = request(tx,&subject).map_err(internal)? {
-                if existing.body["fields"]["person"] != person || existing.body["fields"]["request"] != structured {
-                    return Err(St3Error::new("idempotency-conflict","approval key already names another request"));
-                }
-                return step(tx,&subject).map_err(internal)?.ok_or_else(|| St3Error::new("internal","approval ask absent"));
-            }
-            let claim = append_claim_tx(tx,&self.origin,&subject,"work.person-asked",Some("daemon/chatgpt-approval"),
-                &with_request(json!({"fields":{"run":format!("mission-run/chatgpt/{key}"),
-                    "generation":format!("run-generation/chatgpt-{key}"),"person":person,"title":input.title,"reason":input.reason,
-                    "key":key,"attempt":1,"status":"ready","mission_spec":mission}}),&structured),&[],None).map_err(claim_append_error)?;
-            project(tx,&claim)?;
-            step(tx,&subject).map_err(internal)?.ok_or_else(|| St3Error::new("internal","approval ask absent"))
-        }).map_err(internal)?
-    }
+
     pub fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error> {
         if !input.person.starts_with("person/")
             || input.person.matches('/').count() != 1
@@ -689,11 +662,12 @@ impl Store {
             }
             // Checked after authority and fences below; a replay compares against it first.
             let resolved = resolve_answer(ask.as_ref(), input, cancel);
+            let response_actor = if authorization.is_some() { "assistant/chatgpt" } else { input.actor.as_str() };
             let kind = if cancel { "work.person-cancelled" } else { "work.person-done" };
             if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-h97f8e7f9bbb3 owner=st3_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
                 actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2
                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, kind], claim_from_row).optional().map_err(internal)? {
-                if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(input.actor.as_str()) {
+                if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(response_actor) {
                     let Ok((answer, summary)) = &resolved else {
                         return Err(St3Error::new("idempotency-conflict", "this response key already has another answer"));
                     };
@@ -750,6 +724,9 @@ impl Store {
             if let Some(grant_id) = &assistant_grant_id {
                 body["fields"]["sender_class"] = json!("external-assistant");
                 body["fields"]["assistant_grant_id"] = json!(grant_id);
+                let authorization = authorization.expect("grant ID comes from authorization");
+                body["fields"]["assistant_owner"] = json!(authorization.owner);
+                body["fields"]["assistant_session_actor"] = json!(authorization.actor);
             }
             if let Some(proof) = &input.delegation {
                 if cancel { return Err(St3Error::new("delegation-refused", "cancelling another agent's ask is outside the delegation list")); }
@@ -759,7 +736,7 @@ impl Store {
                 super::delegation::add_evidence(tx, &mut response_evidence, proof)?;
                 body["evidence"] = json!(response_evidence);
             }
-            let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(&input.actor), &body, &evidence, None).map_err(claim_append_error)?;
+            let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(response_actor), &body, &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             if let Some(ask) = ask.as_ref().filter(|a| !cancel && a.body["fields"]["origin_step"].is_null() && !is_update(a)) {
                 send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), authorization)?;
@@ -1061,19 +1038,11 @@ fn send_answer_tx(
     if let Some(run) = fields["owner_run"].as_str() {
         tags.push(Value::String(format!("mission-run:{run}")));
     }
-    let mut body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
+    let body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
         "title": format!("Answered: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
     if let Some(authorization) = authorization {
-        body["fields"]["from"] = json!("assistant/chatgpt");
-        body["fields"]["assistant_owner"] = json!(authorization.owner);
-        body["fields"]["assistant_session_actor"] = json!(authorization.actor);
-        body["fields"]["sender_class"] = json!("external-assistant");
-        body["fields"]["assistant_grant_id"] = response.body["fields"]["assistant_grant_id"].clone();
-        // The answer's grant was authorized in this same writer transaction. Preserve its
-        // server-established provenance without entering the unverified generic writer.
-        super::retirements::admit_recipient(tx, Some(requester))?;
-        append_admitted_claim_tx(tx, origin, &subject, "message.sent", Some("assistant/chatgpt"), &body,
-            &[], None).map_err(claim_append_error)?;
+        append_claim_tx_with_assistant_answer(tx, origin, &subject, "message.sent", Some("assistant/chatgpt"), &body,
+            &[], None, Some(authorization)).map_err(claim_append_error)?;
         return Ok(());
     }
     append_claim_tx(tx, origin, &subject, "message.sent", Some("daemon/runtime"), &body,
@@ -1800,7 +1769,9 @@ mission "person-work" state="ready" {{
             for subject in [&origin.subject, &ask.subject] {
                 let view = store.step_run(subject).unwrap().unwrap();
                 let answer = &view.person_answers[0];
-                assert_eq!(answer.respondent, "person/avery");
+                assert_eq!(answer.respondent, "assistant/chatgpt");
+                assert_eq!(answer.assistant_owner.as_deref(), Some(authorization.owner.as_str()));
+                assert_eq!(answer.assistant_session_actor.as_deref(), Some(authorization.actor.as_str()));
                 assert_eq!(answer.sender_class.as_deref(), Some("external-assistant"));
                 assert_eq!(answer.assistant_grant_id.as_deref(), Some(grant_id));
                 let json = serde_json::to_value(&view).unwrap();

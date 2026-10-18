@@ -32,10 +32,10 @@ pub async fn propose(State(state): State<AppState>, Extension(snapshot): Extensi
         if request.parameters.get("signature").is_some() {
             return Err(forbidden("assistant writes cannot supply person signatures"));
         }
-        if request.action_type == "message.send" {
-            if ["from", "actor", "sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|field| request.parameters.get(*field).is_some()) {
-                return Err(forbidden("assistant message identity and provenance are server-owned"));
-            }
+        if request.action_type == "message.send"
+            && ["from", "actor", "sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|field| request.parameters.get(*field).is_some())
+        {
+            return Err(forbidden("assistant message identity and provenance are server-owned"));
         }
 
     }

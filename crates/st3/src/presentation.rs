@@ -927,6 +927,12 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
             if let Some(grant) = &response.assistant_grant_id {
                 let _ = writeln!(output, "    Assistant grant: {grant}");
             }
+            if let Some(owner) = &response.assistant_owner {
+                let _ = writeln!(output, "    Assistant owner: {owner}");
+            }
+            if let Some(session_actor) = &response.assistant_session_actor {
+                let _ = writeln!(output, "    Assistant session actor: {session_actor}");
+            }
         }
     }
     output
@@ -1522,10 +1528,12 @@ mod tests {
             acted_for: None,
             sender_class: Some("external-assistant".into()),
             assistant_grant_id: Some("assistant-grant/test".into()),
+            assistant_owner: Some("person/avery".into()),
+            assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
             ask: "step-run/demo/ask".into(),
             status: "completed".into(),
             summary: "Proceed".into(),
-            respondent: "person/avery".into(),
+            respondent: "assistant/chatgpt".into(),
             answered_at_unix_ms: 2_000,
             answer: None,
             evidence: vec![],
@@ -1533,6 +1541,9 @@ mod tests {
         let rendered = render_step_run(&work, OutputStyle::plain(), 2_000);
         assert!(rendered.contains("Sender class: external-assistant"));
         assert!(rendered.contains("Assistant grant: assistant-grant/test"));
+        assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
+        assert!(rendered.contains("Assistant owner: person/avery"));
+        assert!(rendered.contains("Assistant session actor: assistant/chatgpt/session/test"));
     }
 
     fn run(subject: &str, parent: Option<&str>, steps: Vec<StepRunView>) -> MissionRunView {
