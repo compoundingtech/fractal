@@ -5982,7 +5982,9 @@ impl Store {
         if let Some(snapshot) = current(self)? {
             return Ok(snapshot);
         }
+        let waiting = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotBuildWait);
         let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
+        drop(waiting);
         if let Some(snapshot) = current(self)? {
             return Ok(snapshot);
         }
@@ -5997,6 +5999,7 @@ impl Store {
         &self,
         connection: &Connection,
     ) -> Result<Arc<ReplicationSnapshot>> {
+        let reading = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotInventory);
         let previous = crate::read_budget::lock_sync(&self.replication_snapshot)?.take();
         // The six-table digest stays on the legacy peer wire format. Its generation lets us
         // retain compatibility without rescanning those tables for unrelated source changes.
@@ -6102,7 +6105,9 @@ impl Store {
         } else {
             full(connection)?
         };
+        drop(reading);
         crate::read_budget::check()?;
+        let hashing = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotDigest);
         inventory.resume_digest(&buckets, &mut digest_prefixes, resume_from);
         crate::read_budget::check()?;
         // Envelope hashes already commit the complete payload (and chain metadata). The
@@ -6116,6 +6121,7 @@ impl Store {
         let projection_generation = projection_digest::generation(connection)?;
         let projection_digests = projection_digest::tables(connection)?;
         let graph_digest = projection_digest::root(&projection_digests);
+        drop(hashing);
         let snapshot = Arc::new(ReplicationSnapshot {
             store_index: current_index(connection)?,
             replica_generation: self.replica_generation.load(Ordering::Acquire),
@@ -8013,14 +8019,21 @@ impl Store {
     pub fn record_replication_worker(
         &self,
         peer: &str,
-        worker: crate::replication::ReplicationWorkerStatus,
+        mut worker: crate::replication::ReplicationWorkerStatus,
     ) {
-        self.replication_sync
+        let mut sync = self
+            .replication_sync
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(peer.to_owned())
-            .or_default()
-            .worker = Some(worker);
+            .unwrap_or_else(PoisonError::into_inner);
+        let progress = sync.entry(peer.to_owned()).or_default();
+        // Exchange polling and retry probes report phase without selecting a new route.
+        if worker.route_is_preferred.is_none()
+            && let Some(previous) = &progress.worker
+        {
+            worker.route_is_preferred = previous.route_is_preferred;
+            worker.preferred_retry_at_unix_ms = previous.preferred_retry_at_unix_ms;
+        }
+        progress.worker = Some(worker);
     }
 
     /// The latest sync measurement for each configured peer that has one.

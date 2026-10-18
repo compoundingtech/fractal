@@ -15,7 +15,6 @@ macro_rules! message_desired_recipient_match {
 pub mod attention;
 pub mod delivery;
 pub mod evidence;
-pub mod github;
 pub mod missions;
 pub mod seats;
 pub mod trace_principal;
@@ -63,7 +62,7 @@ pub mod observer_actuals;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
 pub mod github_workflow_failures;
-pub mod git_changes;
+pub mod git_change_tables;
 pub mod message_subscriptions;
 pub mod rollouts;
 pub mod publication;
@@ -211,10 +210,9 @@ pub use person_work::AskImages;
 pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
-pub mod watches;
-pub mod idle_holds;
 pub mod idle_mail;
-pub use idle_holds::WORK_NUDGED_KIND;
+/// The claim recorded on a step each time its holder is nudged.
+pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
 pub use limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
 pub use limits::ACCOUNT_READING_WINDOW_MS;
@@ -227,6 +225,14 @@ pub mod checkpoint_agreement_tests;
 pub mod terminal_gate_evidence;
 #[cfg(test)]
 pub mod checkpoint_tests;
+#[cfg(test)]
+pub mod provenance_tests;
+#[cfg(test)]
+pub mod mission_model_tests;
+#[cfg(test)]
+pub mod native_resume_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod mailbox_tests;
 #[cfg(test)]
 pub mod checkpoint_capture_epoch_tests;
 #[cfg(test)]
@@ -1971,7 +1977,7 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 /// smalltalk's store: the graph store, which it derefs to, and smalltalk's runtime, which
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
 pub struct Store {
-    graph: GraphStore,
+    pub graph: GraphStore,
     smalltalk: Arc<SmalltalkRuntime>,
 }
 
@@ -2114,13 +2120,13 @@ const SUBSCRIPTION_STARTED_RUN_QUERY: &str =
      WHERE kind='subscription.mission-started'
      AND json_extract(body, '$.fields.mission_run')=?1)";
 
-fn subscription_started_run_tx(connection: &Connection, run: &str) -> Result<bool> {
+pub fn subscription_started_run_tx(connection: &Connection, run: &str) -> Result<bool> {
     Ok(connection
         .prepare_cached(SUBSCRIPTION_STARTED_RUN_QUERY)?
         .query_row([run], |row| row.get(0))?)
 }
 
-fn stale_pull_request_request_tx(
+pub fn stale_pull_request_request_tx(
     connection: &Connection,
     resource: &str,
     discovery: &str,
@@ -7989,7 +7995,7 @@ fn current_desired_row(connection: &Connection, subject: &str) -> Result<Option<
         .map_err(Into::into)
 }
 
-fn normalize_message_party(value: &str) -> String {
+pub fn normalize_message_party(value: &str) -> String {
     if value.is_empty() || value == "requester" || value.contains('/') {
         value.into()
     } else {
@@ -10963,6 +10969,8 @@ fn check_mailbox_incarnation(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
 ) -> Result<(), St3Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    MAILBOX_INCARNATION_EVALUATIONS.set(MAILBOX_INCARNATION_EVALUATIONS.get() + 1);
     let runtime: Option<(String, String)> = connection
         .prepare_cached(&format!(
             "{} LIMIT 1",
@@ -11142,7 +11150,11 @@ impl crate::otlp::ObservationSource for Store {
             let store = self.clone();
             self.connection
                 .write_workers()
-                .spawn_blocking(move || store.set_otlp_export_cursor(cursor))
+                .spawn_blocking(move || {
+                    smallclaims::task_cpu::blocking("observations.export", || {
+                        store.set_otlp_export_cursor(cursor)
+                    })
+                })
                 .await??;
             Ok(())
         })
@@ -11173,11 +11185,30 @@ pub struct MailboxWatermark {
     desired: Option<String>,
 }
 
-fn check_mailbox_fence(
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static MAILBOX_FENCE_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static MAILBOX_INCARNATION_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Thread-local instrumentation of actual full fence evaluations, not API calls.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mailbox_fence_evaluations() -> u64 {
+    MAILBOX_FENCE_EVALUATIONS.get()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn mailbox_incarnation_evaluations() -> u64 {
+    MAILBOX_INCARNATION_EVALUATIONS.get()
+}
+
+pub fn check_mailbox_fence(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
     host: &str,
 ) -> Result<(), St3Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    MAILBOX_FENCE_EVALUATIONS.set(MAILBOX_FENCE_EVALUATIONS.get() + 1);
     check_mailbox_incarnation(connection, fence)?;
     mailbox_lease::check_lease_fence(connection, fence, host)?;
     let owner: Option<(String, u64)> = connection
@@ -12075,7 +12106,7 @@ fn mission_definition_token_tx(
         .collect())
 }
 
-fn desired_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesiredSubject> {
+pub fn desired_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesiredSubject> {
     let desired = row.get::<_, String>(2)?;
     let desired = serde_json::from_str(&desired).unwrap_or(Value::Null);
     let accountable = st3_schema::accountable::from_desired(&desired)
@@ -13582,7 +13613,7 @@ fn validate_mission_run_timeout(mission: &MissionSpec, mode: &str) -> Result<(),
     Ok(())
 }
 
-fn claim_append_error(error: anyhow::Error) -> St3Error {
+pub fn claim_append_error(error: anyhow::Error) -> St3Error {
     match error.downcast::<St3Error>() {
         Ok(error) => error,
         Err(error) => internal(error),
@@ -20955,18 +20986,18 @@ fn append_claim_with_subject_fences(
     append_claim_with_commit_context(graph, input, fence, event_runtime, expected_subjects, observer_completion, Default::default())
 }
 
-type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + 'a;
+pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + 'a;
 
 #[derive(Default)]
-struct ClaimCommitContext<'a> {
-    signature: Option<&'a str>,
+pub struct ClaimCommitContext<'a> {
+    pub signature: Option<&'a str>,
     // Only retire_agent supplies the declaration, owner and rollout admission together.
-    retirement_writer: bool,
-    admission: Option<&'a ClaimAdmission<'a>>,
-    assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
+    pub retirement_writer: bool,
+    pub admission: Option<&'a ClaimAdmission<'a>>,
+    pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
 }
 
-fn append_claim_with_commit_context(
+pub fn append_claim_with_commit_context(
     graph: &GraphStore,
     input: &ClaimInput,
     fence: Option<&crate::mailbox::Fence>,
