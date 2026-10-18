@@ -37,7 +37,7 @@ impl DecisionAttention {
             priority: if self.observation.decision_kind == "blocker" { "high" } else { "normal" }.into(),
             kind: "decision".into(), review_mode: None,
             subject: self.observation.decision_id.clone(), person: self.person.clone(),
-            requester_id: Some(self.requester.clone()), launch_id: None, variant_id: None, message_id: None,
+            requester_id: Some(self.requester.clone()), launch_id: None, variant_id: None, message_id: None, prompt_call: None,
             conversation: Some(self.requester.clone()), answers: Vec::new(),
             title: format!("Q{} needs your answer", self.observation.q),
             detail: format!("Source decision is {}. Axe owns its answer.", self.state()),
@@ -52,7 +52,7 @@ impl DecisionAttention {
 impl Store {
     pub(crate) fn decision_attention(&self, person: Option<&str>) -> Result<Vec<DecisionAttention>> {
         let connection = self.readers.get();
-        let mut query = connection.prepare(&canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc5418ae8efae owner=st3_store::store::decision_attention TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
             FROM claims WHERE kind='decision.observed'
             AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
             ORDER BY CANONICAL_ASC(claims)"))?;
