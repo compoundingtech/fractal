@@ -1151,8 +1151,12 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
         elif not cont:
             uses = list(file_uses)
             if rel not in test_rels:
-                # a production file's own items (the ones that stay) are neighbours of the shared module
+                # a production file's own items (the ones that stay) are neighbours of the shared module;
+                # named explicitly, because a glob import of the same name elsewhere would make them ambiguous
                 uses.append("use super::%s::*;" % parts[-1])
+                own = sorted({it.name for it in items if it.kind in FREE_KINDS and it.kind != "mod" and it.is_pub and it.name and not any(x.startswith("#[cfg") for x in it.attrs)})
+                for k in range(0, len(own), 12):
+                    uses.append("use super::%s::{%s};" % (parts[-1], ", ".join(own[k : k + 12])))
         else:
             # inside the inline module `super` is the file's module; here that module is a sibling
             uses = list(file_uses)
