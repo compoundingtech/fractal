@@ -129,7 +129,7 @@ pub fn hook(
     if invocations.is_empty() && logs.is_empty() && code == 0 {
         return code;
     }
-    let subject = (!crate::driver_hook::identity_conflict(env))
+    let subject = (!st_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name)))
         .then(|| env.var("ST3_SUBJECT").or_else(|| env.var("ST_AGENT")))
         .flatten()
         .filter(|subject| subject.starts_with("agent/"));
