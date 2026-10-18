@@ -33,6 +33,7 @@ fn fleet(state: &AppState, root: &std::path::Path) {
     let source = format!(
         r#"version 2
 agent "reads-fixture.worker" {{ workspace "/tmp"; command "true"; restart always; }}
+agent "reads-fixture.second" {{ workspace "/tmp"; command "true"; restart always; }}
 mission "reads-fixture-mission" state="ready" {{
     goal "{SECRET} {INJECTION} Entscheidung 決定";
     step "build" {{ assigned-to "{AGENT}"; goal "{SECRET} {INJECTION}"; }}
@@ -100,6 +101,8 @@ async fn assistant_collection_read_timing_on_a_store_copy() {
     if seed {
         seed_assistant_timing_store(&state);
     }
+    state.store.start_agent_roster_refresher().unwrap();
+    state.store.start_attention_list_refresher().unwrap();
     crate::api::refresh_agent_roster(&state.store, false).unwrap();
     crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
     crate::api::client_v0::summary::refresh_published(&state, 0, false).unwrap();
@@ -184,6 +187,18 @@ fn seed_assistant_timing_store(state: &AppState) {
     }
     println!("assistant seed: mission_rows={missions} run_rows={runs} work_rows={} agent_rows={agents} attention_rows={asks} message_rows={messages}",
         runs * 3);
+}
+
+#[tokio::test]
+async fn assistant_baseline_summary_counts_include_person_ask_mission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    fleet(&state, root.path());
+    let (_, summary) = project(&state, &new_client_snapshot(&state), "summary",
+        &BTreeMap::new(), MAX_RESPONSE_BYTES).await.unwrap();
+    let expected = json!({"ready": 1, "running": 2});
+    assert_eq!(summary["counts"]["mission_states"], expected);
+    println!("assistant baseline mission_counts={expected}");
 }
 
 #[tokio::test]
