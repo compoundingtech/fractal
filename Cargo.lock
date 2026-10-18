@@ -4541,12 +4541,15 @@ dependencies = [
  "axum",
  "clap",
  "libc",
+ "parking_lot",
  "reqwest",
  "rmcp",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

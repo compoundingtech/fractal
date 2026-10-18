@@ -221,3 +221,110 @@ fn credential_reader_accepts_only_bounded_owner_only_regular_token_files() {
     std::fs::write(&path, [0xff]).unwrap();
     assert!(read_credential(&path).is_err());
 }
+
+#[derive(Clone, Default)]
+struct CapturedLogs(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer { self.clone() }
+}
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().clone()).unwrap()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_telemetry_is_correlated_and_content_free() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_writer(logs.clone()).finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("st3-client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let id = "request/12345678-1234-1234-1234-123456789abc";
+    let body = json!({"request_id":id,"value":{"content":"RESPONSE_CONTENT_SENTINEL"}}).to_string();
+    let expected_bytes = body.len();
+    let server_body = body.clone();
+    let router = Router::new()
+        .route("/v1/client/assistant/attention-rich", get(move || {
+            let body = server_body.clone();
+            async move { body }
+        }))
+        .route("/v1/client/assistant/propose", axum::routing::post(|| async {
+            (StatusCode::FORBIDDEN, r#"{"request_id":"REQUEST_SECRET_SENTINEL","code":"ERROR_SECRET_SENTINEL","message":"ERROR_CONTENT_SENTINEL"}"#)
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(),
+        bearer: "BEARER_SECRET_SENTINEL".into() };
+    assert_eq!(call(&adapter, "st_alerts_list", &json!({"cursor":"CURSOR_SECRET_SENTINEL"})).await.unwrap()["request_id"], id);
+    let mut args = send_arguments();
+    args["content"] = json!("ARGUMENT_CONTENT_SENTINEL");
+    assert_eq!(call(&adapter, "st_message_send", &args).await.unwrap_err()["code"], "daemon-denied");
+    assert_eq!(call(&adapter, "UNKNOWN_TOOL_SECRET_SENTINEL", &json!({})).await.unwrap_err()["code"], "unknown-tool");
+    assert_eq!(call(&adapter, "st_alert_get", &json!({})).await.unwrap_err()["code"], "invalid-arguments");
+    let text = logs.text();
+    assert_eq!(text.matches("ChatGPT tool call finished").count(), 4, "{text}");
+    for field in ["tool=\"st_alerts_list\"", "outcome=\"success\"", "code=\"ok\"",
+        "outcome=\"error\"", "code=\"daemon-denied\"", "code=\"invalid-arguments\"",
+        "tool=\"unknown\"", "duration_ms=", id, &format!("response_bytes={expected_bytes}")] {
+        assert!(text.contains(field), "{field}: {text}");
+    }
+    assert!(!text.contains("SENTINEL"), "{text}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_writer(logs.clone()).finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("st3-client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = entered.clone();
+    let router = Router::new()
+        .route("/v1/client/assistant/attention-rich", get(|| async { "INVALID_BODY_SECRET_SENTINEL" }))
+        .route("/v1/client/assistant/agents-rich", get(move || {
+            let notify = notify.clone();
+            async move {
+                notify.notify_one();
+                std::future::pending::<String>().await
+            }
+        }))
+        .route("/v1/client/assistant/missions-rich", get(|| async {
+            (StatusCode::PAYLOAD_TOO_LARGE, r#"{"code":"response-budget-exceeded","message":"BUDGET_CONTENT_SENTINEL"}"#)
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(), bearer: "test".into() };
+    assert_eq!(call(&adapter, "st_alerts_list", &json!({})).await.unwrap_err()["code"], "invalid-daemon-response");
+    assert_eq!(call(&adapter, "st_missions_list", &json!({})).await.unwrap_err()["code"], "incomplete");
+    assert_eq!(call(&disconnected_adapter(), "st_alerts_list", &json!({})).await.unwrap_err()["code"], "unavailable");
+    {
+        let args = json!({});
+        let pending = call(&adapter, "st_agents_list", &args);
+        tokio::pin!(pending);
+        tokio::select! {
+            () = entered.notified() => {},
+            result = &mut pending => panic!("dispatch completed before cancellation: {result:?}"),
+        }
+    }
+    let text = logs.text();
+    assert_eq!(text.matches("ChatGPT tool call finished").count(), 4, "{text}");
+    for code in ["invalid-daemon-response", "incomplete", "unavailable", "cancelled"] {
+        assert!(text.contains(&format!("code=\"{code}\"")), "{text}");
+    }
+    assert!(text.contains("outcome=\"cancelled\""), "{text}");
+    assert!(!text.contains("SENTINEL"), "{text}");
+    server.abort();
+}
