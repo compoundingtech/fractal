@@ -557,8 +557,12 @@ fetched every page it touched again with one `read()` call each, from the kernel
 into the connection's private cache: on dev3, 87,500 calls a second across 73 readers, with 79%
 of the daemon's CPU in the kernel (#3343). A mapped page needs no call and no copy, and all
 readers share the kernel's one copy of it. WAL frames are still read with `read()`. Mapped
-pages the daemon has touched count in its RSS as file-backed memory; they are the same
-page-cache pages `read()` used, reclaimable and charged to the same cgroup. Set
+pages the daemon has touched count in its RSS as file-backed memory (`RssFile`), so VmRSS,
+VmHWM and the `st.process.memory.rss` gauge read higher, by up to the hot part of the store:
+1.8 GB after a 30-second replay on a 29 GB store copy, while `RssAnon` fell by about 400 MB.
+They are the same page-cache pages `read()` filled, which the service cgroup's `memory.max`
+(`MemoryMax`, `MemoryHigh`) already counted, and the kernel reclaims them under pressure.
+Compare `RssAnon` for the daemon's own memory. Set
 `SMALLCLAIMS_READ_MMAP_MIB` in the **daemon's** environment to map at most that many MiB,
 or `0` to turn mapping off; values above 1,048,576 or invalid values use the default. The
 bundled SQLite is built with `SQLITE_MAX_MMAP_SIZE` raised to 1 TiB to allow it, since its
