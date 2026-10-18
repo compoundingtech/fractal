@@ -1422,12 +1422,12 @@ fn typescript_operation_methods(
         } else if id == "documents.list" {
             writeln!(
                 out,
-                "    async {method}(options: {{ prefix?: string; history?: boolean; cursor?: string; limit?: number }} = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options)); }}"
+                "    async {method}(options: {{ prefix?: string; history?: boolean; cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
         } else if id == "document-references.get" {
             writeln!(
                 out,
-                "    async {method}(subject: string): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ subject }})); }}"
+                "    async {method}(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}"
             )?;
         } else if id == "custom-subjects.list" {
             writeln!(
