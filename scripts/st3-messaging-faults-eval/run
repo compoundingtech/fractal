@@ -35,6 +35,10 @@ def now_ms():
     return time.time_ns() // 1_000_000
 
 
+# A message must be read within this long after its fault clears (the cases' read oracle).
+READ_DEADLINE_MS = 10_000
+
+
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
@@ -801,7 +805,16 @@ agent "fault-probe" {{
         trace_text = await target.cli("trace", "show", subject, "--json", "--limit", "100")
         claims = [json.loads(line) for line in trace_text.splitlines() if line]
         graph_reads = [claim for claim in claims if claim.get("kind") == "message.read"]
-        source_view = await source.api("/v1/messages/read/" + subject)
+        # The read receipt reaches the sender on an exchange after the read itself. Wait for it
+        # within the same read deadline, measured from this message's send, not one sample.
+        async def sender_converged():
+            view = await source.api("/v1/messages/read/" + subject)
+            return view if (view or {}).get("status") in ("read", "closed") else None
+        try:
+            source_view = await until(sender_converged,
+                                      max(0.0, (cleared + READ_DEADLINE_MS - now_ms()) / 1000))
+        except TimeoutError:
+            source_view = await source.api("/v1/messages/read/" + subject)
         result.update(
             warmup_received_copies=sum(1 for row in all_receipts
                 if row.get("subject") == warmup and row.get("event") == "received"),
