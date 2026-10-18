@@ -1302,10 +1302,7 @@ async fn runtime_only_leave_keeps_both_carriers_until_signed_proof_receipt() {
         retained_for_test(&fixture.receiver.fleet)
             .await
             .contains(&key),
-        "receiving the signed leave must not revoke before exporting the response: receiver={:?}; awaiting={:?}; source={:?}",
-        fixture.receiver.backend.0.fleet_view().unwrap(),
-        &fixture.receiver.fleet.leave.lock().await.awaiting,
-        fixture.leaving.fleet_view().unwrap()
+        "receiving the signed leave must not revoke before exporting the response"
     );
     let error = exchange(
         &http,
