@@ -577,8 +577,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
   each stream is a sequence of mostly single-threaded lanes and its output is printed whole
   once all four have finished, in the job summary's lane table as the streams' wall time. The
   generated changelog registry is written atomically and only when it differs, so the streams'
-  parallel readers are safe. The SDK frame CPU budgets (which measure CPU time) and the strict
-  plays (which use every vCPU, and need the Storybook build) run alone afterwards.
+  parallel readers are safe. The kit stream contains only typecheck and play-index contracts.
+  Its browser controls and Storybook build run after all streams finish to avoid competing
+  with scenario, app and SDK tests. The SDK frame CPU budgets (which measure CPU time) and
+  strict plays (which use every vCPU) then also run alone.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them. The detector separately emits `kit-inputs`: app-only changes
   skip kit play-index contracts, Storybook and strict browser plays; kit source,
@@ -681,11 +683,14 @@ and the gate refuses shard options for any set but `all`. Each shard validates t
 **full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
 cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
 configures N. `KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
+Every shard generates and checks the app changelog registry after the frozen install,
+before starting any streams: Storybook imports it through the workspace stories.
 Every selected story still runs all four width/theme cases with the same runner and
 assertions. Empty shards fail unless N exceeds the story count. Shard 0 runs every
-stream in `scripts/ci-fractal-web`; the other shards run only `stream_kit`'s play index
-contracts and Storybook build, then their strict plays. The kit typecheck, the
-isolation/negative controls and the SDK frame CPU budgets stay on shard 0. App-only
+stream in `scripts/ci-fractal-web`; the other shards run only the play index contracts,
+Storybook build and their strict plays. Browser controls and Storybook wait for every
+stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
+stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
 
 Every shard publishes `receipt.json` in an artifact named

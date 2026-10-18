@@ -318,18 +318,29 @@ for required in (False, True):
 fake_lane = r"""lane() {
   printf '%s\n' "$1"
   case "$1" in
+    "UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
+      [ "${TEST_STREAMS_ACTIVE:-0}" -eq 0 ] || { echo "exclusive kit lane overlapped test streams" >&2; return 17; } ;;
+  esac
+  case "$1" in
     "App unit tests") if [ "${FAIL_APP:-0}" -ne 0 ]; then return "$FAIL_APP"; fi ;;
-    "UI kit Storybook"*) if [ "${FAIL_BUILD:-0}" -ne 0 ]; then return "$FAIL_BUILD"; fi ;;
+    "UI kit Storybook"*)
+      [ -f "$GITHUB_STEP_SUMMARY.registry" ] || { echo "missing changelog registry" >&2; return 1; }
+      if [ "${FAIL_BUILD:-0}" -ne 0 ]; then return "$FAIL_BUILD"; fi ;;
+    "Changelog registry"*) touch "$GITHUB_STEP_SUMMARY.registry" ;;
     "UI kit play index contracts") if [ "${FAIL_INDEX:-0}" -ne 0 ]; then return "$FAIL_INDEX"; fi ;;
     "UI kit strict plays"*) if [ "${FAIL_KIT:-0}" -ne 0 ]; then return "$FAIL_KIT"; fi ;;
   esac
 }
 """
 control_flow = lanes[:lanes.index("lane() {")] + fake_lane + lanes[lanes.index("toolchain() {"):]
+# Mark the lifetime of the actual parallel runner, including its child processes.
+# Merely checking printed lane order is insufficient: stream logs are buffered until all finish.
+control_flow = control_flow.replace("run_streams() {", "run_streams() {\n  export TEST_STREAMS_ACTIVE=1")
+control_flow = control_flow.replace('  return "$status"\n}', '  unset TEST_STREAMS_ACTIVE\n  return "$status"\n}')
 for shard, app, kit, build, index, expected in (
     (0, 0, 0, 0, 0, 0), (1, 0, 0, 0, 0, 0),
     (0, 7, 0, 0, 0, 1), (0, 0, 9, 0, 0, 9), (1, 0, 9, 0, 0, 9),
-    (0, 0, 0, 11, 0, 1), (1, 0, 0, 0, 13, 1),
+    (0, 0, 0, 11, 0, 11), (1, 0, 0, 0, 13, 1),
 ):
     with tempfile.TemporaryDirectory() as scratch:
         result = subprocess.run(["bash", "-c", control_flow, str(root / "scripts/ci-fractal-web")],
@@ -339,12 +350,16 @@ for shard, app, kit, build, index, expected in (
                                     "FAIL_APP": str(app), "FAIL_KIT": str(kit),
                                     "FAIL_BUILD": str(build), "FAIL_INDEX": str(index)})
         assert result.returncode == expected, (expected, result)
-        for name in ("Changelog registry", "App unit tests", "Scenario tests", "Buck typecheck", "UI kit typecheck",
-                     "UI kit context isolation controls", "SDK frame CPU budgets"):
-            assert (name in result.stdout) == (shard == 0 and (name != "SDK frame CPU budgets" or not (app or build or index))), (name, result.stdout)
-        assert ("UI kit Storybook and module graph" in result.stdout) == (not index), result.stdout
+        assert "Changelog registry" in result.stdout, result.stdout
+        assert Path(scratch, "summary.registry").is_file(), result.stdout
+        for name in ("App unit tests", "Scenario tests", "Buck typecheck", "UI kit typecheck"):
+            assert (name in result.stdout) == (shard == 0), (name, result.stdout)
+        assert ("UI kit context isolation controls" in result.stdout) == (shard == 0 and not app and not index), result.stdout
+        assert ("SDK frame CPU budgets" in result.stdout) == (shard == 0 and not (app or build or index)), result.stdout
+        assert ("UI kit Storybook and module graph" in result.stdout) == (not app and not index), result.stdout
         assert ("UI kit strict plays" in result.stdout) == (not app and not build and not index), result.stdout
-print("passed: shard 0 runs every lane once, other shards only the kit build and their plays")
+print("passed: every shard generates Storybook inputs before building; only shard 0 runs non-kit lanes")
+print("passed: browser controls, Storybook and strict plays wait until the non-kit test streams finish")
 
 # Exercise the production hash/receipt aggregator without a browser.
 subprocess.run(["node", "--input-type=module", "-"], cwd=root, check=True, input=r'''
