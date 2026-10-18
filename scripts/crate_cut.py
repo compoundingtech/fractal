@@ -1099,11 +1099,12 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
                     leaf = segs[-1]
                     if leaf == "*":
                         extra = ["crate"] + hit[1] + absolute[hit[0]:]  # the shared module's items too
-                    elif leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
+                    elif len(absolute) == hit[0] + 1 and leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
                         segs = ["crate"] + hit[1] + absolute[hit[0]:]
                         test_only = False
-                    else:
+                    elif len(absolute) == hit[0] + 1:
                         continue  # not extracted: it stays in the cfg(test) module
+                    # deeper than the module (a child module): the path stays as it is
                 if test_only:
                     segs = None  # exists only for cfg(test)
             if extra is not None:
