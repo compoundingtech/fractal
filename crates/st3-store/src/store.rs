@@ -257,6 +257,7 @@ pub mod published_views;
 pub mod published_list;
 pub mod mission_list;
 pub mod work_list;
+pub mod runtime_list;
 #[cfg(test)]
 pub mod tombstones_tests;
 #[cfg(test)]

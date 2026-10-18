@@ -86,6 +86,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case projectionDetailInvalidSource
     case runtimeNotLocal
     case runtimeAuthorityIndeterminate
+    case runtimeListNotReady
+    case runtimeListEnded
     case remoteUnavailable
     case `internal`
     case terminalUnavailable
@@ -160,6 +162,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "response-budget-exceeded": .responseBudgetExceeded
         case "content-not-text": .contentNotText
         case "runtime-authority-indeterminate": .runtimeAuthorityIndeterminate
+        case "runtime-list-not-ready": .runtimeListNotReady
+        case "runtime-list-ended": .runtimeListEnded
         case "remote-unavailable": .remoteUnavailable
         case "internal": .internal
         default: .unknown(raw)
@@ -218,6 +222,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .responseBudgetExceeded: "response-budget-exceeded"
         case .contentNotText: "content-not-text"
         case .runtimeAuthorityIndeterminate: "runtime-authority-indeterminate"
+        case .runtimeListNotReady: "runtime-list-not-ready"
+        case .runtimeListEnded: "runtime-list-ended"
         case .remoteUnavailable: "remote-unavailable"
         case .internal: "internal"
         case .unknown(let value): value

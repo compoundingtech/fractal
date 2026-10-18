@@ -1300,6 +1300,8 @@ export type ErrorCode = (
   | "rate-limited"
   | "runtime-not-local"
   | "runtime-authority-indeterminate"
+  | "runtime-list-not-ready"
+  | "runtime-list-ended"
   | "remote-unavailable"
   | "terminal-unavailable"
   | "terminal-ended"
