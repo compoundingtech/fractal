@@ -1283,10 +1283,10 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             pos = _insert_position(otext, cont)
             if pos is not None:
                 spath = "::".join(_shared_path(rel, cont))
-                line = '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::*;\n' % spath
+                line = '#[cfg(any(test, feature = "test-support"))]\n#[allow(unused_imports)]\npub use crate::%s::*;\n' % spath
                 named = sorted({x for u in ns for x in (u.names if u.kind == "macro_call" else ([u.name] if u.name else [])) if u.kind != "impl"})
                 for k in range(0, len(named), 10):
-                    line += '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::{%s};\n' % (spath, ", ".join(named[k : k + 10]))
+                    line += '#[cfg(any(test, feature = "test-support"))]\n#[allow(unused_imports)]\npub use crate::%s::{%s};\n' % (spath, ", ".join(named[k : k + 10]))
                 Path(opath).write_text(otext[:pos] + line + otext[pos:])
     for parent, decls in added_decls.items():
         ppath = os.path.join(src_dir, parent)
@@ -2057,6 +2057,85 @@ def cmd_inventory(args):
     return 1 if problems else 0
 
 
+
+def _unused_imports(cmd, crate):
+    """{(file, start, end)} of the `unused_imports` warnings one compilation of `crate` reports."""
+    out = subprocess.run(cmd, capture_output=True, text=True).stdout
+    found = set()
+    for line in out.split("\n"):
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if m.get("reason") != "compiler-message":
+            continue
+        d = m["message"]
+        if (d.get("code") or {}).get("code") != "unused_imports" or crate not in m.get("package_id", "").replace("#", "/"):
+            continue
+        for sp in d["spans"]:
+            if sp["is_primary"]:
+                found.add((sp["file_name"], sp["byte_start"], sp["byte_end"]))
+    return found
+
+
+def cmd_imports(args):
+    """Remove the imports nothing uses. `cargo fix` removes an import that only test code uses (the library
+    build has no use for it); this removes what both the library and its test build leave unused, and gates
+    with `#[cfg(test)]` what only the library build does."""
+    for crate in [c for c in args.crates.split(",") if c]:
+        lib = _unused_imports(["cargo", "check", "-p", crate, "--lib", "--message-format=json"], crate.replace("-", "_") if False else crate)
+        test = _unused_imports(["cargo", "test", "-p", crate, "--lib", "--no-run", "--message-format=json"], crate)
+        remove = lib & test
+        gate = lib - test
+        by_file = collections.defaultdict(lambda: ([], []))
+        for f, a, b in remove:
+            by_file[f][0].append((a, b))
+        for f, a, b in gate:
+            by_file[f][1].append((a, b))
+        for f, (rem, gat) in by_file.items():
+            raw = Path(f).read_bytes()
+            text = raw.decode()
+            def cspan(a, b):
+                return len(raw[:a].decode()), len(raw[:b].decode())
+            rem_c = [cspan(a, b) for a, b in rem]
+            gat_c = [cspan(a, b) for a, b in gat]
+            edits = []
+            for it in ri.parse(text):
+                if it.kind != "use":
+                    continue
+                parsed = use_paths(it.text)
+                if not parsed:
+                    continue
+                attrs, vis, paths = parsed
+                code = ri._leading_meta(text, it.start, len(text))[1]
+                inside = lambda spans: [(a, b) for a, b in spans if it.start <= a and b <= it.end]
+                r, g = inside(rem_c), inside(gat_c)
+                if not r and not g:
+                    continue
+
+                def leaf_text(segs, alias):
+                    return alias or segs[-1]
+
+                def flagged(segs, alias, spans):
+                    names = {text[a:b].split("::")[-1].split(" as ")[-1].strip() for a, b in spans}
+                    whole = {text[a:b].strip() for a, b in spans}
+                    return leaf_text(segs, alias) in names or "::".join(segs) in whole
+                keep, gated = [], []
+                for segs, alias in paths:
+                    if flagged(segs, alias, r):
+                        continue
+                    (gated if flagged(segs, alias, g) else keep).append((segs, alias))
+                new = render_use(attrs, vis, keep) if keep else ""
+                if gated:
+                    new = (new + "\n" if new else "") + render_use("#[cfg(test)]\n" + attrs, vis, gated)
+                edits.append((code, it.end, new))
+            for a, b, rep in sorted(edits, reverse=True):
+                text = text[:a] + rep + text[b:]
+            Path(f).write_text(text)
+        print("%s: removed %d, gated %d unused imports" % (crate, len(remove), len(gate)))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2065,6 +2144,8 @@ def main(argv=None):
     pf.add_argument("--all-targets", action="store_true")
     pf.add_argument("--rounds", type=int, default=12)
     sub.add_parser("inventory", help="carry the SQLite large-value inventory over a code move")
+    pi = sub.add_parser("imports", help="remove unused imports without breaking the test build")
+    pi.add_argument("--crates", required=True)
     ps = sub.add_parser("sweep", help="remove the dead code a cut leaves in the lower crates")
     ps.add_argument("--roots", required=True)
     ps.add_argument("--rounds", type=int, default=4)
@@ -2091,6 +2172,8 @@ def main(argv=None):
         return cmd_sweep(args)
     if args.cmd == "inventory":
         return cmd_inventory(args)
+    if args.cmd == "imports":
+        return cmd_imports(args)
     config = load_config(args.config)
     pins = [l.strip() for l in open(args.pins)] if args.pins and os.path.exists(args.pins) else []
     nodes, files, tfiles = load(args.src)
