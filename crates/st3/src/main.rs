@@ -1,3 +1,9 @@
+#[cfg(test)]
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+#[allow(dead_code)]
+mod ci_test_paths;
+
 use st3::GitChangesStore;
 use st3::cli_output;
 use st3::{cli_print as print, cli_println as println};
