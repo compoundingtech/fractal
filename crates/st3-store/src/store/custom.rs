@@ -933,7 +933,7 @@ pub fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
     })
 }
 
-fn source(connection: &Connection, subject: &str) -> Result<Option<Value>> {
+pub fn source(connection: &Connection, subject: &str) -> Result<Option<Value>> {
     let text: Option<String> = connection
         .query_row(
             "SELECT body FROM custom_sources WHERE subject=?1",
