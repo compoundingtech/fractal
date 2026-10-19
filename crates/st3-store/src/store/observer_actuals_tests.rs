@@ -28,6 +28,64 @@ fn read(store: &Store) -> (Option<Value>, u64) {
 }
 
 #[test]
+fn terminal_authority_ignores_idempotent_message_traffic_but_wakes_on_shared_conflict() {
+    let store = Store::open_memory("owner").unwrap();
+    let subject = "agent/terminal-message-traffic";
+    store.append_claim(&crate::model::ClaimInput {
+        subject: subject.into(), kind: "runtime.observed".into(),
+        actor: Some("person/robin".into()),
+        fields: serde_json::from_value(json!({
+            "status": "running", "runtime_id": "terminal-message-traffic",
+            "incarnation_id": "one", "terminal": true,
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some("terminal-operation".into()),
+    }).unwrap();
+    let mut changes = store.subscribe_runtime_authority(subject);
+    assert_eq!(store.runtime_authority(subject).unwrap().unwrap().reachability, "reachable");
+    changes.borrow_and_update();
+    for index in 0..100 {
+        // The durable message.send path: a fresh message and fresh idempotency operation.
+        store.append_claim(&crate::model::ClaimInput {
+            subject: format!("message/traffic-{index}"), kind: "message.sent".into(),
+            actor: Some("person/robin".into()),
+            fields: serde_json::from_value(json!({
+                "from": "person/robin", "to": "person/blair",
+                "content": format!("message {index}"), "status": "sent",
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("message-traffic-{index}")),
+        }).unwrap();
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+        // The stream's production read gate must stay closed after every committed message.
+        if changes.has_changed().unwrap() {
+            changes.borrow_and_update();
+            store.runtime_authority(subject).unwrap();
+        }
+        assert_eq!(work.finish().statements, 0, "message {index} triggered authority SQL");
+    }
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let operation: String = transaction.query_row(
+            "SELECT json_extract(body, '$._operation.id') FROM claims WHERE subject=?1",
+            [subject], |row| row.get(0),
+        ).unwrap();
+        // A second claim on another subject reuses the operation with a different digest.
+        // Register it exactly as incremental receive does; no terminal claim changes.
+        let rival = append_claim_tx(&transaction, store.origin(), "message/cross-subject-conflict",
+            "message.sent", Some("person/robin"), &json!({
+                "fields": {"from":"person/robin", "to":"person/blair", "content":"conflict", "status":"sent"},
+                "_operation": {"id":operation, "request_digest":"different-request"},
+            }), &[], None).unwrap();
+        assert!(!smallclaims::store::register_operation_tx(&transaction, &rival).unwrap());
+        transaction.commit().unwrap();
+    }
+    assert!(changes.has_changed().unwrap(), "shared-operation conflict must wake the terminal");
+    assert_eq!(store.runtime_authority(subject).unwrap().unwrap().reachability, "indeterminate");
+}
+
+#[test]
 fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
     let store = Store::open_memory("owner").unwrap();
     let subject = "resource/terminal-coverage";
