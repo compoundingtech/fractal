@@ -3438,7 +3438,7 @@ impl Store {
         let bound = {
             let connection = self.connection.write();
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hb2eb7457a31f owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_invite_tokens SET bound_key=?2, bound_name=?3, writer_floor=?4, admitted_claim=?5
+                /* sqlite-large-value: allow-for-now lv-h19c2bdfa18d0 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_invite_tokens SET bound_key=?2, bound_name=?3, writer_floor=?4, admitted_claim=?5
                  WHERE invite_id=?1 AND bound_key IS NULL AND token IS NOT NULL",
                 params![request.invite, request.member_key, request.name, floor, reused.as_ref().map(|(claim, _)| claim)],
             )?
