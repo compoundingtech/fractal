@@ -1,3 +1,4 @@
+use crate::SeatsStore;
 use super::*;
 
 #[derive(Default, Deserialize)]

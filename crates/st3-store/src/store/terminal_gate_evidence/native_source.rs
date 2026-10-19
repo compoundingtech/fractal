@@ -12,7 +12,7 @@ pub use crate::store::terminal_gate_evidence::native_source_shared::{Binding, FI
 pub use crate::store::terminal_gate_evidence::native_source_shared::{required};
 use super::*;
 
-use smallclaims::ivm::install::Installer;
+
 use std::collections::BTreeMap;
 
 #[cfg(test)]

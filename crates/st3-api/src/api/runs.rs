@@ -1,3 +1,4 @@
+use crate::RevisionSeatsStore;
 use super::*;
 
 /// Start running each exec gate of a mission file once, the way a run would: `st missions check`.

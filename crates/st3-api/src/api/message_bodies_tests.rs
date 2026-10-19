@@ -1,5 +1,6 @@
 //! A message past the inline limit keeps a preview in its claim and the whole text in a file on
 //! the member that took it. Each test owns its stores; no daemon, fleet or seat is touched.
+use crate::RetirementsStore;
 use super::client_v0::ClientSession;
 use super::*;
 use crate::message_body::{INLINE_MAX_BYTES, MAX_BYTES};

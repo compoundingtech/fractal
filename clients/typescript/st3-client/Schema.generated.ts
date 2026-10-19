@@ -866,7 +866,7 @@ export type UsageContext = typeof UsageContext.Type
 export type UsageContextEncoded = typeof UsageContext.Encoded
 
 export const UsageSummary = /*#__PURE__*/ (() => Schema.Struct({
-  "aggregation": Schema.Literal("cumulative-per-incarnation-else-response-deltas"),
+  "aggregation": Schema.Literals(["cumulative-per-incarnation-else-response-deltas","rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas"]),
   "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "context": optionalKey(UsageContext),
@@ -3386,6 +3386,8 @@ export type ParticipantRefEncoded = typeof ParticipantRef.Encoded
 
 /** Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not. */
 export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
+  /** The complete local authorization model supplying this judgment. Absent on older producers; the label alone does not certify candidate migration or authority. */
+  "authorization_model": optionalKey(Schema.Literals(["legacy","candidate"])).annotate({ description: "The complete local authorization model supplying this judgment. Absent on older producers; the label alone does not certify candidate migration or authority." }),
   /** The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label. */
   "device": optionalKey(Schema.String).annotate({ description: "The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label." }),
   /** The public key that signed (`p256:…` or a bare Ed25519 key). */

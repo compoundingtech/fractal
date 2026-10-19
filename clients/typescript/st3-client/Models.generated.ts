@@ -1647,6 +1647,7 @@ export type MessageBody = {
 };
 
 export type MessageProvenance = {
+  authorization_model?: "legacy" | "candidate";
   device?: string;
   key?: string;
   reason?: string;
@@ -3154,7 +3155,7 @@ export type UsageRow = {
 };
 
 export type UsageSummary = {
-  aggregation: "cumulative-per-incarnation-else-response-deltas";
+  aggregation: "cumulative-per-incarnation-else-response-deltas" | "rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas";
   cache_write_tokens?: number;
   cached_tokens: number;
   context?: UsageContext;

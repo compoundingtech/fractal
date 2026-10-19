@@ -3362,7 +3362,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
+source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
 dependencies = [
  "libc",
  "pty-core",
@@ -3373,7 +3373,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
+source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
 dependencies = [
  "indexmap",
  "libc",
@@ -3388,7 +3388,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
+source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -4967,6 +4967,7 @@ dependencies = [
  "st3-peer",
  "st3-reconcile",
  "st3-schema",
+ "st3-seats",
  "st3-store",
  "st3-telemetry",
  "st3-terminal-direct",
@@ -5043,7 +5044,7 @@ dependencies = [
  "smallclaims",
  "st3-evidence",
  "st3-kernel",
- "st3-store",
+ "st3-seats",
  "tempfile",
  "tokio",
  "uuid",
@@ -5257,6 +5258,40 @@ dependencies = [
  "sha2",
  "st-storage-version",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "st3-seats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "kdl",
+ "libc",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-client",
+ "st3-kernel",
+ "st3-schema",
+ "st3-seats",
+ "st3-secrets",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]
