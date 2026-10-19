@@ -2,9 +2,9 @@
 use crate::SeatsStore;
 use crate::EvidenceStore;
 use super::*;
-use st3_seats::store::shared::*;
-use st3_seats::store::roster_fresh_proof_tests_shared::*;
-use st3_seats::store::roster_fresh_proof_tests_shared::{SUBJECT, unrelated};
+use st3_attention::store::shared::*;
+use st3_attention::store::roster_fresh_proof_tests_shared::*;
+use st3_attention::store::roster_fresh_proof_tests_shared::{SUBJECT, unrelated};
 
 
 pub fn fixture(history: bool) -> (Store, u64, Arc<Vec<Value>>, u128) {

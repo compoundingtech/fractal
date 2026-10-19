@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use st3::AttentionStore;
 use st3::MissionsStore;
 use st3::SeatsStore;
 use st3::SeatsStoreCore;

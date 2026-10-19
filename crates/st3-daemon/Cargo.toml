@@ -9,7 +9,7 @@ license = "MIT"
 # Enabled by the st3 package for its tests and fixtures, and by the dev-dependency below for this package's
 # own tests (so `cargo test -p st3-daemon --lib` runs the test-support tests, as `-p st3 --lib` did).
 # Never enabled by a production build.
-test-support = ["st3-telemetry/test-support", "st3-store/test-support", "st3-delivery/test-support", "st3-missions/test-support", "st3-seats/test-support", "st3-evidence/test-support", "st3-github/test-support", "st3-peer/test-support", "st3-reconcile/test-support", "st3-api/test-support"]
+test-support = ["st3-telemetry/test-support", "st3-store/test-support", "st3-delivery/test-support", "st3-missions/test-support", "st3-seats/test-support", "st3-attention/test-support", "st3-evidence/test-support", "st3-github/test-support", "st3-peer/test-support", "st3-reconcile/test-support", "st3-api/test-support"]
 
 [dependencies]
 anyhow = "1"
@@ -57,6 +57,7 @@ st3-store = { path = "../st3-store" }
 st3-delivery = { path = "../st3-delivery" }
 st3-missions = { path = "../st3-missions" }
 st3-seats = { path = "../st3-seats" }
+st3-attention = { path = "../st3-attention" }
 st3-evidence = { path = "../st3-evidence" }
 st3-github = { path = "../st3-github" }
 st3-peer = { path = "../st3-peer" }

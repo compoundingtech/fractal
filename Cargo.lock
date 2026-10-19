@@ -4836,6 +4836,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-attention"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-attention",
+ "st3-client",
+ "st3-kernel",
+ "st3-schema",
+ "st3-seats",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "st3-client"
 version = "0.1.0"
 dependencies = [
@@ -4958,6 +4981,7 @@ dependencies = [
  "st-drivers",
  "st-runtime",
  "st3-api",
+ "st3-attention",
  "st3-client",
  "st3-daemon",
  "st3-delivery",
@@ -5069,9 +5093,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "st3-attention",
  "st3-evidence",
  "st3-kernel",
- "st3-seats",
  "tempfile",
  "tokio",
  "uuid",
