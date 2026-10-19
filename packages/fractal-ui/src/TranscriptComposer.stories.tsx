@@ -123,11 +123,11 @@ async function settleFrames() {
   for (let frame = 0; frame < 3; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
 }
 /** An agent reply keeps a scrolled-up reader's line and offers the jump; the reader's own send brings it into view. */
-export const OwnSendFollows: Story = { tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const OwnSendFollows: Story = { tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
   const canvas = within(canvasElement)
   // This play starts with a reader in older history, so reveal the deliberately deferred turns first.
   await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
-  const viewport = await committedTranscriptHistory(canvasElement, historyTurns.length)
+  const viewport = await committedTranscriptHistory(canvasElement, historyTurns.length, abortSignal)
   const jump = canvas.getByText('New messages ↓')
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   // The reader scrolls up into history.
