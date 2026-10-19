@@ -66,6 +66,14 @@ export const Stale: Story = {
     // A last-observed roster has one glyph tone: nothing reads as live.
     const tones = new Set([...canvasElement.querySelectorAll('[data-row-column="glyph"] svg')].map(svg => getComputedStyle(svg).color))
     await expect(tones.size).toBe(1)
+    // Every fixture event predates the frozen snapshot; a newer event must not be clamped into a misleading "0s".
+    const release = within(canvasElement).getByText('Draft release notes').closest('[data-testid="milestone-agent-row"]')!
+    await expect(release.querySelector('[data-row-column="time"]')).toHaveTextContent('14s')
+    const working = canvasElement.querySelector('[data-row-column="glyph"] [data-status="working"]')!
+    const idle = canvasElement.querySelector('[data-row-column="glyph"] [data-status="idle"]')!
+    await expect(working).toHaveAttribute('data-frozen', 'true')
+    await expect(idle).toHaveAttribute('data-frozen', 'true')
+    await expect(working.querySelectorAll('svg circle, svg path').length).toBeGreaterThan(idle.querySelectorAll('svg circle, svg path').length)
   },
 }
 export const StaleLight = light(Stale)

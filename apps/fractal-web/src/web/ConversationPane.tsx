@@ -6,10 +6,11 @@ import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-u
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
-import { useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot } from '../data/react.tsx'
-import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
+import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot } from '../data/react.tsx'
+import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
@@ -51,6 +52,9 @@ export const ConversationPane = ({
   const interest = React.useMemo(() => shellInterest ?? source.conversationInterest?.(agentRef), [shellInterest, source, agentRef])
   useFeedInterest({ interest, visible: shellInterest === undefined && visible })
   const feed = useConversation(agentRef)
+  const connection = useConnection()
+  // The same last-observed rule as the roster: a stale feed or a connection that is not live.
+  const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const projectTranscript = React.useMemo(createConversationTranscript, [])
   const state = projectTranscript(feed, { agentName, showSystemEvents })
   const observed = state._tag === 'Observed'
@@ -107,11 +111,12 @@ export const ConversationPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} ux={ux} visible={visible} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} stale={stale} ux={ux} visible={visible} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, ux, visible }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, stale, ux, visible }: {
+  readonly stale: boolean
   readonly ux?: UxTelemetry
   readonly visible: boolean
   readonly agentRef: string
@@ -148,6 +153,10 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     if (result._tag === 'Refused' && runId !== undefined && currentRun.current === runId) setStopRefusal({ runId, detail: result.detail })
   }, [agentControls, agentRef, runId])
   const retryConversation = source.retryConversation
+  // Only a failed (or not-yet-found) read can recover by re-acquiring the follow; refusals cannot.
+  const retryUnavailable = state._tag === 'Unavailable' && retryConversation !== undefined && (state.classification === 'failed' || state.classification === 'not-found')
+    && !(feed._tag === 'Unavailable' && feed.retryable === false) ? () => retryConversation(agentRef) : undefined
+  const frozen = React.useMemo(() => stale && state._tag === 'Observed' ? frozenTranscript(state.turns) : undefined, [stale, state])
   const renderInlineReference = React.useMemo(() => onOpenDocument === undefined ? undefined : documentReferences(onOpenDocument), [onOpenDocument])
   // A Markdown link to a `doc/…` opens it in a tab instead of following a relative URL.
   const followDocumentLinks = (event: React.MouseEvent) => {
@@ -160,17 +169,17 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-    <ConversationTranscript
+    {state._tag === 'Unavailable' ? <ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable} /> : <ConversationTranscript
       agentRef={agentRef}
       feed={feed}
       active={visible}
       viewportKey={agentRef}
-      turns={state._tag === 'Observed' ? state.turns : []}
+      turns={frozen?.turns ?? (state._tag === 'Observed' ? state.turns : [])}
       scrollToBottomKey={feed._tag === 'Observed' ? feed.value.lastSendId : undefined}
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
-      onRetrySync={state._tag === 'Unavailable' || retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
+      onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
       onLoadImage={(src) => { const url = openableImageUrl(src); if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer') }}
       onRetrySend={grants.messageSend === 'granted' ? (id) => {
@@ -178,15 +187,11 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
         const item = feed.value.items.find(item => item.id === id)
         if (item !== undefined) void binding.retry(item)
       } : undefined}
-      {...(state._tag === 'Unavailable' ? { availability: {
-        ...state.availability,
-        // Preserve the follow-retry policy; the unavailable body owns its single recovery action.
-        ...(retryConversation === undefined ? {} : { action: { label: 'Try again', onPress: () => retryConversation(agentRef) } }),
-      } } : {})}
       {...(state._tag === 'Observed' && state.history._tag === 'HasOlder' ? { history: state.history } : {})}
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
-    />
+    />}
     </div>
+    {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
     <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
@@ -210,3 +215,4 @@ function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.Compone
   const headerActionsHost = React.useContext(ThreadHeaderSlotContext)
   return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} />
 }
+

@@ -138,7 +138,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         pairing_grant: Some(granted.subject.clone()),
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
         assistant_write: None,
-        conversation_blocks:false, local_peer:false, scopes })
+        conversation_blocks:false, messages_paging:false, local_peer:false, scopes })
 }
 
 pub fn authorize_route(session: &ClientSession, request: &Request<Body>)

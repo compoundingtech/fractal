@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Run the onboarding-play eval. With no flags it spends nothing: it checks the judge against its
 # fixtures and prints the plan. A paid run needs --paid and a run cap:
 #
@@ -13,7 +14,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-paid=false; max_runs=0; harness=claude; variants="silent,skip"; st_bin="${ST_BIN:-}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+paid=false; max_runs=0; harness=claude; variants="silent,skip"; st_bin="${FRACTAL_BIN-${ST_BIN:-}}"
 claude_dir=""; codex_home=""; out="$here/reports/run-$(date -u +%Y%m%dT%H%M%SZ)"
 overall_s=900; person="person/avery"; plumbing=false
 usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
@@ -48,7 +50,8 @@ if $plumbing; then
   ln -s "$(command -v pty)" "$root/home/.local/bin/pty"
   plumb_env=(env -i PATH="$root/home/.local/bin:$PATH" HOME="$root/home" USER=avery LANG="${LANG:-C.UTF-8}"
     XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/home/.local/state" XDG_RUNTIME_DIR="$root/run"
-    ST_BIN="$st_bin")
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    FRACTAL_BIN="$st_bin" ST_BIN="$st_bin")
   cleanup_plumbing() {
     local pid
     for pid in $(pgrep -u "$(id -u)" -x st3 || true); do
@@ -103,7 +106,8 @@ for variant in "${plan[@]}"; do
   root="$(mktemp -d)"; mkdir -p "$root/home/.config" "$root/home/.local/state" "$root/run"
   run_env=(env -i PATH="$PATH" HOME="$root/home" USER=avery LANG="${LANG:-C.UTF-8}" TERM=xterm-256color
     XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/home/.local/state" XDG_RUNTIME_DIR="$root/run"
-    ST_BIN="$st_bin" EVAL_PERSON="$person")
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    FRACTAL_BIN="$st_bin" ST_BIN="$st_bin" EVAL_PERSON="$person")
   [ -n "$claude_dir" ] && run_env+=(CLAUDE_CONFIG_DIR="$claude_dir")
   [ -n "$codex_home" ] && run_env+=(CODEX_HOME="$codex_home")
   st() { "${run_env[@]}" "$st_bin" "$@"; }
