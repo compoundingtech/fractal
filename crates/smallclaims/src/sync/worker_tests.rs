@@ -1116,7 +1116,15 @@ mod retry_tests {
                         if request.method() == axum::http::Method::POST {
                             observed.lock().push(preferred);
                             if preferred && !up.load(Ordering::SeqCst) {
-                                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                                // Fail the HTTP stream, not an application response (503
+                                // must retain the route under the transport-only policy).
+                                return Response::new(Body::from_stream(
+                                    futures_util::stream::once(async {
+                                        Err::<Bytes, _>(std::io::Error::from(
+                                            std::io::ErrorKind::ConnectionReset,
+                                        ))
+                                    }),
+                                ));
                             }
                         }
                         next.run(request).await
