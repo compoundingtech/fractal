@@ -49,8 +49,9 @@ def project($nodes; $root; $name; $ancestors):
         error("malformed flake flag: \($name)")
       else
         {
-          # Preserve source-kind fields (e.g. dir), but not update timestamps.
-          locked: ($locked | del(.lastModified)),
+          # Flake sourceInfo exposes metadata such as lastModified to derivations.
+          # Preserve every locked field, including fields added by future lock formats.
+          locked: $locked,
           flake: (if $node | has("flake") then $node.flake else true end),
           inputs: (inputs($nodes; $name) | to_entries | map(
             .key as $input

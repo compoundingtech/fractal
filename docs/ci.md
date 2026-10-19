@@ -662,7 +662,9 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `nix/web-shell-inputs.json`, `scripts/ci-web-shell` and `scripts/ci-web-shell-inputs.jq`
   with a canonical jq projection of the declared inputs' transitive lock graph and system.
   `web-shell-inputs.json` declares the root inputs once; the projection resolves follows,
-  includes locked source identities and edges, and rejects malformed references or cycles.
+  includes each complete `locked` object and edges, and rejects malformed references or cycles.
+  Metadata such as `lastModified` is retained because flake `sourceInfo` exposes it to
+  derivations (including the upstream Genie's build stamp); future locked fields also affect keys.
   Root Rust inputs and unrelated `flake.nix` edits do not invalidate the entry.
   No Nix evaluation, input fetch or IFD runs during key computation or cache-hit lookup.
   Both publishers and consumers use the same exact key, with no prefix restoration.

@@ -40,7 +40,7 @@ def fixture_lock():
     def node(rev, inputs=None):
         result = {
             'locked': {'type': 'github', 'owner': 'fixture', 'repo': rev,
-                       'rev': rev, 'narHash': 'sha256-fixture-' + rev},
+                       'rev': rev, 'narHash': 'sha256-fixture-' + rev, 'lastModified': 1},
             'original': {'type': 'github', 'owner': 'fixture', 'repo': rev},
         }
         if inputs is not None:
@@ -138,8 +138,16 @@ class WebShellKeyTest(unittest.TestCase):
             self.assertEqual(key(), initial, 'Rust-only flake edits must preserve the key')
             lock['nodes']['rust-pkgs']['locked']['rev'] = 'rust2'
             lock['nodes']['fenix']['locked']['rev'] = 'fenix2'
+            lock['nodes']['rust-pkgs']['locked']['lastModified'] = 2
             self.assertEqual(key(), initial, 'Unreachable Rust lock edits must preserve the key')
             rust_lock = copy.deepcopy(lock)
+            lock['nodes']['effect-utils']['locked']['lastModified'] = 2
+            self.assertNotEqual(key(), initial,
+                                'Web lastModified alone must invalidate the key: sourceInfo is observable')
+            lock = copy.deepcopy(rust_lock)
+            lock['nodes']['web-pkgs']['locked']['futureSourceMetadata'] = 'new'
+            self.assertNotEqual(key(), initial, 'New reachable locked fields must invalidate by default')
+            lock = copy.deepcopy(rust_lock)
             lock['nodes']['web-pkgs']['locked']['rev'] = 'web-pkgs2'
             self.assertNotEqual(key(), initial, 'Reachable web inputs must invalidate the key')
             lock = copy.deepcopy(rust_lock)
