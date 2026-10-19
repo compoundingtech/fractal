@@ -379,7 +379,7 @@ pub fn published_attention_rows(
 }
 
 /// Shared owner-indexed attention rows: no scan or content cloning on the read path.
-pub(crate) fn published_assistant_attention_rows(
+pub fn published_assistant_attention_rows(
     store: &Store,
     index: u64,
     person: &str,

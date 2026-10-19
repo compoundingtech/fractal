@@ -1,4 +1,6 @@
+#![allow(unused_imports)]
 use super::*;
+
 
 #[tokio::test]
 async fn assistant_mission_cursor_expires_when_unread_mission_moves_before_its_key() {

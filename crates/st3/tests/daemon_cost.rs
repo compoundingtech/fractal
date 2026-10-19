@@ -1705,6 +1705,9 @@ fn the_cost_check_covers_every_route() {
     declared.extend(family_routes(include_str!(
         "../../st3-api-mailbox/src/api/mailbox.rs"
     )));
+    declared.extend(family_routes(include_str!(
+        "../../st3-api-client-v0/src/api/client_v0.rs"
+    )));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
         .iter()
