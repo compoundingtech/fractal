@@ -21,8 +21,8 @@ use sha2::{Digest as _, Sha256};
 use walkdir::WalkDir;
 #[cfg(test)]
 use crate::native_views::{MAX_OMP_EVENT_IDENTITY_BYTES, MAX_TIMELINE_VALUE_BYTES, bounded_value};
-pub use st3_store::external_sessions::*;
-pub use st3_store::external_sessions::{ExternalDriver, ExternalProcess, ExternalSession, LineTimelineFold, NativeLocator, TimelineKey, TimelineOrder, TimelineSlice, digest, timeline_key, timestamp};
+pub use st3_missions::external_sessions::*;
+pub use st3_missions::external_sessions::{ExternalDriver, ExternalProcess, ExternalSession, LineTimelineFold, NativeLocator, TimelineKey, TimelineOrder, TimelineSlice, digest, timeline_key, timestamp};
 
 const MAX_DISCOVERED_FILES: usize = 10_000;
 

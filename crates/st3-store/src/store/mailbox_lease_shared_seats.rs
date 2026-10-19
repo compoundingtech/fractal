@@ -3,7 +3,7 @@ use crate::store::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
 use crate::store::mailbox_lease::*;
-use crate::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_declaration, check_lease_fence, lease, record, record_argv_binding, refuse_argv_native_adoption};
+use crate::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, record};
 #[cfg(any(test, feature = "test-support"))]
 use crate::store::mailbox_lease::FaultReadHook;
 

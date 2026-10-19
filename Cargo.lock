@@ -4960,9 +4960,11 @@ dependencies = [
  "st3-api",
  "st3-client",
  "st3-daemon",
+ "st3-delivery",
  "st3-evidence",
  "st3-github",
  "st3-kernel",
+ "st3-missions",
  "st3-peer",
  "st3-reconcile",
  "st3-schema",
@@ -4983,6 +4985,32 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "st3-delivery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "ciborium",
+ "futures-util",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-delivery",
+ "st3-kernel",
+ "st3-schema",
+ "st3-secrets",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5162,6 +5190,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-missions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flate2",
+ "hex",
+ "kdl",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-delivery",
+ "st3-kernel",
+ "st3-missions",
+ "st3-schema",
+ "st3-store",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "st3-missions-base"
 version = "0.1.0"
 dependencies = [
@@ -5280,6 +5333,7 @@ dependencies = [
  "st-runtime",
  "st3-client",
  "st3-kernel",
+ "st3-missions",
  "st3-schema",
  "st3-seats",
  "st3-secrets",
