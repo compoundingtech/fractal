@@ -127,3 +127,17 @@ test('chrome tooltips distinguish keyboard navigation from initial and restored 
     assert.equal(tips().length, 0, 'an unused navigation key must not authorize later programmatic focus')
   } finally { await act(async () => root.unmount()); container.remove() }
 })
+
+test('leaving the document cancels unconsumed Tab intent before programmatic restoration', async () => {
+  const container = document.createElement('section'); document.body.append(container)
+  const root = createRoot(container)
+  try {
+    await act(async () => root.render(React.createElement(ChromeControl, { icon: 'chevrons-left', label: 'Restored chrome' })))
+    await key(document.body, 'Tab')
+    await act(async () => window.dispatchEvent(new Event('blur')))
+    await act(async () => container.querySelector('button').focus())
+    await wait(20)
+    assert.equal(document.activeElement, container.querySelector('button'))
+    assert.equal(tips().length, 0, 'a Tab whose keyup landed elsewhere must not disclose a restored control')
+  } finally { await act(async () => root.unmount()); container.remove() }
+})

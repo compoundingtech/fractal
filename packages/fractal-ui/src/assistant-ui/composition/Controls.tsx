@@ -60,6 +60,8 @@ const trackFocusNavigation = (document: Document): FocusNavigation => {
   }, true)
   document.addEventListener('keyup', () => { navigation.pending = false }, true)
   document.addEventListener('pointerdown', () => { navigation.pending = false }, true)
+  // Tab can leave an iframe: its keyup then belongs to another document.
+  document.defaultView?.addEventListener('blur', () => { navigation.pending = false })
   document.addEventListener('focusin', event => {
     navigation.target = event.target
     navigation.userMoved = navigation.pending
