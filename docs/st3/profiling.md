@@ -859,8 +859,8 @@ This is an explicit synthetic sizing probe, not an observed production unread di
 
 ## Browser perceived-UX traces
 
-The browser exports `service.name=webfractal-web` to the same-origin OTLP relay. Dogfood pages
-record **100%** of budget roots and SDK detail.
+The browser exports `service.name=fractal-web` to the explicitly configured
+`VITE_OTLP_TRACES_URL` endpoint. Dogfood pages record **100%** of budget roots and SDK detail.
 No local storage, transcript content, resource identifiers, credentials, or free-form error
 details enter production spans. The existing 200-span `SpanRing` is the dependency-free local
 assertion surface; adding the separate otelite package is unnecessary for these lifecycle tests.

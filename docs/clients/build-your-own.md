@@ -102,6 +102,27 @@ it. Shutdown initialization, already-started pagehide transport and the native f
 share one absolute one-second deadline; the native flush receives only the time remaining
 after the manual transport drain. The independently demanded session-trace provider remains lazy.
 
+Configured browsers also export `fractal.input.next_frame` through this same tracer,
+under `service.name=fractal-web` (the TUI uses `fractal`). This is a span-based
+SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint.
+Trusted pointer/key/paste/focus/resize/input events count only if a DOM mutation
+commits before their next paint boundary. DOM-less React commits, idle updates,
+native scrolling and value-only edits without a DOM mutation do not count.
+The start is the input event timestamp. Event Timing presentation ends are used
+when available and matched by event timestamp and interaction ID; otherwise the
+end is rAF after commit followed by a posted task. A later input's commit before
+paint ends the previous committed input as `coalesced`; page hiding, pagehide,
+unload or telemetry teardown ends unpainted committed input as `unacknowledged`.
+Only `painted` is latency-SLI eligible. There is no timer expiry.
+
+Attributes are bounded `input.kind`, `input.action`, `surface` and one final
+`outcome`. Surface is `agents|conversation|tabs|palette|missions|other`; pointer
+events use TUI kind `mouse`. No key text, element identifiers or accessible text
+are exported. Painted spans include `read_to_frame_ms` (event to paint) and
+`accepted_to_frame_ms` (capture-listener entry to paint). `queue_ms`, TUI `mode`
+and TUI `focus` are omitted because their TUI meanings have no equivalent here.
+These input spans are disabled entirely when the traces URL is unset.
+
 ## Connect, follow and send
 
 Rust local clients use `Client::unix` or `unix_as`. A paired Unix gateway uses `unix_gateway`;

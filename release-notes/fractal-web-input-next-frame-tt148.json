@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Configured Fractal web browsers export DOM-changing input-to-paint spans through the existing OTLP trace exporter, with bounded attributes and final painted/coalesced/unacknowledged outcomes.",
+  "replay": {"status": "none", "detail": "No runtime replay changes."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules changes."},
+  "compatibility": {"status": "none", "detail": "Adds fractal.input.next_frame spans to the existing opt-in browser traces endpoint. No new exporter, dependencies or wire protocol."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No installation action required. Existing VITE_OTLP_TRACES_URL configuration controls export."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery changes."}
+}

@@ -1,5 +1,5 @@
 /**
- * wf browser telemetry (`service.name = webfractal-web`).
+ * wf browser telemetry (`service.name = fractal-web`).
  *
  * One Effect `Tracer` serves both kinds of spans:
  * - Effect spans (SDK `st3.*`, app `wf.*` effects) flow through it as usual.
@@ -22,9 +22,10 @@ import { buildIdentity, deploymentId } from 'virtual:build-identity'
 
 import { makeSpanRing, type SpanRing } from './spanRing.ts'
 import { afterNextPaint, makeUxTelemetry, uxAttributeNames, uxSpanNames, type UxTelemetry } from './ux.ts'
+import { inputPaintAttributeNames, inputPaintSpanName, installInputPaint } from './inputPaint.ts'
 
 /** OpenTelemetry resource identity for browser spans emitted by wf. */
-export const serviceName = 'webfractal-web'
+export const serviceName = 'fractal-web'
 
 /**
  * Event types that start a user interaction. React Aria selects on press start (pointerdown) for
@@ -103,6 +104,7 @@ const interactionTarget = (target: EventTarget | null): string => {
 
 const exportedSpanNames: Readonly<Record<string, true>> = {
   ...Object.fromEntries(uxSpanNames.map((name) => [name, true as const])),
+  [inputPaintSpanName]: true,
   'st3.follow.subscribe': true,
   'st3.capabilities': true,
   'st3.socket.probe': true,
@@ -115,6 +117,7 @@ const exportedSpanNames: Readonly<Record<string, true>> = {
 }
 const exportedAttributes: Readonly<Record<string, true>> = {
   ...Object.fromEntries(uxAttributeNames.map((name) => [name, true as const])),
+  ...Object.fromEntries(inputPaintAttributeNames.map((name) => [name, true as const])),
   'span.label': true,
   'wf.ux.early': true,
   'wf.interaction.type': true,
@@ -172,6 +175,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
   let flushRequested = false
   let shutdownRequested = false
   let closeExporter: (() => void) | undefined
+  let uninstallInputPaint: (() => void) | undefined
 
   /** Replay only pre-exporter spans, retaining the IDs already propagated to the SDK/gateway. */
   const exportEarlySpan = ({ span, events }: EarlySpanCapture, target: Tracer.Tracer) => {
@@ -352,6 +356,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
               Effect.forkIn(scope),
             )
             yield* Effect.addFinalizer(() => {
+              uninstallInputPaint?.()
               ux?.dispose()
               disposed = true
               shutdownRequested = true
@@ -482,6 +487,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
   const install = () => {
     if (uninstall !== undefined) return uninstall
+    uninstallInputPaint = otlpTracesUrl === undefined ? undefined : installInputPaint({ emit })
     for (const type of interactionEvents)
       window.addEventListener(type, onInteraction, { capture: true })
 
@@ -597,6 +603,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
     uninstall = () => {
       uninstall = undefined
+      uninstallInputPaint?.()
       for (const timer of timers.values()) clearTimeout(timer)
       ux?.dispose()
       disposed = true
