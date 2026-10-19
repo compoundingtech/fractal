@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Only packages/fractal-ui and apps/fractal-web change; no protocol, daemon, harness or CLI change. All kit additions are optional: Transcript accepts loadingState and showHeader (default true keeps the header), the package exports TranscriptSkeleton from the index and from the new @smalltalk/fractal-ui/assistant-ui/transcript-skeleton entry, and EmbraceRuntime's adoption context adds isSnapshotAdopted. A turn's reasoning entries now share one Thinking disclosure in its work log. The Vite dev server's workspace watcher change affects development only."
+    "detail": "Only packages/fractal-ui and apps/fractal-web change; no protocol, daemon, harness or CLI change. All kit additions are optional: Transcript accepts loadingState and showHeader (default true keeps the header), the package exports TranscriptSkeleton from the index and from the new @fractal/ui/assistant-ui/transcript-skeleton entry, and EmbraceRuntime's adoption context adds isSnapshotAdopted. A turn's reasoning entries now share one Thinking disclosure in its work log. The Vite dev server's workspace watcher change affects development only."
   },
   "downtime": {
     "status": "none",

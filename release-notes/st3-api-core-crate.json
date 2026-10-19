@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Rename st3-api, what is left of the HTTP API after the mailbox and client-v0 route families moved to st3-api-mailbox and st3-api-client-v0, to st3-api-core (crates/st3-api-core). Same code: every module keeps its st3::api path and every route, wire byte and response is unchanged.",
+  "summary": "Rename st3-api, what is left of the HTTP API after the mailbox and client-v0 route families moved to st3-api-mailbox and st3-api-client-v0, to st3-api-core (crates/fractal-api-core). Same code: every module keeps its st3::api path and every route, wire byte and response is unchanged.",
   "replay": {
     "status": "none",
     "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
