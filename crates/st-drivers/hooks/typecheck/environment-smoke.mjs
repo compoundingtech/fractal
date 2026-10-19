@@ -7,6 +7,8 @@ import vm from "node:vm";
 
 for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
   const source = fs.readFileSync(new URL(`./smoke-out/${file}-channel.mjs`, import.meta.url), "utf8");
+  const daemonAsset = file.startsWith("st-");
+  if (daemonAsset) assert.ok(!/st2/i.test(source), `${file} keeps the fresh daemon artifact boundary`);
   const helpers = source.match(/(?:const|let|var) preferredName = [\s\S]*?(?=(?:const|let|var) BIN =)/)?.[0];
   const stashSource = source.match(/(?:const|let|var) stash = \(\) => \{[\s\S]*?\n\};/)?.[0];
   assert.ok(helpers, `${file} embeds standalone env helpers`);
@@ -49,14 +51,15 @@ for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
     for (const [suffix, field] of Object.entries(fields)) {
       let expected;
       if (mode.startsWith("reload")) expected = "retained";
-      else if (["preferred", "equal", "conflict", "legacy-conflict", "legacy-empty"].includes(mode)) expected = ["conflict", "legacy-conflict", "legacy-empty"].includes(mode) && identityFields.has(suffix) ? undefined : "preferred-value";
+      else if (["preferred", "equal", "conflict", "legacy-conflict", "legacy-empty"].includes(mode)) expected = (["conflict", "legacy-empty"].includes(mode) || (mode === "legacy-conflict" && !daemonAsset)) && identityFields.has(suffix) ? undefined : "preferred-value";
       else if (mode === "current") expected = "current-value";
-      else if (mode === "legacy") expected = "legacy-value";
+      else if (mode === "legacy" && !daemonAsset) expected = "legacy-value";
       else if (["empty", "current-empty"].includes(mode)) expected = "";
       assert.equal(state[field], expected, `${file} ${mode} ${field}`);
-      for (const name of [preferred + suffix, prefix + suffix, old + suffix]) assert.equal(env[name], undefined, `${file} ${mode} clears ${name}`);
+      for (const name of [preferred + suffix, prefix + suffix]) assert.equal(env[name], undefined, `${file} ${mode} clears ${name}`);
+      assert.equal(env[old + suffix], daemonAsset && ["legacy", "equal", "legacy-conflict", "current-empty", "empty"].includes(mode) ? "legacy-value" : undefined, `${file} ${mode} only predecessor-compatible assets clear ${old + suffix}`);
     }
-    const conflictCount = ["conflict", "legacy-conflict", "legacy-empty"].includes(mode) ? identityFields.size : mode === "expected-session-conflict" ? 1 : 0;
+    const conflictCount = ["conflict", "legacy-empty"].includes(mode) || (mode === "legacy-conflict" && !daemonAsset) ? identityFields.size : mode === "expected-session-conflict" ? 1 : 0;
     assert.equal(reports.length, conflictCount, `${file} ${mode} conflict count`);
     for (const report of reports) {
       const legacyPrefix = mode === "legacy-conflict" ? old : prefix;

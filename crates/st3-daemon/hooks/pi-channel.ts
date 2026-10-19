@@ -25,14 +25,12 @@ const PROTOCOL = 2;
 // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 // Inline because this asset is embedded and published as a standalone file.
 const preferredName = (name: string) => name.replace(/^ST3?_/, "FRACTAL_");
-const legacyName = (name: string) => name.replace(/^ST3?_/, "ST2_");
 const readEnv = (name: string, identity = false) => {
   const preferred = preferredName(name);
   const value = process.env[preferred];
-  const legacy = process.env[name] !== undefined ? name : legacyName(name);
-  const legacyValue = process.env[legacy];
+  const legacyValue = process.env[name];
   if (identity && value && legacyValue !== undefined && legacyValue !== value) {
-    console.error(`Conflicting identity environment variables: ${preferred} and ${legacy}`);
+    console.error(`Conflicting identity environment variables: ${preferred} and ${name}`);
     return undefined;
   }
   return value ?? legacyValue;
@@ -40,7 +38,6 @@ const readEnv = (name: string, identity = false) => {
 const removeEnv = (name: string) => {
   delete process.env[preferredName(name)];
   delete process.env[name];
-  delete process.env[legacyName(name)];
 };
 const writeEnv = (env: NodeJS.ProcessEnv, name: string, value: string | undefined) => {
   if (value === undefined) return;
