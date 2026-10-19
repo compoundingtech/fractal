@@ -549,21 +549,27 @@ fn atomic_bridge_recovery_handles_both_exchange_crash_boundaries() -> Result<()>
 
 #[test]
 fn home_manager_config_fence_restores_original_symlink_at_every_publication_boundary() -> Result<()> {
-    for boundary in ["intent", "backup", "partial", "published"] {
+    for boundary in ["intent", "partial", "backing", "staged", "published", "reversed"] {
         let fixture = Fixture::new()?;
         let directory = &fixture.layout.directories[0].0;
         let original = fixture.root.path().join("immutable-config");
         fs::write(&original, b"node = \"test\"\n")?;
         symlink(&original, directory.join("config.toml"))?;
         let inode = fs::symlink_metadata(directory.join("config.toml"))?.ino();
-        if boundary == "published" {
+        if matches!(boundary, "published" | "reversed") {
             install_config_fence(directory)?;
             assert_eq!(fs::read_link(directory.join("config.toml"))?, Path::new(CONFIG_BACKING));
             assert!(fs::read_to_string(directory.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
-        } else if boundary != "intent" {
-            fs::rename(directory.join("config.toml"), directory.join(CONFIG_BACKUP))?;
-            if boundary == "partial" { fs::write(directory.join(CONFIG_PENDING), b"partial")?; }
+            if boundary == "reversed" {
+                exchange(&directory.join("config.toml"), &directory.join(CONFIG_BACKUP))?;
+            }
+        } else if boundary == "partial" {
+            fs::write(directory.join(CONFIG_PENDING), b"partial")?;
+        } else if matches!(boundary, "backing" | "staged") {
+            fs::write(directory.join(CONFIG_BACKING), b"completed backing")?;
+            if boundary == "staged" { symlink(CONFIG_BACKING, directory.join(CONFIG_BACKUP))?; }
         }
+        assert!(fs::read(directory.join("config.toml")).is_ok());
         restore_config_fence(directory)?;
         restore_config_fence(directory)?;
         assert_eq!(fs::read_link(directory.join("config.toml"))?, original);

@@ -207,24 +207,32 @@ fn home_manager(services: &Services) -> bool {
 fn install_config_fence(directory: &Path) -> Result<()> {
     let mut content = fs::read(directory.join("config.toml"))?;
     content.extend_from_slice(CONFIG_MARKER.as_bytes());
-    fs::rename(directory.join("config.toml"), directory.join(CONFIG_BACKUP))?;
     let mut file = OpenOptions::new().create_new(true).write(true).mode(0o600).open(directory.join(CONFIG_PENDING))?;
     file.write_all(&content)?;
     file.sync_all()?;
     fs::rename(directory.join(CONFIG_PENDING), directory.join(CONFIG_BACKING))?;
-    symlink(CONFIG_BACKING, directory.join("config.toml"))?;
+    symlink(CONFIG_BACKING, directory.join(CONFIG_BACKUP))?;
+    File::open(directory)?.sync_all()?;
+    // Neither a crash nor an immutable activation can observe config.toml
+    // absent: exchange its original object with the already-published fence.
+    exchange(&directory.join("config.toml"), &directory.join(CONFIG_BACKUP))?;
     File::open(directory)?.sync_all()?;
     Ok(())
 }
 
 fn restore_config_fence(directory: &Path) -> Result<()> {
-    if fs::symlink_metadata(directory.join(CONFIG_BACKUP)).is_ok() {
-        let config = directory.join("config.toml");
-        if fs::symlink_metadata(&config).is_ok() {
+    let backup = directory.join(CONFIG_BACKUP);
+    if fs::symlink_metadata(&backup).is_ok() {
+        if fs::read_link(&backup).ok().as_deref() != Some(Path::new(CONFIG_BACKING)) {
+            let config = directory.join("config.toml");
             ensure!(fs::read_link(&config)? == Path::new(CONFIG_BACKING), "config fence changed during rollback");
-            fs::remove_file(config)?;
+            exchange(&config, &backup)?;
+            File::open(directory)?.sync_all()?;
         }
-        fs::rename(directory.join(CONFIG_BACKUP), directory.join("config.toml"))?;
+        // A staged fence means either forward exchange has not happened or
+        // reverse exchange already completed before interruption.
+        ensure!(fs::read_link(&backup)? == Path::new(CONFIG_BACKING), "invalid staged config fence");
+        fs::remove_file(backup)?;
     }
     for name in [CONFIG_BACKING, CONFIG_PENDING] {
         if fs::symlink_metadata(directory.join(name)).is_ok() { fs::remove_file(directory.join(name))?; }
@@ -413,6 +421,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
             // A staged self-link becomes the legacy bridge in one atomic swap:
             // old config/state is never absent, even across a crash or reboot.
             symlink(new, new)?;
+            File::open(old.parent().context("source has no parent")?)?.sync_all()?;
             exchange(old, new)?;
         } else {
             fs::rename(old, new).with_context(|| format!("rename {} to {}", old.display(), new.display()))?;
