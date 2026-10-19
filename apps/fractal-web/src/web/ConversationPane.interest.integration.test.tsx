@@ -382,7 +382,8 @@ describe('ConversationPane conversation demand', () => {
     flushSync(() => button.click())
     const panel = container.querySelector('aside[aria-label="Tool detail"]')!
     expect(panel.textContent).toContain('export const rows = []')
-    expect(panel.parentElement).toBe(workspace.parentElement)
+    // The workspace now sits inside the stable Changes split; tool detail stays outside it.
+    expect(panel.parentElement).toBe(workspace.closest('[data-testid="live-agent-workspace"]'))
     expect(workspace.contains(panel)).toBe(false)
     flushSync(() => (panel.querySelector('button[aria-label="Close tool detail"]') as HTMLButtonElement).click())
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()

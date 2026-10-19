@@ -169,7 +169,7 @@ export function ThreadHeader({
           <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash)}>/</span>
         </> : null}
-        <span {...stylex.props(styles.crumbTitle)}>{title}</span>
+        <span role={narrow ? undefined : 'heading'} aria-level={narrow ? undefined : 2} {...stylex.props(styles.crumbTitle)}>{title}</span>
       </nav>
       <div {...stylex.props(styles.actions)}>
         {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}

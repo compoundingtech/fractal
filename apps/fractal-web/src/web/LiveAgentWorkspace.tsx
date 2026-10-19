@@ -402,14 +402,12 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       </Aria.Button>
     </footer>
   </>
-  // The panes are portalled from outside the shell providers: those values change on every
-  // switch, and React then scans every fiber below a memoized pane for consumers, which costs
-  // O(retained turns) per click. No pane reads these shell contexts.
-  return (<>
+  // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
+  // Only the stable header DOM host crosses that boundary.
+  return (<ThreadHeaderSlotContext.Provider value={narrow ? null : headerSlot}>
     <WorkbenchContextProvider value={{ open, focusedRef: address.ref || null, subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
-          <ThreadHeaderSlotContext.Provider value={headerSlot}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               {narrow ? <NarrowSheet id={agentsSheetId} side="start" label="Agents" isOpen={agentsOpen} onOpenChange={setAgentsOpen} width={320}>
                 {sidebarBody}
@@ -476,12 +474,11 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
               </NarrowSheet> : null}
               <div ref={overlayHost} {...stylex.props(styles.overlayHost)} />
             </div>
-          </ThreadHeaderSlotContext.Provider>
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
     {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
-  </>)
+  </ThreadHeaderSlotContext.Provider>)
 }
 
 /** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */

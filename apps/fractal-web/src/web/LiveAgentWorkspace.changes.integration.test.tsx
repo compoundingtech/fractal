@@ -127,6 +127,11 @@ describe('live captured Changes dock', () => {
     expect(toggle().getAttribute('aria-pressed')).toBe('false')
     const thread = host.querySelector('[data-testid="conversation-history-host"]')
     expect(thread).not.toBeNull()
+    const titles = host.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]')
+    expect(titles).toHaveLength(1)
+    expect(titles[0]?.textContent).toBe('Changes A')
+    expect(host.querySelector('[data-testid="transcript-header"]')).toBeNull()
+    expect(host.querySelector('[data-testid="thread-header"] [data-testid="transcript-header-status"]')).not.toBeNull()
 
     await openChanges()
     expect(inspectorRequested).toHaveBeenCalledTimes(1)
