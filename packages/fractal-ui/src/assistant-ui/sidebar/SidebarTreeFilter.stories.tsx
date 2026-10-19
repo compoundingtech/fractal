@@ -280,6 +280,12 @@ async function playFilterProbes(canvasElement: HTMLElement, benchmark: boolean) 
     } finally {
       root.dataset.rebuildControl = 'false'
     }
+    if (!benchmark) {
+      // The benchmark's busy phase restores retained objects after the rebuild control.
+      // Without that phase, restore identity before asserting normal retained-row work.
+      const reset = await phase('reset')
+      for (const sample of reset.samples) await expect(sample.retainedIdentity).toBe(true)
+    }
     if (benchmark) {
       try {
         const busy = await phase('busy', true)
