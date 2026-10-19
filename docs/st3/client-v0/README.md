@@ -21,6 +21,19 @@ generated file (`git checkout --theirs -- clients crates/st3-client/src/contract
 crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
 
+Client transport receivers accept the deployed `st3.client.*` names and matching
+`fractal.client.*` aliases, including error and visualization version fields.
+The generated sender constants and request defaults remain `st3.*`. A sender
+cutover must offer both WebSocket subprotocols, Fractal first: servers select
+`fractal.*` only when offered, and clients retain the WebSocket library's
+offered-protocol guard. Rust and Swift models keep their existing lossless string
+decoding behavior; accepting aliases does not reject previously tolerated versions.
+The legacy terminal route likewise selects either `st3.terminal.v1` or
+`fractal.terminal.v1` and still permits upgrades with no supported subprotocol.
+This transport vocabulary does not rename signed peer envelope tags, signature
+domains, durable identities, JSON Schema annotations or local provenance labels.
+
+
 `ResourceHeader.operational` describes current versus historical state, actionability, reasons,
 and optional owner-generation/runtime-incarnation identities. Work also exposes `agentless`,
 claim expiry, execution start/elapsed time, and timeout in milliseconds. These fields are optional
@@ -77,6 +90,17 @@ Launch delivery, change notifications, and UI authoring are outside this read-pa
 Paired sessions can send bounded disjoint UTC minute diagnostics with
 [`observations.report`](observations.md). This command has no action receipt, replication
 or snapshot fence. Live-share is typed foreground/live time, separate from latency histograms.
+
+### Person ask respondents
+
+Work `person_answers[].respondent` uses `SenderRef`: `agent/...`, `assistant/...`,
+`person/...`, or `step/...`. An assistant answer identifies `assistant/chatgpt` as
+the respondent, never the grant's owning person. Optional `sender_class`,
+`assistant_grant_id`, `assistant_owner`, and `assistant_session_actor` carry
+server-owned provenance separately; `assistant_owner` is a concrete `PersonId`.
+These fields do not confer person authority or replace an agent's `acted_for`
+delegation proof. `ActorRef`, `ParticipantRef`, and recipient contracts remain
+narrower; accepting an assistant respondent does not make assistants recipients.
 
 ### Mission run timing
 
@@ -1264,13 +1288,13 @@ effect for every subsequent request, including a new bounded terminal WebSocket 
 ### External assistant grants
 
 External assistants use a separate, closed principal namespace, never person delegation.
-See [External assistants](../external-assistants.md) for the staged A/B contract and dormant
-future send/kill requirements. No live issuance is authorized by merging this implementation.
+See [External assistants](../external-assistants.md) for the grant, read, scoped native write,
+and coordinated kill requirements. No live issuance is authorized by merging this implementation.
 
 `PairingBegin` and `PairedSession` are disjoint untagged unions of person and assistant variants. Person
 wire fields and historical claims are unchanged; typed person clients use `PersonPairingBegin`
 and `PersonPairedSession`. Assistant begin names only `assistant/chatgpt`, seals explicit
-assistant read scopes, requires disclosure consent and its evidence, and uses the same
+assistant scopes, requires disclosure consent and its evidence, and uses the same
 five-minute single-use challenge. Grant duration defaults to one hour and cannot exceed
 30 days; it is independent of challenge expiry. Completion returns `assistant-paired-session`,
 not a person session, and never creates a person signing chain. Assistant credentials and keys
@@ -1286,8 +1310,9 @@ increment the policy revision. The standalone ChatGPT adapter requires
 `minimal_read_mode=caller-bound-allow`: the scoped bearer grant and its disclosure consent
 authorize reads without a per-read signature or approval key. Grant projections include exact
 scope, consent, issuer as a concrete `PersonId` and revoked status, never the bearer or credential
-digest. `key_id` is the public-key SHA-256 digest. The owner may configure exact agent recipient
-IDs and `write.assistant.messages` / `write.assistant.custom-reply` scopes for low-risk writes.
+digest. `key_id` is the public-key SHA-256 digest. The owner must explicitly grant
+`write.assistant.answers`, `write.assistant.messages`, or `write.assistant.custom-reply`
+for the corresponding native writes. Read scopes and disclosure consent never imply write authority.
 
 Assistant collection reads materialize only the requested page. Missions seek through the
 native mission keyset and build cards for those IDs; agents slice the published roster or
@@ -1329,20 +1354,22 @@ default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an
 The adapter uses `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
 under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
 the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only
-closed typed actions. `work.done` creates a daemon-owned structured owner ask whose digest
-binds the whole request, including alert ID, episode, option, fence and idempotency key. The
-owner answers with `st work done <approval-id> --as person/ada --answer approve --episode ...`;
-an identical MCP retry executes through the existing fenced, idempotent action path.
-`message.send` is low-risk: it requires its explicit grant scope and an exact owner-allowlisted
-agent recipient. Its non-read-only tool annotation asks ChatGPT to show a confirmation card;
-the daemon does not treat the advisory card as execution authorization or create another
-st approval. `custom.reply` is likewise grant-scoped at the daemon boundary.
+closed typed actions. `work.done` requires `write.assistant.answers` and immediately answers
+supported owner alerts through the existing fenced, idempotent action path, without creating
+another owner approval ask. The request binds the alert ID, episode, option, fence and idempotency
+key. `read.assistant.attention` only authorizes reads; answering changes authoritative owner work
+and can release waiting work, so existing read-only grants must explicitly add the write scope.
+`message.send` requires `write.assistant.messages` and accepts any existing agent recipient,
+whether or not listed in `recipient_allowlist`; person recipients remain refused. That list is
+stored metadata, not an enforced restriction. The non-read-only tool annotation asks ChatGPT
+to show a confirmation card, but the card is advisory and creates no additional daemon approval.
+`custom.reply` requires `write.assistant.custom-reply` at the daemon boundary.
 
 Execution carries the original assistant grant and policy revision through typed action dispatch.
 The message append, person-answer transaction, and custom-reply transaction recheck the
-authoritative grant, revocation, expiry, exact scope, policy revision, recipient, and owner
-approval where required. Revocation or recipient removal between handler preflight and the
-writer transaction denies the synchronous send without appending a message claim.
+authoritative grant, revocation, expiry, exact scope, policy revision and relevant owner/recipient
+binding. Revocation between handler preflight and the writer transaction denies the synchronous
+write. Agent recipient existence remains required; allowlist membership is not checked.
 
 `crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
 Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
@@ -1535,6 +1562,58 @@ asked, the gateway returns its replica, never as if it were whole: `replicated` 
 fleet, see `sync`) or `unverified`, and the `reason` the owner was not asked, such as `no-route` or
 `timed-out`. A client renders that as waiting, not as no messages. A list that names no remote
 agent has no `replicated`. Page cursors of a relayed list belong to the owner.
+
+The bounded message paging contract below is capability **`messages-paging` version 2**.
+Clients opt in on each request with `X-St3-Features: messages-paging.v2` (comma-separated
+with any other feature tokens in the first header value; repeated header values are ignored).
+Capability discovery advertises support but does not opt
+a client in. Requests without that exact token retain the legacy message-list response
+shape and paging behavior, including legacy cursors; they do not receive the new retained
+SQL cuts or byte-bounded paging behavior. Gateways preserve the negotiation when relaying
+message lists. Generated Rust, Swift and TypeScript clients default to the legacy contract:
+regenerating a client alone does not opt in. Enable the per-client option explicitly with
+Rust `.with_messages_paging(true)`, Swift `St3Client(..., messagesPaging: true)`, or
+TypeScript `new St3Client({ ..., messagesPaging: true })`. This choice applies to HTTP
+and every WebSocket transport; the default (`false`) omits only the messages-paging token
+while preserving existing feature tokens. Clients without the token keep the old contract unchanged.
+
+Message list pages select the recipient and actor, newest `sent_at` first with ascending message
+ID ties, before loading message bodies. A cursor retains the first page's server-issued cut
+and request time: later writes cannot change the traversal's message fields, current/history
+classification, or delivery age. Current lists omit closed and superseded reminder messages;
+history lists retain them with the same operational reasons. Reminder winners are selected in
+the recipient scope before the actor filter. Cursors remain opaque and expire after five minutes.
+The server retains only bounded cursor metadata, not message bodies; the cut, expiry, filters,
+snapshot and keyset must exactly match an issued cursor. Tampering, metadata eviction or restart,
+and repair/checkpoint deletion that makes the cut unavailable return `page-cursor-expired`
+(HTTP 410), never a successful incomplete page. A web client restarts pagination on that error.
+Fresh pages also respect current desired-projection availability: removing a desired-only
+declaration does not restore its recipient or content from retained `intent.desired` history.
+The local body-free selector projection maintains ordered recipient/actor ranges and current
+eligibility before the page limit. Opening an older store installs body-free tables, indexes
+and source capture without populating the headers. Once both APIs serve, a background worker
+builds the first cut in resumable, independently admitted writer chunks. Until publication,
+negotiated v2 message pages return HTTP 503 `message-selectors-not-ready`; legacy message
+reads and unrelated endpoints remain available. Changed ordering or eligibility creates a
+temporal header, but body-only writes do not copy bodies or churn header versions.
+While later selector maintenance lags, pages and issued cursors pin the last fully
+published frontier; pending rows are invisible rather than making message lists fail.
+Admitted remote declarations do not advance that frontier until the durable graph projection
+covers them. An interrupted initial backfill retains its resume state and exposes no initial
+message-page cut until projection and bounded backfill complete.
+Selector maintenance wakes from committed source-writer notifications, including projection-only
+changes, rather than polling while idle. It drains independently bounded background writer loans;
+its own maintenance commits do not schedule another idle pass.
+Recipient delivery presence is live process evidence, not graph state: each page reassesses
+`recipient_delivery`, including its observation age, rather than retaining a stale report.
+
+Successful message-list responses fit the advertised `max_bytes` ceiling (1,048,576 bytes),
+including JSON escaping, attachments, the response envelope and any continuation cursor.
+The byte ceiling can return fewer resources than the requested count; the continuation starts
+after the last resource actually returned, so the remaining resources are not skipped.
+A single resource that cannot fit returns HTTP 422 with `response-too-large`, rather than an
+empty page or a silently omitted resource. A relayed response whose final local envelope cannot
+fit is refused with the same error.
 
 A read that no peer can carry fails with `remote-unavailable`, and its `details` say why, so a
 client can tell a host nobody reaches from a slow or refusing one: `reason` is `no-route` (this node

@@ -3,8 +3,8 @@
 Seeded, privacy-safe scenario worlds for every Fractal client, and the kit that builds and
 replays them. [spec.md](spec.md) is the contract.
 
-The registered catalog contains 24 worlds: seven narratives, empty/loading/forward-compatibility
-edges, eleven failed-sync causes, replication divergence, `huge` and Unicode.
+The registered catalog contains 25 worlds: seven narratives, empty/loading/forward-compatibility
+edges, twelve failed-sync causes, replication divergence, `huge` and Unicode.
 
 ## Recorded narratives
 

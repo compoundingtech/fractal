@@ -265,7 +265,11 @@
           "--exclude"
           "st3-reconcile"
           "--exclude"
-          "st3-api"
+          "st3-api-core"
+          "--exclude"
+          "st3-api-client-v0"
+          "--exclude"
+          "st3-api-mailbox"
           "--exclude"
           "st3-client"
           "--exclude"
@@ -500,7 +504,11 @@
             "-p"
             "st3-reconcile"
             "-p"
-            "st3-api"
+            "st3-api-core"
+            "-p"
+            "st3-api-client-v0"
+            "-p"
+            "st3-api-mailbox"
             "-p"
             "st3-client"
             "-p"
@@ -557,10 +565,13 @@
             # their store paths in attributes inherited by the unchecked package.
             # Preserve the historical executable name for its CLI dispatch and
             # fixtures that copy the binary: pass the original .../bin/st3 path.
+            # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
             ST3_MESSAGING_COMPAT_BIN=$(readlink -f "$(command -v st3-messaging-compat)")
             ST3_OTELITE_BIN=$(command -v otelite)
-            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN
-            export ST3_OTEL_REQUIRE=1
+            FRACTAL_MESSAGING_COMPAT_BIN=$ST3_MESSAGING_COMPAT_BIN
+            FRACTAL_OTELITE_BIN=$ST3_OTELITE_BIN
+            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN FRACTAL_MESSAGING_COMPAT_BIN FRACTAL_OTELITE_BIN
+            export FRACTAL_OTEL_REQUIRE=1 ST3_OTEL_REQUIRE=1
             export HOME=$(mktemp -d)
             export SHELL=${pkgs.bashInteractive}/bin/bash
             printf 'export PATH=%q\n' "$PATH" > "$HOME/.bash_profile"
@@ -980,6 +991,11 @@
           };
           pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
+        checks.st3-check-input-isolation =
+          assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
+          # Native check inputs must not contribute to the installed package identity.
+          assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
+          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
@@ -1357,7 +1373,8 @@
           ];
         } ''
           export HOME=$(mktemp -d)
-          export ST_HOOKS=$HOME/hooks
+          # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+          export FRACTAL_HOOKS=$HOME/hooks ST_HOOKS=$HOME/hooks
 
           ${st2}/bin/st2 hooks install
           original_dir=$(jq -r '.directory' "$ST_HOOKS/current.json")
@@ -1435,6 +1452,8 @@
           # Same collector the Nix gate pins, so a bare
           # `cargo test --test integration otel_export::` in this shell runs against it.
           ST2_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+          FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           shellHook = ''

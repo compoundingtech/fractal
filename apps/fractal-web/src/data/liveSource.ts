@@ -1082,6 +1082,7 @@ export const liveSource = ({
         if (!disposed && sdk !== undefined) runtime.runFork(sdk.reconnectSockets)
       },
       agents,
+      retryAgents: () => agentsRetained.retry(),
       missions,
       attention,
       conversation,

@@ -27,10 +27,12 @@ st-drivers = { path = "../st-drivers" }
 st-runtime = { path = "../st-runtime" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 st3_github_self = { package = "st3-github-base", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
+parking_lot = "0.12"
 tokio = { version = "1", features = ["test-util"] }
