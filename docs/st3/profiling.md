@@ -378,6 +378,15 @@ Local opening captures the first page and replay boundary together, using the na
 keyset fold and reusing its bounded head for the header. Remote opening retains the
 two established owner reads (changes with no cursor and zero wait, then timeline);
 profile those reads separately before attributing repeated fold work to local opening.
+The opening admission pins one graph frontier for routing and managed session identity.
+An `agent/` target reads that subject directly, rather than constructing the fleet owner map.
+The local first page carries that owner and its incarnation through transcript selection,
+the follower mark, native ordering and stored-message overlay; those stages do not resolve
+the owner again. Transcript selection is shared with the mark rather than repeated for it.
+Identity fields and runtime-source selection use newest-first indexed seeks; only genuine
+rival runtime origins require the causal conflict proof. The daemon-cost owner regressions
+compare short and long mixed-origin histories without increasing a growth allowance.
+
 For representative receipts, pin the daemon build and capture five successful initial,
 tab-switch and reconnect frames on the used collections route, with client receipt/render
 time beside the internal profile. Record local versus relayed ownership and cold versus
@@ -426,6 +435,121 @@ as writer wait, and the job itself as writer hold. The batch `COMMIT` appears un
 `(unlabeled st3-writer)`, whose statement count is the number of batches. Phase times
 and the enclosing operation can overlap; they must not be added as independent
 request durations.
+
+### Isolated native message-selector cost receipts
+
+The ignored native controls in `crates/st3-api/src/api/client_messages_selector_tests.rs`
+use fresh temporary stores, not daemon databases. Run them in the admitted native
+proof lane with the same optimized build, filesystem and durability settings for
+both designs; retain the exact source/build identity, command, machine/filesystem,
+complete stderr JSON and exit status. Focused Cargo filters (with
+`cargo test --release -p st3-api --lib FILTER -- --ignored --nocapture --test-threads=1`):
+
+- `benchmark_client_messages_selector_scaling`: 128/1,280/12,800 real messages,
+  each with 32 metadata claims, explicit native rebuild and first/next pages.
+- `benchmark_client_messages_selector_closed_heavy`: 12,800 real messages,
+  12,672 closed, explicit native rebuild and open first/next pages.
+- `benchmark_client_messages_selector_write_bursts`: identical 128 sends,
+  256 delivered/read setup commits and 128 closes per design. Fresh source-only
+  and selector-enabled stores run in reversed order across two rounds; full
+  authoritative message views must agree.
+- `benchmark_client_messages_selector_deferred_maintenance`: a real 128-message,
+  32-metadata-claims-per-message fixture followed by one native delivered-claim
+  batch that must leave pending work. It drains independent production maintenance
+  calls, retains each loan's interval and maximum, gates every call at 100 ms,
+  and checks fully drained headers, canonical body status and complete page/oracle
+  equality. The source batch's COMMIT and maintenance checkpoint are separate.
+- `benchmark_client_messages_selector_migration_copy`: requires
+  `ST3_CLIENT_MESSAGES_SELECTOR_MIGRATION_COPY` naming an explicitly supplied,
+  checkpointed **offline copy** with 118,000–118,999 claims. Only a further fresh
+  temporary copy is mutated. It reports total Store open, native startup backfill,
+  explicit rebuild, outside-transaction checkpoint and populated reopen separately.
+  A copy with completed selectors is rejected as migration evidence.
+
+The scaling and closed-heavy controls now gate the **maximum** of every real
+rebuild chunk against the existing 100 ms transaction target, independently of
+page p95. The offline control does the same for startup and explicit rebuild.
+`selector_backfill_transactions` reports BEGIN-through-durable-COMMIT maximum,
+the phase and work/COMMIT times for that transaction, plus the independently
+longest COMMIT's phase, work, Unix-microsecond interval and WAL file length.
+Work includes BEGIN and progress/fold bookkeeping, not just one selector SQL
+step. `checkpoint_outside_transactions_ms` is the driver's PASSIVE checkpoint;
+it is not deducted from transaction time or from total Store open. These are
+observed cohort maxima, **not** a universal scheduler/fsync tail guarantee.
+
+The write control retains FULL (`synchronous=2`) and verifies automatic
+checkpointing is disabled. Its `commit_inclusive` distribution includes max and
+the count at or over 100 ms; every append call must be below 100 ms. This is an
+outer call scope, including writer admission, native append/projection, selector
+finalization and COMMIT, **not** an isolated SQL transaction measurement.
+Per-commit indexed wall times and Unix-microsecond intervals allow correlation
+with a contemporaneous native profile or OS trace. They do not by themselves
+attribute a slow call to selector work or fsync. Profiling's batch COMMIT label
+above and the backfill phase counters must not be conflated.
+
+The deferred-maintenance control reports a conservative transaction envelope:
+preflight reads, writer admission, BEGIN, the production finalizer, durable COMMIT
+and remaining-work checks. Unlike the startup/rebuild counters, this public
+maintenance call does not expose separate selector-work/COMMIT timings. A slow
+loan requires native profiling/OS tracing or a contract-preserving test-only phase
+hook at that production boundary; its outer wall time must not be labeled isolated
+SQL work. A finite fixture and passing observed maxima do not establish a universal
+bound for all future workloads.
+
+`client_messages_selector_checkpoint` records TRUNCATE admission/checkpoint
+wall time, SQLite busy/frame results and before/after physical storage; each
+send/close segment must start with a verified zero-length WAL. Send and close
+records include the pre-checkpoint WAL bytes, bytes per commit, post-checkpoint
+storage, and separate checkpoint timing. Delivered/read setup is real work but
+excluded from send/close latency distributions; its WAL is visible in the next
+segment-start checkpoint record. Delta records report absolute extra WAL bytes,
+percentage over the source-only baseline and p95/max/call-sum wall differences
+for the same round and lifecycle workload. These file lengths include the WAL
+header; they are neither daily database growth nor cumulative write I/O.
+Startup/rebuild's PASSIVE checkpoint can leave a reusable WAL file, so their
+post-return file lengths cannot be presented as bytes written by that operation.
+
+A passing new cohort cannot explain or erase an earlier over-target COMMIT.
+For an unexplained tail, preserve the adverse receipt and collect a contemporaneous
+SQLite/OS scheduling and sync trace over its recorded interval before assigning
+a cause; disabling automatic checkpointing does not remove FULL sync or scheduler
+tails. Do not weaken durability, raise 100 ms, or substitute page p95 for transaction
+max. No benchmark result is implied by these commands or instrumentation.
+The repository's database-size/daily-growth targets do not allocate an acceptable
+selector-versus-baseline WAL amplification percentage. That limit and disposition
+of adverse write/WAL receipts require the public contract owner's explicit decision;
+these controls deliberately do not invent a WAL ceiling or a waiver.
+
+#### Production-size offline-copy receipt
+
+`api::client_messages_selector_tests::production_copy::benchmark_client_messages_selector_production_copy`
+is a separate ignored control; the older 118k-claim migration-copy control is unchanged.
+Set `ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY` to an explicitly supplied,
+checkpointed offline database and `TMPDIR` to a scratch filesystem with room for
+two fresh database copies, derived indexes and WAL. The input is opened read-only;
+neither copy is a daemon store. A completed selector projection is rejected as
+initial online-build evidence rather than silently rebuilt.
+
+The receipt records source counts/bytes and Git HEAD, every observed online
+backfill transaction's BEGIN-through-COMMIT duration and work/COMMIT split,
+distribution/max and 100 ms counts, and physical WAL start/peak/growth relative
+to the original database bytes against the 20% bar. Real foreground
+send/delivered/read/close lifecycles compete with the independent background
+writer loans. One lifecycle is offered per loan through a capacity-one channel
+(coalescing offers while busy); intervals and actual transaction overlaps are
+reported, not assumed. WAL samples include those competing writes.
+
+After the build, isolated send/close segments report individual physical WAL
+deltas and latency, and compare against a second source-only copy with the same
+foreground workload replayed before measurement. FULL durability is retained;
+automatic build checkpoints are disabled by the production backfill guard.
+One JSON receipt is emitted, including adverse bars and operational errors;
+inspect top-level and nested `error` fields, `errors`, overlap counts and bar
+results even when the test exits successfully. This control deliberately does
+not assert the performance bars before printing the receipt.
+The separate ignored `benchmark_client_messages_selector_production_copy_smoke`
+uses only its own small fresh offline store and asserts receipt completeness.
+
 
 ## Raw terminal cold opens
 

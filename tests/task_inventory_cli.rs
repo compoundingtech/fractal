@@ -575,12 +575,11 @@ fn failed_and_timed_out_pty_commands_are_typed_incomplete() {
     assert!(!failed.status.success());
     let failed_json: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
     assert_eq!(failed_json["complete"], false);
-    assert!(
-        failed_json["errors"][0]
-            .as_str()
-            .unwrap()
-            .contains("fixture failure")
-    );
+    // A failed launcher is reported by its exit status alone: launcher output may carry
+    // environment values, so it never reaches the inventory.
+    let failed_error = failed_json["errors"][0].as_str().unwrap();
+    assert!(failed_error.contains("exit status: 7"), "{failed_error}");
+    assert!(!failed_error.contains("fixture failure"), "{failed_error}");
 
     let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|dir| dir.join("sleep"))
