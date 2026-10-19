@@ -74,6 +74,108 @@ let socket = "/state/st3.sock";
                     changed = proof.inventory(path, 'sample.rs', {}, {})
                     self.assertNotEqual(baseline[category], changed[category])
 
+    def test_annotated_raw_and_macro_sql_mutations_are_serialized_changes(self):
+        sources = (
+            'pub const SCHEMA: &str = /* sqlite-large-value: owner=fractal_store */ '
+            '"CREATE INDEX st3_replica_lifecycle_unavailable ON records(id);";',
+            '#[rustfmt::skip]\nconst RULES_SQL: &str = indoc::indoc! {r##"\n'
+            'CREATE INDEX st3_replica_lifecycle_unavailable ON records(id);\n"##};',
+            'const RULES_SQL: &str =\n concat!("CREATE INDEX ", '
+            'r#"st3_replica_lifecycle_unavailable"#, " ON records(id);");',
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'schema.rs'
+            for source in sources:
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    baseline = proof.inventory(path, 'schema.rs', {}, {})['serialized_constants']
+                    self.assertTrue(any('st3_replica_lifecycle_unavailable' in key for key in baseline))
+                    path.write_text(source.replace('st3_replica_lifecycle_unavailable', 'fractal_lifecycle_unavailable'))
+                    changed = proof.inventory(path, 'schema.rs', {}, {})['serialized_constants']
+                    self.assertNotEqual(baseline, changed)
+
+    def test_wit_generated_identifiers_are_frozen_across_all_six_consumers(self):
+        paths = [
+            'components/github-issue/src/lib.rs', 'components/github-pr/src/lib.rs',
+            'components/pty-stats/src/lib.rs', 'components/vista/src/lib.rs',
+            'crates/st2-resource-wasip2/src/lib.rs', 'crates/st2-resource-wasip2/tests/executor.rs',
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            for relative in paths:
+                path = tree / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                root = 'fixture' if relative.endswith('executor.rs') else 'crate::bindings::exports'
+                path.write_text(f'use {root}::st2::resource_provider::provider_api;\n'
+                                '// exports::ignored::resource_provider\n'
+                                'const NOTE: &str = "fixture::ignored::resource_provider";\n')
+            baseline = proof.wit_namespaces(tree, {'st2-resource-wasip2': 'fractal-resource-wasip2'}, {})
+            self.assertEqual(sum(sum(values.values()) for values in baseline.values()), 6)
+            for relative in paths:
+                with self.subTest(path=relative):
+                    path = tree / relative
+                    original = path.read_text()
+                    path.write_text(original.replace('::st2::', '::fractal_legacy_runner::'))
+                    self.assertNotEqual(baseline, proof.wit_namespaces(
+                        tree, {'st2-resource-wasip2': 'fractal-resource-wasip2'}, {}))
+                    path.write_text(original)
+
+    def test_wit_bytes_and_relative_symlink_targets_are_guarded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            target = tree / 'provider.wit'
+            target.write_text('package st2:resource-provider;\n')
+            link = tree / 'nested/provider-api.wit'
+            link.parent.mkdir()
+            link.symlink_to('../provider.wit')
+            baseline = proof.wit_artifacts(tree, {}, {})
+            self.assertEqual(proof.symlink_guard(tree), {'checked': 1, 'dangling': []})
+            target.write_text('package fractal:resource-provider;\n')
+            self.assertNotEqual(baseline, proof.wit_artifacts(tree, {}, {}))
+            link.unlink()
+            link.symlink_to('../missing.wit')
+            result = proof.symlink_guard(tree)
+            self.assertEqual(result['checked'], 1)
+            self.assertEqual(result['dangling'][0]['path'], 'nested/provider-api.wit')
+            self.assertEqual(result['dangling'][0]['target'], '../missing.wit')
+
+    def test_real_nix_evaluates_every_system_and_computed_output_name_without_building(self):
+        # Deliberately no skip/mock: missing Nix or evaluation errors fail the guard.
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'flake.lock').write_text(
+                '{"nodes":{"root":{}},"root":"root","version":7}\n')
+            source = '''{
+              outputs = { self }: let name = "stable" + "-output"; in {
+                packages.x86_64-linux.${name} = throw "must not evaluate derivation";
+                packages.aarch64-darwin.other = throw "must not build";
+                apps.aarch64-linux.${name} = throw "must not evaluate app";
+                checks.x86_64-darwin.${name} = throw "must not evaluate check";
+              };
+            }'''
+            flake = tree / 'flake.nix'
+            flake.write_text(source)
+            baseline = proof.nix_output_names(tree)
+            self.assertEqual(baseline, {
+                'packages': {'x86_64-linux': ['stable-output'], 'aarch64-darwin': ['other']},
+                'apps': {'aarch64-linux': ['stable-output']},
+                'checks': {'x86_64-darwin': ['stable-output']},
+            })
+            for kind, system in (
+                ('packages', 'x86_64-linux'), ('apps', 'aarch64-linux'), ('checks', 'x86_64-darwin'),
+            ):
+                attribute = kind + '.' + system + '.${name}'
+                for replacement in (kind + '.' + system + '.renamed', kind + '.riscv64-linux.${name}'):
+                    with self.subTest(kind=kind, replacement=replacement):
+                        flake.write_text(source.replace(attribute, replacement))
+                        self.assertNotEqual(baseline[kind], proof.nix_output_names(tree)[kind])
+            flake.write_text('{ outputs = { self }: throw "intentional evaluation error"; }')
+            with self.assertRaisesRegex(RuntimeError, 'Nix output evaluation failed'):
+                proof.nix_output_names(tree)
+            (tree / 'flake.lock').unlink()
+            with self.assertRaisesRegex(ValueError, 'flake.lock is missing'):
+                proof.nix_output_names(tree)
+
 
 if __name__ == '__main__':
     unittest.main()

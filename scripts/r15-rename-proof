@@ -2,7 +2,7 @@
 """Print rename statistics, hunk kinds and exact-tree runtime invariant checks.
 
 Run: nix develop -c python3 scripts/r15-rename-proof --base origin/main --head HEAD
-The script reads Git trees, not uncommitted files. Cargo metadata does not build.
+The script reads Git trees, not uncommitted files. Cargo/Nix evaluation does not build.
 """
 import argparse
 from collections import Counter
@@ -42,7 +42,7 @@ def binaries(tree):
                   for target in package['targets'] if 'bin' in target['kind'])
 
 
-def literals(text, suffix):
+def literals(text, suffix, spans=False):
     """Yield string payloads and their source positions; skip comments and Rust lifetimes."""
     cursor = 0
     while cursor < len(text):
@@ -70,7 +70,7 @@ def literals(text, suffix):
             end = text.find('"' + raw[1], begin)
             if end < 0:
                 raise ValueError('unterminated Rust raw string')
-            yield text[begin:end], start
+            yield (text[begin:end], start, end + 1 + len(raw[1])) if spans else (text[begin:end], start)
             cursor = end + 1 + len(raw[1])
             continue
         char = text[cursor]
@@ -90,11 +90,97 @@ def literals(text, suffix):
             if text[cursor] == '\\':
                 cursor += 2
             elif text.startswith(quote, cursor):
-                yield text[begin:cursor], start
+                yield (text[begin:cursor], start, cursor + len(quote)) if spans else (text[begin:cursor], start)
                 cursor += len(quote)
                 break
             else:
                 cursor += 1
+
+
+def rust_code(text):
+    """Mask strings and comments without changing identifier positions."""
+    masked = list(text)
+    for _, start, end in literals(text, '.rs', spans=True):
+        masked[start:end] = ' ' * (end - start)
+    code = ''.join(masked)
+    return re.sub(r'//[^\n]*|/\*.*?\*/', lambda match: ' ' * len(match[0]), code, flags=re.S)
+
+
+def sql_literals(text):
+    """Include literal fragments of annotated, multiline and macro serialized constants."""
+    code = rust_code(text)
+    strings = list(literals(text, '.rs'))
+    found = Counter()
+    for declaration in re.finditer(r'\b(?:const|static)\s+(?:mut\s+)?([A-Za-z_]\w*)\s*:[^=;]+=', code):
+        if not re.search(r'SQL|VERSION|SCHEMA|DOMAIN|KIND|PROTOCOL|HEADER|PREFIX|SOCKET|CONFIG|STATE|PATH|DIRECTOR|ENV', declaration[1], re.I):
+            continue
+        end = code.find(';', declaration.end())
+        if end < 0:
+            raise ValueError('unterminated serialized constant: ' + declaration[1])
+        for value, position in strings:
+            if declaration.end() <= position < end:
+                found['constant:' + value] += 1
+    return found
+
+
+def wit_namespaces(tree, crates, packages):
+    found = {}
+    for path in sorted(tree.rglob('*.rs')):
+        if path.is_symlink():
+            continue
+        namespaces = Counter(re.sub(r'\s+', '', match[0]) for match in re.finditer(
+            r'\b(?:exports|fixture)\s*::\s*[A-Za-z_]\w*\s*::\s*resource_provider\b',
+            rust_code(path.read_text())))
+        if namespaces:
+            found[source_literal(path.relative_to(tree).as_posix(), crates, packages)] = dict(namespaces)
+    return found
+
+
+def wit_artifacts(tree, crates, packages):
+    # Freeze complete WIT bytes, not only package declarations or quoted strings.
+    return {source_literal(path.relative_to(tree).as_posix(), crates, packages): path.read_bytes()
+            for path in sorted(tree.rglob('*.wit')) if not path.is_symlink()}
+
+
+def symlink_guard(tree):
+    links = sorted(path for path in tree.rglob('*') if path.is_symlink())
+    dangling = []
+    for path in links:
+        try:
+            path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            dangling.append({'path': path.relative_to(tree).as_posix(),
+                             'target': str(path.readlink()), 'error': str(error)})
+    return {'checked': len(links), 'dangling': dangling}
+
+
+def nix_output_names(tree):
+    if not (tree / 'flake.lock').is_file():
+        raise ValueError(f'committed flake.lock is missing in {tree}')
+    # getFlake resolves this immutable archive using its committed flake.lock.
+    # --impure permits only the local snapshot reference; lock updates are forbidden.
+    # attrNames is lazy in derivation values: this evaluates names on every system,
+    # without instantiating/building packages or depending on source-text spelling.
+    reference = json.dumps('path:' + str(tree.resolve()))
+    expression = f'''let flake = builtins.getFlake {reference}; in
+      builtins.listToAttrs (map (kind: {{
+        name = kind;
+        value = builtins.mapAttrs (_: outputs: builtins.attrNames outputs) (flake.${{kind}} or {{}});
+      }}) [ "packages" "apps" "checks" ])'''
+    command = ['nix', 'eval', '--json', '--impure', '--no-write-lock-file',
+               '--no-update-lock-file', '--expr', expression]
+    result = subprocess.run(command, cwd=tree, text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(f'Nix output evaluation failed in {tree}: {result.stderr.strip()}')
+    outputs = json.loads(result.stdout)
+    if not isinstance(outputs, dict) or set(outputs) != {'packages', 'apps', 'checks'}:
+        raise ValueError('invalid Nix output attribute map')
+    for systems in outputs.values():
+        if not isinstance(systems, dict) or any(
+                not isinstance(names, list) or any(not isinstance(name, str) for name in names)
+                for names in systems.values()):
+            raise ValueError('invalid Nix per-system attribute names')
+    return outputs
 
 
 def source_mapping():
@@ -127,6 +213,8 @@ def inventory(path, relative, crates, packages):
         # changes because the renamed build input and stable output now differ.
         text = text.replace('$out/share/st2/providers/${wasmName}', '$out/share/st2/providers/${installedName}')
     found = {kind: Counter() for kind in ('serialized_constants', 'wire_storage', 'environment', 'on_disk_paths')}
+    if path.suffix == '.rs':
+        found['serialized_constants'].update(sql_literals(text))
     for value, position in literals(text, path.suffix):
         value = source_literal(value, crates, packages)
         prefix = text[max(0, position - 200):position]
@@ -243,6 +331,35 @@ def main():
         for revision, tree in zip((base, head), trees):
             tree.mkdir()
             snapshot(revision, tree)
+        guards = {}
+        guards['head_symlinks'] = symlink_guard(trees[1])
+        guards['head_symlinks']['result'] = 'FAIL' if guards['head_symlinks']['dangling'] else 'PASS'
+        differences.extend({'category': 'dangling_symlink', **link}
+                           for link in guards['head_symlinks']['dangling'])
+        for category, collect in (
+            ('wit_generated_namespaces', lambda tree: wit_namespaces(tree, crates, packages)),
+            ('nix_output_attributes', nix_output_names),
+        ):
+            try:
+                before, after = [collect(tree) for tree in trees]
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+                guards[category] = {'result': 'ERROR', 'error': str(error)}
+                differences.append({'category': category, 'error': str(error)})
+                continue
+            guards[category] = {'result': 'PASS' if before == after else 'FAIL',
+                                'before': before, 'after': after}
+            if category == 'wit_generated_namespaces':
+                guards[category]['checked'] = sum(sum(values.values()) for values in before.values())
+            else:
+                guards[category]['checked'] = sum(len(names) for systems in before.values() for names in systems.values())
+            if before != after:
+                differences.append({'category': category, 'before': before, 'after': after})
+        wit_before, wit_after = [wit_artifacts(tree, crates, packages) for tree in trees]
+        wit_changed = sorted(path for path in wit_before.keys() | wit_after.keys()
+                             if wit_before.get(path) != wit_after.get(path))
+        guards['wit_artifacts'] = {'result': 'FAIL' if wit_changed else 'PASS',
+                                  'checked': len(wit_before), 'changed': wit_changed}
+        differences.extend({'category': 'wit_artifact', 'path': path} for path in wit_changed)
         binary_lists = [binaries(tree) for tree in trees]
         if binary_lists[0] != binary_lists[1]:
             differences.append({'category': 'binary_names', 'before': binary_lists[0], 'after': binary_lists[1]})
@@ -298,6 +415,7 @@ def main():
                     differences.append({'path': new, 'category': kind, 'removed': dict(removed), 'added': dict(added)})
     print(json.dumps({'invariants': 'PASS' if not differences else 'FAIL', 'binary_names': binary_lists[1],
                       'serialized_contract_artifacts': len(frozen),
+                      'guards': guards,
                       'protected_occurrences': dict(totals), 'differences': differences}, sort_keys=True))
     return bool(differences)
 
