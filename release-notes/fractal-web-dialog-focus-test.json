@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Make the fractal-web declaration dialog test wait for the dialog's deferred focus move",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only change to one fractal-web integration test; no runtime, claim, storage or protocol behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Test-only change to one fractal-web integration test; no runtime, claim, storage or protocol behavior changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Test-only change to one fractal-web integration test; no runtime, claim, storage or protocol behavior changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Test-only change to one fractal-web integration test; no runtime, claim, storage or protocol behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Test-only change to one fractal-web integration test; no runtime, claim, storage or protocol behavior changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Test-only change to one fractal-web integration test; no runtime, claim, storage or protocol behavior changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Test-only change to one fractal-web integration test; no runtime, claim, storage or protocol behavior changes."
+  }
+}
