@@ -1,4 +1,4 @@
-import { scenarioStoryCheck } from '@smalltalk/st3-scenarios/storybook'
+import { scenarioStoryCheck } from '@smalltalk/st3-scenarios/storybook/check'
 import { expect, test } from 'vitest'
 import meta, { AllStates } from './Markdown.stories.tsx'
 

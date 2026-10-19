@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest'
 
 import { ANCHOR_MS, catalog, foldSlice, loadWorld, manualClock, syncStatusAt, type SliceKind } from '../src/index.ts'
 import { createReadTracker, ScenarioProvider, useScenarioSlice, type WireSlice } from '../src/react/index.ts'
-import { scenarioArgTypes, scenarioGlobalTypes, scenarioStoryCheck, ScenarioStoryCheckError, withScenario, type ScenarioStoryCheckOptions } from '../src/storybook/index.ts'
+import { scenarioArgTypes, scenarioGlobalTypes } from '../src/storybook/index.ts'
+import { scenarioStoryCheck, ScenarioStoryCheckError, withScenario, type ScenarioStoryCheckOptions } from '../src/storybook/check.ts'
+import { defaultVariants, worldNames } from '../src/storybook/manifest.ts'
 import meta, { Fixed, Good, Invariant, LoadingRoster, Pinned, Sync, Undeclared } from './stories/Consumption.stories.tsx'
 
 const world = loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
@@ -76,6 +78,8 @@ describe('Storybook scenario binding', () => {
   it('lists the catalog and offers the world variants as controls', () => {
     expect(scenarioGlobalTypes.scenario.defaultValue).toBe('fleet-mid-refactor')
     expect(scenarioGlobalTypes.scenario.toolbar.items.map(({ value }) => value)).toEqual(catalog.map(({ id }) => id))
+    expect(worldNames).toEqual(catalog.map(({ id, title }) => ({ id, title })))
+    expect(defaultVariants).toEqual(world.available)
     const controls = scenarioArgTypes(['roster', 'attention'], world)
     expect(controls.roster?.options).toEqual(world.available.roster)
     expect(controls.attention?.defaultValue).toBe('default')
