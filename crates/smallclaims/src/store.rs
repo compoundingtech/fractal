@@ -80,6 +80,7 @@ pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 mod document_pages;
+pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
@@ -966,6 +967,7 @@ impl Store {
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
         })?;
+        claim_ranges::install(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
             idempotency::initialize(connection)

@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `5a773ab229f6840a044c37d88812f64af0179542bff88ba67994415efd4cf6c3`
+Storage digest: `84ea6c9cbf254900bd77a11ac55608abf634e3fb400c276f314a9e133c956bdb`
 
 ## Subject families
 
@@ -324,3 +324,17 @@ the checkpoint tables: reading the ledger before local-mode activation stops tho
 would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
+
+## Claim range digests
+
+`claim_range_digests` summarizes the claims this store retains for claims sync. Each claim falls
+in one of 4,096 leaf ranges by the first three hex digits of its ID, and each leaf in one of 64 top
+ranges; an ID that is not 64 lowercase hex digits is counted in a separate irregular range. A
+range keeps its claim count and the 512-bit modular sum of its members' domain-separated SHA-512
+hashes, so it does not depend on arrival order. Plain-SQL triggers queue every claim insert and
+delete in `claim_range_pending`, so an earlier build that writes claims queues its changes too. A
+background job (`maintenance.claim_ranges`) folds the queue into the digests after each store
+event, and once folds the claims that predate the triggers, tracked by `claim_range_import`; it
+takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
+loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
+import are both empty. Nothing reads them yet.
