@@ -1,3 +1,4 @@
+use crate::OwnedSetsStore;
 use super::*;
 use crate::store::owned_sets::{self as sets, Request as SetRequest};
 
@@ -70,7 +71,7 @@ pub async fn apply(
     ))
 }
 
-fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
+pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
     let mut value = serde_json::to_value(&view)?;
     let mut statuses = Vec::new();
     for (subject, member, retired) in state.store.owned_set_effective_members(&view)? {
@@ -200,7 +201,7 @@ pub async fn get(
     Ok((Extension(snapshot), Json(value?)))
 }
 
-fn detail(state: &AppState, id: &str, sha: Option<String>) -> Result<Value, ApiError> {
+pub fn detail(state: &AppState, id: &str, sha: Option<String>) -> Result<Value, ApiError> {
     let subject = sets::subject(id).map_err(ApiError::bad)?;
     let selected = state
         .store

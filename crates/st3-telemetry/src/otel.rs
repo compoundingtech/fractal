@@ -426,16 +426,18 @@ fn span_batch_config() -> BatchConfig {
 }
 
 fn cli_backoff_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(runtime).join("st3/otel-cli-backoff"));
+    }
+    let base = std::env::var_os("XDG_STATE_HOME")
         .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()))
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME")
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    Some(base.join("st3/otel-cli-backoff"))
+    Some(st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal")).join("otel-cli-backoff"))
 }
 
 fn unix_seconds() -> u64 {
@@ -591,6 +593,51 @@ pub fn extract_remote_context(headers: &axum::http::HeaderMap) -> opentelemetry:
 }
 
 static HTTP_DURATION: OnceLock<opentelemetry::metrics::Histogram<f64>> = OnceLock::new();
+
+struct IndexMigrationMetrics {
+    ready: opentelemetry::metrics::Gauge<u64>,
+    build: opentelemetry::metrics::Histogram<f64>,
+    write_hold: opentelemetry::metrics::Histogram<f64>,
+}
+
+static INDEX_MIGRATION: std::sync::LazyLock<IndexMigrationMetrics> = std::sync::LazyLock::new(|| {
+    let meter = opentelemetry::global::meter("st3.db");
+    IndexMigrationMetrics {
+        ready: meter.u64_gauge("st.db.migration.index.ready")
+            .with_description("1 when the side index is complete and reads may use it; 0 during bootstrap")
+            .build(),
+        build: meter.f64_histogram("st.db.migration.index.build.duration")
+            .with_unit("s")
+            .with_description("Elapsed background index build time, including paced yields and contention")
+            .build(),
+        write_hold: meter.f64_histogram("st.db.migration.index.write_hold.duration")
+            .with_unit("s")
+            .with_description("Begin-through-commit upper bound on page write hold, excluding queue wait")
+            .build(),
+    }
+});
+
+/// One bounded index name labels readiness, completed build duration and each
+/// page's begin-through-commit write-hold upper bound (excluding queue admission).
+pub fn record_index_migration(
+    index: &'static str,
+    ready: bool,
+    write_hold: Option<Duration>,
+    completed: Option<Duration>,
+) {
+    if !metrics_enabled() {
+        return;
+    }
+    let metrics = &*INDEX_MIGRATION;
+    let attributes = [KeyValue::new("index", index)];
+    metrics.ready.record(u64::from(ready), &attributes);
+    if let Some(duration) = write_hold {
+        metrics.write_hold.record(duration.as_secs_f64(), &attributes);
+    }
+    if let Some(duration) = completed {
+        metrics.build.record(duration.as_secs_f64(), &attributes);
+    }
+}
 
 /// The five status classes the request-duration histogram labels; 101 WebSocket upgrades
 /// count as `1xx`.

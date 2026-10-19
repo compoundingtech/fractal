@@ -21,6 +21,19 @@ generated file (`git checkout --theirs -- clients crates/st3-client/src/contract
 crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
 
+Client transport receivers accept the deployed `st3.client.*` names and matching
+`fractal.client.*` aliases, including error and visualization version fields.
+The generated sender constants and request defaults remain `st3.*`. A sender
+cutover must offer both WebSocket subprotocols, Fractal first: servers select
+`fractal.*` only when offered, and clients retain the WebSocket library's
+offered-protocol guard. Rust and Swift models keep their existing lossless string
+decoding behavior; accepting aliases does not reject previously tolerated versions.
+The legacy terminal route likewise selects either `st3.terminal.v1` or
+`fractal.terminal.v1` and still permits upgrades with no supported subprotocol.
+This transport vocabulary does not rename signed peer envelope tags, signature
+domains, durable identities, JSON Schema annotations or local provenance labels.
+
+
 `ResourceHeader.operational` describes current versus historical state, actionability, reasons,
 and optional owner-generation/runtime-incarnation identities. Work also exposes `agentless`,
 claim expiry, execution start/elapsed time, and timeout in milliseconds. These fields are optional
@@ -513,6 +526,20 @@ Missing recipient allowances use the $0.22–$0.33 API-equivalent fleet allowanc
 fallback for every recipient and reports no calibration. Recalibration changes future reads
 of historical counts; the pinned document makes an exported report reproducible. Older daemons
 omit the entire estimate, which clients treat as unavailable.
+
+An agent's `usage` summary selects the newest response rollup in each incarnation/model/account/
+run/step/host slot. Selected rollups take precedence over legacy cumulative or response records
+for that incarnation, for both tokens and cost. Known `cost_microusd` values are summed once and
+exposed as USD in `usage.cost`; `reported_cost_microusd` is already included, not added again.
+Clients accept both `cumulative-per-incarnation-else-response-deltas` and
+`rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas` for `aggregation`.
+The daemon still emits the old literal in this client-first rollout. Only after dual-literal
+clients are deployed will a separate PR switch daemon emission to the new literal; acceptance
+of the old literal will be removed later, after old daemons are retired.
+Any contributing tokens without a price, or selected costs in different currencies, leaves the
+combined cost/currency unknown, including legacy cumulative and response records. A newer priced
+rollup replaces an unpriced one in the same slot. This summary is not period spend, native session
+lifetime accounting, or a child-agent total.
 
 `GET /v1/client/usage?since_ms=…&until_ms=…` reads token spend over a period: the last 24 hours
 when both are omitted, ending now when `until_ms` is omitted. It requires `read.projections`. The
@@ -1287,6 +1314,21 @@ digest. `key_id` is the public-key SHA-256 digest. The owner must explicitly gra
 `write.assistant.answers`, `write.assistant.messages`, or `write.assistant.custom-reply`
 for the corresponding native writes. Read scopes and disclosure consent never imply write authority.
 
+Assistant collection reads materialize only the requested page. Missions seek through the
+native mission keyset and build cards for those IDs; agents slice the published roster or
+use the native shallow-reference pager when no refresher runs. Attention slices a published
+owner-specific list. These cursors bind the projection's metadata/content class, grant,
+policy revision, snapshot and page size. A changed or unavailable publication returns
+`page-cursor-expired`; before the first attention or agent publication, reads requiring it
+return the corresponding view-not-ready error. Summary reads count grouped mission states
+and published attention/agent state inputs, without building collection cards.
+Mission cursors also bind the store claim cut: changed mission inputs or more than 512
+intervening claims expire the sequence with `page-cursor-expired`, because mutable sort
+keys can cross the cursor. Read receipts alone do not invalidate a continuation.
+Mission metadata retains the relevant live run even outside the native recent-run preview.
+Summary agent states include
+delivery-presence downgrades, and rich attention/content preserve update request payloads.
+
 The issuer is sealed from the configured owner at trusted-local begin and preserved through
 gateway completion; remote callers cannot select or replace it. Assistant clients validate
 the issuer's concrete person shape from that gateway response without person grant proofs
@@ -1702,8 +1744,16 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `forbidden`, `unsupported-capability`, `validation-failed`, `idempotency-conflict`, `stale-fence`,
 `cursor-gap`, `page-cursor-expired`, `projection-detail-too-large`,
 `projection-detail-invalid-source`, `rate-limited`, `runtime-not-local`,
-`runtime-authority-indeterminate`, `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
+`runtime-authority-indeterminate`, `runtime-list-not-ready`, `runtime-list-ended`,
+`remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
 `response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
+
+Current runtime lists return HTTP 503 `runtime-list-not-ready` with `retryable: true`
+until their first complete publication. `runtime-list-ended` is HTTP 503 with
+`retryable: false` and requires daemon restart. Both codes are typed in the generated clients.
+An embedded `api::router` owns routes, not daemon background tasks: its owner calls
+`start_published_lists` before serving and can await `wait_published_lists_at_least` for a
+seeded store cut. A bare router refuses unpublished runtime reads rather than folding on demand.
 
 Revoking a pairing from a non-issuer returns HTTP 409 with `code: issuer-required`,
 `retryable: false`, and `details.issuer_host_id` naming the authoritative issuer.

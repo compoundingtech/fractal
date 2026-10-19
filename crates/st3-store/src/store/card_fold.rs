@@ -8,7 +8,7 @@ use super::*;
 pub mod health_capture;
 
 /// Subjects per statement, so that no single statement holds the reader for the whole fleet.
-const CHUNK: usize = 256;
+pub const CHUNK: usize = 256;
 
 /// What one fold has read at its snapshot, kept across its view and status passes.
 pub struct CardReads {
@@ -20,7 +20,7 @@ pub struct CardReads {
 
 /// A subject's folded actual state and its selected actual-state claim: the claim, its origin
 /// and the rival observations it must descend from to hold alone.
-struct ActualState {
+pub struct ActualState {
     latest: Option<Value>,
     source: Option<(String, String, Vec<String>)>,
 }

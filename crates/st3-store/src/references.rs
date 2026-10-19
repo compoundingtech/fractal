@@ -33,37 +33,6 @@ const PROOF_RUN: &str = "migration-proof";
 /// cannot be checked before the run and is skipped.
 const RUN_VALUE: &str = "st-run-value";
 
-/// Every reference in `intent` that resolves neither in the intent nor in `graph`.
-pub fn publication(
-    intent: &NormalizedIntent,
-    graph: &impl Graph,
-    host: &str,
-) -> Result<Vec<String>, St3Error> {
-    let mut refusals = Vec::new();
-    for desired in intent.subjects.values() {
-        subject_references(
-            desired,
-            None,
-            &Scope::empty(intent),
-            graph,
-            host,
-            &mut refusals,
-        )?;
-    }
-    for run in runs(&intent.missions.values().collect::<Vec<_>>()) {
-        let scope = Scope {
-            run: run_declarations(&run, host),
-            intent: Some(intent),
-        };
-        for mission in run {
-            mission_references(mission, &scope, graph, host, &mut refusals)?;
-        }
-    }
-    refusals.sort();
-    refusals.dedup();
-    Ok(refusals)
-}
-
 /// Every reference in the graph's ready missions and current declarations that no longer
 /// resolves. A mission's loop rounds are checked with it, since they share its run's
 /// declarations. Messages are history and are not checked.
@@ -98,7 +67,7 @@ pub fn graph(
 /// The missions whose declarations one run shares: each mission with the loop rounds embedded in
 /// it. Separate missions start separate runs, so one never resolves another's run-scoped
 /// declarations. An embedded mission without its owner is checked alone.
-fn runs<'a>(missions: &[&'a MissionSpec]) -> Vec<Vec<&'a MissionSpec>> {
+pub fn runs<'a>(missions: &[&'a MissionSpec]) -> Vec<Vec<&'a MissionSpec>> {
     let mut grouped = BTreeSet::new();
     let mut runs = Vec::new();
     for owner in missions
@@ -124,15 +93,15 @@ fn runs<'a>(missions: &[&'a MissionSpec]) -> Vec<Vec<&'a MissionSpec>> {
     runs
 }
 
-struct Scope<'a> {
+pub struct Scope<'a> {
     /// The subjects the missions' own declarations create in a run, under [`PROOF_RUN`].
-    run: BTreeSet<String>,
+    pub run: BTreeSet<String>,
     /// The publication being checked, whose subjects and missions resolve references too.
-    intent: Option<&'a NormalizedIntent>,
+    pub intent: Option<&'a NormalizedIntent>,
 }
 
 impl<'a> Scope<'a> {
-    fn empty(intent: &'a NormalizedIntent) -> Self {
+    pub fn empty(intent: &'a NormalizedIntent) -> Self {
         Self {
             run: BTreeSet::new(),
             intent: Some(intent),
@@ -223,7 +192,7 @@ fn run_intent(mission: &MissionSpec, source: &str, host: &str) -> Option<Normali
     crate::graph::parse_execution_intent(&source, host, PROOF_RUN).ok()
 }
 
-fn run_declarations(missions: &[&MissionSpec], host: &str) -> BTreeSet<String> {
+pub fn run_declarations(missions: &[&MissionSpec], host: &str) -> BTreeSet<String> {
     missions
         .iter()
         .flat_map(|mission| declaration_sources(mission))
@@ -237,7 +206,7 @@ fn authored(subject: &str) -> String {
     subject.replace(PROOF_RUN, "${ST_MISSION_RUN}")
 }
 
-fn mission_references(
+pub fn mission_references(
     mission: &MissionSpec,
     scope: &Scope<'_>,
     graph: &impl Graph,
@@ -302,7 +271,7 @@ fn mission_references(
 
 /// The references one declaration names. `mission` is the mission whose declarations hold it,
 /// when it belongs to a run.
-fn subject_references(
+pub fn subject_references(
     desired: &DesiredSubject,
     mission: Option<&MissionSpec>,
     scope: &Scope<'_>,
@@ -442,262 +411,6 @@ fn subject_references(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::graph::parse_intent;
-    use crate::store::Store;
 
-    const UNSTORED: &str = "5f0c3a9e1d2b4c6a8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d";
-
-    fn refusals(store: &Store, source: &str) -> Vec<String> {
-        store
-            .unresolved_references(&parse_intent(source, "node").unwrap())
-            .unwrap()
-    }
-
-    /// Publishes without the reference checks, as a publication before them did.
-    fn publish(store: &Store, source: &str) -> crate::model::ApplyResponse {
-        store
-            .apply_internal(&parse_intent(source, "node").unwrap(), source)
-            .unwrap()
-    }
-
-    /// A mission whose runs declare `declarations`.
-    fn watch(declarations: &str) -> String {
-        format!(
-            r#"version 2
-mission "watch" state="ready" {{
-  goal "Watch."
-  step "watch" {{ agentless }}
-{declarations}
-}}"#
-        )
-    }
-
-    fn schedule(revision: &str) -> String {
-        watch(&format!(
-            r#"schedule "cycle" {{
-  every "6h"
-  anchor "2026-01-01T00:00:00Z"
-  work {{ mission "cycle@{revision}"; workspace "/tmp/cycles" }}
-}}"#
-        ))
-    }
-
-    const CYCLE: &str = r#"mission "cycle" state="ready" {
-  goal "Complete one cycle."
-  step "work" { agentless }
-}"#;
-
-    fn cycle_revision() -> String {
-        parse_intent(&format!("version 2\n{CYCLE}"), "node")
-            .unwrap()
-            .missions["cycle"]
-            .revision
-            .clone()
-    }
-
-    #[test]
-    fn unpinned_schedule_refuses_unknown_mission_at_publish() {
-        let store = Store::open_memory("node").unwrap();
-        let source = watch(
-            r#"schedule "cycle" {
-  every "6h"
-  anchor "2026-01-01T00:00:00Z"
-  work { mission "unknown"; workspace "/tmp/cycles" }
-}"#,
-        );
-        assert_eq!(
-            refusals(&store, &source),
-            [
-                "mission `mission/watch` declares schedule `schedule/${ST_MISSION_RUN}/cycle` references unpublished mission `mission/unknown`"
-            ]
-        );
-        for state in ["draft", "ready", "retired"] {
-            let declared = format!(
-                "{source}\nmission \"unknown\" state=\"{state}\" {{ goal \"Cycle.\"; step \"work\" {{ agentless }} }}"
-            );
-            assert!(refusals(&store, &declared).is_empty());
-        }
-    }
-
-    #[test]
-    fn a_step_selecting_an_agent_nothing_declares_is_refused() {
-        let store = Store::open_memory("node").unwrap();
-        let missing = r#"version 2
-mission "work" state="ready" {
-  goal "Complete the work."
-  step "do-work" { assigned-to "agent/example/nobody" }
-}"#;
-        assert_eq!(
-            refusals(&store, missing),
-            ["mission `mission/work` references missing eligible agent `agent/example/nobody`"]
-        );
-        let declared =
-            format!("{missing}\nagent \"example/nobody\" {{ workspace \"/tmp\"; command \"true\" }}");
-        assert_eq!(refusals(&store, &declared), Vec::<String>::new());
-    }
-
-    #[test]
-    fn an_agent_the_mission_declares_for_its_run_resolves() {
-        let store = Store::open_memory("node").unwrap();
-        let source = r#"version 2
-mission "work" state="ready" {
-  goal "Complete the available work."
-  agent "worker" {
-    identity "fleet.worker"
-    workspace "."
-    command "true"
-  }
-  step "do-work" {
-    assigned-to "agent/${ST_MISSION_RUN}/fleet.worker"
-  }
-}"#;
-        assert_eq!(refusals(&store, source), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_pin_to_a_revision_that_is_not_stored_is_refused() {
-        let store = Store::open_memory("node").unwrap();
-        assert_eq!(
-            refusals(&store, &schedule(UNSTORED)),
-            [format!(
-                "mission `mission/watch` declares schedule `schedule/${{ST_MISSION_RUN}}/cycle` runs a mission that is not stored: mission `mission/cycle@{UNSTORED}` is not stored on this host"
-            )]
-        );
-        let uses = |revision: &str| {
-            format!(
-                r#"version 2
-mission "parent" state="ready" {{
-  goal "Run one cycle."
-  step "cycle" {{ uses-mission "cycle@{revision}" }}
-}}"#
-            )
-        };
-        assert_eq!(
-            refusals(&store, &uses(UNSTORED)),
-            [format!(
-                "step `cycle` of mission `mission/parent` uses a mission that is not stored: mission `mission/cycle@{UNSTORED}` is not stored on this host"
-            )]
-        );
-
-        // Published by the same document, or stored, the pin resolves.
-        let revision = cycle_revision();
-        assert_eq!(
-            refusals(&store, &format!("{}\n{CYCLE}", schedule(&revision))),
-            Vec::<String>::new()
-        );
-        publish(&store, &format!("version 2\n{CYCLE}"));
-        assert_eq!(refusals(&store, &schedule(&revision)), Vec::<String>::new());
-        assert_eq!(refusals(&store, &uses(&revision)), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_pin_to_the_claim_that_published_a_revision_names_the_revision() {
-        let store = Store::open_memory("node").unwrap();
-        let published = publish(&store, &format!("version 2\n{CYCLE}"));
-        let revision = cycle_revision();
-        let [claim] = published.claim_ids.as_slice() else {
-            panic!("one claim publishes the mission: {:?}", published.claim_ids);
-        };
-        assert_eq!(
-            refusals(&store, &schedule(claim)),
-            [format!(
-                "mission `mission/watch` declares schedule `schedule/${{ST_MISSION_RUN}}/cycle` runs a mission that is not stored: `mission/cycle@{claim}` pins the ID of the claim that published `mission/cycle@{revision}`, not a mission revision; pin `mission/cycle@{revision}`"
-            )]
-        );
-    }
-
-    const OBSERVER: &str = r#"observer "status" {
-  resource "resource/status"
-  provider "local.file"
-  locator "/tmp/st3-reference-status"
-  field "status"
-}"#;
-
-    const SUBSCRIPTION: &str = r#"subscription "changed" {
-  observer "observer/status"
-  on "status"
-  to "agent/example/watcher"
-  delivery "message"
-}"#;
-
-    const WATCHER: &str = r#"agent "example/watcher" { workspace "/tmp"; command "true" }"#;
-
-    #[test]
-    fn a_subscription_to_a_missing_observer_or_mission_is_refused() {
-        let store = Store::open_memory("node").unwrap();
-        assert_eq!(
-            refusals(&store, &format!("{}\n{WATCHER}", watch(SUBSCRIPTION))),
-            [
-                "mission `mission/watch` declares subscription `subscription/${ST_MISSION_RUN}/changed` references missing observer `observer/status`"
-            ]
-        );
-        assert_eq!(
-            refusals(&store, &watch(&format!("{SUBSCRIPTION}\n{OBSERVER}"))),
-            [
-                "mission `mission/watch` declares subscription `subscription/${ST_MISSION_RUN}/changed` has missing delivery target `agent/example/watcher`"
-            ]
-        );
-        assert_eq!(
-            refusals(
-                &store,
-                &format!(
-                    "{}\n{WATCHER}",
-                    watch(&format!("{SUBSCRIPTION}\n{OBSERVER}"))
-                )
-            ),
-            Vec::<String>::new()
-        );
-
-        let mission = watch(&format!(
-            r#"{OBSERVER}
-subscription "changed" {{
-  observer "observer/status"
-  on "status"
-  delivery "mission" {{
-    mission "ghost"
-    resource "status"
-    workspace "/tmp/ghost"
-  }}
-}}"#
-        ));
-        assert_eq!(
-            refusals(&store, &mission),
-            [
-                "mission `mission/watch` declares subscription `subscription/${ST_MISSION_RUN}/changed` references unpublished mission `mission/ghost`"
-            ]
-        );
-    }
-
-    #[test]
-    fn st_doctor_lists_references_in_the_graph_that_no_longer_resolve() {
-        let store = Store::open_memory("node").unwrap();
-        assert_eq!(
-            store.unresolved_graph_references().unwrap(),
-            Vec::<String>::new()
-        );
-        publish(
-            &store,
-            &format!(
-                r#"{}
-mission "parent" state="ready" {{
-  goal "Run one cycle."
-  step "cycle" {{ uses-mission "cycle@{UNSTORED}" }}
-}}"#,
-                watch(&format!("{SUBSCRIPTION}\n{OBSERVER}"))
-            ),
-        );
-        assert_eq!(
-            store.unresolved_graph_references().unwrap(),
-            [
-                "mission `mission/watch` declares subscription `subscription/${ST_MISSION_RUN}/changed` has missing delivery target `agent/example/watcher`".to_owned(),
-                format!(
-                    "step `cycle` of mission `mission/parent` uses a mission that is not stored: mission `mission/cycle@{UNSTORED}` is not stored on this host"
-                ),
-            ]
-        );
-        publish(&store, &format!("version 2\n{WATCHER}"));
-        assert_eq!(store.unresolved_graph_references().unwrap().len(), 1);
-    }
-}
+#[cfg(any(test, feature = "test-support"))]
+pub mod seats_shared_tests;

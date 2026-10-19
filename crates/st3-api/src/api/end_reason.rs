@@ -1,9 +1,11 @@
+#[cfg(test)]
+use crate::OwnedSetsStore;
 use serde_json::{Value, json};
 use crate::model::{ClaimRecord, CurrentHarnessView, SubjectStatus};
 use crate::suspension::Suspension;
 
 /// Read-only terminal evidence. An unknown actor/exit never implies success.
-pub(super) fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarnessView>, suspension: Option<&Suspension>, desired: Option<&ClaimRecord>, retired: bool, updated_at: &str) -> Option<Value> {
+pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarnessView>, suspension: Option<&Suspension>, desired: Option<&ClaimRecord>, retired: bool, updated_at: &str) -> Option<Value> {
     let fields = subject.actual.as_ref().map(|v| v.get("fields").unwrap_or(v));
     let actual = fields.and_then(|v| v.get("status")).and_then(Value::as_str);
     let stop = subject.kind.as_deref() == Some("stop");

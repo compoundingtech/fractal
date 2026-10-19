@@ -60,8 +60,23 @@ fn writes_publish_typed_closed_fences() {
     }
 }
 
+#[test]
+fn writes_publish_action_identity_constraints() {
+    for tool in tool_definitions().iter().filter(|tool| matches!(tool.name.as_ref(), "st_alert_answer" | "st_message_send")) {
+        let published = serde_json::to_value(tool).unwrap();
+        let properties = &published["inputSchema"]["properties"];
+        assert_eq!(properties["action_id"]["pattern"], "^action/");
+        assert_eq!(properties["action_id"]["description"], "Unique per intended action, e.g. action/<short-slug>; reuse the same value on a retry");
+        assert_eq!(properties["idempotency_key"]["pattern"], "^[ -~]{16,256}$");
+        assert!(properties["idempotency_key"].get("minLength").is_none());
+        assert!(properties["idempotency_key"].get("maxLength").is_none());
+        assert_eq!(properties["idempotency_key"]["description"], "16-256 printable ASCII chars only (stricter than daemon byte-length bounds); reuse the exact value on retries of the same action");
+        assert!(properties["fence"]["properties"]["snapshot_id"]["description"].as_str().unwrap().contains("immediately preceding read result"));
+    }
+}
+
 fn send_arguments() -> Value {
-    json!({"action_id":"action/test", "idempotency_key":"test-key",
+    json!({"action_id":"action/test", "idempotency_key":"test-key-12345678",
         "fence":{"snapshot_id":"snapshot/test", "subject_revisions":{"agent/recipient":"claim/test"}},
         "to":"agent/recipient", "title":"Hello", "content":"Exact content"})
 }
@@ -76,9 +91,56 @@ fn validation_accepts_every_published_tool_contract() {
     assert!(validate_arguments("st_conversation_read", &json!({"agent_id":"agent/a","session_id":"session/a",
         "reference":"opaque","revision":"claim/a","start":0,"end":1,"max_response_bytes":1})).is_ok());
     assert!(validate_arguments("st_message_send", &send_arguments()).is_ok());
-    assert!(validate_arguments("st_alert_answer", &json!({"action_id":"action/test","idempotency_key":"test-key",
+    assert!(validate_arguments("st_alert_answer", &json!({"action_id":"action/test","idempotency_key":"test-key-12345678",
         "fence":{"snapshot_id":"snapshot/test"},"alert_id":"attention/test","episode":"episode/test",
         "option":"done","summary":"Done"})).is_ok());
+}
+
+fn write_arguments(name: &str) -> Value {
+    if name == "st_message_send" {
+        send_arguments()
+    } else {
+        json!({"action_id":"action/test","idempotency_key":"test-key-12345678",
+            "fence":{"snapshot_id":"snapshot/test"},"alert_id":"attention/test","episode":"episode/test",
+            "option":"done","summary":"Done"})
+    }
+}
+
+#[tokio::test]
+async fn action_identity_violations_fail_before_contacting_gateway() {
+    let adapter = disconnected_adapter();
+    for name in ["st_alert_answer", "st_message_send"] {
+        for (field, value, rule) in [
+            ("action_id", "test".to_owned(), "^action/"),
+            ("action_id", "prefix/action/test".to_owned(), "^action/"),
+            ("idempotency_key", "k".repeat(15), "16-256 printable ASCII"),
+            ("idempotency_key", "k".repeat(257), "16-256 printable ASCII"),
+            ("idempotency_key", "\u{e9}".repeat(16), "printable ASCII"),
+            ("idempotency_key", "\u{e9}".repeat(256), "printable ASCII"),
+            ("idempotency_key", format!("{}\n", "k".repeat(16)), "printable ASCII"),
+            ("idempotency_key", format!("{}\t", "k".repeat(16)), "printable ASCII"),
+        ] {
+            let mut args = write_arguments(name);
+            args[field] = json!(value);
+            let error = call(&adapter, name, &args).await.unwrap_err();
+            assert_eq!(error["code"], "invalid-arguments", "{name}: {args}");
+            let message = error["message"].as_str().unwrap();
+            assert!(message.contains(field) && message.contains(rule), "{message}");
+        }
+    }
+}
+
+#[test]
+fn action_identity_accepts_inclusive_key_length_bounds() {
+    for name in ["st_alert_answer", "st_message_send"] {
+        for length in [16, 256] {
+            for character in ['k', ' ', '~'] {
+                let mut args = write_arguments(name);
+                args["idempotency_key"] = json!(character.to_string().repeat(length));
+                assert!(validate_arguments(name, &args).is_ok(), "{name}: {length}: {character}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -361,7 +423,7 @@ async fn alert_answer_maps_to_work_done_and_returns_direct_action_result_unchang
         bearer: "test-only-answer-credential".into(),
     };
     let arguments = json!({
-        "action_id":"action/answer", "idempotency_key":"answer-key",
+        "action_id":"action/answer", "idempotency_key":"answer-key-0000001",
         "fence":{"snapshot_id":"snapshot/before-answer"},
         "alert_id":"step-run/test/ask", "episode":"claim/ask", "option":"yes",
         "summary":"Proceed with the selected option"
@@ -373,7 +435,7 @@ async fn alert_answer_maps_to_work_done_and_returns_direct_action_result_unchang
     assert_eq!(headers["authorization"], "Bearer test-only-answer-credential");
     assert_eq!(body, json!({
         "api_version":"st3.client.v0", "id":"action/answer", "type":"work.done",
-        "idempotency_key":"answer-key", "fence":{"snapshot_id":"snapshot/before-answer"},
+        "idempotency_key":"answer-key-0000001", "fence":{"snapshot_id":"snapshot/before-answer"},
         "parameters":{"target_id":"step-run/test/ask", "episode":"claim/ask",
             "summary":"Proceed with the selected option", "answer":{"id":"yes"}}
     }));

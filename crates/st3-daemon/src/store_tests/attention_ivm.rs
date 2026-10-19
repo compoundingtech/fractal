@@ -2,6 +2,8 @@
 
 #![allow(unused_imports)]
 
+use crate::CustomStore;
+use crate::PersonWorkStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,9 +19,9 @@ use anyhow::Result;
 use rusqlite::params;
 use smallclaims::store::now_ms;
 use smallclaims::ivm::{Definition, LocalChange, View, Views, source_cut};
-use st3_store::store::attention_ivm::*;
-use st3_store::store::person_work;
-use st3_store::store::*;
+use crate::store::attention_ivm::*;
+use crate::store::person_work;
+use crate::store::*;
 use crate::model::PersonStepResponse;
 use crate::store::custom::{RegistrationRequest, ReplyRequest};
 use smallclaims::ivm::{Readiness, SourceCut, events};
@@ -537,10 +539,24 @@ for (target, sources) in [(&first, [&left, &right]), (&second, [&right, &left])]
 }
 install(&first, &first_views);
 install(&second, &second_views);
+// Split: views installed before anything arrives, maintained after each source's delivery.
+let third = Store::open_memory("fir").unwrap();
+let third_views = views(&third);
+install(&third, &third_views);
+for source in [&right, &left] {
+    third
+        .import_replication(&source.origin, &source.export_replication(0).unwrap())
+        .unwrap();
+    maintain(&third, &third_views);
+}
 for person in ["person/lichen", "person/avery"] {
     assert_eq!(
         parity(&first, &first_views, CUSTOM_VIEW, person, u128::MAX),
         parity(&second, &second_views, CUSTOM_VIEW, person, u128::MAX)
+    );
+    assert_eq!(
+        parity(&first, &first_views, CUSTOM_VIEW, person, u128::MAX),
+        parity(&third, &third_views, CUSTOM_VIEW, person, u128::MAX)
     );
 }
 // A repeated delivery produces neither a semantic change nor a new public episode.

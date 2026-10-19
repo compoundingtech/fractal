@@ -7,10 +7,10 @@ use smallclaims::hash::canonical_json_text;
 use super::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES};
 fn default_response_bytes() -> usize { DEFAULT_RESPONSE_BYTES }
 fn max_response_bytes() -> usize { MAX_RESPONSE_BYTES }
-const HEADER: &str = "x-st3-scg-read-authorization";
+pub const HEADER: &str = "x-st3-scg-read-authorization";
 const USED: &str = "custom.client.assistant.v1.read-used";
-const OUTCOME: &str = "custom.client.assistant.v1.read-outcome";
-const ROUTES: &[(&str, &str)] = &[
+pub const OUTCOME: &str = "custom.client.assistant.v1.read-outcome";
+pub const ROUTES: &[(&str, &str)] = &[
     ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
     ("attention-content", "read.assistant.attention"),
     ("attention-rich", "read.assistant.attention"), ("missions-rich", "read.assistant.missions"),
@@ -42,50 +42,50 @@ pub struct ReadTrust {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadTrustRequest {
-    api_version: String,
-    issuer: String,
-    key_id: String,
-    attestor_public_key: String,
-    shim_public_key: String,
+    pub api_version: String,
+    pub issuer: String,
+    pub key_id: String,
+    pub attestor_public_key: String,
+    pub shim_public_key: String,
     #[serde(default = "default_response_bytes")]
-    default_response_bytes: usize,
+    pub default_response_bytes: usize,
     #[serde(default = "max_response_bytes")]
-    max_response_bytes: usize,
+    pub max_response_bytes: usize,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ReadPayload {
-    issuer: String,
-    identity: String,
-    assistant_id: String,
-    grant_id: String,
-    policy_revision: u64,
-    key_id: String,
-    approval_id: String,
-    execution_id: String,
-    projection: String,
-    parameters: BTreeMap<String, String>,
-    max_response_bytes: usize,
-    request_digest: String,
-    expires_at_unix_ms: u64,
-    nonce: String,
+pub struct ReadPayload {
+    pub issuer: String,
+    pub identity: String,
+    pub assistant_id: String,
+    pub grant_id: String,
+    pub policy_revision: u64,
+    pub key_id: String,
+    pub approval_id: String,
+    pub execution_id: String,
+    pub projection: String,
+    pub parameters: BTreeMap<String, String>,
+    pub max_response_bytes: usize,
+    pub request_digest: String,
+    pub expires_at_unix_ms: u64,
+    pub nonce: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReadAuthorization {
-    payload: ReadPayload,
-    signature: String,
+pub struct ReadAuthorization {
+    pub payload: ReadPayload,
+    pub signature: String,
 }
 /// Carried to the enclosing response: never stores or publishes private projection bytes.
 #[derive(Clone, Debug)]
 pub struct ReadReceipt {
-    subject: String,
+    pub subject: String,
     consumed_claim: String,
     grant_subject: String,
-    actor: String,
+    pub actor: String,
     transport: &'static str,
     policy_revision: u64,
-    proof_expiry: u64,
+    pub proof_expiry: u64,
     pub max_response_bytes: usize,
 }
 
@@ -151,7 +151,7 @@ pub fn route(session: &ClientSession, request: &Request<Body>) -> Result<(), Api
     }
     Ok(())
 }
-fn parameters(uri: &axum::http::Uri) -> Result<BTreeMap<String,String>, ApiError> {
+pub fn parameters(uri: &axum::http::Uri) -> Result<BTreeMap<String,String>, ApiError> {
     let mut result = BTreeMap::new();
     fn decode(value: &str) -> Result<String, ApiError> {
         let value = if value.contains('+') {std::borrow::Cow::Owned(value.replace('+', " "))}
@@ -167,12 +167,12 @@ fn parameters(uri: &axum::http::Uri) -> Result<BTreeMap<String,String>, ApiError
     }
     Ok(result)
 }
-fn request_digest(path: &str, parameters: &BTreeMap<String,String>) -> Result<String,ApiError> {
+pub fn request_digest(path: &str, parameters: &BTreeMap<String,String>) -> Result<String,ApiError> {
     let canonical = canonical_json_text(&json!({"method":"GET","path":path,"parameters":parameters}))
         .map_err(ApiError::internal)?;
     Ok(credential_digest(&canonical))
 }
-fn signing_bytes(payload: &ReadPayload) -> Result<String,ApiError> {
+pub fn signing_bytes(payload: &ReadPayload) -> Result<String,ApiError> {
     let canonical = canonical_json_text(&serde_json::to_value(payload).map_err(ApiError::internal)?)
         .map_err(ApiError::internal)?;
     Ok(format!("st3.scg-read.v1\n{canonical}"))
@@ -185,7 +185,7 @@ fn proof(headers: &HeaderMap) -> Result<ReadAuthorization,ApiError> {
         .map_err(|_| forbidden("SCG read authorization is malformed"))?;
     serde_json::from_slice(&bytes).map_err(|_| forbidden("SCG read authorization is malformed"))
 }
-fn budget(parameters: &BTreeMap<String,String>, trust: &ReadTrust) -> Result<usize,ApiError> {
+pub fn budget(parameters: &BTreeMap<String,String>, trust: &ReadTrust) -> Result<usize,ApiError> {
     let requested = parameters.get("max_response_bytes").map(|value| value.parse::<usize>())
         .transpose().map_err(|_| validation("response budget must be an integer"))?
         .unwrap_or(trust.default_response_bytes);
@@ -194,7 +194,7 @@ fn budget(parameters: &BTreeMap<String,String>, trust: &ReadTrust) -> Result<usi
     }
     Ok(requested)
 }
-fn verify(state: &AppState, session: &ClientSession, path: &str, parameters: &BTreeMap<String,String>,
+pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters: &BTreeMap<String,String>,
           authorization: &ReadAuthorization) -> Result<(ClaimRecord,ReadReceipt),ApiError> {
     let subject = session.pairing_grant.as_deref().ok_or_else(|| forbidden("assistant grant absent"))?;
     let granted = latest(state, subject, GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
@@ -244,11 +244,8 @@ fn verify(state: &AppState, session: &ClientSession, path: &str, parameters: &BT
 
 pub async fn read(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                                Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
-                               request_id: Option<Extension<crate::api::response_body::RequestId>>,
-                               headers: HeaderMap) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
-    let request_id = request_id.map_or_else(String::new, |Extension(id)| id.0);
-    let result=super::reads::RESPONSE_REQUEST_ID.scope(request_id,
-        read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers)).await;
+                               headers: HeaderMap, Extension(context): Extension<response_body::Context>) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+    let result=read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers, &context).await;
     if result.is_err() {
         let granted=session.pairing_grant.as_deref().map(|subject| latest(&state,subject,GRANTED)).transpose()?.flatten();
         let grant_id=granted.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")).and_then(Value::as_str);
@@ -257,17 +254,12 @@ pub async fn read(State(state): State<AppState>, Extension(session): Extension<C
     result
 }
 
-async fn read_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub async fn read_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                         Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
-                        headers: HeaderMap) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+                        headers: HeaderMap, context: &response_body::Context) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
     let grant_subject = session.pairing_grant.as_deref().ok_or_else(|| forbidden("assistant grant absent"))?;
     let granted = latest(&state, grant_subject, GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
     let policy = effective(&state, &granted)?;
-    // Handles belong to one authenticated grant at one effective policy revision.
-    let binding = credential_digest(&serde_json::to_string(&(
-        fields(&policy)?["grant_id"].as_str().ok_or_else(|| forbidden("assistant grant id absent"))?,
-        fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
-    )).map_err(ApiError::internal)?);
     if fields(&policy)?["minimal_read_mode"] == "caller-bound-allow" {
         let parameters = parameters(&uri)?;
         let requested = parameters.get("max_response_bytes").map(|v| v.parse::<usize>())
@@ -287,7 +279,8 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
             grant_subject:grant_subject.into(), actor:current.actor, transport:session.transport,
             policy_revision:fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
             proof_expiry:fields(&policy)?["expires_at_unix_ms"].as_u64().unwrap_or(0), max_response_bytes:requested };
-        let (snapshot,value) = super::reads::project(&state,&snapshot,projection,&parameters,requested,&binding).await?;
+        let binding = format!("{}:{}", receipt.grant_subject, receipt.policy_revision);
+        let (snapshot,value) = super::reads::project_with_context(&state,&snapshot,projection,&parameters,requested,&binding,context).await?;
         return Ok((Extension(receipt),Extension(snapshot),Json(value)));
     }
     let authorization = proof(&headers)?;
@@ -305,7 +298,8 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
     }),None).map_err(|error| if error.code=="stale-subject" {
         forbidden("the SCG read approval has already been consumed") } else {error})?;
     receipt.consumed_claim=consumed.id.clone();
-    let (snapshot,value) = match super::reads::project(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding).await {
+    let binding = format!("{}:{}", receipt.grant_subject, receipt.policy_revision);
+    let (snapshot,value) = match super::reads::project_with_context(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding,context).await {
         Ok(result) => result,
         Err(error) => {
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
@@ -350,7 +344,3 @@ pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
     }
     authorization
 }
-
-#[cfg(test)]
-#[path = "authorization_tests.rs"]
-mod tests;

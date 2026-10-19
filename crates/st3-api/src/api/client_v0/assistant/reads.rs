@@ -2,19 +2,32 @@
 //! reads copy only explicitly selected fields; conversation content uses bounded text
 //! and revision-pinned references. Declaration environments, workspace paths and terminal
 //! content never enter operational or conversation projections.
+use crate::MissionsStore;
+use crate::SeatsStore;
+use crate::EvidenceStore;
 use super::*;
+use crate::api::published_attention::{
+    published_assistant_attention_rows, published_view_not_ready,
+};
 
-#[path = "reads_conversation.rs"]
-mod conversation_reads;
-#[path = "reads_operational.rs"]
-mod operational_reads;
-
-#[path = "reads_discovery.rs"]
-mod discovery;
-
-tokio::task_local! {
-    pub(super) static RESPONSE_REQUEST_ID: String;
+/// Boxed result of a projection served by a crate above this one.
+pub type ProjectionFuture<'a> = std::pin::Pin<Box<
+    dyn std::future::Future<Output = Result<(ClientSnapshot, Value), ApiError>> + Send + 'a>>;
+/// Reader of the conversation and operational projections, which need client-v0 readers
+/// (search, mission resources) that live above this crate.
+pub type ProjectionExtension = for<'a> fn(
+    &'a AppState, &'a ClientSnapshot, &'a str, &'a BTreeMap<String, String>, usize, &'a str,
+    &'a response_body::Context,
+) -> ProjectionFuture<'a>;
+static PROJECTION_EXTENSION: std::sync::OnceLock<ProjectionExtension> = std::sync::OnceLock::new();
+/// Install the extension once; later installs of the same reader are no-ops.
+pub fn install_projection_extension(extension: ProjectionExtension) {
+    let _ = PROJECTION_EXTENSION.set(extension);
 }
+
+#[path = "reads_paging.rs"]
+pub mod paging;
+use paging::page;
 
 /// Default and ceiling of an assistant response, including its whole JSON envelope. The
 /// route enforces the envelope; content sources read no more than this many bytes.
@@ -25,16 +38,16 @@ const ATTENTION_KINDS: &[&str] = &[
     "human-gate", "launch-approval", "revision-approval", "unread-message", "person-step",
     "agent-request", "fault", "harness-login", "harness-prompt",
 ];
-const AGENT_STATES: &[&str] = &[
+pub const AGENT_STATES: &[&str] = &[
     "desired", "starting", "running", "waiting", "stopped", "failed", "suspended",
 ];
-const AGENT_LIFECYCLES: &[&str] = &["standing", "owner", "bounded"];
-const MISSION_PHASES: &[&str] = &[
+pub const AGENT_LIFECYCLES: &[&str] = &["standing", "owner", "bounded"];
+pub const MISSION_PHASES: &[&str] = &[
     "draft", "ready", "running", "standing", "blocked", "completed", "failed", "cancelled",
     "retired",
 ];
 
-const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
+pub const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
 const SUMMARY_FIELDS: &[&str] = &["max_response_bytes"];
 const CONVERSATION_FIELDS: &[&str] = &[
     "agent_id", "session_id", "reference", "revision", "start", "end", "max_response_bytes",
@@ -43,57 +56,51 @@ const TERMINAL_FIELDS: &[&str] = &[
     "agent_id", "terminal_id", "incarnation_id", "screen_revision", "max_response_bytes",
 ];
 
-/// Project one assistant read with the snapshot its rows were read in. `parameters` are the
-/// exact decoded query parameters the read authorization names; the person is the
-/// configured owner, never a parameter. A cursor or content read keeps `snapshot`.
-pub async fn project(
+#[allow(clippy::too_many_arguments)]
+pub async fn project_with_context(
     state: &AppState,
     snapshot: &ClientSnapshot,
     projection: &str,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
     binding: &str,
+    context: &response_body::Context,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     match projection {
         "summary" => {
             allow(parameters, SUMMARY_FIELDS, max_bytes)?;
             summary(state).await
         }
-        "attention" => page(state, snapshot, "assistant.attention", parameters, max_bytes, attention_rows, binding).await,
-        "attention-rich" => page(state, snapshot, "assistant.attention-rich", parameters, max_bytes, attention_rich_rows, binding).await,
-        "missions-rich" => page(state, snapshot, "assistant.missions-rich", parameters, max_bytes, mission_rich_rows, binding).await,
-        "agents-rich" => page(state, snapshot, "assistant.agents-rich", parameters, max_bytes, agent_rich_rows, binding).await,
+        "attention" | "attention-rich" | "missions" | "missions-rich" | "agents" | "agents-rich" =>
+            page(state, snapshot, projection, parameters, max_bytes, binding, context).await,
         "attention-content" => {
             allow(parameters, &["alert_id","max_response_bytes"], max_bytes)?;
             let id = required(parameters, "alert_id")?;
-            let item = state.store.attention_items(Some(&owner(state)?)).map_err(ApiError::internal)?
-                .into_iter().find(|item| item.subject == id || client_attention_id(&item.subject,&item.person,&item.episode).ok().as_deref() == Some(id))
+            let (cut, _, items) = published_assistant_attention_rows(
+                &state.store, snapshot.store_index, &owner(state)?,
+            ).ok_or_else(|| published_view_not_ready("attention"))?;
+            let item = items.iter()
+                .find(|item| item["source_id"] == id || item["id"] == id)
                 .ok_or_else(|| ApiError::not_found("owner alert absent"))?;
-            Ok((snapshot.clone(), json!({"id":item.subject,"episode":item.episode,"kind":item.kind,
-                "title":item.title,"detail":item.detail,"request":item.request})))
+            Ok((client_snapshot_at(state, cut), json!({
+                "id": item["source_id"], "episode": item["episode"], "kind": item["attention_kind"],
+                "title": item["title"], "detail": item["detail"], "request": attention_request(item),
+            })))
         },
-        "missions" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rows, binding).await,
-        "agents" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rows, binding).await,
-        "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
-            conversation_reads::project_bound(state, snapshot, projection, parameters, max_bytes, binding).await,
-        "mission-detail" | "work" | "work-detail" | "agent-detail" | "agent-queue" =>
-            operational_reads::project_bound(state, snapshot, projection, parameters, max_bytes, binding).await,
+        "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search"
+        | "mission-detail" | "work" | "work-detail" | "agent-detail" | "agent-queue" => {
+            let extension = PROJECTION_EXTENSION.get()
+                .ok_or_else(|| ApiError::not_found("unknown assistant projection"))?;
+            extension(state, snapshot, projection, parameters, max_bytes, binding, context).await
+        }
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
         _ => Err(ApiError::not_found("unknown assistant projection")),
     }
 }
 
-#[cfg(test)]
-pub(super) async fn test_project(
-    state: &AppState, snapshot: &ClientSnapshot, projection: &str,
-    parameters: &BTreeMap<String, String>, max_bytes: usize,
-) -> Result<(ClientSnapshot, Value), ApiError> {
-    project(state, snapshot, projection, parameters, max_bytes, "test-grant-policy").await
-}
-
 /// Every parameter is named by the projection; a stated budget must be the one enforced.
-fn allow(
+pub fn allow(
     parameters: &BTreeMap<String, String>,
     fields: &[&str],
     max_bytes: usize,
@@ -112,7 +119,7 @@ fn allow(
     Ok(())
 }
 
-fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
+pub fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
     parameters
         .get(name)
         .map(String::as_str)
@@ -120,7 +127,7 @@ fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<
         .ok_or_else(|| validation(format!("query parameter `{name}` is required")))
 }
 
-fn budget_exceeded(message: impl Into<String>) -> ApiError {
+pub fn budget_exceeded(message: impl Into<String>) -> ApiError {
     ApiError {
         status: StatusCode::PAYLOAD_TOO_LARGE,
         code: "response-budget-exceeded".into(),
@@ -131,25 +138,25 @@ fn budget_exceeded(message: impl Into<String>) -> ApiError {
 
 /// An identifier copied out of a source row, or nothing. Identifiers are short tokens; a value
 /// with spaces, controls or prose punctuation is source text, which never leaves.
-fn ident(value: Option<&str>) -> Option<String> {
-    value
-        .filter(|value| {
-            (1..=256).contains(&value.len())
-                && value.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte)
-                })
+pub fn identifier_allowed(value: &str) -> bool {
+    (1..=256).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte)
         })
-        .map(str::to_owned)
 }
 
-fn closed(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
+pub fn ident(value: Option<&str>) -> Option<String> {
+    value.filter(|value| identifier_allowed(value)).map(str::to_owned)
+}
+
+pub fn closed(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
     value
         .and_then(|value| allowed.iter().find(|item| **item == value))
         .copied()
         .unwrap_or("unknown")
 }
 
-fn attention_kind(kind: &str) -> &'static str {
+pub fn attention_kind(kind: &str) -> &'static str {
     if kind.starts_with("custom.") {
         "custom"
     } else {
@@ -158,14 +165,14 @@ fn attention_kind(kind: &str) -> &'static str {
 }
 
 /// A timestamp the native reader rendered, kept only if it is one.
-fn timestamp(value: &Value) -> Value {
+pub fn timestamp(value: &Value) -> Value {
     value
         .as_str()
         .filter(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok())
         .map_or(Value::Null, |at| json!(at))
 }
 
-fn owner(state: &AppState) -> Result<String, ApiError> {
+pub fn owner(state: &AppState) -> Result<String, ApiError> {
     state
         .owning_person
         .clone()
@@ -173,170 +180,126 @@ fn owner(state: &AppState) -> Result<String, ApiError> {
         .ok_or_else(|| forbidden("assistant reads require a configured owning person"))
 }
 
-type Rows = fn(&AppState, &str, u64, u128) -> anyhow::Result<Vec<Value>>;
-
-/// One page in the existing snapshot/page envelope. A cursor continues its first page's
-/// cached rows and re-reads nothing; the page never grows past one limit to fit a budget.
-/// The collection names the exact projector/content class: both the cursor and its cached
-/// rows bind it, so a rich cursor cannot be continued by a metadata-only authorization.
-async fn page(
-    state: &AppState,
-    snapshot: &ClientSnapshot,
-    collection: &'static str,
-    parameters: &BTreeMap<String, String>,
-    max_bytes: usize,
-    rows: Rows,
-    binding: &str,
-) -> Result<(ClientSnapshot, Value), ApiError> {
-    allow(parameters, METADATA_FIELDS, max_bytes)?;
-    let collection = format!("{collection}:{binding}");
-    let limit = parameters
-        .get("limit")
-        .map(|limit| {
-            limit
-                .parse::<usize>()
-                .ok()
-                .filter(|limit| (1..=CLIENT_MAX_PAGE_ITEMS).contains(limit))
-                .ok_or_else(|| validation(format!("limit must be between 1 and {CLIENT_MAX_PAGE_ITEMS}")))
-        })
-        .transpose()?;
-    let query = ClientListQuery {
-        limit,
-        cursor: parameters.get("cursor").cloned(),
-        ..Default::default()
-    };
-    let person = owner(state)?;
-    // As `client_snapshot_page`: a cursor continues the cached first page of the snapshot it
-    // was issued in; a first page is read inside one SQLite snapshot and names that snapshot.
-    if query.cursor.is_some() {
-        let page = client_page(state, snapshot, &collection, Vec::new(), &query)?;
-        return Ok((snapshot.clone(), serde_json::to_value(page).map_err(ApiError::internal)?));
-    }
-    let reader = state.clone();
-    let (snapshot, items) = blocking_store(move || {
-        reader.store.clone().read_snapshot(|index| {
-            let snapshot = client_snapshot_at(&reader, index);
-            let now = client_snapshot_time(&snapshot);
-            let items = reader
-                .store
-                .with_owned_set_snapshot_reads(|| rows(&reader, &person, index, now))?;
-            Ok((snapshot, items))
-        })
-    })
-    .await?;
-    let page = client_page_read(state, &snapshot, &collection, items, &query, true)?;
-    Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?))
-}
 
 async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> {
     let person = owner(state)?;
     let reader = state.clone();
     blocking_store(move || {
         reader.store.clone().read_snapshot(|index| {
+            let read = || -> Result<_, ApiError> {
             let snapshot = client_snapshot_at(&reader, index);
             let now = client_snapshot_time(&snapshot);
-            let value = reader.store.with_owned_set_snapshot_reads(|| {
-                let attention = attention_rows(&reader, &person, index, now)?.len();
-                let count = |rows: Vec<Value>, field: &str| {
-                    let mut counts = BTreeMap::<String, u64>::new();
-                    for row in rows {
-                        if let Some(value) = row[field].as_str() {
-                            *counts.entry(value.to_owned()).or_default() += 1;
+            let (_, _, attention) = published_assistant_attention_rows(&reader.store, index, &person)
+                .ok_or_else(|| published_view_not_ready("attention"))?;
+            let Some((cut, agents, _)) = reader.store.published_agent_roster(index, false) else {
+                reader.store.request_agent_roster_refresh();
+                return Err(published_view_not_ready("agents"));
+            };
+            if cut < index {
+                reader.store.request_agent_roster_refresh();
+            }
+            let mut agent_states = BTreeMap::<&str, u64>::new();
+            let local_host = client_host_id(reader.store.origin());
+            for agent in agents.iter() {
+                if ident(agent["id"].as_str()).is_some_and(|id| id.starts_with("agent/")) {
+                    let reported = agent["harness_state"].as_str();
+                    let age = agent["_status_source"]["observed_at_unix_ms"].as_u64()
+                        .map(|at| u64::try_from(now.saturating_sub(u128::from(at))).unwrap_or(u64::MAX));
+                    // The scalar state rules of overlay_agent_resources/overlay_down, followed
+                    // by the same local delivery assessment; no card is built just to count it.
+                    let mut runtime = agent["state"].as_str();
+                    if age.is_some_and(|age| age > 90_000)
+                        && matches!(reported, Some("ready" | "idle")) && runtime == Some("running")
+                    {
+                        runtime = Some("waiting");
+                    }
+                    if matches!(runtime, Some("desired" | "starting")) {
+                        if age.is_some_and(|age| age <= HEARTBEAT_MS)
+                            && !matches!(reported, None | Some("starting" | "ended" | "failed"))
+                        {
+                            runtime = Some(match reported {
+                                Some("working") => "running",
+                                Some("ready" | "idle") if age.is_some_and(|age| age <= 90_000) => "running",
+                                _ => "waiting",
+                            });
+                        } else if agent["_launch_since_ms"].as_u64()
+                            .is_some_and(|since| now.saturating_sub(u128::from(since)) > u128::from(LAUNCH_WINDOW_MS))
+                        {
+                            runtime = Some("down");
                         }
                     }
-                    counts
-                };
-                let agents = count(agent_rows(&reader, &person, index, now)?, "runtime_state");
-                let missions = count(mission_rows(&reader, &person, index, now)?, "phase");
-                anyhow::Ok(json!({
-                    "kind": "assistant-summary",
-                    "as_of": client_timestamp(now),
-                    "counts": {
-                        "attention": attention,
-                        "agent_states": agents,
-                        "mission_states": missions,
-                    },
-                }))
-            })?;
+                    if agent_delivery_presence(agent, runtime, &local_host)
+                        .is_some_and(|assessment| assessment.stale())
+                    {
+                        runtime = Some("waiting");
+                    }
+                    *agent_states.entry(closed(runtime, AGENT_STATES)).or_default() += 1;
+                }
+            }
+            let mut mission_states = BTreeMap::<&str, u64>::new();
+            for (phase, count) in reader.store.assistant_mission_state_counts_at(now).map_err(ApiError::internal)? {
+                *mission_states.entry(closed(Some(&phase), MISSION_PHASES)).or_default() += count;
+            }
+            let value = json!({
+                "kind": "assistant-summary",
+                "as_of": client_timestamp(now),
+                "counts": {
+                    "attention": attention.len(),
+                    "agent_states": agent_states,
+                    "mission_states": mission_states,
+                },
+            });
             Ok((snapshot, value))
+            };
+            Ok(read())
         })
     })
-    .await
+    .await?
 }
 
-/// The owner's open attention: identifiers, kind, episode and when it began waiting.
-fn attention_rows(state: &AppState, person: &str, _index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
-    let store = &state.store;
-    let mut rows = Vec::new();
-    for item in store.attention_snapshot(Some(person), now)? {
-        if item.person != person {
-            continue;
-        }
-        // An episode that is not identifier-shaped is source text: the row stays, unnamed.
-        let episode = ident(Some(item.episode.as_str())).unwrap_or_default();
-        let mission = match &item.mission {
-            Some(mission) => Some(mission.clone()),
-            None if item.kind == "person-step" => store
-                .person_ask_context(&item.subject)?
-                .and_then(|context| context["mission_id"].as_str().map(str::to_owned)),
-            None => None,
-        };
-        let agent = [item.conversation.as_deref(), item.requester_id.as_deref()]
-            .into_iter()
-            .flatten()
-            .find(|agent| agent.starts_with("agent/"));
-        rows.push(json!({
-            "id": client_attention_id(&item.subject, &item.person, &item.episode)?,
-            "attention_kind": attention_kind(&item.kind),
-            "person_id": person,
-            "agent_id": ident(agent),
-            "mission_id": ident(mission.as_deref()),
-            "mission_run_id": ident(item.mission_run.as_deref()),
-            "revision": episode,
-            "episode": episode,
-            "waiting_since": client_timestamp(item.requested_at_unix_ms),
-        }));
-    }
-    Ok(rows)
+/// Native cards put informational person-step requests in `update`, not `request`.
+/// Rich/content assistant reads retain that payload under their existing request field;
+/// metadata never calls this helper or copies either source field.
+fn attention_request(item: &Value) -> &Value {
+    item.get("request").filter(|request| !request.is_null())
+        .unwrap_or(&item["update"])
 }
 
-fn attention_rich_rows(state: &AppState, person: &str, index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
-    let mut rows = attention_rows(state,person,index,now)?;
-    let items = state.store.attention_snapshot(Some(person),now)?;
-    for row in &mut rows {
-        for item in &items {
-            if row["episode"] == item.episode {
-                row["title"] = json!(item.title);
-                row["detail"] = json!(item.detail);
-                row["request"] = json!(item.request);
-                row["target_id"] = json!(item.subject);
-                row["evidence"] = json!(item.targets);
-            }
-        }
+/// Translate one published native attention row; metadata never copies source prose.
+pub fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
+    let episode = ident(item["episode"].as_str()).unwrap_or_default();
+    let agent = [item["conversation_id"].as_str(), item["requester_id"].as_str()]
+        .into_iter().flatten().find(|agent| agent.starts_with("agent/"));
+    let mut row = json!({
+        "id": client_attention_id(
+            item["source_id"].as_str().ok_or_else(|| anyhow::anyhow!("attention source id absent"))?,
+            item["person_id"].as_str().ok_or_else(|| anyhow::anyhow!("attention person id absent"))?,
+            item["episode"].as_str().ok_or_else(|| anyhow::anyhow!("attention episode absent"))?,
+        )?,
+        "attention_kind": attention_kind(item["attention_kind"].as_str().unwrap_or_default()),
+        "person_id": ident(item["person_id"].as_str()),
+        "agent_id": ident(agent),
+        "mission_id": ident(item["mission_id"].as_str()),
+        "mission_run_id": ident(item["mission_run_id"].as_str()),
+        "revision": episode,
+        "episode": episode,
+        "waiting_since": timestamp(&item["requested_at"]),
+    });
+    if rich {
+        row["title"] = item["title"].clone();
+        row["detail"] = item["detail"].clone();
+        row["request"] = attention_request(item).clone();
+        row["target_id"] = item["source_id"].clone();
+        row["evidence"] = item["targets"].clone();
     }
-    Ok(rows)
-}
-fn mission_rich_rows(state: &AppState, person: &str, index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
-    let mut rows = mission_rows(state,person,index,now)?;
-    let source = mission_resources(&state.store,index,false,None)?;
-    for row in &mut rows {
-        if let Some(mission) = source.iter().find(|mission| mission["id"] == row["id"]) {
-            row["title"] = mission["title"].clone();
-        }
-    }
-    Ok(rows)
-}
-fn agent_rich_rows(state: &AppState, person: &str, index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
-    let mut rows = agent_rows(state,person,index,now)?;
-    for row in &mut rows { row["title"] = json!(row["id"].as_str().unwrap_or("").trim_start_matches("agent/")); }
-    Ok(rows)
+    Ok(row)
 }
 
 /// Current missions: phase, the open (else newest) run, its step and blocked counts and the
 /// agents it names. Goals, titles, step paths and status prose stay in the source.
-fn mission_rows(state: &AppState, _person: &str, index: u64, _now: u128) -> anyhow::Result<Vec<Value>> {
-    let mut rows = Vec::new();
-    for mission in mission_resources(&state.store, index, false, None)? {
+pub fn mission_rows(missions: &[Value], rich: bool) -> anyhow::Result<Vec<Value>> {
+    let mut rows = Vec::with_capacity(missions.len());
+    for mission in missions {
         let Some(id) = ident(mission["id"].as_str()) else {
             continue;
         };
@@ -367,7 +330,7 @@ fn mission_rows(state: &AppState, _person: &str, index: u64, _now: u128) -> anyh
             }
             None => (None, 0, 0, 0, BTreeSet::new()),
         };
-        rows.push(json!({
+        let mut row = json!({
             "id": id,
             "run_id": run_id,
             "agent_ids": agents,
@@ -376,48 +339,40 @@ fn mission_rows(state: &AppState, _person: &str, index: u64, _now: u128) -> anyh
             "blocked_count": blocked,
             "revision": ident(mission["revision"].as_str()),
             "updated_at": timestamp(&mission["updated_at"]),
-        }));
+        });
+        if rich {
+            row["title"] = mission["title"].clone();
+        }
+        rows.push(row);
     }
     Ok(rows)
 }
 
-/// Current agents from the published roster (or this cut's cards without a refresher):
-/// lifecycle, runtime state, current mission and run, updated-at. No workspace, checkout,
-/// environment, ask, reason or conversation preview.
-fn agent_rows(state: &AppState, _person: &str, index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
-    let store = &state.store;
-    let mut agents = if store.agent_roster_refresher_running() {
-        let Some((cut, cards, _)) = store.published_agent_roster(index, false) else {
-            store.request_agent_roster_refresh();
-            anyhow::bail!("the agents roster is still being prepared; retry shortly");
-        };
-        if cut < index {
-            store.request_agent_roster_refresh();
-        }
-        (*cards).clone()
-    } else {
-        client_agent_resources_cached(store, false, index)?
-    };
-    overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
-    Ok(agents
+/// Allowlist only the selected page's native cards; never fold the whole roster.
+fn agent_rows(agents: &[Value], rich: bool) -> Vec<Value> {
+    agents
         .iter()
         .filter_map(|agent| {
             let id = ident(agent["id"].as_str()).filter(|id| id.starts_with("agent/"))?;
             let work = &agent["current_work"][0];
-            Some(json!({
+            let mut row = json!({
                 "id": id,
                 "lifecycle": agent["lifecycle"].as_str().map(|lifecycle| closed(Some(lifecycle), AGENT_LIFECYCLES)),
                 "runtime_state": closed(agent["state"].as_str(), AGENT_STATES),
                 "current_mission_id": ident(work["mission_id"].as_str()),
                 "current_run_id": ident(work["mission_run_id"].as_str().or_else(|| agent["owner_run_id"].as_str())),
                 "updated_at": timestamp(&agent["updated_at"]),
-            }))
+            });
+            if rich {
+                row["title"] = json!(id.trim_start_matches("agent/"));
+            }
+            Some(row)
         })
-        .collect())
+        .collect()
 }
 
 /// Escaped JSON string bytes of `text`, so a budget holds for the encoded response.
-fn encoded_len(text: &str) -> usize {
+pub fn encoded_len(text: &str) -> usize {
     text.chars()
         .map(|character| match character {
             '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
@@ -427,7 +382,7 @@ fn encoded_len(text: &str) -> usize {
         .sum()
 }
 
-fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize, ApiError> {
+pub fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize, ApiError> {
     required(parameters, name)?
         .parse()
         .map_err(|_| validation(format!("`{name}` must be a byte offset")))
@@ -437,7 +392,7 @@ fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize, Ap
 /// is opened only if it fits the response budget, so no larger body is ever read. The
 /// range must lie on character boundaries inside the text and fit the budget; it is never
 /// widened, split or continued automatically. `next_range` names the next equal range.
-async fn conversation(
+pub async fn conversation(
     state: &AppState,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
@@ -510,7 +465,7 @@ async fn conversation(
 /// The current screen of one exactly named terminal incarnation and screen revision, as
 /// text, cut on a character boundary to the budget. The shared screen is borrowed, never
 /// rendered whole: only the returned characters are copied. One screen, never a stream.
-async fn terminal(
+pub async fn terminal(
     state: &AppState,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
@@ -573,7 +528,3 @@ async fn terminal(
         "truncated": truncated,
     }))
 }
-
-#[cfg(test)]
-#[path = "reads_tests.rs"]
-pub mod tests;
