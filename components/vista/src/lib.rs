@@ -10,7 +10,7 @@ wit_bindgen::generate!({
 });
 
 use compoundingtech::st2_vista::vista;
-use exports::fractal_legacy_runner::resource_provider::provider_api;
+use exports::st2::resource_provider::provider_api;
 
 const SNAPSHOT_SCHEMA: &str = "dev.schickling.vista.snapshot.v1";
 const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;

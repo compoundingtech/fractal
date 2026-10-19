@@ -55,7 +55,7 @@ mod runtime {
     use wasmtime::{Config, Engine, Store, Trap, UpdateDeadline};
 
     use crate::bindings::Provider;
-    use crate::bindings::exports::fractal_legacy_runner::resource_provider::provider_api as guest;
+    use crate::bindings::exports::st2::resource_provider::provider_api as guest;
     use crate::cache::{self, CacheDisposition, CacheIdentity, CacheLookup, PrivateArtifactCache};
     use crate::limits::InvocationLimits;
     use crate::{ObservationRequest, ProviderDescriptor, SchedulingCapability};

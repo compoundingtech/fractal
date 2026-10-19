@@ -11,7 +11,7 @@ wit_bindgen::generate!({
 });
 
 use compoundingtech::st2_github_issue::github_issue;
-use exports::fractal_legacy_runner::resource_provider::provider_api;
+use exports::st2::resource_provider::provider_api;
 
 const SNAPSHOT_SCHEMA: &str = "dev.schickling.github-issue.snapshot.v1";
 const TOPICS: [&str; 5] = ["body", "state", "labels", "assignment", "discussion"];

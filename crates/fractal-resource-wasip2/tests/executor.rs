@@ -18,7 +18,7 @@ mod fixture {
     });
 }
 
-use fixture::fractal_legacy_runner::resource_provider::provider_api::{
+use fixture::st2::resource_provider::provider_api::{
     DescriptorError, Fact, FactValue, Host, ObservationResult as WitObservationResult,
     ObserveRequest, ProviderDescriptor as WitProviderDescriptor, Publication,
     SchedulingCapability as WitSchedulingCapability,
