@@ -391,7 +391,11 @@ impl ReplicationExchangeFailure {
 
 impl std::fmt::Display for ReplicationExchangeFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.cause)
+        if let Some(status) = self.http_status {
+            write!(f, "{} (HTTP {status}): {}", self.code, self.cause)
+        } else {
+            write!(f, "{}: {}", self.code, self.cause)
+        }
     }
 }
 

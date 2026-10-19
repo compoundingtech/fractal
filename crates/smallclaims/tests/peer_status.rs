@@ -253,6 +253,18 @@ fn failure_details_round_trip_and_legacy_observations_remain_readable() {
     assert!(!detail.cause.contains("private"));
     assert!(!detail.cause.contains("password"));
     assert!(detail.cause.len() <= 512);
+    assert_eq!(
+        detail.to_string(),
+        format!("{} (HTTP 500): {}", detail.code, detail.cause),
+    );
+    let mut without_status = detail.clone();
+    without_status.http_status = None;
+    assert_eq!(
+        without_status.to_string(),
+        format!("{}: {}", detail.code, detail.cause),
+    );
+    assert!(!detail.to_string().contains("private"));
+    assert!(!detail.to_string().contains("password"));
     transport.failure = Some(detail.clone());
     let encoded = serde_json::to_vec(&transport).unwrap();
     assert_eq!(serde_json::from_slice::<ReplicationExchangeTransport>(&encoded).unwrap(), transport);
