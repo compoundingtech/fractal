@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { once } from 'node:events'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
@@ -11,12 +13,23 @@ const sentence = 'The first mission is running. Checking sprout now.'
 const epoch = new Date('2026-10-01T12:00:00.000Z')
 const violations = []
 const errors = []
-let server, browser
+let server, browser, devtools
 let negativePassed = false
-const close = async () => {
-  await browser?.close()
-  await server?.close()
+let closing
+const close = () => closing ??= (async () => {
+  try { await browser?.close() } finally {
+    devtools?.close()
+    await server?.close()
+  }
+})()
+const interrupt = (signal) => {
+  console.error(`Replay browser e2e interrupted by ${signal}`)
+  void close().finally(() => process.exit(signal === 'SIGINT' ? 130 : 143))
 }
+const onSigint = () => interrupt('SIGINT')
+const onSigterm = () => interrupt('SIGTERM')
+process.once('SIGINT', onSigint)
+process.once('SIGTERM', onSigterm)
 const deadline = setTimeout(() => {
   console.error('Replay browser e2e exceeded its 90-second deadline')
   process.exitCode = 1
@@ -39,7 +52,71 @@ try {
   const origin = `http://127.0.0.1:${address.port}`
   const authority = new URL(origin).host
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
-  browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
+  // A separate loopback CDP connection gives us flattened worker sessions, which the
+  // public Playwright CDPSession.send API cannot address with a sessionId.
+  browser = await chromium.launch({
+    ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+    args: ['--remote-debugging-port=0', '--enable-automation'],
+  })
+  const browserSession = await browser.newBrowserCDPSession()
+  const { arguments: arguments_ } = await browserSession.send('Browser.getBrowserCommandLine')
+  const profile = arguments_.find(argument => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length)
+  assert(profile, 'Chromium must report its temporary profile for the loopback CDP endpoint')
+  const [port, socketPath] = (await readFile(`${profile}/DevToolsActivePort`, 'utf8')).trim().split('\n')
+  await browserSession.detach()
+  devtools = new WebSocket(`ws://127.0.0.1:${port}${socketPath}`)
+  await once(devtools, 'open')
+  let nextCommand = 0
+  const commands = new Map()
+  const sockets = new Map()
+  const attaching = new Set()
+  const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+    const id = ++nextCommand
+    commands.set(id, { resolve, reject })
+    devtools.send(JSON.stringify({ id, method, params, ...(sessionId === undefined ? {} : { sessionId }) }))
+  })
+  const autoAttach = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }
+  devtools.addEventListener('message', ({ data }) => {
+    const message = JSON.parse(data)
+    if (message.id !== undefined) {
+      const command = commands.get(message.id)
+      commands.delete(message.id)
+      if (message.error) command?.reject(new Error(JSON.stringify(message.error)))
+      else command?.resolve(message.result)
+      return
+    }
+    const { method, params, sessionId } = message
+    if (method === 'Target.attachedToTarget') {
+      // Auto-attachment is recursive: page targets own dedicated/shared worker targets.
+      // Every target stays paused until Network observation is installed.
+      const setup = (async () => {
+        await send('Network.enable', {}, params.sessionId)
+        await send('Target.setAutoAttach', autoAttach, params.sessionId)
+        await send('Runtime.runIfWaitingForDebugger', {}, params.sessionId)
+      })().catch(error => errors.push(`CDP target observation: ${error.message}`))
+      attaching.add(setup)
+      void setup.finally(() => attaching.delete(setup))
+    } else if (method === 'Network.webSocketCreated') {
+      const url = new URL(params.url)
+      sockets.set(`${sessionId}:${params.requestId}`, { url: params.url, verified: false })
+      if (url.protocol !== 'ws:' || url.host !== authority || /^\/v1(?:\/|$)/.test(url.pathname)) {
+        violations.push(`WebSocket ${url}`)
+      }
+    } else if (method === 'Network.webSocketWillSendHandshakeRequest') {
+      const socket = sockets.get(`${sessionId}:${params.requestId}`)
+      if (socket === undefined) {
+        errors.push('CDP observed a WebSocket handshake without its creation event')
+        return
+      }
+      socket.verified = true
+      const url = new URL(socket.url)
+      const protocol = Object.entries(params.request.headers).find(([key]) => key.toLowerCase() === 'sec-websocket-protocol')?.[1]
+      if (url.protocol !== 'ws:' || url.host !== authority || protocol !== 'vite-hmr') {
+        violations.push(`WebSocket ${url} protocol=${JSON.stringify(protocol)}`)
+      }
+    }
+  })
+  await send('Target.setAutoAttach', autoAttach)
 
   const context = async (negative = false) => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
@@ -47,24 +124,6 @@ try {
       const url = new URL(request.url())
       if (!['http:', 'https:'].includes(url.protocol)) return
       if (url.origin !== origin || /^\/v1(?:\/|$)/.test(url.pathname)) violations.push(`request ${request.method()} ${url}`)
-    })
-    // The constructor binding records both authority and subprotocol before any app module runs.
-    // Retain native construction/prototype behavior; the observer never supplies replay data.
-    await context.exposeBinding('recordReplaySocket', (_source, url, protocols) => {
-      const socket = new URL(url, origin)
-      if (socket.protocol !== 'ws:' || socket.host !== authority || protocols.length !== 1 || protocols[0] !== 'vite-hmr') {
-        violations.push(`WebSocket ${socket} protocols=${JSON.stringify(protocols)}`)
-      }
-    })
-    await context.addInitScript(() => {
-      const NativeWebSocket = window.WebSocket
-      window.WebSocket = new Proxy(NativeWebSocket, {
-        construct(target, args) {
-          const [url, protocols] = args
-          void window.recordReplaySocket(String(url), typeof protocols === 'string' ? [protocols] : protocols ?? [])
-          return Reflect.construct(target, args)
-        },
-      })
     })
     const page = await context.newPage()
     page.setDefaultTimeout(10_000)
@@ -137,6 +196,9 @@ try {
   assert.equal(await negative.page.getByTestId('live-agent-workspace').count(), 0)
   await negative.context.close()
   console.log('PASS unknown-world negative control')
+  await send('Browser.getVersion') // Drain protocol events after the contexts and their workers close.
+  await Promise.all(attaching)
+  for (const socket of sockets.values()) if (!socket.verified) violations.push(`WebSocket without an observed HMR handshake: ${socket.url}`)
   assert.deepEqual(violations, [], 'Replay network invariant: no real /v1/, non-local requests, or non-HMR WebSockets')
   assert.deepEqual(errors, [], 'Unexpected browser errors')
   console.log('PASS network: zero real /v1/ requests, zero non-local requests, only local vite-hmr WebSockets')
@@ -147,6 +209,8 @@ try {
   throw error
 } finally {
   clearTimeout(deadline)
+  process.removeListener('SIGINT', onSigint)
+  process.removeListener('SIGTERM', onSigterm)
   await close()
   console.log(`REPLAY_E2E ${JSON.stringify({ seconds: Number(((performance.now() - started) / 1000).toFixed(2)), negativePassed, violations, errors })}`)
 }
