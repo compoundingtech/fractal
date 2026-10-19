@@ -1,6 +1,5 @@
 use super::*;
 use std::collections::BTreeMap;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 struct FakeManager {
     services: Services,
