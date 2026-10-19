@@ -411,6 +411,7 @@ pub fn device_resources(state: &AppState, snapshot: &ClientSnapshot) -> Result<V
 
 #[cfg(test)]
 mod tests {
+    mod replication_tests;
     use super::*;
     const ISSUER: &str = "person/operator";
     fn state(root: &Path) -> AppState { super::super::tests::test_state_named(root, "assistant-tests") }

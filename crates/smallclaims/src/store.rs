@@ -6928,6 +6928,14 @@ impl Store {
                     }
                     let started = std::time::Instant::now();
                     let hold = fleet_admission_hold(&pass, prepared_membership, envelope)?;
+                    let hold = hold.or_else(|| {
+                        (prepared.requires_keyed_writer
+                            && matches!(
+                                prepared_membership.window(&envelope.writer, envelope.sequence),
+                                crate::fleet::Window::Legacy
+                            ))
+                        .then_some("unsigned")
+                    });
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
