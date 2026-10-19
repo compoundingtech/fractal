@@ -21,6 +21,7 @@
 //! Each further read happens only once the cheaper conditions hold, the quiet check stops at the
 //! first wait that holds, and a seat that is not due yet records when it will be, so nothing
 //! polls.
+use crate::MissionsStore;
 use super::waits::{Wait, WaitAction, describe_age, step_waits};
 use super::*;
 use crate::IdleHoldsStore;

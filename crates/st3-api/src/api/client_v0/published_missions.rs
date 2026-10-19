@@ -1,4 +1,5 @@
 //! HTTP mission pages share the same complete cards as the background-published windows.
+use crate::MissionListStore;
 use crate::PublishedViewsStore;
 use super::*;
 use crate::store::mission_list::MissionRows;

@@ -137,6 +137,8 @@ export const capabilities = (ctx: FactoryContext, options: { readonly collection
     { id: 'terminal.read', version: 0, state: 'granted' as const },
     { id: 'terminal.attach', version: 0, state: 'granted' as const },
     { id: 'control.messages', version: 0, state: 'granted' as const },
+    { id: 'read.arrangements', version: 0, state: 'granted' as const },
+    { id: 'arrangements', version: 1, state: 'granted' as const },
     ...(options.collectionsV1 === false ? [] : [{ id: 'collections', version: 1, state: 'granted' as const }]),
   ]
   return {

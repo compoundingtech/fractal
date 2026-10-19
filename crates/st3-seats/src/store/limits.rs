@@ -5,8 +5,8 @@ use super::accounts::limit_binding_is_current;
 use super::*;
 use crate::model::DoctorCheck;
 use serde::Deserialize;
-pub use st3_store::store::limits::*;
-pub use st3_store::store::limits::{ACCOUNT_READING_WINDOW_MS, AccountLimit, LIMITS_CATCH_UP_PAGE, account_limits_at, create_limits_schema, flush_limits, flush_limits_page, open_limits, reading, refold_limits_tx};
+pub use st3_missions::store::limits::*;
+pub use st3_missions::store::limits::{ACCOUNT_READING_WINDOW_MS, AccountLimit, LIMITS_CATCH_UP_PAGE, account_limits_at, create_limits_schema, flush_limits, flush_limits_page, open_limits, reading, refold_limits_tx};
 
 /// The actor st records for what its limits policy does.
 pub const LIMITS_ACTOR: &str = "daemon/limits";
@@ -469,10 +469,10 @@ impl LimitsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::limits_tests_shared_seats::*;
-    use st3_store::store::limits_tests_shared_seats::{HOUR, read, read_account, read_unnamed};
+    use st3_missions::store::limits_tests_shared_seats::*;
+    use st3_missions::store::limits_tests_shared_seats::{HOUR, read, read_account, read_unnamed};
 
-    fn declare(store: &Store, seat: &str, host: &str) {
+    pub fn declare(store: &Store, seat: &str, host: &str) {
         let name = seat.trim_start_matches("agent/");
         let intent = crate::graph::parse_internal_intent(
             &format!("version 2\nagent {name:?} {{ workspace \"/tmp\"; command \"true\"; }}"),

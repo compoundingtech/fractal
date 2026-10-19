@@ -4836,6 +4836,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-attention"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-attention",
+ "st3-client",
+ "st3-kernel",
+ "st3-schema",
+ "st3-seats",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "st3-client"
 version = "0.1.0"
 dependencies = [
@@ -4958,11 +4981,14 @@ dependencies = [
  "st-drivers",
  "st-runtime",
  "st3-api",
+ "st3-attention",
  "st3-client",
  "st3-daemon",
+ "st3-delivery",
  "st3-evidence",
  "st3-github",
  "st3-kernel",
+ "st3-missions",
  "st3-peer",
  "st3-reconcile",
  "st3-schema",
@@ -4983,6 +5009,32 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "st3-delivery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "ciborium",
+ "futures-util",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-delivery",
+ "st3-kernel",
+ "st3-schema",
+ "st3-secrets",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5041,9 +5093,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "st3-attention",
  "st3-evidence",
  "st3-kernel",
- "st3-seats",
  "tempfile",
  "tokio",
  "uuid",
@@ -5159,6 +5211,31 @@ dependencies = [
  "st3-daemon",
  "tempfile",
  "walkdir",
+]
+
+[[package]]
+name = "st3-missions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flate2",
+ "hex",
+ "kdl",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-delivery",
+ "st3-kernel",
+ "st3-missions",
+ "st3-schema",
+ "st3-store",
+ "tempfile",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5280,6 +5357,7 @@ dependencies = [
  "st-runtime",
  "st3-client",
  "st3-kernel",
+ "st3-missions",
  "st3-schema",
  "st3-seats",
  "st3-secrets",

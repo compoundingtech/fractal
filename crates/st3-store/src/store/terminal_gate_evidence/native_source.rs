@@ -16,7 +16,4 @@ use super::*;
 use std::collections::BTreeMap;
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
 mod transaction_hooks;

@@ -154,6 +154,10 @@ name = "checkpoint_memory"
 path = "tests/checkpoint_memory.rs"
 
 [[test]]
+name = "checkpoint_space_gate_capabilities"
+path = "tests/checkpoint_space_gate_capabilities.rs"
+
+[[test]]
 name = "scenario_recorder"
 path = "tests/scenario_recorder.rs"
 
