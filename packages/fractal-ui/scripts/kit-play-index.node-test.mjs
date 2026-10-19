@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY } from './kit-play-commit-set.mjs'
+import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, FULL_CASE_OVERRIDES } from './kit-play-commit-set.mjs'
+import { aggregateShards, shardStories } from './kit-play-shards.mjs'
 
 const story = { type: 'story', id: 'kit--sample', importPath: './Sample.stories.tsx' }
 const docs = { type: 'docs', id: 'kit--docs', importPath: './Sample.mdx' }
@@ -107,4 +108,60 @@ test('the per-commit set rejects a listed story that is not critical, so a renam
   assert.throws(() => commitSetCases(['a--one'], { mergeOnlyIds: ['a--renamed'], bothWidthsIds: [] }), /a--renamed, which is not a critical story/)
   assert.throws(() => commitSetCases(['a--one'], { mergeOnlyIds: [], bothWidthsIds: ['a--gone'] }), /a--gone, which is not a critical story/)
   assert.equal(new Set([...MERGE_ONLY, ...BOTH_WIDTHS]).size, MERGE_ONLY.length + BOTH_WIDTHS.length, 'a story is merge-only or both-widths, not both')
+})
+
+const benchmarkId = 'fractal-ui-sidebar-tree--filter-keystroke-to-paint'
+const functionalId = 'fractal-ui-sidebar-tree--filter-behavior'
+const aliasIds = [...FULL_CASE_OVERRIDES].filter(([, cases]) => cases.length === 0).map(([id]) => id)
+test('the strict case set measures the filter once, keeps functional corners, and omits only the scheme aliases', () => {
+  const ids = [benchmarkId, functionalId, ...aliasIds]
+  assert.deepEqual(fullCases([benchmarkId]), [{ id: benchmarkId, scheme: 'dark', width: 1440 }])
+  assert.equal(fullCases([functionalId]).length, 4)
+  assert.deepEqual(fullCases(aliasIds), [])
+  assert.equal(fullCases(ids).length, 5)
+  const commit = commitSetCases([functionalId, ...aliasIds], { mergeOnlyIds: [], bothWidthsIds: [] })
+  assert.deepEqual(commit.ids, [functionalId])
+  assert.deepEqual(commit.omittedStories, aliasIds)
+})
+test('shard coverage requires the exact strict case set, including the benchmark corner', () => {
+  const fullIds = [benchmarkId, functionalId, ...aliasIds].sort()
+  const provenance = { runId: '1234', runAttempt: 1, headSha: 'a'.repeat(40) }
+  const receipts = [0, 1].map(shardIndex => ({
+    ...provenance, pass: true, fullIds, shardIndex, shardCount: 2,
+    rows: fullCases(shardStories(fullIds, shardIndex, 2)).map(row => ({ ...row, pass: true })),
+  }))
+  assert.equal(aggregateShards(receipts, 2, provenance).cases, 5)
+  const wrongCorner = structuredClone(receipts)
+  wrongCorner.flatMap(receipt => receipt.rows).find(row => row.id === benchmarkId).width = 440
+  assert.throws(() => aggregateShards(wrongCorner, 2, provenance), /invalid play case/)
+  const missing = structuredClone(receipts)
+  const benchmarkShard = missing.find(receipt => receipt.rows.some(row => row.id === benchmarkId))
+  benchmarkShard.rows = benchmarkShard.rows.filter(row => row.id !== benchmarkId)
+  assert.throws(() => aggregateShards(missing, 2, provenance), /Incomplete shard cases/)
+})
+test('the gate receipt declares the intended benchmark corner and alias omissions before browser execution', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kit-play-cases-test-'))
+  try {
+    const build = join(directory, 'build'), output = join(directory, 'receipt')
+    await mkdir(build)
+    const ids = [benchmarkId, functionalId, ...aliasIds]
+    await writeFile(join(build, 'index.json'), JSON.stringify({ entries: Object.fromEntries(ids.map(id => [id, { ...story, id }])) }))
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
+      env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-case-contract' },
+      stdio: 'ignore',
+    })
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', resolve)
+    })
+    assert.equal(code, 1)
+    const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
+    assert.equal(receipt.expectedCases, 5)
+    assert.equal(receipt.omitted.cases, 11)
+    assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
+    assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
+    assert.match(receipt.fatalError, /must-not-import-browser-for-case-contract/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })

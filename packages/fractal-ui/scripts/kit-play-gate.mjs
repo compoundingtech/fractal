@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, fullCases } from './kit-play-commit-set.mjs'
+import { commitSetCases, fullCases, FULL_CASE_OVERRIDES } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
 
@@ -86,6 +86,7 @@ const writeReceipt = async () => {
     headSha: process.env.GITHUB_SHA,
     set, a11y, maxSeconds, overBudget,
     stories: ids.length, expectedCases, cases: rows.length, workers, omitted,
+    caseOverrides: Object.fromEntries([...FULL_CASE_OVERRIDES].filter(([id]) => fullIds.includes(id))),
     passed: rows.filter(row => row.pass).length, failed: rows.filter(row => !row.pass).length,
     playMinutes: elapsedSeconds / 60,
     storybookBuildSeconds: Number(process.env.KIT_STORYBOOK_BUILD_SECONDS ?? 0),
@@ -120,6 +121,7 @@ try {
     omitted = { stories: selection.omittedStories, cases: selection.omittedCases }
   } else {
     cases = fullCases(ids)
+    omitted = { stories: ids.filter(id => FULL_CASE_OVERRIDES.get(id)?.length === 0), cases: ids.length * 4 - cases.length }
   }
   expectedCases = cases.length
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
