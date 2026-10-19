@@ -675,7 +675,19 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
-  --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames].join(',')}" --remote origin`,
+  --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames].join(',')}" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"`,
+        },
+        // Shadow verification: what would a gate that fetched these refs from the remote say about each lane? Reported
+        // in the job summary only; it gates nothing, runs from the BASE commit's scripts (absent there: skipped), and
+        // is fail-soft like every other step of this job.
+        {
+          name: 'Shadow-verify the published notes',
+          if: "${{ always() && steps.sign.outcome == 'success' }}",
+          'continue-on-error': true,
+          run: `shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+[ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \\
+  --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames].join(',')}" --remote origin`,
         },
         { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
       ],

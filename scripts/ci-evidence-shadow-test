@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""ci-evidence-shadow reports each lane as ok or would-reject from what the remote holds, and never fails the job."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from evidence_test_support import clean_loader_environment, tool_path  # noqa: E402
+clean_loader_environment()
+ROOT = Path(__file__).resolve().parent.parent
+SHADOW, PUBLISH = ROOT / 'scripts/ci-evidence-shadow', ROOT / 'scripts/evidence-publish'
+WRAP, SIGN = ROOT / 'scripts/evidence-wrap', ROOT / 'scripts/evidence-sign'
+ENV = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
+           GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+ENV.pop('GITHUB_STEP_SUMMARY', None)
+
+
+def git(repo, *args):
+    done = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, env=ENV)
+    assert done.returncode == 0, (args, done.stderr.decode())
+    return done.stdout.decode().strip()
+
+
+def keygen(path, comment):
+    subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', str(path)], check=True)
+    return path.with_suffix('.pub').read_text().split()
+
+
+with tempfile.TemporaryDirectory() as directory:
+    tmp = Path(directory)
+    pub = keygen(tmp / 'good', 'fleet/ci')
+    keygen(tmp / 'rogue', 'fleet/ci')
+    keys = tmp / 'allowed'
+    keys.write_text(f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
+
+    def home(name, key):
+        h = tmp / name
+        (h / '.config/st').mkdir(parents=True)
+        (h / '.config/st/evidence-sign.json').write_text(json.dumps(
+            {'signer': 'fleet/ci', 'ssh_key': str(key), 'scratch_repo': str(h / 'scratch.git'), 'path': tool_path()}))
+        return h
+
+    homes = {'good': home('h-good', tmp / 'good'), 'rogue': home('h-rogue', tmp / 'rogue')}
+    upstream = tmp / 'upstream'
+    subprocess.run(['git', 'init', '-q', str(upstream)], check=True, env=ENV)
+    (upstream / 'flake.lock').write_text('{}\n')
+    git(upstream, 'add', '.')
+    git(upstream, 'commit', '-q', '-m', 'one')
+    tree = git(upstream, 'rev-parse', 'HEAD^{tree}')
+    job = tmp / 'job'
+    subprocess.run(['git', 'clone', '-q', '--depth=1', f'file://{upstream}', str(job)], check=True, env=ENV)
+
+    def note(check, who='good', exit_code=0):
+        facts = tmp / f'facts-{check}-{who}.json'
+        facts.write_text(json.dumps({'command': ['bash', 'scripts/ci-linux', 'tests'], 'exit_code': exit_code,
+                                     'output_sha256': '3' * 64, 'inputs': {'stage': check}}))
+        done = subprocess.run([sys.executable, str(WRAP), '--check', check, '--toolchain-sha256', '1' * 64, '--signer',
+                               json.dumps([sys.executable, str(SIGN)]), '--aggregate', str(facts), '--out', str(tmp / 'notes' / who)],
+                              cwd=job, capture_output=True, env=dict(ENV, HOME=str(homes[who])))
+        assert done.returncode == exit_code, done.stderr.decode()
+
+    note('linux-tests')
+    note('linux-clippy', exit_code=1)        # a failing lane is a note, and reads as would-reject
+    note('linux-fleet-compat', who='rogue')  # refused at publish: no note for the lane
+
+    publisher = tmp / 'publisher'
+    subprocess.run(['git', 'clone', '-q', f'file://{upstream}', str(publisher)], check=True, env=ENV)
+    remote = tmp / 'remote.git'
+    subprocess.run(['git', 'init', '-q', '--bare', str(remote)], check=True, env=ENV)
+    git(publisher, 'remote', 'add', 'sink', f'file://{remote}')
+    done = subprocess.run([sys.executable, str(PUBLISH), '--notes', str(tmp / 'notes'), '--keys', str(keys),
+                           '--checks', 'linux-tests,linux-clippy,linux-fleet-compat', '--remote', 'sink'],
+                          cwd=publisher, capture_output=True, env=ENV)
+    result_file = tmp / 'publish.json'
+    result_file.write_bytes(done.stdout)
+    published = json.loads(done.stdout)
+    assert {a['check'] for a in published['accepted']} == {'linux-tests', 'linux-clippy'}, published
+
+    def shadow(*extra, checks='linux-tests,linux-clippy,linux-fleet-compat,genie-freshness', summary=None, cwd=publisher):
+        env = dict(ENV, **({'GITHUB_STEP_SUMMARY': str(summary)} if summary else {}))
+        return subprocess.run([sys.executable, str(SHADOW), '--publish-result', str(result_file), '--keys', str(keys),
+                               '--checks', checks, '--remote', 'sink', *extra], cwd=cwd, capture_output=True, text=True, env=env)
+
+    summary = tmp / 'summary.md'
+    done = shadow(summary=summary)
+    assert done.returncode == 0, done.stderr
+    lines = {l.split()[2].split('=')[1]: l for l in done.stdout.splitlines() if ' check=' in l}
+    assert 'result=ok' in lines['linux-tests'] and 'signer=fleet/ci' in lines['linux-tests'], done.stdout
+    assert 'result=would-reject' in lines['linux-clippy'] and 'reason=satisfied' not in lines['linux-clippy'], done.stdout
+    assert 'reason=no_note' in lines['linux-fleet-compat'] and 'reason=no_note' in lines['genie-freshness'], done.stdout
+    assert 'total lanes=4 ok=1 would_reject=3 refs_added=2' in done.stdout, done.stdout
+    table = summary.read_text()
+    assert '1 of 4 lanes ok' in table and '`linux-tests` | ok' in table and '**would-reject**' in table, table
+    print('passed: a lane with a trusted signed note on the remote is ok; a failing note, a refused signer and an unsigned lane are would-reject by name')
+
+    # The verification reads the remote, not this job's own refs: a record deleted there is not_on_remote.
+    record = next(a['record'] for a in published['accepted'] if a['check'] == 'linux-tests')
+    git(remote, 'update-ref', '-d', f'refs/notes/evidence/{record}')
+    done = shadow()
+    assert 'check=linux-tests result=would-reject reason=not_on_remote' in done.stdout, done.stdout
+    print('passed: a record absent from the remote is would-reject even when this job still holds the ref')
+
+    # A key list that does not name the signer rejects.
+    other = tmp / 'other-keys'
+    other.write_text('fleet/ci namespaces="git" ' + ' '.join(keygen(tmp / 'third', 'fleet/ci')[:2]) + '\n')
+    done = subprocess.run([sys.executable, str(SHADOW), '--publish-result', str(result_file), '--keys', str(other),
+                           '--checks', 'linux-clippy', '--remote', 'sink'], cwd=publisher, capture_output=True, text=True, env=ENV)
+    assert done.returncode == 0 and 'result=would-reject' in done.stdout, done.stdout
+    print('passed: notes signed by a key that is not on the accepted list read as would-reject')
+
+    # Never fails the job: unreadable input and bad usage.
+    result_file.write_text('not json')
+    done = shadow()
+    assert done.returncode == 0 and 'error=unreadable_publish_result' in done.stdout, (done.stdout, done.stderr)
+    done = shadow(checks='Bad Name')
+    assert done.returncode == 2, done.returncode
+    print('passed: unreadable input never fails the job; a bad lane name is a usage error')
