@@ -22,6 +22,29 @@ import type {
 
 const PROTOCOL = 2;
 
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+// Inline because this asset is embedded and published as a standalone file.
+const preferredName = (name: string) => name.replace(/^ST3?_/, "FRACTAL_");
+const readEnv = (name: string, identity = false) => {
+  const preferred = preferredName(name);
+  const value = process.env[preferred];
+  const legacyValue = process.env[name];
+  if (identity && value && legacyValue !== undefined && legacyValue !== value) {
+    console.error(`Conflicting identity environment variables: ${preferred} and ${name}`);
+    return undefined;
+  }
+  return value ?? legacyValue;
+};
+const removeEnv = (name: string) => {
+  delete process.env[preferredName(name)];
+  delete process.env[name];
+};
+const writeEnv = (env: NodeJS.ProcessEnv, name: string, value: string | undefined) => {
+  if (value === undefined) return;
+  env[preferredName(name)] = value;
+  env[name] = value;
+};
+
 const BIN = "ST_PI_CHANNEL_BIN";
 const IDENTITY = "ST_PI_CHANNEL_IDENTITY";
 const RUNTIME_ID = "ST_PI_CHANNEL_RUNTIME_ID";
@@ -136,18 +159,20 @@ const stash = (): Stash => {
     // leaked runtime id or session token would hand a nested pi (or any tool child) this seat's
     // registry key and record ownership. The channel subprocess receives them explicitly below.
     globals.__stPiChannel = {
-      bin: process.env[BIN],
-      identity: process.env[IDENTITY],
-      runtimeId: process.env[RUNTIME_ID],
-      session: process.env[SESSION],
-      seq: process.env[SEQ],
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      bin: readEnv(BIN),
+      identity: readEnv(IDENTITY, true),
+      runtimeId: readEnv(RUNTIME_ID, true),
+      session: readEnv(SESSION, true),
+      seq: readEnv(SEQ, true),
     };
-    delete process.env[BIN];
-    delete process.env[IDENTITY];
-    delete process.env[RUNTIME_ID];
-    delete process.env[SESSION];
-    delete process.env[SEQ];
   }
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  removeEnv(BIN);
+  removeEnv(IDENTITY);
+  removeEnv(RUNTIME_ID);
+  removeEnv(SESSION);
+  removeEnv(SEQ);
   return globals.__stPiChannel;
 };
 
@@ -220,9 +245,10 @@ export default function (pi: ExtensionAPI) {
     if (!reconnecting) state.lastCostUsd = undefined;
 
     const channelEnv: NodeJS.ProcessEnv = { ...process.env };
-    if (runtimeId) channelEnv[RUNTIME_ID] = runtimeId;
-    if (session) channelEnv[SESSION] = session;
-    if (seq) channelEnv[SEQ] = seq;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    writeEnv(channelEnv, RUNTIME_ID, runtimeId);
+    writeEnv(channelEnv, SESSION, session);
+    writeEnv(channelEnv, SEQ, seq);
     const child = childProcess.spawn(
       bin,
       ["driver", "pi-channel", "--identity", identity],

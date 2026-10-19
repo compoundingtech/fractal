@@ -2,6 +2,8 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { flushSync } from 'react-dom'
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useScenarioSlice } from '@smalltalk/st3-scenarios/react'
+import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
 import { Button } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { EmbraceMarkdownPreview } from './assistant-ui/EmbraceToolPreview'
@@ -79,6 +81,20 @@ function MarkdownCanvas({ scenario = 'rich-text', scheme = 'dark' }: { scenario?
       {scenario === 'all' ? <><h2 {...stylex.props(styles.heading)}>Code languages</h2><Markdown text={languageText} /><h2 {...stylex.props(styles.heading)}>Open streaming fence</h2><Markdown text={streamChunks[0]} streaming /><h2 {...stylex.props(styles.heading)}>Partial inline streams</h2>{inlineStreamStages.map(value => <Markdown key={value} text={value} streaming resources={resources} />)}</> : null}
     </div>
   </ThemePortal></main>
+}
+
+// Keep the rendering picker (`args.scenario`) independent of the Scenario toolbar.
+const ScenarioMarkdown = (args: React.ComponentProps<typeof MarkdownCanvas>) => {
+  const conversation = useScenarioSlice('conversation')
+  return <>
+    <MarkdownCanvas {...args} />
+    <section aria-label="Scenario prose" {...stylex.props(styles.canvas, ...baselineTheme, args.scheme === 'light' && lightTheme)}>
+      {conversation.loading ? <p role="status">Loading conversation…</p> : conversation.state.threads.flatMap(thread => thread.items.flatMap(item => {
+        if (item.type !== 'content' || !('text' in item.body) || typeof item.body.text !== 'string') return []
+        return <Markdown key={`${thread.agent}/${item.id}`} text={item.body.text} />
+      }))}
+    </section>
+  </>
 }
 const meta = {
   title: 'Fractal UI/Markdown', component: MarkdownCanvas,
@@ -161,7 +177,12 @@ export const Languages: Story = { tags: ['critical'],
   },
 }
 export const Light: Story = { ...RichText, args: { scheme: 'light' } }
-export const AllStates: Story = { args: { scenario: 'all' } }
+export const AllStates: Story = {
+  args: { scenario: 'all' },
+  parameters: { scenario: { slices: ['conversation'] } },
+  argTypes: scenarioArgTypes(['conversation']),
+  render: args => <ScenarioMarkdown {...args} />,
+}
 export const LanguagesLight: Story = { ...Languages, args: { scenario: 'languages', scheme: 'light' } }
 export const AllStatesLight: Story = { args: { scenario: 'all', scheme: 'light' } }
 export const StreamingControlsPersistence: Story = { tags: ['critical'],

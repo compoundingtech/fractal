@@ -4541,12 +4541,15 @@ dependencies = [
  "axum",
  "clap",
  "libc",
+ "parking_lot",
  "reqwest",
  "rmcp",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4786,7 +4789,51 @@ dependencies = [
 ]
 
 [[package]]
-name = "st3-api"
+name = "st3-api-client-v0"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-api-client-v0",
+ "st3-api-core",
+ "st3-client",
+ "st3-schema",
+ "st3-ui-model",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "st3-api-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4807,6 +4854,7 @@ dependencies = [
  "notify",
  "opentelemetry",
  "opentelemetry_sdk",
+ "parking_lot",
  "proptest",
  "pty-client",
  "pty-core",
@@ -4820,7 +4868,7 @@ dependencies = [
  "smallclaims",
  "st-drivers",
  "st-runtime",
- "st3-api",
+ "st3-api-core",
  "st3-client",
  "st3-reconcile",
  "st3-schema",
@@ -4833,6 +4881,37 @@ dependencies = [
  "tracing-opentelemetry",
  "urlencoding",
  "uuid",
+]
+
+[[package]]
+name = "st3-api-mailbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-api-core",
+ "st3-api-mailbox",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
 ]
 
 [[package]]
@@ -4980,7 +5059,9 @@ dependencies = [
  "smallclaims",
  "st-drivers",
  "st-runtime",
- "st3-api",
+ "st3-api-client-v0",
+ "st3-api-core",
+ "st3-api-mailbox",
  "st3-attention",
  "st3-client",
  "st3-daemon",
@@ -5148,6 +5229,7 @@ dependencies = [
  "futures-util",
  "hex",
  "libc",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
@@ -5159,6 +5241,7 @@ dependencies = [
  "st3-secrets",
  "tempfile",
  "tokio",
+ "tracing",
  "urlencoding",
  "uuid",
 ]
@@ -5266,6 +5349,7 @@ dependencies = [
  "hex",
  "jsonschema",
  "notify",
+ "parking_lot",
  "pty-client",
  "pty-core",
  "reqwest",

@@ -5,6 +5,8 @@ mod attention_ivm;
 mod common;
 mod attention_list;
 mod client;
+mod client_message_cancellation;
+mod client_message_reminder_deletion;
 mod mission_eval_reuse;
 mod suspension;
 mod terminal_projection_date;
