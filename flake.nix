@@ -1185,6 +1185,7 @@
             # upstream HM checkLinkTargets itself, including both backup modes.
             cp ${pkgs.writeText "old-config.toml" unstaged.xdg.configFile."st3/config.toml".text} generation/.config/st3/config.toml
             cp generation/.config/st3/config.toml config/fractal/config.home-manager.toml
+            chmod u+w config/fractal/config.home-manager.toml
             printf '\n%s\n' '# arn:lmig:smalltalk:2026-10-16-service-labels-fractal Home Manager legacy-generation fence' >> config/fractal/config.home-manager.toml
             ln -s config.home-manager.toml config/fractal/config.toml
             ln -s fractal config/st3
