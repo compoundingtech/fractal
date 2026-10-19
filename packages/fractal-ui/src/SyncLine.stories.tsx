@@ -95,9 +95,9 @@ export const SubscriptionLimitsLight: Story = { tags: ['critical'], render: Subs
 /** A host-owned pane header must not reserve standalone hidden retry/detail width. */
 export const InlineHeader: Story = { tags: ['critical'], render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
   {(['Live', 'Failed'] as const).map(id => <div key={id} data-testid={`inline-${id}`} {...stylex.props(styles.band)}>
-    <strong>{id}</strong><SyncLine inline status={syncObservations.find(row => row.id === id)!.status} label="conversation" now={syncNow} onRetry={() => {}} />
+    <strong>{id}</strong><SyncLine inline status={syncObservations.find(row => row.id === id)!.status} label="conversation" now={syncNow} observedAt={syncNow} onRetry={() => {}} />
   </div>)}
-  <div data-testid="standalone-live" {...stylex.props(styles.band)}><SyncLine status={{ _tag: 'Live', since: syncNow }} label="conversation" now={syncNow} /></div>
+  <div data-testid="standalone-live" {...stylex.props(styles.band)}><SyncLine status={{ _tag: 'Live', since: syncNow }} label="conversation" now={syncNow} observedAt={syncNow} /></div>
 </main>, play: async ({ canvasElement }) => {
   const live = canvasElement.querySelector<HTMLElement>('[data-testid="inline-Live"] [data-testid="sync-line"]')!
   if (live.getBoundingClientRect().width !== 0 || live.getBoundingClientRect().height !== 0) throw new Error('Live inline status must not reserve header space')
