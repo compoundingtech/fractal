@@ -1,8 +1,8 @@
 //! The part of `store::work_list` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_delivery::store::work_list::*;
-pub use st3_delivery::store::work_list::{ACTOR_ORDERS, ActorEntry, ActorOrders, OrderCell, SeatQueue, WorkRow, WorkRows, run_key, work_state_rank};
+pub use fractal_delivery::store::work_list::*;
+pub use fractal_delivery::store::work_list::{ACTOR_ORDERS, ActorEntry, ActorOrders, OrderCell, SeatQueue, WorkRow, WorkRows, run_key, work_state_rank};
 
 /// Every leased step's lease end, by the lease index.
 pub const WORK_LEASES: &str = "SELECT subject, CAST(lease_expires_at_unix_ms AS INTEGER) FROM step_runs
@@ -101,7 +101,7 @@ impl WorkListStore for Store {
         let mut requesters = BTreeSet::new();
         let mut every_ask = false;
         let mut tree_roots = BTreeSet::new();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3a9c105fb394 owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ published_list::CLAIMS_SINCE)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd9f7e7a219ce owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ published_list::CLAIMS_SINCE)?;
         let claims = statement
             .query_map(params![after, through], |row| {
                 Ok((
@@ -122,7 +122,7 @@ impl WorkListStore for Store {
             } else if let Some(generation) = subject.strip_prefix("run-generation/") {
                 let mut owner = connection
                     .prepare_cached("SELECT run_id FROM run_generations WHERE id=?1")?;
-                if let Some(run) = owner.query_row(/* sqlite-large-value: allow-for-now lv-h996c82339129 owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ [generation], |row| row.get::<_, String>(0)).optional()? {
+                if let Some(run) = owner.query_row(/* sqlite-large-value: allow-for-now lv-h198436c4efad owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ [generation], |row| row.get::<_, String>(0)).optional()? {
                     runs.insert(run);
                 }
             } else if let Some(proposal) = subject.strip_prefix("revision-proposal/") {
@@ -215,7 +215,7 @@ impl WorkListStore for Store {
 
     fn work_leases(&self) -> Result<HashMap<String, u128>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1241fcfbbee1 owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ WORK_LEASES)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h13082a1df187 owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ WORK_LEASES)?;
         let leases = statement
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?;
@@ -225,8 +225,8 @@ impl WorkListStore for Store {
     fn next_claim_after(&self, subject: &str, time: u128) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let next = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd780693ea93b owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ NEXT_CLAIM_AFTER)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h0144b2b3d767 owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ params![subject, time.min(i64::MAX as u128) as i64], |row| row.get::<_, Option<i64>>(0))?;
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h15f9715ba1db owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ NEXT_CLAIM_AFTER)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hb16ae5c869ea owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ params![subject, time.min(i64::MAX as u128) as i64], |row| row.get::<_, Option<i64>>(0))?;
         Ok(next.map(|next| next.max(0) as u128))
     }
 
@@ -240,7 +240,7 @@ impl WorkListStore for Store {
         }
         let connection = self.readers.get();
         let rows = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h427bd44a82e2 owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ STEP_ASSIGNEES)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1ddde8762a89 owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ STEP_ASSIGNEES)?
             .query_map([serde_json::to_string(steps)?], |row| {
                 Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
             })?
@@ -287,8 +287,8 @@ impl WorkListStore for Store {
     fn repaired_since(&self, after: u64, through: u64) -> Result<bool> {
         let connection = self.readers.get();
         Ok(connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h06d247781219 owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ REPAIRED_SINCE)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hccabf21f14e0 owner=st3_missions::store::work_list TODO=trace-statement-and-value-representation */ params![after, through], |_| Ok(()))
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8fe8d15d1c36 owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ REPAIRED_SINCE)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h8dac11e4ef43 owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ params![after, through], |_| Ok(()))
             .optional()?
             .is_some())
     }

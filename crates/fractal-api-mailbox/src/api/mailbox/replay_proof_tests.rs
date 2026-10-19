@@ -22,12 +22,12 @@ pub fn fixture(state: &AppState, name: &str) -> (Fence, NativeDeliveryPeer) {
     let agent_dir = crate::hooks::claude_agent_dir(
         &state.state_dir.join("drivers"), &subject, &state.node,
     );
-    st_drivers::harness_events::enable(&agent_dir, "current").unwrap();
+    fractal_drivers::harness_events::enable(&agent_dir, "current").unwrap();
     let session = format!("replay-session-{name}");
-    let sequence = st_drivers::harness_state::claim(&agent_dir, name, "omp", &session).unwrap();
+    let sequence = fractal_drivers::harness_state::claim(&agent_dir, name, "omp", &session).unwrap();
     let owner = Authority {
         provider: "omp".into(), session, sequence,
-        pid, process_token: st_runtime::process_start_token(pid).unwrap(),
+        pid, process_token: fractal_runtime::process_start_token(pid).unwrap(),
     };
     let fence = state.store.bind_mailbox_with_lease(
         &request, Some(&owner),
@@ -78,7 +78,7 @@ fn every_replay_input_change_invalidates_equality_and_retention() {
 }
 
 // Linux only: a process's start token comes from /proc there and fails for a process that is not
-// there. Elsewhere `st_runtime::process_start_token` is the pid by design (a fast exit must not
+// there. Elsewhere `fractal_runtime::process_start_token` is the pid by design (a fast exit must not
 // fail a spawn), so no lookup is ever unavailable.
 #[cfg(target_os = "linux")]
 #[test]
@@ -194,7 +194,7 @@ fn indexed_episode_read_error_clears_consumed_proof() {
     assert!(proof.is_current(&state, &fence, &peer));
     // Break only the indexed episode lookup in this isolated file store.
     rusqlite::Connection::open(&database).unwrap()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-ha4ded16608ea owner=st3_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_subject_kind_accepted_index").unwrap();
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h30511ead6c4f owner=fractal_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_subject_kind_accepted_index").unwrap();
     assert!(state.store.mailbox_failure_episode(&fence, &authority::episode(&fence)).is_err());
     assert!(!proof.is_current(&state, &fence, &peer));
 }
@@ -209,7 +209,7 @@ fn native_sequence_change_clears_proof_before_the_lease_is_readmitted() {
     let agent_dir = crate::hooks::claude_agent_dir(
         &state.state_dir.join("drivers"), &fence.subject, &state.node,
     );
-    let sequence = st_drivers::harness_state::claim(
+    let sequence = fractal_drivers::harness_state::claim(
         &agent_dir, name, "omp", &proof.lease_owner.session,
     ).unwrap();
     assert!(sequence > proof.lease_owner.sequence);
@@ -227,7 +227,7 @@ fn revoked_lease_clears_proof_with_the_same_owner_identity() {
     let proof = authority::replay_proof_inputs(&state, &fence, &peer).unwrap();
     assert!(proof.is_current(&state, &fence, &peer));
     rusqlite::Connection::open(&database).unwrap().execute(
-        /* sqlite-large-value: allow-for-now lv-heb119eae22a2 owner=st3_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1 AND component=?2",
+        /* sqlite-large-value: allow-for-now lv-h57d4b7e88d2d owner=fractal_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1 AND component=?2",
         rusqlite::params![fence.subject, fence.component],
     ).unwrap();
     assert_eq!(state.store.mailbox_lease_authority(&fence).unwrap(), Some(proof.lease_owner.clone()));

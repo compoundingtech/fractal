@@ -2,7 +2,7 @@ import type {
   ActionRequest, ActionResult, ArrangementPage, CollectionName, CollectionSocket, CollectionSocketFactory,
   ErrorCode, ErrorEnvelope, Operation, Snapshot, SyncNotice,
   TerminalAttachment, TimelinePage,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 
 import type { Clock } from '../clock.ts'
 import { generateConversationRange } from '../kit/conversationHistory.ts'

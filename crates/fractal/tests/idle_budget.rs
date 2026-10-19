@@ -11,13 +11,13 @@
 //! Run it under nextest, as CI does, so no other test shares the process:
 //!
 //! ```sh
-//! cargo nextest run -p st3 --test integration idle_budget:: --no-capture
+//! cargo nextest run -p fractal --test integration idle_budget:: --no-capture
 //! ```
 //!
 //! Inside an st seat, run it with `env -u ST_AGENT` under `systemd-run --user --pipe` or another
 //! parent outside the seat: the API binds callers to the agent in their process ancestry.
 
-use st3::MissionsStore;
+use fractal_daemon::MissionsStore;
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -27,10 +27,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::model::{ClaimInput, IntentInput, MissionRunRequest};
-use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest};
+use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const NODE: &str = "idle-node";
@@ -78,7 +78,7 @@ impl RuntimeControl for IdleRuntime {
     fn observe_exec(&self, _: &str) -> Result<Option<RuntimeObservation>> {
         Ok(None)
     }
-    fn start(&self, _: &st3::model::MemberSpec) -> Result<()> {
+    fn start(&self, _: &fractal_daemon::model::MemberSpec) -> Result<()> {
         Ok(())
     }
     fn stop(&self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
@@ -142,7 +142,7 @@ mission "idle/wait-{index}" state="ready" {{
 "#
         ));
     }
-    let intent = st3::parse_intent(&source, NODE).unwrap();
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
     let plan = store
         .mission(
             &intent,
@@ -214,7 +214,7 @@ fn seat_driver(root: &Path, socket: &Path, index: usize) -> Child {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
     let (runtime_id, _) = seat(index);
-    st3::test_support::command(test_bin!("st3-fixture"))
+    fractal_daemon::test_support::command(test_bin!("st3-fixture"))
         // Its own process group, so stopping the seat also stops the stand-in provider.
         .process_group(0)
         .current_dir(root.join("workspace"))
@@ -379,7 +379,7 @@ impl Drop for BusyControl {
 /// second changes only a test-owned CPU burner: the same measurement must reject it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let startup = CpuControlWindow::start();
@@ -390,7 +390,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
     let event_notify = watch::channel(0_u64).0;
     let state_dir = root.path().join("daemon");
     std::fs::create_dir_all(&state_dir).unwrap();
-    let receipts = st3::recorder::receipt_path(&state_dir);
+    let receipts = fractal_daemon::recorder::receipt_path(&state_dir);
     std::fs::create_dir_all(&receipts).unwrap();
     // Its removal proves the real receipt consumer completed an initial scan. Startup
     // cleanup is reported separately; the spool must be empty before either CPU window.
@@ -412,9 +412,9 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
-    let ingesting = tokio::spawn(st3::recorder_receipts::run(
+    let ingesting = tokio::spawn(fractal_daemon::recorder_receipts::run(
         store.clone(),
         receipts.clone(),
         notify.clone(),
@@ -423,7 +423,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
     let socket = root.path().join("st3.sock");
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, st3::api::router(state))
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
             .await
             .unwrap();
     });
@@ -436,7 +436,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         )
         .skipping_unneeded(true),
     );
-    let initial_passes = counts(&st3::performance::snapshot(), "requests", |row| {
+    let initial_passes = counts(&fractal_daemon::performance::snapshot(), "requests", |row| {
         row["kind"].as_str().unwrap_or("?").to_owned()
     })
     .get("task reconcile-pass")
@@ -457,7 +457,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
             stable_index = index;
             stable_since = Instant::now();
         }
-        let passes = counts(&st3::performance::snapshot(), "requests", |row| {
+        let passes = counts(&fractal_daemon::performance::snapshot(), "requests", |row| {
             row["kind"].as_str().unwrap_or("?").to_owned()
         })
         .get("task reconcile-pass")
@@ -476,17 +476,17 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
     let startup = startup.finish();
     assert!(store.desired_subjects().unwrap().is_empty());
     assert!(std::fs::read_dir(&receipts).unwrap().next().is_none());
-    let before = st3::performance::snapshot();
+    let before = fractal_daemon::performance::snapshot();
     let idle = CpuControlWindow::start();
     tokio::time::sleep(CONTROL_WINDOW).await;
     let idle = idle.finish();
-    let after_idle = st3::performance::snapshot();
+    let after_idle = fractal_daemon::performance::snapshot();
     let mut burner = BusyControl::start();
     let busy = CpuControlWindow::start();
     tokio::time::sleep(CONTROL_WINDOW).await;
     let iterations = burner.finish();
     let busy = busy.finish();
-    let after_busy = st3::performance::snapshot();
+    let after_busy = fractal_daemon::performance::snapshot();
     let request_count = |report: &Value| report["request_count"].as_u64().unwrap();
     let pass_count = |report: &Value| {
         counts(report, "requests", |row| {
@@ -503,7 +503,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         .unwrap()
         .remove("under_idle_budget");
     let report = json!({
-        "source_file": "crates/st3/tests/idle_budget.rs",
+        "source_file": "crates/fractal/tests/idle_budget.rs",
         "compiled_source_sha256": format!("{:x}", sha2::Sha256::digest(include_bytes!("idle_budget.rs"))),
         "ci_source_commit": std::env::var("GITHUB_SHA").ok(),
         "scope": "API/reconciler/receipt integration process; not whole-fleet idle acceptance",
@@ -557,7 +557,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -583,14 +583,14 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     std::fs::create_dir_all(root.join("daemon")).unwrap();
     // The receipt consumer is part of the daemon's idle cost. Its own scans must
     // not keep waking its filesystem watcher.
-    let receipts = st3::recorder::receipt_path(&root.join("daemon"));
+    let receipts = fractal_daemon::recorder::receipt_path(&root.join("daemon"));
     std::fs::create_dir_all(&receipts).unwrap();
-    let ingesting_receipts = tokio::spawn(st3::recorder_receipts::run(
+    let ingesting_receipts = tokio::spawn(fractal_daemon::recorder_receipts::run(
         store.clone(),
         receipts,
         notify.clone(),
@@ -599,7 +599,7 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     let socket = root.join("st3.sock");
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        let _ = st3::api::serve_unix(&server_socket, st3::api::router(state)).await;
+        let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await;
     });
     let reconciler = Arc::new(Reconciler::new(
         store.clone(),
@@ -631,12 +631,12 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     }
 
     let cpu_before = process_cpu();
-    let report_before = st3::performance::snapshot();
+    let report_before = fractal_daemon::performance::snapshot();
     let measured = Instant::now();
     tokio::time::sleep(WINDOW).await;
     let elapsed = measured.elapsed().as_secs_f64();
     let cpu = (process_cpu() - cpu_before).as_secs_f64() / elapsed;
-    let report_after = st3::performance::snapshot();
+    let report_after = fractal_daemon::performance::snapshot();
 
     for mut seat in seats {
         let group = i32::try_from(seat.id()).unwrap();

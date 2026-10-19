@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use pty_client::ClientIo;
 use pty_core::protocol::{MessageType, PacketReader, decode_size, encode_data, encode_screen};
-use st3_client::{
+use fractal_client::{
     Client, ClientError, ErrorCode, Fence, TargetParameters, TerminalColor, TerminalCursorStyle,
     TerminalInputMode, TerminalInputParameters, TerminalLine, TerminalModes,
     TerminalResizeParameters, TerminalRun, TerminalScreen, TerminalStream,

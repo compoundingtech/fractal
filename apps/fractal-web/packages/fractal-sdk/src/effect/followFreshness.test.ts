@@ -4,8 +4,8 @@
  * Stale(Evicted) when the conversation pool reclaims a slot, and no leaked table entries.
  */
 import { it as effectIt } from '@effect/vitest'
-import type { CollectionFrame, CollectionSocket } from '@smalltalk/st3-client'
-import type { CollectionName, Snapshot } from '@smalltalk/st3-client'
+import type { CollectionFrame, CollectionSocket } from '@fractal/client'
+import type { CollectionName, Snapshot } from '@fractal/client'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
 import type * as Scope from 'effect/Scope'

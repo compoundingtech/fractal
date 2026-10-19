@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { conversationEntries, DEFAULT_FILTERS, SHOW_EVERYTHING, headerLine } from '@smalltalk/st3-views';
-import { simplify } from '@smalltalk/st3-views/conversationSimple';
+import { conversationEntries, DEFAULT_FILTERS, SHOW_EVERYTHING, headerLine } from '@fractal/views';
+import { simplify } from '@fractal/views/conversationSimple';
 
 // Every harness transcript in fixtures/clients/transcripts reads the same in this model as in
-// st3-conversation-ui. Rust's model-only tests (crates/st3-conversation-ui/src/tests.rs) check
+// st3-conversation-ui. Rust's model-only tests (crates/fractal-conversation-ui/src/tests.rs) check
 // the same `*.expected.json`, so the two cannot drift.
 const fixture = name => JSON.parse(readFileSync(new URL(`../../../../fixtures/clients/transcripts/${name}`, import.meta.url), 'utf8'));
 

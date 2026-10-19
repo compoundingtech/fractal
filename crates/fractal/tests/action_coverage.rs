@@ -1,12 +1,12 @@
 //! Product actions over the real client/CLI Unix transport, with disk-backed daemon restarts.
 #![cfg(unix)]
 
-use st3::DeliveryStore;
-use st3::MissionsStore;
-use st3::SeatsStore;
-use st3::EvidenceStore;
-use st3::OwnedSetsStore;
-use st3::GitChangesStore;
+use fractal_daemon::DeliveryStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStore;
+use fractal_daemon::EvidenceStore;
+use fractal_daemon::OwnedSetsStore;
+use fractal_daemon::GitChangesStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -14,10 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::model::{ClaimInput, IntentInput, MissionRunRequest};
-use st3::store::Store;
-use st3_client::{ActionResult, Client, ClientError, Envelope, ErrorCode, Fence};
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest};
+use fractal_daemon::store::Store;
+use fractal_client::{ActionResult, Client, ClientError, Envelope, ErrorCode, Fence};
 use tokio::sync::{Notify, watch};
 
 const NODE: &str = "action-coverage";
@@ -28,14 +28,14 @@ const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("claims.sqlite3");
     let startup = Store::open(&path, NODE).unwrap();
     let definitions = |connection: &rusqlite::Connection| {
-        st3::owner_indexes::INDEX_NAMES.iter().map(|name| {
+        fractal_daemon::owner_indexes::INDEX_NAMES.iter().map(|name| {
             connection.query_row(
                 "SELECT sql FROM sqlite_master WHERE name=?1", [name],
                 |row| row.get::<_, String>(0),
@@ -45,17 +45,17 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
     let expected = definitions(&startup.connection.write());
     drop(startup);
     let connection = rusqlite::Connection::open(&path).unwrap();
-    for name in st3::owner_indexes::INDEX_NAMES {
+    for name in fractal_daemon::owner_indexes::INDEX_NAMES {
         connection.execute_batch(&format!("DROP INDEX {name}")).unwrap();
     }
     let run = || async {
-        let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
         command.args(["store", "prepare-indexes", "--endpoint", "unix:/nonexistent/offline.sock",
             "--daemon-wait", "0", "--store"]).arg(&path);
         command.output().await
     };
     // The CLI is a separate process: both lifetime and SQLite writer locks must fence it.
-    let state_lock = st3::node_identity::lock(root.path()).unwrap();
+    let state_lock = fractal_daemon::node_identity::lock(root.path()).unwrap();
     assert!(!run().await.unwrap().status.success());
     drop(state_lock);
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -66,7 +66,7 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
     let prepared = run().await.unwrap();
     assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
     let output = String::from_utf8(prepared.stdout).unwrap();
-    for name in st3::owner_indexes::INDEX_NAMES {
+    for name in fractal_daemon::owner_indexes::INDEX_NAMES {
         assert!(output.contains(&format!("before: {name}: missing")));
         assert!(output.contains(&format!("after: {name}: exists")));
     }
@@ -88,18 +88,18 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
         String::from_utf8_lossy(&rejected.stdout),
         String::from_utf8_lossy(&rejected.stderr), definitions(&connection));
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("schema gate failed"));
-    let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
     assert!(!command.args(["store", "prepare-indexes"]).output().await.unwrap().status.success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    use st3::changes::config::{Config, Repository};
-    use st3::changes::service::Registry;
-    use st3::changes::{Record, Revision, State, TrailerStatus};
+    use fractal_daemon::changes::config::{Config, Repository};
+    use fractal_daemon::changes::service::Registry;
+    use fractal_daemon::changes::{Record, Revision, State, TrailerStatus};
 
     let mut daemon = Daemon::new().await;
     let id = format!("I{}", "4".repeat(40));
@@ -238,16 +238,16 @@ async fn cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_across_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    use st3::changes::config::{Config, Repository as RepositoryConfig};
-    use st3::changes::service::Registry;
-    use st3::changes::transport::{Authentication, Repository};
-    use st3::changes::{Record, State, TrailerStatus, new_change_id};
+    use fractal_daemon::changes::config::{Config, Repository as RepositoryConfig};
+    use fractal_daemon::changes::service::Registry;
+    use fractal_daemon::changes::transport::{Authentication, Repository};
+    use fractal_daemon::changes::{Record, State, TrailerStatus, new_change_id};
 
     fn git(path: &Path, args: &[&str]) -> String {
-        let output = st3::test_support::command("git")
+        let output = fractal_daemon::test_support::command("git")
             .arg("-C")
             .arg(path)
             .args([
@@ -393,10 +393,10 @@ async fn cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_a
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    use st3::store::owned_sets::{Options, Source};
+    use fractal_daemon::store::owned_sets::{Options, Source};
     let mut daemon = Daemon::new().await;
     let seat = "agent/garden/maple";
     let path = daemon.root.path().join("seats.kdl");
@@ -423,7 +423,7 @@ async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
                 .first()
                 .map_or("absent".into(), |set| set.revision.clone()),
             rollout: if sequence == 2 {
-                Some(st3::rollout::Policy::when_idle(1_800_000, false))
+                Some(fractal_daemon::rollout::Policy::when_idle(1_800_000, false))
             } else {
                 None
             },
@@ -466,7 +466,7 @@ async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
         daemon.restart().await;
     }
     let request = json!({"subject":seat,"actor":PERSON,"expected_desired":first_token,"expected_incarnation":"maple-original",
-        "policy":st3::rollout::Policy::when_idle(5000,false),"idempotency_key":"stale-maple"});
+        "policy":fractal_daemon::rollout::Policy::when_idle(5000,false),"idempotency_key":"stale-maple"});
     let before = daemon.store().index().unwrap();
     let stale = daemon
         .transport()
@@ -474,7 +474,7 @@ async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
         .await
         .unwrap_err();
     assert_eq!(
-        st3::client::api_error_code(&stale),
+        fractal_daemon::client::api_error_code(&stale),
         Some("stale-rollout-target")
     );
     assert_eq!(before, daemon.store().index().unwrap());
@@ -574,8 +574,8 @@ impl Daemon {
     fn client(&self, actor: &str) -> Client {
         Client::unix_as(self.socket(), actor)
     }
-    fn transport(&self) -> st3::client::Client {
-        st3::client::Client::unix_as(self.socket(), PERSON).unwrap()
+    fn transport(&self) -> fractal_daemon::client::Client {
+        fractal_daemon::client::Client::unix_as(self.socket(), PERSON).unwrap()
     }
 
     async fn serve(&mut self) {
@@ -583,7 +583,7 @@ impl Daemon {
         let state = self.state.clone();
         self.server = Some(tokio::spawn(async move {
             // Provider lifecycle is simulated here; discovery must use the same fixture.
-            let router = st3::api::router(state).layer(axum::middleware::from_fn(
+            let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
                 |request: axum::extract::Request, next: axum::middleware::Next| async move {
                     if request.uri().path() == "/v1/harnesses" {
                         return axum::response::IntoResponse::into_response(axum::Json(json!({
@@ -593,7 +593,7 @@ impl Daemon {
                     next.run(request).await
                 },
             ));
-            st3::api::serve_unix(&socket, router).await
+            fractal_daemon::api::serve_unix(&socket, router).await
         }));
         let mut last_error = None;
         for _ in 0..200 {
@@ -626,7 +626,7 @@ impl Daemon {
     }
 
     fn apply(&self, source: &str, key: &str) {
-        let intent = st3::parse_intent(source, NODE).unwrap();
+        let intent = fractal_daemon::parse_intent(source, NODE).unwrap();
         let preview = self
             .store()
             .mission(
@@ -666,7 +666,7 @@ impl Daemon {
         );
     }
 
-    fn start(&self, mission: &str, key: &str) -> st3::model::MissionRunView {
+    fn start(&self, mission: &str, key: &str) -> fractal_daemon::model::MissionRunView {
         self.store()
             .create_mission_run(&MissionRunRequest {
                 mission: mission.into(),
@@ -756,7 +756,7 @@ impl Daemon {
     }
 
     fn cli_command(&self, actor: &str, args: &[&str]) -> tokio::process::Command {
-        let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
         command
             .args([
                 "--endpoint",
@@ -864,7 +864,7 @@ async fn dispatch(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn messages_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -900,7 +900,7 @@ async fn messages_survive_stale_fences_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn creation_and_declaration_actions_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -962,7 +962,7 @@ async fn creation_and_declaration_actions_survive_stale_fences_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn work_actions_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for end in ["work.complete", "work.fail", "work.release"] {
@@ -1020,7 +1020,7 @@ mission "example/work" state="ready" {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revise_notes_cli_carries_notes_through_two_revisions_and_retry() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -1039,7 +1039,7 @@ mission "example/notes" state="ready" {{
     };
     daemon.apply(&source("First goal."), "notes-mission");
     let run = daemon.start("example/notes", "notes-run");
-    let step = |run: &st3::model::MissionRunView, path: &str| {
+    let step = |run: &fractal_daemon::model::MissionRunView, path: &str| {
         run.steps
             .iter()
             .find(|step| step.step == path)
@@ -1107,7 +1107,7 @@ mission "example/notes" state="ready" {{
                 .await,
         );
     }
-    let original: st3::model::MissionRunView = serde_json::from_value(cli_value(
+    let original: fractal_daemon::model::MissionRunView = serde_json::from_value(cli_value(
         daemon
             .cli(PERSON, &["missions", "show", &run.subject])
             .await,
@@ -1217,7 +1217,7 @@ mission "example/notes" state="ready" {{
             .await,
     );
     daemon.restart().await;
-    let retried: st3::model::MissionRunView = serde_json::from_value(cli_value(
+    let retried: fractal_daemon::model::MissionRunView = serde_json::from_value(cli_value(
         daemon
             .cli(PERSON, &["missions", "show", &run.subject])
             .await,
@@ -1232,14 +1232,14 @@ mission "example/notes" state="ready" {{
 
 /// Reconcile declarations and agentless human gates; these cases launch no processes.
 struct NoRuntime;
-impl st3::reconcile::RuntimeControl for NoRuntime {
-    fn snapshot_ptys(&self) -> anyhow::Result<Vec<st3::reconcile::RuntimeObservation>> {
+impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
+    fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<st3::reconcile::RuntimeObservation>> {
+    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
-    fn start(&self, _: &st3::model::MemberSpec) -> anyhow::Result<()> {
+    fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
         Ok(())
     }
     fn stop(&self, _: &str, _: bool, _: Option<&str>) -> anyhow::Result<()> {
@@ -1264,7 +1264,7 @@ impl st3::reconcile::RuntimeControl for NoRuntime {
 
 impl Daemon {
     fn reconcile(&self) {
-        let reconciler = st3::reconcile::Reconciler::new(
+        let reconciler = fractal_daemon::reconcile::Reconciler::new(
             self.state.store.clone(),
             Arc::new(NoRuntime),
             NODE.into(),
@@ -1278,7 +1278,7 @@ impl Daemon {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn human_review_actions_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for (kind, mode, verdict) in [
@@ -1309,7 +1309,7 @@ mission "example/review" state="ready" {{
                     .work_action(
                         step,
                         action,
-                        &st3::model::WorkRequest {
+                        &fractal_daemon::model::WorkRequest {
                             wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
@@ -1364,7 +1364,7 @@ mission "example/review" state="ready" {{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lane_actions_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -1443,7 +1443,7 @@ mission "example/lane" state="ready" {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launch_actions_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for end in ["launch.approve", "launch.revise", "launch.cancel"] {
@@ -1454,7 +1454,7 @@ async fn launch_actions_survive_stale_fences_and_restarts() {
         let id = launch.trim_start_matches("launch/");
         let session = daemon.store().planning_session(id).unwrap().unwrap();
         assert_eq!(session.requester, PERSON);
-        let _: Value = daemon.transport().post(&format!("/v1/launches/{id}/variants/default/submit"), &st3::model::PlanningCandidateSubmitRequest {
+        let _: Value = daemon.transport().post(&format!("/v1/launches/{id}/variants/default/submit"), &fractal_daemon::model::PlanningCandidateSubmitRequest {
             actor: session.planner, markdown: b"# Copper proof\n".to_vec(),
             kdl: b"version 2\nmission \"example/launch\" state=\"ready\" { goal \"Record the proof.\"; step \"proof\" { agentless } }\n".to_vec(),
             idempotency_key: "coverage:prepare-launch-candidate".into(),
@@ -1534,7 +1534,7 @@ async fn launch_actions_survive_stale_fences_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seat_queue_moves_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -1564,7 +1564,7 @@ mission "example/queue" state="ready" { concurrent-runs; goal "Order a seat's wo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pairing_revocation_survives_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -1601,7 +1601,7 @@ async fn pairing_revocation_survives_stale_fences_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn person_work_actions_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for kind in ["work.done", "work.cancel-ask"] {
@@ -1638,7 +1638,7 @@ async fn person_work_actions_survive_stale_fences_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_actions_survive_stale_fences_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -1667,7 +1667,7 @@ mission "example/cancel" state="ready" { concurrent-runs; goal "Exercise a run c
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_import_survives_stale_discovery_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -1742,7 +1742,7 @@ async fn native_import_survives_stale_discovery_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revision_decisions_survive_stale_previews_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for kind in ["mission.approve-revision", "mission.cancel-revision"] {
@@ -1756,7 +1756,7 @@ async fn revision_decisions_survive_stale_previews_and_restarts() {
         let run = daemon.start("example/revision", "revision-run");
         let candidate = source("Revised goal.");
         daemon.apply(&candidate, "revision-candidate");
-        let intent = st3::parse_intent(&candidate, NODE).unwrap();
+        let intent = fractal_daemon::parse_intent(&candidate, NODE).unwrap();
         let proposal = daemon
             .store()
             .create_revision_proposal(
@@ -1828,7 +1828,7 @@ async fn revision_decisions_survive_stale_previews_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn suspension_requests_survive_stale_incarnations_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -1846,7 +1846,7 @@ async fn suspension_requests_survive_stale_incarnations_and_restarts() {
             fence,
         )
         .await;
-    let suspension = st3::suspension::current(daemon.store(), WORKER)
+    let suspension = fractal_daemon::suspension::current(daemon.store(), WORKER)
         .unwrap()
         .unwrap();
     assert_eq!(suspension.phase, "quiescing");
@@ -1854,11 +1854,11 @@ async fn suspension_requests_survive_stale_incarnations_and_restarts() {
     // process shutdown/resume. Here the public client request and its durable receipt are tested.
     for (key, phase) in [
         (
-            st3::suspension::suspend_snapshot_key(&suspension.operation_id),
+            fractal_daemon::suspension::suspend_snapshot_key(&suspension.operation_id),
             "snapshotting",
         ),
         (
-            st3::suspension::suspend_completed_key(&suspension.operation_id),
+            fractal_daemon::suspension::suspend_completed_key(&suspension.operation_id),
             "suspended",
         ),
     ] {
@@ -1869,7 +1869,7 @@ async fn suspension_requests_survive_stale_incarnations_and_restarts() {
         }).unwrap();
     }
     assert_eq!(
-        st3::suspension::current(daemon.store(), WORKER)
+        fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
             .unwrap()
             .phase,
@@ -1880,7 +1880,7 @@ async fn suspension_requests_survive_stale_incarnations_and_restarts() {
     daemon
         .exercise(PERSON, "agent.resume", json!({"agent": WORKER}), fence)
         .await;
-    let resumed = st3::suspension::current(daemon.store(), WORKER)
+    let resumed = fractal_daemon::suspension::current(daemon.store(), WORKER)
         .unwrap()
         .unwrap();
     assert_eq!(resumed.phase, "restoring");
@@ -1894,7 +1894,7 @@ async fn suspension_requests_survive_stale_incarnations_and_restarts() {
 /// the selected transcript exists. Both public mutation routes use the same preflight.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn suspend_refuses_authored_selection_without_writes() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for transcript_exists in [false, true] {
@@ -1931,10 +1931,10 @@ async fn suspend_refuses_authored_selection_without_writes() {
                 .await
                 .unwrap_err();
             assert_eq!(
-                st3::client::api_error_code(&refused),
+                fractal_daemon::client::api_error_code(&refused),
                 Some("suspend-authored-session-selection")
             );
-            assert_eq!(st3::client::http_status(&refused), Some(422));
+            assert_eq!(fractal_daemon::client::http_status(&refused), Some(422));
             assert!(refused.to_string().contains("--resume"), "{refused}");
             assert_eq!(daemon.store().index().unwrap(), before);
             let mut fence = daemon.fence(PERSON).await;
@@ -1958,13 +1958,13 @@ async fn suspend_refuses_authored_selection_without_writes() {
             assert!(!envelope.retryable);
             assert_eq!(daemon.store().index().unwrap(), before);
             assert!(
-                st3::suspension::current(daemon.store(), WORKER)
+                fractal_daemon::suspension::current(daemon.store(), WORKER)
                     .unwrap()
                     .is_none()
             );
             let running = daemon.store().status(Some(WORKER)).unwrap();
             assert_eq!(
-                st3::model::projected_actual_status(running.subjects[0].actual.as_ref()),
+                fractal_daemon::model::projected_actual_status(running.subjects[0].actual.as_ref()),
                 Some("running")
             );
             daemon.restart().await;
@@ -1975,7 +1975,7 @@ async fn suspend_refuses_authored_selection_without_writes() {
 /// Recreate a hold accepted by an older daemon and exercise the documented exit over the CLI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn existing_authored_suspension_exits_with_stop_then_start() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let daemon = Daemon::new().await;
@@ -2009,7 +2009,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
     // A retry of a suspend accepted before this preflight was installed still returns its
     // original claim. It must bypass today's authored-selector and running-state refusals.
     let before_retry = daemon.store().index().unwrap();
-    let retried: st3::model::ClaimRecord = daemon
+    let retried: fractal_daemon::model::ClaimRecord = daemon
         .transport()
         .post(
             "/v1/agents/suspend",
@@ -2024,11 +2024,11 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
     assert_eq!(daemon.store().index().unwrap(), before_retry);
     for (key, phase) in [
         (
-            st3::suspension::suspend_snapshot_key(&suspended.id),
+            fractal_daemon::suspension::suspend_snapshot_key(&suspended.id),
             "snapshotting",
         ),
         (
-            st3::suspension::suspend_completed_key(&suspended.id),
+            fractal_daemon::suspension::suspend_completed_key(&suspended.id),
             "suspended",
         ),
     ] {
@@ -2044,7 +2044,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
             .await,
     );
     assert_eq!(
-        st3::suspension::current(daemon.store(), WORKER)
+        fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
             .unwrap()
             .phase,
@@ -2061,7 +2061,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
         .await
         .unwrap_err();
     assert_eq!(
-        st3::client::api_error_code(&refused),
+        fractal_daemon::client::api_error_code(&refused),
         Some("restart-suspended")
     );
     let message = refused.to_string();
@@ -2079,7 +2079,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
             .await,
     );
     assert!(
-        st3::suspension::current(daemon.store(), WORKER)
+        fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
             .is_none()
     );
@@ -2105,7 +2105,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
         Some("agent")
     );
     assert!(
-        st3::suspension::current(daemon.store(), WORKER)
+        fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
             .is_none()
     );
@@ -2123,7 +2123,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unavailable_actions_refuse_before_and_after_restart_without_writes() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -2167,7 +2167,7 @@ async fn unavailable_actions_refuse_before_and_after_restart_without_writes() {
 }
 
 struct PtyFixture {
-    runtime: st_runtime::PtyRuntime,
+    runtime: fractal_runtime::PtyRuntime,
     id: String,
     incarnation: String,
 }
@@ -2179,7 +2179,7 @@ impl Drop for PtyFixture {
 }
 impl Daemon {
     async fn pty(&self, owner: &str) -> PtyFixture {
-        let runtime = st_runtime::PtyRuntime::new(self.state.pty_root.clone()).with_binary("pty");
+        let runtime = fractal_runtime::PtyRuntime::new(self.state.pty_root.clone()).with_binary("pty");
         let id = self
             .store()
             .desired_subjects()
@@ -2215,7 +2215,7 @@ impl Daemon {
         fixture
     }
 
-    async fn screen_containing(&self, owner: &str, text: &str) -> st3_client::TerminalScreen {
+    async fn screen_containing(&self, owner: &str, text: &str) -> fractal_client::TerminalScreen {
         for _ in 0..100 {
             let screen = self
                 .client(PERSON)
@@ -2250,7 +2250,7 @@ impl Daemon {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_controls_survive_stale_screens_and_daemon_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -2332,7 +2332,7 @@ async fn terminal_controls_survive_stale_screens_and_daemon_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_controls_survive_stale_incarnations_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for kind in [
@@ -2404,7 +2404,7 @@ async fn runtime_controls_survive_stale_incarnations_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_runtime_reset_survives_stale_desired_revision_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -2450,13 +2450,13 @@ async fn run_runtime_reset_survives_stale_desired_revision_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn glasses_save_delete_and_read_survive_stale_bases_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
     let id = "019a0000-0000-7000-8000-000000000042";
     let body = json!({"name": "Copper workspace", "layout": {"tabs": [{"title": "Home", "pane": "home:"}]}});
-    let request: st3_client::GlassPut =
+    let request: fractal_client::GlassPut =
         serde_json::from_value(json!({"body": body, "base_revision": null})).unwrap();
     daemon.restart().await;
     let saved = daemon
@@ -2475,7 +2475,7 @@ async fn glasses_save_delete_and_read_survive_stale_bases_and_restarts() {
         .value;
     assert_eq!(replay.header.revision, saved.header.revision);
     assert_eq!(daemon.store().index().unwrap(), index);
-    let stale: st3_client::GlassPut =
+    let stale: fractal_client::GlassPut =
         serde_json::from_value(json!({"body": body, "base_revision": "old-base"})).unwrap();
     // Glass bases record which edit was replaced: concurrent edits intentionally remain
     // last-writer-wins, unlike execution fences. The response makes that replacement visible.
@@ -2490,7 +2490,7 @@ async fn glasses_save_delete_and_read_survive_stale_bases_and_restarts() {
         Some(saved.header.revision.as_str())
     );
     assert_eq!(replaced.base_revision.as_deref(), Some("old-base"));
-    let request = st3_client::GlassDelete {
+    let request = fractal_client::GlassDelete {
         base_revision: Some(replaced.header.revision),
     };
     daemon.restart().await;
@@ -2521,7 +2521,7 @@ async fn glasses_save_delete_and_read_survive_stale_bases_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_reads_preserve_operational_views_after_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -2618,7 +2618,7 @@ async fn cli_reads_preserve_operational_views_after_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use sha2::Digest as _;
@@ -2634,9 +2634,9 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
         ),
         "coverage-seeded-worker",
     );
-    let client = st3::client::Client::new(st3::client::Endpoint::Unix(daemon.socket()));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(daemon.socket()));
     assert_eq!(
-        st3::native_seed::first_launch(&client, WORKER, "seed-attempt", "omp", Some(&seed), &inventory, false)
+        fractal_daemon::native_seed::first_launch(&client, WORKER, "seed-attempt", "omp", Some(&seed), &inventory, false)
             .await.unwrap(),
         Some(session.clone()),
     );
@@ -2649,7 +2649,7 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
     daemon.restart().await;
     std::fs::remove_file(&seed).unwrap();
     assert_eq!(
-        st3::native_seed::first_launch(&client, WORKER, "before-acknowledgement", "omp", Some(&seed), &inventory, false)
+        fractal_daemon::native_seed::first_launch(&client, WORKER, "before-acknowledgement", "omp", Some(&seed), &inventory, false)
             .await.unwrap(),
         None,
         "an incomplete attempt starts fresh even before acknowledgement, without reading the missing seed",
@@ -2674,7 +2674,7 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].body, acknowledgement["body"]);
     assert_eq!(
-        st3::native_seed::first_launch(&client, WORKER, "after-acknowledgement", "omp", Some(&seed), &inventory, false)
+        fractal_daemon::native_seed::first_launch(&client, WORKER, "after-acknowledgement", "omp", Some(&seed), &inventory, false)
             .await.unwrap(),
         None,
         "acknowledgement never rearms or restages the missing seed",
@@ -2690,7 +2690,7 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_metadata_documents_blobs_and_rules_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -2817,7 +2817,7 @@ async fn cli_metadata_documents_blobs_and_rules_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -3108,7 +3108,7 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -3246,7 +3246,7 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_silent_kinds_and_count_reads_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -3271,7 +3271,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
     let sent = cli_value(daemon.cli(PEER, &silent_args).await);
     assert_eq!(sent["kind"], "silent");
     let held = sent["subject"].as_str().unwrap().to_owned();
-    assert!(st3::silent::is_held(
+    assert!(fractal_daemon::silent::is_held(
         &daemon.store().message(&held).unwrap().unwrap()
     ));
     daemon.restart().await;
@@ -3288,7 +3288,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
     assert_eq!(read["status"], "read");
     let question = cli_value(daemon.cli(PEER, &send("copper-question", "wake")).await);
     assert_eq!(question["kind"], "wake");
-    assert!(!st3::silent::is_held(
+    assert!(!fractal_daemon::silent::is_held(
         &daemon
             .store()
             .message(question["subject"].as_str().unwrap())
@@ -3334,7 +3334,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
             )
             .await,
     );
-    assert!(!st3::silent::is_held(
+    assert!(!fractal_daemon::silent::is_held(
         &daemon
             .store()
             .message(answer["subject"].as_str().unwrap())
@@ -3361,7 +3361,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
             )
             .await,
     );
-    assert!(st3::silent::is_held(
+    assert!(fractal_daemon::silent::is_held(
         &daemon
             .store()
             .message(reply["subject"].as_str().unwrap())
@@ -3380,7 +3380,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
     .unwrap();
     let api = serde_json::to_value(api).unwrap();
     let api_id = api["value"]["affected_ids"][0].as_str().unwrap();
-    assert!(st3::silent::is_held(
+    assert!(fractal_daemon::silent::is_held(
         &daemon.store().message(api_id).unwrap().unwrap()
     ));
     let before = daemon.store().index().unwrap();
@@ -3406,7 +3406,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -3545,7 +3545,7 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_revision_propose_inspect_approve_and_cancel_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for decision in ["approve", "cancel"] {
@@ -3633,7 +3633,7 @@ async fn cli_revision_propose_inspect_approve_and_cancel_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_delegation_policy_and_answers_preserve_identity_across_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -3783,7 +3783,7 @@ async fn cli_delegation_policy_and_answers_preserve_identity_across_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -3923,7 +3923,7 @@ async fn cli_person_asks_updates_done_cancel_and_retired_attention_survive_resta
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_mission_output_and_manual_wake_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -4001,7 +4001,7 @@ async fn cli_mission_output_and_manual_wake_survive_restart() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_service_install_status_restart_reset_uninstall_use_isolated_manager() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::os::unix::fs::PermissionsExt;
@@ -4009,7 +4009,7 @@ async fn cli_service_install_status_restart_reset_uninstall_use_isolated_manager
     for directory in ["bin", "home", "config/st3", "state/st3", "data", "run"] {
         std::fs::create_dir_all(root.path().join(directory)).unwrap();
     }
-    let config = st3::config::Config {
+    let config = fractal_daemon::config::Config {
         node: "fixture-service".into(),
         person: Some(PERSON.into()),
         state_dir: root.path().join("state/st3"),
@@ -4082,7 +4082,7 @@ PY
             command.args(["-c", "import os,pty,subprocess,sys; master,slave=pty.openpty(); os.write(master,b'yes\\nfixture-service\\nerase st state\\n'); result=subprocess.run(sys.argv[1:],stdin=slave); os.close(master); os.close(slave); sys.exit(result.returncode)", test_bin!("st3-fixture").to_str().unwrap()]);
             command
         } else {
-            st3::test_support::async_command(test_bin!("st3-fixture"))
+            fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
         };
         command
             .env_clear()
@@ -4156,7 +4156,7 @@ PY
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_launch_planning_questions_variants_approval_and_run_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for end in ["approve", "approve-and-launch", "revise", "cancel"] {
@@ -4379,7 +4379,7 @@ async fn cli_launch_planning_questions_variants_approval_and_run_survive_restart
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_terminal_controls_and_stream_capabilities_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -4469,7 +4469,7 @@ async fn cli_terminal_controls_and_stream_capabilities_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_local_skill_completions_holds_and_repairs_use_private_files() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -4581,7 +4581,7 @@ async fn cli_local_skill_completions_holds_and_repairs_use_private_files() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_subscription_release_and_cancel_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -4632,7 +4632,7 @@ async fn cli_subscription_release_and_cancel_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_replication_inspection_and_repair_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     const FLEET: &str = "5e3c1a9b-2d4f-4b6e-8a7c-0f1e2d3c4b5a";
@@ -4672,7 +4672,7 @@ async fn cli_replication_inspection_and_repair_survive_restart() {
     .unwrap();
     let mut bytes = Vec::new();
     ciborium::into_writer(&payload, &mut bytes).unwrap();
-    let broken = st3::model::ReplicaEnvelope {
+    let broken = fractal_daemon::model::ReplicaEnvelope {
         hash: smallclaims::hash::replica_envelope_hash(
             &original.writer,
             original.sequence,
@@ -4736,7 +4736,7 @@ async fn cli_replication_inspection_and_repair_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_devices_and_native_import_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -4880,7 +4880,7 @@ async fn cli_devices_and_native_import_survive_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_launch_proposes_a_named_variant_from_an_exact_run_generation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -4993,7 +4993,7 @@ async fn cli_launch_proposes_a_named_variant_from_an_exact_run_generation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_seat_suspension_and_resume_wait_for_durable_owner_acknowledgements() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -5007,7 +5007,7 @@ async fn cli_seat_suspension_and_resume_wait_for_durable_owner_acknowledgements(
         // native runtime canaries; this tests the public CLI request/wait and durable state.
         let owner = tokio::spawn(async move {
             for _ in 0..200 {
-                if let Some(operation) = st3::suspension::current(&store, WORKER).unwrap()
+                if let Some(operation) = fractal_daemon::suspension::current(&store, WORKER).unwrap()
                     && operation.action == command
                     && matches!(operation.phase.as_str(), "quiescing" | "restoring")
                 {
@@ -5015,11 +5015,11 @@ async fn cli_seat_suspension_and_resume_wait_for_durable_owner_acknowledgements(
                         store.append_claim(&ClaimInput {
                             subject: WORKER.into(), kind: "runtime.action.succeeded".into(), actor: Some(WORKER.into()),
                             fields: serde_json::from_value(json!({"action": command, "operation_status": "snapshotting", "harness": "claude", "native_session_id": "copper-cli-suspended"})).unwrap(),
-                            evidence: vec![operation.operation_id.clone()], expected_subject: None, idempotency_key: Some(st3::suspension::suspend_snapshot_key(&operation.operation_id)),
+                            evidence: vec![operation.operation_id.clone()], expected_subject: None, idempotency_key: Some(fractal_daemon::suspension::suspend_snapshot_key(&operation.operation_id)),
                         }).unwrap();
-                        st3::suspension::suspend_completed_key(&operation.operation_id)
+                        fractal_daemon::suspension::suspend_completed_key(&operation.operation_id)
                     } else {
-                        st3::suspension::resume_completed_key(&operation.operation_id)
+                        fractal_daemon::suspension::resume_completed_key(&operation.operation_id)
                     };
                     store.append_claim(&ClaimInput {
                         subject: WORKER.into(), kind: "runtime.action.succeeded".into(), actor: Some(WORKER.into()),
@@ -5042,7 +5042,7 @@ async fn cli_seat_suspension_and_resume_wait_for_durable_owner_acknowledgements(
         );
         owner.await.unwrap();
         daemon.restart().await;
-        let saved = st3::suspension::current(daemon.store(), WORKER)
+        let saved = fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
             .unwrap();
         assert_eq!(saved.phase, phase);
@@ -5055,7 +5055,7 @@ async fn cli_seat_suspension_and_resume_wait_for_durable_owner_acknowledgements(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_human_reviews_act_on_the_current_card_after_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for (kind, mode, verdict) in [
@@ -5086,7 +5086,7 @@ mission "example/review" state="ready" {{
                     .work_action(
                         step,
                         action,
-                        &st3::model::WorkRequest {
+                        &fractal_daemon::model::WorkRequest {
                             wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
@@ -5147,13 +5147,13 @@ mission "example/review" state="ready" {{
 
 #[test]
 fn action_inventory_matches_contract_and_has_existing_test_references() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::collections::BTreeSet;
     let inventory: Value =
         serde_json::from_str(include_str!("../../../docs/st3/action-coverage.json")).unwrap();
-    let declared: BTreeSet<_> = st3_client::ACTION_NAMES.iter().copied().collect();
+    let declared: BTreeSet<_> = fractal_client::ACTION_NAMES.iter().copied().collect();
     let documented: BTreeSet<_> = inventory["typed_actions"]
         .as_array()
         .unwrap()
@@ -5199,7 +5199,7 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
             }
         }
     }
-    let source = include_str!("../../stui/src/ui/mod.rs");
+    let source = include_str!("../../fractal-tui/src/ui/mod.rs");
     let declaration = source
         .split("pub enum Effect {")
         .nth(1)
@@ -5227,7 +5227,7 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
         offered, documented,
         "add reducer and transport evidence when stui gains an effect"
     );
-    let source = include_str!("../../stui/src/ui/glass.rs");
+    let source = include_str!("../../fractal-tui/src/ui/glass.rs");
     let declaration = source
         .split("enum Action {")
         .nth(1)
@@ -5259,7 +5259,7 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_github_gates_pass_wait_and_refuse_over_private_http_across_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -5346,7 +5346,7 @@ async fn cli_github_gates_pass_wait_and_refuse_over_private_http_across_restart(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_agent_and_shell_declarations_survive_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -5563,7 +5563,7 @@ async fn custom_reply_survives_fences_cli_and_daemon_restarts() {
         .await
         .unwrap();
     assert_eq!(cards.value.items.len(), 1);
-    let st3_client::Resource::Attention(card) = &cards.value.items[0] else {
+    let fractal_client::Resource::Attention(card) = &cards.value.items[0] else {
         panic!("expected custom card")
     };
     assert_eq!(card.actions, ["custom.reply"]);
@@ -5777,7 +5777,7 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
         .await
         .unwrap();
     assert_eq!(cards.value.items.len(), 1);
-    let st3_client::Resource::Attention(card) = &cards.value.items[0] else {
+    let fractal_client::Resource::Attention(card) = &cards.value.items[0] else {
         panic!("expected the decision card")
     };
     assert_eq!(card.actions, ["custom.reply"]);
@@ -5948,7 +5948,7 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
 async fn reference_manifest_proof(source: &str, good: Value, malformed: Vec<Value>) {
     const ACTOR: &str = "agent/garden/seed";
     const FLEET: &str = "5e3c1a9b-2d4f-4b6e-8a7c-0f1e2d3c4b5a";
-    let manifest: st3_schema::custom::Manifest = serde_json::from_str(source).unwrap();
+    let manifest: fractal_schema::custom::Manifest = serde_json::from_str(source).unwrap();
     let mut daemon = Daemon::new_member("alder").await;
     let mut replica = Daemon::new_member("birch").await;
     daemon.store().bind_fleet(FLEET).unwrap();
@@ -6114,7 +6114,7 @@ async fn reference_manifest_proof(source: &str, good: Value, malformed: Vec<Valu
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn image_file_reference_manifest_registers_validates_replicates_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let good = json!({"file":"file/alder:/srv/garden/seed.png", "content_hash":"a".repeat(64), "media_type":"image/png"});
@@ -6153,7 +6153,7 @@ async fn image_file_reference_manifest_registers_validates_replicates_and_restar
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn onepassword_field_reference_manifest_registers_validates_replicates_and_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut malformed = vec![
@@ -6201,7 +6201,7 @@ async fn onepassword_field_reference_manifest_registers_validates_replicates_and
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut daemon = Daemon::new().await;
@@ -6299,7 +6299,7 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
         "{stderr}"
     );
     let raw = daemon.transport().post::<_,Value>("/v1/messages",&json!({"to":WORKER,"from":PERSON,"content":"An adapter note","idempotency_key":"retirement-adapter-message"})).await.unwrap_err();
-    let (status,code,_,details)=st3::client::api_error_parts(&raw).unwrap();
+    let (status,code,_,details)=fractal_daemon::client::api_error_parts(&raw).unwrap();
     assert_eq!(status,409);assert_eq!(code,"recipient-retired");assert_eq!(details["applied"],"none");
     let restarted = daemon
         .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 
 import { it } from '@effect/vitest'
-import type { ActionOf, CollectionSocket, ErrorEnvelope, Snapshot } from '@smalltalk/st3-client'
+import type { ActionOf, CollectionSocket, ErrorEnvelope, Snapshot } from '@fractal/client'
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 

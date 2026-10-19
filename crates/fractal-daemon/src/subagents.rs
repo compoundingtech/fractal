@@ -1,6 +1,6 @@
 //! A seat driver's record of its harness's subagents.
 //!
-//! The harness's hooks or events keep `st_drivers::subagents`'s ledger beside the seat's other
+//! The harness's hooks or events keep `fractal_drivers::subagents`'s ledger beside the seat's other
 //! harness files. Each driver tick turns what changed into claims on the seat: a
 //! `subagent.appeared` for each new subagent, with the step the seat holds, a `subagent.renewed`
 //! once half of a running subagent's lease has passed, and a `subagent.ended` with its tokens
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use st_drivers::subagents::{self as ledger, Ended, Ledger, Subagent, Tokens};
+use fractal_drivers::subagents::{self as ledger, Ended, Ledger, Subagent, Tokens};
 
 use crate::client::{Client, api_error_code};
 use crate::model::{ClaimInput, ClaimRecord, StepRunView};
@@ -133,7 +133,7 @@ impl Publisher {
             claude_config: std::env::var_os("CLAUDE_CONFIG_DIR")
                 .filter(|dir| !dir.is_empty())
                 .map(PathBuf::from),
-            codex_home: st_drivers::codex_app_server::codex_home(),
+            codex_home: fractal_drivers::codex_app_server::codex_home(),
             timeline_incarnation: None,
             lease_ms: lease_ms(),
             silence_ms: silence_ms(),
@@ -347,7 +347,7 @@ impl Publisher {
         let id = ended.subagent.id.clone();
         let thread = ledger::subagent_thread(&id).to_owned();
         let rollout = match &self.codex_home {
-            Some(home) => st_drivers::codex_app_server::latest_codex_transcript_in(home, &thread)?,
+            Some(home) => fractal_drivers::codex_app_server::latest_codex_transcript_in(home, &thread)?,
             None => None,
         };
         let counted_run = match (rollout, self.timeline_incarnation.as_deref()) {

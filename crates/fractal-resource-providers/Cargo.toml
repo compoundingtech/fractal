@@ -1,5 +1,5 @@
 [package]
-name = "st2-resource-providers"
+name = "fractal-resource-providers"
 version = "0.1.0"
 edition = "2024"
 description = "Typed host capabilities for the st2 GitHub and PTY stats resource components."
@@ -16,12 +16,12 @@ parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["gzip", "rustls-tls", "stream"] }
 serde_json = "1"
-st2-resource-wasip2 = { path = "../st2-resource-wasip2", features = ["runtime"] }
+fractal-resource-wasip2 = { path = "../fractal-resource-wasip2", features = ["runtime"] }
 wasmtime = { version = "=48.0.1", default-features = false, features = ["component-model", "runtime", "std"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
-st2-resource-protocol = { package = "st-resource-protocol", path = "../st-resource-protocol" }
+fractal-resource-protocol = { package = "fractal-resource-protocol", path = "../fractal-resource-protocol" }
 tempfile = "3"
 
 [[test]]

@@ -2,9 +2,9 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use serde::{Deserialize, Serialize};
-use st3_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
-pub use st3_store::store::custom::*;
-pub use st3_store::store::custom::{RegistrationRequest, attention_item, create_schema, flush, open, prepare, rebuild, source, typed};
+use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
+pub use fractal_store::store::custom::*;
+pub use fractal_store::store::custom::{RegistrationRequest, attention_item, create_schema, flush, open, prepare, rebuild, source, typed};
 #[cfg(test)]
 mod tests;
 

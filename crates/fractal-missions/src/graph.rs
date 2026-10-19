@@ -16,8 +16,8 @@ use crate::model::{
     ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType,
     RuntimeResetOperation, ScheduleSpec, St3Error, SubscriptionConditionSpec, SubscriptionSpec,
 };
-pub use st3_delivery::graph::*;
-pub use st3_delivery::graph::{agent_under, observer_spec, parse_execution_intent, parse_intent, parse_internal_intent, planning_planner_request, planning_planner_subject, runtime_id, runtime_proof_variables, schedule_spec, subscription_spec, validate_mission_runtimes};
+pub use fractal_delivery::graph::*;
+pub use fractal_delivery::graph::{agent_under, observer_spec, parse_execution_intent, parse_intent, parse_internal_intent, planning_planner_request, planning_planner_subject, runtime_id, runtime_proof_variables, schedule_spec, subscription_spec, validate_mission_runtimes};
 
 /// Empty membership is meaningful only on the owned-set route; apply still requires explicit intent.
 pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, St3Error> {
@@ -447,7 +447,7 @@ version 2
         assert_eq!(
             mechanical(3),
             (
-                r#""$ST3_BIN" gate cargo-test log_diet --package st3 --ref origin/main"#,
+                r#""$ST3_BIN" gate cargo-test log_diet --package fractal --ref origin/main"#,
                 "node-a",
                 "repo",
                 3_600_000

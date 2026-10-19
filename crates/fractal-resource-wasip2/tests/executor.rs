@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use serde_json::json;
-use st2_resource_protocol::ObservationResult;
-use st2_resource_wasip2::{
+use fractal_resource_protocol::ObservationResult;
+use fractal_resource_wasip2::{
     CacheDisposition, CacheRejection, CapabilityContext, CapabilityModule, Executor,
     InvocationStore, LimitKind, LoadError, NoCapabilities, ObservationRequest, ObserveError,
     PrivateArtifactCache, RuntimeConfig, SchedulingCapability,
@@ -18,7 +18,7 @@ mod fixture {
     });
 }
 
-use fixture::st2::resource_provider::provider_api::{
+use fixture::fractal_legacy_runner::resource_provider::provider_api::{
     DescriptorError, Fact, FactValue, Host, ObservationResult as WitObservationResult,
     ObserveRequest, ProviderDescriptor as WitProviderDescriptor, Publication,
     SchedulingCapability as WitSchedulingCapability,

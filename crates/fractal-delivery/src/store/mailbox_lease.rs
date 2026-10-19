@@ -9,8 +9,8 @@ pub use crate::store::mailbox_lease_shared_seats::{AFTER_FAULT_ACQUISITION, AFTE
 use super::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
-pub use st3_store::store::mailbox_lease::*;
-pub use st3_store::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, record};
+pub use fractal_store::store::mailbox_lease::*;
+pub use fractal_store::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, record};
 
 fn capture_mailbox_faults(
     connection: &Connection, subjects: &[String], index: u64,
@@ -40,7 +40,7 @@ fn capture_mailbox_faults(
             AND +store_index<=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1)
          FROM unresolved JOIN claims fault ON fault.id=unresolved.failure",
     );
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8796b5bd9c03 owner=st3_delivery::store::mailbox_lease TODO=trace-statement-and-value-representation */ &query)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5037e9e530a6 owner=fractal_delivery::store::mailbox_lease TODO=trace-statement-and-value-representation */ &query)?;
     let rows = statement.query_map(params![serde_json::to_string(subjects)?, index], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
     })?;
@@ -92,7 +92,7 @@ pub fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence) -> Re
 
 pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &MemberSpec) -> Result<(), St3Error> {
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h98c2efd38f31 owner=st3_delivery::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_argv_bindings VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(token) DO NOTHING",
+        /* sqlite-large-value: allow-for-now lv-h13207c3614f8 owner=fractal_delivery::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_argv_bindings VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(token) DO NOTHING",
         params![fence.token,fence.subject,fence.component,fence.incarnation,fence.epoch,serde_json::to_string(member).map_err(internal)?],
     ).map_err(internal)?;
     Ok(())
@@ -214,7 +214,7 @@ impl MailboxLeaseStore for Store {
         ) -> Result<Option<(String, bool)>, St3Error> {
         let connection = self.readers.get();
         connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h266d605a3f83 owner=st3_delivery::store::mailbox_lease TODO=trace-statement-and-value-representation */ &canonical_sql(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h28113e2f57f3 owner=fractal_delivery::store::mailbox_lease TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id, NOT EXISTS(
                     SELECT 1 FROM claims AS recovery INDEXED BY claims_subject_kind_index
                     WHERE recovery.subject=claims.subject
@@ -226,7 +226,7 @@ impl MailboxLeaseStore for Store {
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ))
             .map_err(internal)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h3c6eae7f2cbb owner=st3_delivery::store::mailbox_lease TODO=trace-statement-and-value-representation */ params![fence.subject, episode], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-hbb02f708c2c5 owner=fractal_delivery::store::mailbox_lease TODO=trace-statement-and-value-representation */ params![fence.subject, episode], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .optional()
@@ -528,7 +528,7 @@ impl MailboxLeaseStore for Store {
             return Err(refused("a successor owner cannot be rewound by recovery"));
         }
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h97abe3765a3e owner=st3_delivery::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
+            /* sqlite-large-value: allow-for-now lv-hafd64db4e362 owner=fractal_delivery::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
              ON CONFLICT(subject,component) DO UPDATE SET incarnation=excluded.incarnation,epoch=excluded.epoch",
             params![fence.subject,fence.component,fence.incarnation,fence.epoch],
         ).map_err(internal)?;

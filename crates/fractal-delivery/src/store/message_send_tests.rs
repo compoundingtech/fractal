@@ -2,8 +2,8 @@
 use crate::DeliveryStore;
 use super::*;
 use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, Judged, fields_signing_bytes};
-use st3_store::store::message_send_tests_shared_delivery::*;
-use st3_store::store::message_send_tests_shared_delivery::{assert_operation_replay_parity, operation_rows, request, signed};
+use fractal_store::store::message_send_tests_shared_delivery::*;
+use fractal_store::store::message_send_tests_shared_delivery::{assert_operation_replay_parity, operation_rows, request, signed};
 
 
 #[test]
@@ -91,7 +91,7 @@ fn signed_send_commits_once_and_retries_keep_the_original_signature() {
 fn failed_signed_send_rolls_back_its_message_and_temporary_signature() {
     let store = Store::open_memory("node").unwrap();
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hf2a8515684a3 owner=st3_delivery::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER reject_fixture_send BEFORE INSERT ON claims
+        /* sqlite-large-value: allow-for-now lv-h4f81cab06ba9 owner=fractal_delivery::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER reject_fixture_send BEFORE INSERT ON claims
          WHEN NEW.subject='message/local-signed-send' BEGIN SELECT RAISE(ABORT,'injected send failure'); END;",
     ).unwrap();
     let input = request();
@@ -118,7 +118,7 @@ fn failed_signed_send_rolls_back_its_message_and_temporary_signature() {
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h43318ab397d3 owner=st3_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_fixture_send")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-ha0a315cfb9e7 owner=fractal_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_fixture_send")
         .unwrap();
     assert!(store.append_signed_message(&input, &signature).unwrap().1);
     assert_eq!(
@@ -143,7 +143,7 @@ fn digest_mismatched_message_operation_repair_persists_across_reopen() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h7f1b3620b9cf owner=st3_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET request_digest='invented-stale-digest' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h957d7e031439 owner=fractal_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET request_digest='invented-stale-digest' WHERE id=?1",
             [&operation],
         )
         .unwrap();
@@ -478,11 +478,11 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
     assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
     assert_eq!(claim.body["fields"]["assistant_grant_id"], grant_id);
     assert_eq!(store.append_assistant_claim_outcome(&input, &authorization).unwrap().0.id, claim.id);
-    assert!(matches!(classify_replicated_claim_with_registry(&claim, st3_schema::registry()).unwrap(),
+    assert!(matches!(classify_replicated_claim_with_registry(&claim, fractal_schema::registry()).unwrap(),
         ReplicatedClaimAdmission::Valid));
     let mut forged = claim;
     forged.body["fields"].as_object_mut().unwrap().remove("assistant_grant_id");
-    assert_eq!(classify_replicated_claim_with_registry(&forged, st3_schema::registry()).err().unwrap().code,
+    assert_eq!(classify_replicated_claim_with_registry(&forged, fractal_schema::registry()).err().unwrap().code,
         "assistant-send-refused");
     let mut wrong_actor = input;
     wrong_actor.actor = Some("person/intruder".into());

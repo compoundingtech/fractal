@@ -7,7 +7,7 @@ use crate::sekrets::identity::{self, STATEMENT_VERSION, Statement};
 use crate::sekrets::protocol::Attestation;
 use crate::model::St3Error;
 use crate::store::Store;
-pub use st3_missions::sekrets_daemon::*;
+pub use fractal_missions::sekrets_daemon::*;
 
 /// The person this daemon's seats work for: the configured `person`. Set once at startup.
 pub static PERSON: OnceLock<String> = OnceLock::new();
@@ -18,7 +18,7 @@ pub fn seat_for_scope(pty_root: &Path, scope: &str) -> Result<Option<String>, St
         return Ok(Some(found));
     }
     // A scope whose name does not lead to its terminal's file: read the whole registry.
-    let observations = st_runtime::PtyRuntime::new(pty_root.to_path_buf())
+    let observations = fractal_runtime::PtyRuntime::new(pty_root.to_path_buf())
         .snapshot()
         .map_err(|error| St3Error::new("sekrets-attestation", format!("{error:#}")))?;
     Ok(observations
@@ -180,7 +180,7 @@ pub fn claim_for(
             copy(&mut fields, "reason", "reason");
             "sekret.refused"
         }
-        change if st3_schema::SEKRET_CHANGES.contains(&change) => {
+        change if fractal_schema::SEKRET_CHANGES.contains(&change) => {
             fields.insert("change".into(), json!(change));
             fields.insert("detail".into(), detail.clone());
             "sekret.changed"
@@ -364,8 +364,8 @@ mod tests {
     use super::*;
     use crate::sekrets::store::LogEntry;
     use serde_json::json;
-    use st3_missions::sekrets_daemon::shared_tests_seats::*;
-    use st3_missions::sekrets_daemon::shared_tests_seats::{entry};
+    use fractal_missions::sekrets_daemon::shared_tests_seats::*;
+    use fractal_missions::sekrets_daemon::shared_tests_seats::{entry};
 
     #[test]
     fn busy_gateway_append_keeps_cursor_and_retries_the_same_entry() {
@@ -490,7 +490,7 @@ mod tests {
             .is_none()
         );
         for claim in [call, exited, changed] {
-            st3_schema::registry()
+            fractal_schema::registry()
                 .validate_claim(&claim.subject, &claim.kind, &claim.fields)
                 .unwrap_or_else(|error| panic!("{}: {error:?}", claim.kind));
         }

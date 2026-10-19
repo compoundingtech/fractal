@@ -6,7 +6,7 @@
 /// Run the named unittest selectors of the probe script in an isolated, process-supervised child.
 #[cfg(target_os = "linux")]
 fn probe(selectors: &[&str]) {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::path::PathBuf;
@@ -16,7 +16,7 @@ fn probe(selectors: &[&str]) {
         .prefix("delivery-probe-scratch-")
         .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
-    let result = st3::test_support::command("setsid")
+    let result = fractal_daemon::test_support::command("setsid")
         .args(["-f", "env", "-u", "ST_AGENT", "python3"])
         .arg(repo.join("scripts/st3-delivery-probe-test"))
         .arg("--binary")

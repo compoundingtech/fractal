@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "St3Client",
+    name: "FractalClient",
     platforms: [.iOS(.v17), .macOS(.v14)],
-    products: [.library(name: "St3Client", targets: ["St3Client"])],
+    products: [.library(name: "FractalClient", targets: ["FractalClient"])],
     targets: [
-        .target(name: "St3Client"),
-        .testTarget(name: "St3ClientTests", dependencies: ["St3Client"]),
+        .target(name: "FractalClient"),
+        .testTarget(name: "FractalClientTests", dependencies: ["FractalClient"]),
     ]
 )

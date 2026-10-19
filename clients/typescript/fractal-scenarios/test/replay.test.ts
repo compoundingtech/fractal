@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  applyWindow, ClientError, St3Client,
+  applyWindow, ClientError, FractalClient,
   type ActionRequest, type CollectionFrame, type CollectionStream, type CollectionWindow,
   type TerminalAttachment, type TimelineEntry,
-} from '@smalltalk/st3-client'
-import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { applyConversation, isConversational, type Conversation } from '../../st3-views/sessionView.ts'
+} from '@fractal/client'
+import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownSync } from '@fractal/client/schema'
+import { applyConversation, isConversational, type Conversation } from '../../fractal-views/sessionView.ts'
 
 import { ANCHOR_MS, buildWorld, foldSlice, loadWorld, type Slice, type SyncEvent, type World } from '../src/index.ts'
 import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
@@ -31,7 +31,7 @@ const setup = (world = base()) => {
     }
     return response
   }
-  const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl })
+  const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl })
   const frames: CollectionFrame[] = []
   const endings: (Error | undefined)[] = []
   const connect = async (): Promise<CollectionStream> => client.collectionStream({ socket: replay.socket,

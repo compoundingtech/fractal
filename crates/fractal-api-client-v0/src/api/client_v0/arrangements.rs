@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::ArrangementsStore;
 use super::*;
-pub use st3_api_core::api::client_v0::arrangements::*;
-pub use st3_api_core::api::client_v0::arrangements::{list, person, window_end};
+pub use fractal_api_core::api::client_v0::arrangements::*;
+pub use fractal_api_core::api::client_v0::arrangements::{list, person, window_end};
 
 pub async fn get(
     State(state): State<AppState>,
@@ -12,7 +12,7 @@ pub async fn get(
 ) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
     let owner = person(&session, Some(&format!("person/{name}")), false)?;
     let subject = format!("arrangement/{owner}/{uuid}");
-    st3_schema::arrangements::owner(&subject).map_err(|error| validation(error.message))?;
+    fractal_schema::arrangements::owner(&subject).map_err(|error| validation(error.message))?;
     let (snapshot, resource) = blocking_store(move || {
         state.store.read_snapshot(|index| {
             Ok((client_snapshot_at(&state, index), state.store.arrangement(&subject, index)?))
@@ -30,7 +30,7 @@ pub async fn get(
 struct Edit {
     subject: String,
     owner: String,
-    operations: Vec<st3_schema::arrangements::Operation>,
+    operations: Vec<fractal_schema::arrangements::Operation>,
 }
 
 pub async fn edit(
@@ -41,7 +41,7 @@ pub async fn edit(
     let parameters: Edit = serde_json::from_value(request.parameters.clone())
         .map_err(|error| validation(error.to_string()))?;
     let owner = person(session, Some(&parameters.owner), true)?;
-    if st3_schema::arrangements::owner(&parameters.subject)
+    if fractal_schema::arrangements::owner(&parameters.subject)
         .map_err(|error| validation(error.message))? != owner
     {
         return Err(validation("arrangement owner must match its immutable subject owner"));
@@ -102,9 +102,9 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&competing).unwrap())).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let envelope: st3_client::ErrorEnvelope = serde_json::from_slice(
+        let envelope: fractal_client::ErrorEnvelope = serde_json::from_slice(
             &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
-        assert_eq!(envelope.code, st3_client::ErrorCode::ArrangementExists);
+        assert_eq!(envelope.code, fractal_client::ErrorCode::ArrangementExists);
         assert!(!envelope.retryable);
         assert_eq!(state.store.index().unwrap(), index);
         let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)),
@@ -116,7 +116,7 @@ mod tests {
 
     #[tokio::test]
     async fn arrangement_folder_race_and_validation_refusals_stay_typed() {
-        use st3_client::ErrorCode;
+        use fractal_client::ErrorCode;
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "arrangement-typed-refusals");
         let session = ClientSession::local(Some("person/ada")).unwrap();
@@ -135,7 +135,7 @@ mod tests {
                     .header(LOCAL_PERSON_HEADER, "person/ada").header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&input).unwrap())).unwrap()).await.unwrap();
                 assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-                serde_json::from_slice::<st3_client::ErrorEnvelope>(
+                serde_json::from_slice::<fractal_client::ErrorEnvelope>(
                     &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap()
             }
         };
@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn inventory_edit(store: &Store, subject: &str, operations: Value) {
-        let owner = st3_schema::arrangements::owner(subject).unwrap();
+        let owner = fractal_schema::arrangements::owner(subject).unwrap();
         store.append_claim(&ClaimInput {
             subject:subject.into(), kind:"arrangement.edited".into(), actor:Some(owner.into()),
             fields:serde_json::from_value(json!({"owner":owner,"operations":operations})).unwrap(),

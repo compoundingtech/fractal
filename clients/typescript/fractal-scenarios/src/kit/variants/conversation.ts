@@ -1,4 +1,4 @@
-import type { TimelineEntry } from '@smalltalk/st3-client'
+import type { TimelineEntry } from '@fractal/client'
 import { child, type FactoryContext } from '../context.ts'
 import { ENTRIES_PER_HISTORY_TURN, generateConversationRange, HUGE_COMMITTED_TURNS, HUGE_TURNS } from '../conversationHistory.ts'
 import { diff } from '../factories/diff.ts'

@@ -12,7 +12,7 @@ for (const name of ['Models.generated', 'Client.generated', 'fetch-receiver.test
     const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, rewriteRelativeImportExtensions: true } }).outputText;
     fs.writeFileSync(path.join(temporary, `${name}.js`), output);
 }
-const { St3Client, ClientError, applyWindow } = require(path.join(temporary, 'Client.generated.js'));
+const { FractalClient, ClientError, applyWindow } = require(path.join(temporary, 'Client.generated.js'));
 require(path.join(temporary, 'fetch-receiver.test.js'));
 fs.rmSync(temporary, { recursive: true, force: true });
 
@@ -36,7 +36,7 @@ test('native HTTP cancellation covers pending headers and streamed JSON bodies',
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     t.after(() => { server.closeAllConnections(); server.close(); });
-    const client = new St3Client({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const client = new FractalClient({ baseUrl: `http://127.0.0.1:${server.address().port}` });
     await client.discover();
     for (const phase of ['headers', 'body', 'mail-backlog']) {
         const controller = new AbortController();
@@ -54,7 +54,7 @@ test('native HTTP cancellation covers pending headers and streamed JSON bodies',
 test('cancellation after async credentials prevents sending an action', async () => {
     const controller = new AbortController();
     let fetches = 0;
-    const client = new St3Client({
+    const client = new FractalClient({
         baseUrl: 'https://example.test',
         credential: async () => { controller.abort(); return 'secret'; },
         fetchImpl: async () => { fetches++; return response(capabilityFixture); },
@@ -74,7 +74,7 @@ test('actual delayed WebSocket upgrade distinguishes readiness and contains malf
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     t.after(() => { peer?.destroy(); server.close(); });
-    const client = new St3Client({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const client = new FractalClient({ baseUrl: `http://127.0.0.1:${server.address().port}` });
     let opens = 0, stream;
     const frames = [];
     let ended;
@@ -146,7 +146,7 @@ test('collection callback failures and missing snapshot items terminate once wit
     for (const failCallback of [false, true]) {
         const socket = collectionSocket();
         const ends = [];
-        const client = new St3Client({ baseUrl: 'https://example.test' });
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
         await client.collectionStream({
             socket: () => socket,
             onFrame: () => { throw new Error('consumer decode failure'); },
@@ -165,7 +165,7 @@ test('readiness callback precedes buffered commands and can close before flushin
     for (const closeOnOpen of [false, true]) {
         const socket = collectionSocket();
         let calls = 0, stream;
-        const client = new St3Client({ baseUrl: 'https://example.test' });
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
         stream = await client.collectionStream({
             socket: () => socket,
             onFrame: () => {},
@@ -187,7 +187,7 @@ test('readiness callback precedes buffered commands and can close before flushin
 
 test('onOpen cancellation and fence replacement follow pre-open subscriptions in FIFO order', async () => {
     const socket = collectionSocket();
-    const client = new St3Client({ baseUrl: 'https://example.test' });
+    const client = new FractalClient({ baseUrl: 'https://example.test' });
     const stream = await client.collectionStream({
         socket: () => socket,
         onFrame: () => {},
@@ -266,7 +266,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     );
     for (const [method, argumentsFor] of cases) {
         const requests = [];
-        const client = new St3Client({
+        const client = new FractalClient({
             baseUrl: 'https://example.test',
             fetchImpl: async (url, init) => {
                 requests.push([String(url), init]);
@@ -296,7 +296,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
 for (const messagesPaging of [undefined, false, true]) {
     test(`messages paging option ${messagesPaging} governs HTTP, WebSockets and trace-context views`, async () => {
         const headers = [];
-        const client = new St3Client({
+        const client = new FractalClient({
             baseUrl: 'https://example.test',
             ...(messagesPaging === undefined ? {} : { messagesPaging }),
             fetchImpl: async (_url, init) => { headers.push(init.headers); return response(capabilityFixture); },
@@ -319,7 +319,7 @@ for (const messagesPaging of [undefined, false, true]) {
 test('notesList reads the typed advisory current notes endpoint', async () => {
     const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json');
     const calls = [];
-    const client = new St3Client({
+    const client = new FractalClient({
         baseUrl: 'https://example.test',
         credential: () => 'test-credential',
         fetchImpl: async (url, init) => {
@@ -357,7 +357,7 @@ for (const [name, callback, expected] of traceCases) {
         let reads = 0;
         const headers = [];
         const sent = [];
-        const client = new St3Client({
+        const client = new FractalClient({
             baseUrl: 'https://example.test',
             ...(callback === undefined ? {} : { traceContext: () => { reads++; return callback(); } }),
             fetchImpl: async (_url, init) => { headers.push(init.headers); return response(envelope(capabilities)); },
@@ -398,7 +398,7 @@ test('trace context is read when each request starts and when each subscribe is 
     let active;
     const headers = [];
     const sent = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', traceContext: () => active,
+    const client = new FractalClient({ baseUrl: 'https://example.test', traceContext: () => active,
         fetchImpl: async (_url, init) => { headers.push(init.headers); return response(envelope(capabilities)); } });
     await client.capabilities();
     active = { traceparent: validTraceparent };
@@ -420,7 +420,7 @@ test('trace context is read when each request starts and when each subscribe is 
 test('a traced view carries its own context and shares discovery, credentials, and transport', async () => {
     const calls = [];
     const own = '00-0123456789abcdef0123456789abcdef-fedcba9876543210-01';
-    const client = new St3Client({ baseUrl: 'https://example.test', credential: () => 'secret', client: 'web',
+    const client = new FractalClient({ baseUrl: 'https://example.test', credential: () => 'secret', client: 'web',
         traceContext: () => ({ traceparent: validTraceparent }),
         fetchImpl: async (url, init) => {
             calls.push({ url, headers: init.headers });
@@ -440,7 +440,7 @@ test('a traced view carries its own context and shares discovery, credentials, a
 
 test('discovers capabilities, bounds pages, and encodes opaque cursors', async () => {
     const calls = [];
-    const client = new St3Client({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async (url, init) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async (url, init) => {
         calls.push({ url, init });
         return response(envelope(url.endsWith('/capabilities') ? capabilities : { kind: 'page', collection: 'missions', filters: {}, items: [], page: { limit: 2, has_more: false } }));
     } });
@@ -454,7 +454,7 @@ test('discovers capabilities, bounds pages, and encodes opaque cursors', async (
 
 test('sends typed fenced action and follows the returned operation', async () => {
     const calls = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
         calls.push({ url, init });
         if (url.endsWith('/capabilities')) return response(envelope(capabilities));
         if (url.endsWith('/actions')) return response(envelope({ kind: 'action-result', action_id: 'action/test', operation_id: 'operation/test', status: 'accepted', affected_ids: [], snapshot_id: snapshot.id }), 202);
@@ -471,7 +471,7 @@ test('sends typed fenced action and follows the returned operation', async () =>
 });
 
 test('preserves versioned cursor gap errors', async () => {
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
         if (url.endsWith('/capabilities')) return response(envelope(capabilities));
         return response(cursorGapFixture, 409);
     } });
@@ -484,7 +484,7 @@ test('preserves versioned cursor gap errors', async () => {
 
 test('completes pairing with either canonical or bare pairing ID', async () => {
     const calls = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
         calls.push({ url, init });
         return response(envelope({ kind: 'paired-session', device_id: 'device/test', person_id: 'person/test', session_actor: 'person/test/session/test', credential: 'proof', scopes: [], expires_at: '2026-10-01T00:00:00Z' }));
     } });
@@ -502,7 +502,7 @@ test('follows terminal screens until the server ends the stream with its error',
     const staleFixture = require('../../../docs/st3/client-v0/fixtures/terminal-stale-fence-error.json');
     const opened = [];
     const socket = { onmessage: null, onclose: null, onerror: null, closed: [], close(code) { this.closed.push(code); } };
-    const client = new St3Client({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const screens = [];
     let ended;
     await client.terminalStream('terminal/release-shell', {
@@ -530,7 +530,7 @@ test('follows terminal screens until the server ends the stream with its error',
 
 test('a normal close ends the terminal stream without an error', async () => {
     const socket = { onmessage: null, onclose: null, onerror: null, close() {} };
-    const client = new St3Client({ baseUrl: 'http://100.64.0.1:7777', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'http://100.64.0.1:7777', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const ends = [];
     const stream = await client.terminalStream('terminal/release-shell', { streamCapability: 'c', onScreen: () => {}, onEnd: error => ends.push(error), socket: url => { assert.ok(url.startsWith('ws://100.64.0.1:7777/')); return socket; } });
     socket.onclose({ code: 1000, reason: '' });
@@ -542,7 +542,7 @@ test('conversation stream opens at a cursor and delivers bounded changes', async
     const socket = { onmessage: null, onclose: null, onerror: null, close() {} };
     const opened = [];
     const received = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.conversationStream('session/example', {
         after: 'conversation-cursor/owner/example/1.2.3',
         onChange: change => received.push(change.value),
@@ -566,7 +566,7 @@ test('collection stream holds commands until the socket opens and passes frames 
     const lifecycle = [];
     const frames = [];
     const ends = [];
-    const client = new St3Client({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), onEnd: error => ends.push(error), onOpen: () => lifecycle.push(['open']), onCommandSent: command => lifecycle.push([command.kind, command.id]), socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; } });
     assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['st3.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
     stream.subscribe('missions', 'missions', 200);
@@ -601,7 +601,7 @@ test('command observers see queued and direct commands only after socket.send', 
     const socket = collectionSocket();
     const observed = [];
     const ends = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({
         onFrame: () => {},
         onEnd: error => ends.push(error),
@@ -631,7 +631,7 @@ test('a replacement stream opens and reports resubscription sends afresh after a
     const lifecycle = [];
     const ends = [];
     let created = 0;
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const createStream = index => client.collectionStream({
         onFrame: () => {},
         onEnd: error => ends.push([index, error]),
@@ -676,7 +676,7 @@ test('a replacement stream opens and reports resubscription sends afresh after a
 test('closing from onOpen cancels all queued commands', async () => {
     const socket = collectionSocket();
     const lifecycle = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
     let stream;
     stream = await client.collectionStream({ onFrame: () => {}, onOpen: () => { lifecycle.push('open'); stream.close(); }, onCommandSent: command => lifecycle.push(command), socket: () => socket });
     stream.subscribe('agents', 'agents');
@@ -690,7 +690,7 @@ test('closing from onOpen cancels all queued commands', async () => {
 test('an onOpen observer error ends the stream before queued commands are sent', async () => {
     const socket = collectionSocket();
     const ends = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const observerError = new Error('open observer failed');
     const stream = await client.collectionStream({ onFrame: () => {}, onEnd: error => ends.push(error), onOpen: () => { throw observerError; }, socket: () => socket });
     stream.subscribe('agents', 'agents');
@@ -704,7 +704,7 @@ test('an onOpen observer error ends the stream before queued commands are sent',
 test('an onCommandSent observer error ends the stream after the sent command', async () => {
     const socket = collectionSocket();
     const ends = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const observerError = new Error('send observer failed');
     const stream = await client.collectionStream({ onFrame: () => {}, onEnd: error => ends.push(error), onCommandSent: command => { if (command.id === 'agents') throw observerError; }, socket: () => socket });
     stream.subscribe('agents', 'agents');
@@ -718,7 +718,7 @@ test('an onCommandSent observer error ends the stream after the sent command', a
 test('closing from the first command observer stops later queued sends', async () => {
     const socket = collectionSocket();
     const sent = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
     let stream;
     stream = await client.collectionStream({ onFrame: () => {}, onCommandSent: command => { sent.push(command.id); stream.close(); }, socket: () => socket });
     stream.subscribe('agents', 'agents');
@@ -732,7 +732,7 @@ test('closing from the first command observer stops later queued sends', async (
 test('collection commands preserve omitted and nullable options and failure metadata', async () => {
     const socket = collectionSocket();
     const frames = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), socket: () => socket });
     socket.onopen();
     stream.subscribe('agents', 'agents');
@@ -765,7 +765,7 @@ test('exact agent subscriptions are sent only to a daemon that advertises the se
         const calls = [];
         // The fixture daemon's capabilities lack the selector, as an older daemon's do.
         const value = advertised ? { ...capabilityFixture.value, capabilities: [...capabilityFixture.value.capabilities, exact] } : capabilityFixture.value;
-        const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async url => { calls.push(String(url)); return response(envelope(value)); } });
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => { calls.push(String(url)); return response(envelope(value)); } });
         const stream = await client.collectionStream({ onFrame: () => {}, socket: () => socket });
         socket.onopen();
         assert.throws(() => stream.subscribe('raw', 'agents', 1, { agent: 'agent/example/worker' }), /subscribeAgent/);
@@ -785,7 +785,7 @@ test('exact agent subscriptions are sent only to a daemon that advertises the se
 test('closing the collection stream sends nothing more and reports no end', async () => {
     const socket = collectionSocket();
     const ends = [];
-    const client = new St3Client({ baseUrl: 'http://100.64.0.1:7777', fetchImpl: async () => { throw new Error('no HTTP'); } });
+    const client = new FractalClient({ baseUrl: 'http://100.64.0.1:7777', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({ onFrame: () => {}, onEnd: error => ends.push(error), socket: url => { assert.ok(url.startsWith('ws://100.64.0.1:7777/')); return socket; } });
     socket.onopen();
     stream.close();
@@ -815,7 +815,7 @@ test('glass methods preserve structure, null creation base, and idempotency head
     const fixture = require('../../../docs/st3/client-v0/fixtures/glasses.json');
     const put = require('../../../docs/st3/client-v0/fixtures/glass-put.json');
     const calls = [];
-    const client = new St3Client({baseUrl: 'https://example.test', fetchImpl: async (url, options) => {
+    const client = new FractalClient({baseUrl: 'https://example.test', fetchImpl: async (url, options) => {
         calls.push({url, options});
         if (url.endsWith('/capabilities')) return response(envelope(capabilities));
         return response(fixture);
@@ -835,7 +835,7 @@ test('glass methods preserve structure, null creation base, and idempotency head
 
 test('creation methods submit the shared typed fixtures', async () => {
     const calls = [];
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
         calls.push({ url, init });
         if (url.endsWith('/capabilities')) return response(envelope(capabilities));
         return response(envelope({ kind: 'action-result', action_id: 'action/create', operation_id: 'operation/create', status: 'completed', affected_ids: ['agent/example/worker'], snapshot_id: snapshot.id }));
@@ -851,7 +851,7 @@ test('creation methods submit the shared typed fixtures', async () => {
 test('search encodes text, filters, and cursor and preserves result targets', async () => {
     const calls = [];
     const fixture = require('../../../docs/st3/client-v0/fixtures/conversation-search.json');
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async url => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
         calls.push(url);
         return response(url.endsWith('/capabilities') ? envelope(capabilities) : fixture);
     } });
@@ -870,7 +870,7 @@ test('reads bounded seat status history through the paired gateway', async () =>
     const calls = [];
     const history = { kind: 'status-history', seat: 'agent/cedar', retained_from: '2026-10-04T12:00:00Z', complete: false,
         items: [{ seat: 'agent/cedar', runtime_incarnation: 'two', state: null, observed_at: '2026-10-04T12:00:00Z', reset: true }] };
-    const client = new St3Client({ baseUrl: 'https://example.test', credential: () => 'proof', fetchImpl: async (url, init) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', credential: () => 'proof', fetchImpl: async (url, init) => {
         calls.push({ url, init });
         return response(envelope(url.endsWith('/capabilities') ? capabilities : history));
     } });
@@ -884,7 +884,7 @@ test('reads bounded seat status history through the paired gateway', async () =>
 test('canonical publication read encodes mission and schedule subjects and preserves defaults', async () => {
     const calls = [];
     const declaration = { max_active_runs: 1, revision_cutover: 'restart-active', steps: { inspect: { retry: { attempts: 1, backoff_ms: 0 } } } };
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
         calls.push(url);
         return response(envelope(url.endsWith('/capabilities') ? capabilities : { kind: 'publication-definition', subject: new URL(url).searchParams.get('subject'), declaration, revision: 'a'.repeat(64), token: 'claim/example' }));
     } });
@@ -899,7 +899,7 @@ test('canonical publication read encodes mission and schedule subjects and prese
 test('terminal exact filters encode subjects and refuse an old server ignoring filters', async () => {
     const calls = [];
     let filters = { owner: 'agent/lookup/seat-064', state: 'running' };
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async url => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
         calls.push(url);
         return response(envelope(url.endsWith('/capabilities') ? capabilities : {
             kind: 'page', collection: 'terminals', filters, items: [], page: { limit: 1, has_more: false }
@@ -917,7 +917,7 @@ test('terminal exact filters encode subjects and refuse an old server ignoring f
 test('owner content chunk route encodes session identities and retains continuation offsets', async () => {
     const calls = [];
     const chunk = { kind: 'conversation-content-chunk', ref: 'a'.repeat(64), media_type: 'image/png', offset: 262144, size: 262145, data: 'Bw==', next_offset: null };
-    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
         calls.push({ url, init });
         return response(envelope(url.endsWith('/capabilities') ? capabilities : chunk));
     } });
@@ -932,7 +932,7 @@ test('phone observation command retries identical tagged intervals and accepts w
     const report = {report_id:'019a1234-0000-7000-8000-000000000001',samples:[
         {kind:'live-share',target:'ios-live-share',carrier:'lan',interval_start:'2026-10-10T15:00:00Z',interval_end:'2026-10-10T15:01:00Z',foreground_ms:10000,live_ms:9900},
     ]};
-    const client = new St3Client({baseUrl:'https://example.test',credential:()=> 'paired',fetchImpl:async (url,init)=>{
+    const client = new FractalClient({baseUrl:'https://example.test',credential:()=> 'paired',fetchImpl:async (url,init)=>{
         calls.push({url,init});
         return response({api_version:'st3.client.v0',request_id:'request/test',value:{accepted:true}});
     }});

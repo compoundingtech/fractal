@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { base64url, INLINE_MAX_BYTES, isLongMessage, longPreview, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, utf8Bytes } from '@smalltalk/st3-views/deviceSigning';
+import { base64url, INLINE_MAX_BYTES, isLongMessage, longPreview, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, utf8Bytes } from '@fractal/views/deviceSigning';
 
 // The shared vectors every client checks (docs/st3/device-signing.md).
 const vectors = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/device-signing-v1.json', import.meta.url), 'utf8'));

@@ -3,16 +3,16 @@
 //! --idempotency-key` says whether an unconfirmed send landed.
 #![cfg(unix)]
 
-use st3::RetirementsStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::RetirementsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde_json::Value;
-use st3::api::AppState;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::store::Store;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, watch};
@@ -37,12 +37,12 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let store = state.store.clone();
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, st3::api::router(state))
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
             .await
             .unwrap();
     });
@@ -148,7 +148,7 @@ async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
         .collect::<Vec<_>>();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        let mut command = st3::test_support::command(binary);
+        let mut command = fractal_daemon::test_support::command(binary);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("ST_") || name.starts_with("ST3_") {
@@ -321,7 +321,7 @@ async fn a_send_whose_answer_was_lost_is_found_and_never_sent_twice() {
     let front = root.path().join("front.sock");
     let losses = Arc::new(Losses::default());
     let proxy = lossy_proxy(front.clone(), back, losses.clone()).await;
-    let intent = st3::parse_intent(
+    let intent = fractal_daemon::parse_intent(
         "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/tmp\"; }\n",
         "message-send-once",
     )

@@ -59,7 +59,7 @@ pub enum Hit {
     ContentImage(super::content::Key),
     ContentOutput(super::content::Key),
     InlineImage(super::content::Key),
-    Pane(st3_conversation_ui::PaneIntent),
+    Pane(fractal_conversation_ui::PaneIntent),
     JumpLatest,
     Composer,
     Help,
@@ -98,8 +98,8 @@ pub enum Hit {
     PaletteChoice(usize),
 }
 
-pub type Target = st3_conversation_ui::doc::Target<Hit>;
-pub type Doc = st3_conversation_ui::doc::Doc<Hit>;
+pub type Target = fractal_conversation_ui::doc::Target<Hit>;
+pub type Doc = fractal_conversation_ui::doc::Doc<Hit>;
 
 /// Shell-only cards, graph fields and buttons layered on the shared document.
 pub trait DocExt {

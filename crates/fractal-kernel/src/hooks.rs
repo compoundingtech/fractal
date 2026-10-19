@@ -17,14 +17,14 @@ use sha2::{Digest as _, Sha256};
 /// Each file in the set, by name. The pi and omp extensions belong to st's
 /// daemon channel; historical seats retain the shared driver's original assets.
 pub const FILES: [(&str, &[u8]); 4] = [
-    ("claude-observe.sh", include_bytes!("../../st3-daemon/hooks/claude-observe.sh")),
-    ("claude-statusline.sh", include_bytes!("../../st3-daemon/hooks/claude-statusline.sh")),
-    ("pi-channel.ts", include_bytes!("../../st3-daemon/hooks/pi-channel.ts")),
-    ("omp-channel.ts", include_bytes!("../../st3-daemon/hooks/omp-channel.ts")),
+    ("claude-observe.sh", include_bytes!("../../fractal-daemon/hooks/claude-observe.sh")),
+    ("claude-statusline.sh", include_bytes!("../../fractal-daemon/hooks/claude-statusline.sh")),
+    ("pi-channel.ts", include_bytes!("../../fractal-daemon/hooks/pi-channel.ts")),
+    ("omp-channel.ts", include_bytes!("../../fractal-daemon/hooks/omp-channel.ts")),
 ];
 
 /// The file that makes a directory an st3 hook set. st2 skips an `$ST_HOOKS` that holds it.
-pub const MANIFEST: &str = st_drivers::hooks::ST3_SET_MARKER;
+pub const MANIFEST: &str = fractal_drivers::hooks::ST3_SET_MARKER;
 const SETS_DIR: &str = "sets";
 
 fn sha256(bytes: &[u8]) -> String {
@@ -301,7 +301,7 @@ mod tests {
     fn st2_does_not_mistake_an_st3_set_for_its_hook_root() {
         let root = tempfile::tempdir().unwrap();
         let set = ensure_installed(root.path()).unwrap();
-        assert!(set.join(st_drivers::hooks::ST3_SET_MARKER).is_file());
+        assert!(set.join(fractal_drivers::hooks::ST3_SET_MARKER).is_file());
         assert!(!set.join("manifest.json").exists());
     }
 

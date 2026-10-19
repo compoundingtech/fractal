@@ -96,7 +96,7 @@ pub struct Subagent {
 pub struct Ended {
     #[serde(flatten)]
     pub subagent: Subagent,
-    /// One of `st3_schema::SUBAGENT_OUTCOMES`.
+    /// One of `fractal_schema::SUBAGENT_OUTCOMES`.
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

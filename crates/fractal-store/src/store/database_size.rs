@@ -2,7 +2,7 @@
 //! `slo/targets.toml`, and the physical growth that disk-filling conditions read. The daemon
 //! samples the store hourly and keeps two days of samples in `meta`, so the daily growth survives
 //! restarts. A sample reads three pragmas and the WAL file's length. It is the one sampler: the
-//! newest sample is cached for every reader (`st3::slo::database_size`).
+//! newest sample is cached for every reader (`fractal_daemon::slo::database_size`).
 
 use super::*;
 
@@ -124,7 +124,7 @@ impl Store {
         let (page_size, pages, free) = {
             let connection = self.readers.get();
             let pragma = |name: &str| -> Result<u64> {
-                Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h2be7c984aa53 owner=st3_store::store::database_size TODO=trace-statement-and-value-representation */ &format!("PRAGMA {name}"), [], |row| row.get(0))?)
+                Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-hbe95e8c25ae0 owner=fractal_store::store::database_size TODO=trace-statement-and-value-representation */ &format!("PRAGMA {name}"), [], |row| row.get(0))?)
             };
             (pragma("page_size")?, pragma("page_count")?, pragma("freelist_count")?)
         };
@@ -165,7 +165,7 @@ impl Store {
         samples.drain(..excess);
         let stored = Value::Array(samples.iter().map(|sample| sample.to_value()).collect());
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h0393cee6d4ec owner=st3_store::store::database_size TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
+            /* sqlite-large-value: allow-for-now lv-hec77560637a4 owner=fractal_store::store::database_size TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![SAMPLES, stored.to_string()],
         )?;

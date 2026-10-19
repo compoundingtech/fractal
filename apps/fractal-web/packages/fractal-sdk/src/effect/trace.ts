@@ -5,12 +5,12 @@
  * headers, and a `trace` field on collection subscribes). A browser `WebSocket` cannot send
  * headers, so `traceQuerySocket` moves the context into the upgrade URL's query, which the
  * Fractal gateway validates and strips before forwarding. `wrapTraceFetch` gives other HTTP
- * ports (not built on `St3Client`) the same propagation and validation, for the gateway only.
+ * ports (not built on `FractalClient`) the same propagation and validation, for the gateway only.
  */
-import type { CollectionSocket, CollectionSocketFactory, TraceContext } from '@smalltalk/st3-client'
+import type { CollectionSocket, CollectionSocketFactory, TraceContext } from '@fractal/client'
 import type * as Tracer from 'effect/Tracer'
 
-export type { TraceContext } from '@smalltalk/st3-client'
+export type { TraceContext } from '@fractal/client'
 
 const TRACEPARENT = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/
 
@@ -41,7 +41,7 @@ export const validTraceContext = (
 /**
  * A `fetch` that adds the callback's context to each request to `baseUrl`'s origin when it starts;
  * other origins never see it. Headers the caller already set win, so wrapping a fetch used by
- * `St3Client` (which injects its own) is harmless.
+ * `FractalClient` (which injects its own) is harmless.
  */
 export const wrapTraceFetch = ({
   fetchImpl,

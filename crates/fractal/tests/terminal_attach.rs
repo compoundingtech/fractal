@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const SUBJECT: &str = "agent/example/worker";
@@ -39,7 +39,7 @@ pub(crate) fn state(root: &Path) -> AppState {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     }
 }
 
@@ -235,7 +235,7 @@ fn recording_pty(root: &Path) -> PathBuf {
 /// is `ROOT/state/st3/pty`, as `ConfiguredRegistry` writes it.
 async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
     let binary = test_bin!("st3-fixture").to_path_buf();
-    let mut command = st3::test_support::command(binary);
+    let mut command = fractal_daemon::test_support::command(binary);
     // An operator command: the harness running the suite must not lend its seat identity, and
     // its own PTY session must not trip the nested-attach guard.
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
@@ -263,7 +263,7 @@ async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
 /// and how long it ran.
 async fn configured_attach(root: &Path, daemon_wait: &str) -> (Output, u32, Duration) {
     let binary = test_bin!("st3-fixture").to_path_buf();
-    let mut command = st3::test_support::command(binary);
+    let mut command = fractal_daemon::test_support::command(binary);
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
@@ -289,7 +289,7 @@ async fn configured_attach(root: &Path, daemon_wait: &str) -> (Output, u32, Dura
 pub(crate) async fn serve_unix(state: AppState, socket: &Path) -> tokio::task::JoinHandle<()> {
     let server_socket = socket.to_path_buf();
     let server = tokio::spawn(async move {
-        let _ = st3::api::serve_unix(&server_socket, st3::api::router(state)).await;
+        let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await;
     });
     let deadline = Instant::now() + Duration::from_secs(5);
     while std::os::unix::net::UnixStream::connect(socket).is_err() {
@@ -317,7 +317,7 @@ fn assert_attached(output: &Output) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_on_this_host_attaches_through_its_pty_session() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -345,7 +345,7 @@ async fn a_terminal_on_this_host_attaches_through_its_pty_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_behind_an_http_endpoint_attaches_through_the_websocket() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -354,7 +354,7 @@ async fn a_terminal_behind_an_http_endpoint_attaches_through_the_websocket() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, st3::api::router(state)).await;
+        let _ = axum::serve(listener, fractal_daemon::api::router(state)).await;
     });
     let session = pty_session(root.path());
 
@@ -372,7 +372,7 @@ async fn a_terminal_behind_an_http_endpoint_attaches_through_the_websocket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replaced_pty_session_receives_nothing_from_a_local_attach() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -399,7 +399,7 @@ async fn a_replaced_pty_session_receives_nothing_from_a_local_attach() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_on_this_host_attaches_without_st_while_its_daemon_is_down() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -454,7 +454,7 @@ async fn a_terminal_on_this_host_attaches_without_st_while_its_daemon_is_down() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_on_this_host_attaches_while_its_daemon_never_answers() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -538,7 +538,7 @@ impl SilentDaemon {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_on_this_host_attaches_whatever_endpoint_never_answers() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -576,7 +576,7 @@ async fn a_terminal_on_this_host_attaches_whatever_endpoint_never_answers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn waiting_on_a_daemon_that_does_not_answer_says_so() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -585,7 +585,7 @@ async fn waiting_on_a_daemon_that_does_not_answer_says_so() {
     // No PTY session of the subject runs on this host, so only the daemon can attach it.
     ConfiguredRegistry::new(root.path());
     let binary = test_bin!("st3-fixture").to_path_buf();
-    let mut child = st3::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let mut child = fractal_daemon::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("ST3_ENDPOINT")
@@ -638,7 +638,7 @@ async fn waiting_on_a_daemon_that_does_not_answer_says_so() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_another_host_owns_is_not_attached_through_a_local_pty() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -739,7 +739,7 @@ fn fabric_tunnel(
     let terminal_socket = socket.with_file_name("owner-terminals.sock");
     if let Exposure::Socket = exposure {
         std::mem::forget(
-            st3::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root.clone())
+            fractal_daemon::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root.clone())
                 .unwrap(),
         );
     }
@@ -767,7 +767,7 @@ fn fabric_tunnel(
                 Some(std::process::id())
             }
             Exposure::Exec => {
-                let mut serve = st3::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+                let mut serve = fractal_daemon::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                     .env_remove("PTY_SESSION")
                     .args(["terminals", "serve-fabric", "--stdio", "--pty-root"])
                     .arg(&pty_root)
@@ -808,7 +808,7 @@ fn forward(tunnel: std::os::unix::net::UnixStream, service: std::os::unix::net::
 /// Run `st terminals attach` as a person against `endpoint`, with this test's config and state.
 async fn remote_attach(root: &Path, endpoint: &str) -> Output {
     let binary = test_bin!("st3-fixture").to_path_buf();
-    let mut command = st3::test_support::command(binary);
+    let mut command = fractal_daemon::test_support::command(binary);
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
@@ -838,7 +838,7 @@ fn owner_session(root: &Path, created_at: &str) -> std::thread::JoinHandle<Optio
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_another_host_owns_attaches_pty_to_pty_over_fabric() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     attach_over_fabric(Exposure::Socket).await;
@@ -846,7 +846,7 @@ async fn a_terminal_another_host_owns_attaches_pty_to_pty_over_fabric() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_another_host_owns_attaches_over_an_earlier_exec_exposure() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     attach_over_fabric(Exposure::Exec).await;
@@ -888,7 +888,7 @@ async fn attach_over_fabric(exposure: Exposure) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replaced_pty_session_on_another_host_receives_nothing_over_fabric() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -925,7 +925,7 @@ async fn a_replaced_pty_session_on_another_host_receives_nothing_over_fabric() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_another_host_owns_falls_back_to_the_client_gateway_without_fabric() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -960,13 +960,13 @@ async fn a_terminal_another_host_owns_falls_back_to_the_client_gateway_without_f
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expose_fabric_points_fabric_at_the_daemons_terminal_socket() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
     remote_terminal(root.path(), &incarnation(CREATED_AT));
     fabric_shim(root.path(), None);
-    let mut command = st3::test_support::command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -980,7 +980,7 @@ async fn expose_fabric_points_fabric_at_the_daemons_terminal_socket() {
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let socket = std::path::absolute(st3::config::terminal_socket(
+    let socket = std::path::absolute(fractal_daemon::config::terminal_socket(
         &root.path().join("state/st3"),
     ))
     .unwrap();

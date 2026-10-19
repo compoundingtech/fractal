@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { catchUpEstimate, envelopeCount, peerSummary, syncLine, syncView } from '@smalltalk/st3-views/syncNotice';
+import { catchUpEstimate, envelopeCount, peerSummary, syncLine, syncView } from '@fractal/views/syncNotice';
 
 const peer = (host, missing, extra = {}) => ({ host_id: `host/${host}`, peer_only_envelopes: missing, local_only_envelopes: 0, estimated_catch_up_seconds: 840, ...extra });
 

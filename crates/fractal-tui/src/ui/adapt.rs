@@ -7,8 +7,8 @@ use super::view::*;
 use crate::model::{Model, clean_message_text};
 use serde_json::Value;
 #[cfg(test)]
-use st3_client::TimelineEntry;
-use st3_client::{MissionStep, WorkLabel};
+use fractal_client::TimelineEntry;
+use fractal_client::{MissionStep, WorkLabel};
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -38,7 +38,7 @@ pub struct Extras {
     pub attention_live: bool,
     pub agents_live: bool,
     /// st's own counts, when it serves them.
-    pub summary: Option<st3_client::Summary>,
+    pub summary: Option<fractal_client::Summary>,
     pub inventory_supported: Option<bool>,
     pub inventory_partial: Vec<String>,
 }
@@ -77,7 +77,7 @@ fn gateway(model: &Model) -> Option<String> {
 }
 
 /// A step st sent with some mission, and that mission.
-fn find_step<'a>(model: &'a Model, id: &str) -> Option<(&'a st3_client::Mission, &'a MissionStep)> {
+fn find_step<'a>(model: &'a Model, id: &str) -> Option<(&'a fractal_client::Mission, &'a MissionStep)> {
     model.missions().find_map(|mission| {
         mission
             .run_details
@@ -117,12 +117,12 @@ fn short(id: &str) -> String {
 }
 
 fn missions(model: &Model) -> Vec<Mission> {
-    st3_ui_model::missions::adapt(
+    fractal_ui_model::missions::adapt(
         model.missions(),
         model.agents(),
         model.attention(),
         &now(),
-        &st3_ui_model::missions::Display {
+        &fractal_ui_model::missions::Display {
             mission_label: &crate::mission_display_label,
             agent_label: &crate::agent_label,
             age_label: &crate::age_label,
@@ -268,7 +268,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     }
 }
 
-fn connected(item: &st3_client::ClientConnection, member_build: Option<&str>) -> Connected {
+fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>) -> Connected {
     let client = item.client.clone().unwrap_or_default();
     Connected {
         older: member_build.is_some_and(|member| older_than_member(&client, member)),
@@ -688,7 +688,7 @@ fn step_progress(missions: &[Mission], step: &str) -> Option<String> {
 
 /// The state st serves for an agent (`presentation.state`, a words.json id). A daemon too old
 /// to serve one leaves it unknown; the client keeps no derivation of its own.
-fn agent_state(agent: &st3_client::Agent) -> AgentState {
+fn agent_state(agent: &fractal_client::Agent) -> AgentState {
     match agent.presentation.as_ref().map(|p| p.state.as_str()) {
         Some("needs_you") => AgentState::NeedsYou,
         Some("needs_login") => AgentState::NeedsLogin,
@@ -722,7 +722,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                 harness: harness(agent.driver.as_deref()),
                 state,
                 host,
-                worktree: agent.checkout.as_ref().map(st3_client::checkout_label),
+                worktree: agent.checkout.as_ref().map(fractal_client::checkout_label),
                 mission: work.map(|work| work.mission_id.clone()),
                 step: work.map(|work| work.path.clone()),
                 activity: age(&agent.header.updated_at),
@@ -928,21 +928,21 @@ pub fn names(model: &Model, person: &str) -> BTreeMap<String, String> {
 }
 
 #[cfg(test)]
-use st3_conversation_ui::adapt::from_harness;
-pub use st3_conversation_ui::adapt::unreadable_transcript;
+use fractal_conversation_ui::adapt::from_harness;
+pub use fractal_conversation_ui::adapt::unreadable_transcript;
 
 /// Standalone native images need a focusable row even when the text adapter has no words.
 /// The images an ask carries, read from st by its person step (`source_id`), the way a
 /// message's images are read by the message.
 fn request_images(
-    attachments: Option<&Vec<st3_client::Attachment>>,
+    attachments: Option<&Vec<fractal_client::Attachment>>,
     step: &str,
-) -> Vec<st3_conversation_ui::MailImage> {
+) -> Vec<fractal_conversation_ui::MailImage> {
     attachments
         .into_iter()
         .flatten()
         .filter(|attachment| attachment.media_type.starts_with("image/"))
-        .map(|attachment| st3_conversation_ui::MailImage {
+        .map(|attachment| fractal_conversation_ui::MailImage {
             sha256: attachment.sha256.clone(),
             message: step.to_owned(),
             media_type: attachment.media_type.clone(),
@@ -952,10 +952,10 @@ fn request_images(
         .collect()
 }
 
-pub fn conversation(timeline: &[st3_client::TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
-    let mut entries = st3_conversation_ui::adapt::conversation(timeline, names);
+pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
+    let mut entries = fractal_conversation_ui::adapt::conversation(timeline, names);
     for (index, source) in timeline.iter().enumerate() {
-        let st3_client::TimelineBody::Content(content) = &source.body else { continue };
+        let fractal_client::TimelineBody::Content(content) = &source.body else { continue };
         if !super::content::has_images(&content.blocks) { continue; }
         if content.blocks.iter().all(|block| matches!(block.kind.as_str(), "image" | "source_record"))
             && content.text.as_deref().is_none_or(|text| {
@@ -976,7 +976,7 @@ pub fn conversation(timeline: &[st3_client::TimelineEntry], names: &BTreeMap<Str
             id: format!("{}#images", source.id),
             at: source.timestamp.get(11..16).unwrap_or("").into(),
             body: Body::Tool { title: "image · Ctrl+Enter details · Ctrl+U load inline".into(),
-                state: st3_conversation_ui::ToolState::Ok, output: Vec::new() },
+                state: fractal_conversation_ui::ToolState::Ok, output: Vec::new() },
         });
     }
     entries
@@ -1098,7 +1098,7 @@ mod tests {
         };
         assert_eq!(
             images,
-            &[st3_conversation_ui::MailImage {
+            &[fractal_conversation_ui::MailImage {
                 sha256: "aa".into(),
                 message: "message/picture".into(),
                 media_type: "image/png".into(),
@@ -1370,10 +1370,10 @@ mod tests {
             "plugin:st3-channel:st3",
             "plugin:st2-channel:st2",
         ] {
-            assert!(st3_conversation_ui::adapt::channel_source(source), "{source}");
+            assert!(fractal_conversation_ui::adapt::channel_source(source), "{source}");
         }
         for source in ["plugin:slack-channel:slack", "plugin:st-channel", "st-channel:st", ""] {
-            assert!(!st3_conversation_ui::adapt::channel_source(source), "{source}");
+            assert!(!fractal_conversation_ui::adapt::channel_source(source), "{source}");
         }
     }
 
@@ -1406,7 +1406,7 @@ mod tests {
             ["mail true", "mail false"],
             "no delivery line, once or twice"
         );
-        let doc = st3_conversation_ui::conversation::Cache::default().render(
+        let doc = fractal_conversation_ui::conversation::Cache::default().render(
             &entries,
             80,
             &Default::default(),
@@ -1416,7 +1416,7 @@ mod tests {
         let text = doc
             .lines
             .iter()
-            .map(st3_conversation_ui::text::plain)
+            .map(fractal_conversation_ui::text::plain)
             .collect::<Vec<_>>();
         assert!(
             text.iter().any(|line| line.contains("✓✓ delivered")),
@@ -1560,7 +1560,7 @@ mod tests {
             100,
             &Default::default(),
             "⠋",
-            st3_conversation_ui::Density::Full,
+            fractal_conversation_ui::Density::Full,
         );
         doc.lines
             .iter()
@@ -1592,7 +1592,7 @@ mod tests {
             100,
             &std::collections::HashSet::from(["skill-call".into()]),
             "",
-            st3_conversation_ui::Density::Full,
+            fractal_conversation_ui::Density::Full,
         );
         assert!(
             opened
@@ -1622,7 +1622,7 @@ mod tests {
             100,
             &Default::default(),
             "",
-            st3_conversation_ui::Density::Full,
+            fractal_conversation_ui::Density::Full,
         );
         assert!(
             doc.lines
@@ -1775,15 +1775,15 @@ mod tests {
                 .map(|mut item| {
                     if item["kind"] == "agent" && item.get("presentation").is_none() {
                         let facts =
-                            <st3_ui_model::agents::Facts as serde::Deserialize>::deserialize(&item)
+                            <fractal_ui_model::agents::Facts as serde::Deserialize>::deserialize(&item)
                                 .unwrap();
                         item["presentation"] =
-                            serde_json::to_value(st3_ui_model::agents::present(&facts)).unwrap();
+                            serde_json::to_value(fractal_ui_model::agents::present(&facts)).unwrap();
                     }
                     serde_json::from_value(item).unwrap()
                 })
                 .collect(),
-            snapshot: Some(st3_client::Snapshot {
+            snapshot: Some(fractal_client::Snapshot {
                 id: "snapshot/1".into(),
                 host_id: "host/harbor".into(),
                 store_index: 1,
@@ -1797,7 +1797,7 @@ mod tests {
 
     #[test]
     fn a_peer_with_newer_records_is_behind_and_a_diverged_one_is_not() {
-        let peer = |host: &str, missing: u64, diverged: bool| st3_client::SyncPeer {
+        let peer = |host: &str, missing: u64, diverged: bool| fractal_client::SyncPeer {
             last_successful_exchange: None,
             last_failed_exchange: None,
             host_id: host.into(),
@@ -1809,7 +1809,7 @@ mod tests {
         };
         let mut model = Model::default();
         let mut attention = window(Vec::new());
-        attention.sync = Some(st3_client::SyncNotice {
+        attention.sync = Some(fractal_client::SyncNotice {
             state: "catching-up".into(),
             peers: vec![peer("host/harbor", 26_820, false), peer("host/quay", 0, false)],
         });
@@ -1820,7 +1820,7 @@ mod tests {
         assert!(shown.diverged.is_empty());
 
         let mut attention = window(Vec::new());
-        attention.sync = Some(st3_client::SyncNotice {
+        attention.sync = Some(fractal_client::SyncNotice {
             state: "diverged".into(),
             peers: vec![peer("host/harbor", 5, true)],
         });
@@ -1954,7 +1954,7 @@ mod tests {
         let mut mission = crate::ui::demo::world().missions.items()[0].clone();
         mission.step_metadata.insert(
             "step-run/example/build".into(),
-            st3_ui_model::missions::StepMetadata {
+            fractal_ui_model::missions::StepMetadata {
                 blocked_reason: None,
                 last_progress: Some("  Tests pass on\nmain; opening the PR \n".into()),
                 nudged: None,
@@ -1962,7 +1962,7 @@ mod tests {
         );
         mission.step_metadata.insert(
             "step-run/example/quiet".into(),
-            st3_ui_model::missions::StepMetadata::default(),
+            fractal_ui_model::missions::StepMetadata::default(),
         );
         let missions = [mission];
         assert_eq!(

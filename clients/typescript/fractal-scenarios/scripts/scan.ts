@@ -210,7 +210,7 @@ export const scanTree = ({ fixturesDir, packageRoot, vocabularyDir }: ScanRoots)
   ]
 }
 
-const SCOPES = ['fixtures/scenarios/', 'clients/typescript/st3-scenarios/']
+const SCOPES = ['fixtures/scenarios/', 'clients/typescript/fractal-scenarios/']
 
 /**
  * `scripts/check-public-repo` findings for this package and the committed scenarios. Fails closed:

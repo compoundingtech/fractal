@@ -1,6 +1,6 @@
 use crate::{Body, Entry, MailImage, ToolState};
 use serde_json::Value;
-use st3_client::{TimelineBody, TimelineEntry, TimelineRole, TimelineToolStatus};
+use fractal_client::{TimelineBody, TimelineEntry, TimelineRole, TimelineToolStatus};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -34,7 +34,7 @@ pub fn unreadable_transcript(timeline: &[TimelineEntry]) -> Option<String> {
 }
 
 /// st's notice that the transcript is not bound yet; this does not prove an idle harness.
-fn not_yet(error: &st3_client::TimelineErrorBody) -> bool {
+fn not_yet(error: &fractal_client::TimelineErrorBody) -> bool {
     error.details.get("not_yet").and_then(Value::as_bool) == Some(true)
 }
 
@@ -44,7 +44,7 @@ fn not_yet(error: &st3_client::TimelineErrorBody) -> bool {
 /// How a message's signature reads beside its sender: the device that signed it and whether
 /// that checks ("✓ example phone (secure enclave)"). A message st holds no signature for is usually
 /// just old, so it says nothing and a conversation is not covered in "unsigned".
-pub fn signature_mark(provenance: &st3_client::MessageProvenance) -> Option<String> {
+pub fn signature_mark(provenance: &fractal_client::MessageProvenance) -> Option<String> {
     let who = provenance
         .device
         .clone()
@@ -128,7 +128,7 @@ fn conversation_with_output_mode(
     // A Small Talk message is two entries: who wrote to whom, then what they wrote. A
     // harness transcript heads its own turns with message entries too; only a graph message,
     // `message/…`, is Small Talk.
-    let mut mail: Option<(&TimelineEntry, &st3_client::TimelineMessageBody)> = None;
+    let mut mail: Option<(&TimelineEntry, &fractal_client::TimelineMessageBody)> = None;
     // A harness that wraps a delivery in its own prompt repeats mail the stream may already show.
     let shown = timeline
         .iter()
@@ -514,13 +514,13 @@ fn conversation_with_output_mode(
             (_, TimelineBody::Status(status)) => Body::Event(format!(
                 "status: {}{}",
                 match status.status {
-                    st3_client::TimelineStatus::Queued => "queued",
-                    st3_client::TimelineStatus::Running => "running",
-                    st3_client::TimelineStatus::Waiting => "waiting",
-                    st3_client::TimelineStatus::Completed => "completed",
-                    st3_client::TimelineStatus::Failed => "failed",
-                    st3_client::TimelineStatus::Cancelled => "cancelled",
-                    st3_client::TimelineStatus::Unknown => "unknown",
+                    fractal_client::TimelineStatus::Queued => "queued",
+                    fractal_client::TimelineStatus::Running => "running",
+                    fractal_client::TimelineStatus::Waiting => "waiting",
+                    fractal_client::TimelineStatus::Completed => "completed",
+                    fractal_client::TimelineStatus::Failed => "failed",
+                    fractal_client::TimelineStatus::Cancelled => "cancelled",
+                    fractal_client::TimelineStatus::Unknown => "unknown",
                 },
                 status
                     .detail
@@ -604,7 +604,7 @@ fn conversation_with_output_mode(
 fn append_unpaired_media(
     stamped: &mut Vec<(String, Entry)>,
     entry: &TimelineEntry,
-    message: &st3_client::TimelineMessageBody,
+    message: &fractal_client::TimelineMessageBody,
     name: &impl Fn(&str) -> String,
 ) {
     if message.attachments.is_empty() {
@@ -630,12 +630,12 @@ fn append_unpaired_media(
     ));
 }
 
-fn usage_line(usage: &st3_client::TimelineUsageBody) -> String {
+fn usage_line(usage: &fractal_client::TimelineUsageBody) -> String {
     let semantics = match usage.semantics {
-        st3_client::TimelineUsageSemantics::Response => "response",
-        st3_client::TimelineUsageSemantics::SessionCumulative => "session cumulative",
-        st3_client::TimelineUsageSemantics::ContextOccupancy => "context occupancy",
-        st3_client::TimelineUsageSemantics::Unknown => "unknown",
+        fractal_client::TimelineUsageSemantics::Response => "response",
+        fractal_client::TimelineUsageSemantics::SessionCumulative => "session cumulative",
+        fractal_client::TimelineUsageSemantics::ContextOccupancy => "context occupancy",
+        fractal_client::TimelineUsageSemantics::Unknown => "unknown",
     };
     let mut line = format!("usage: {semantics}");
     for (label, value) in [
@@ -665,7 +665,7 @@ fn usage_line(usage: &st3_client::TimelineUsageBody) -> String {
 /// start (its call is an entry of its own) and the end of the session. Other custom entries stay.
 const OMP_BOOKKEEPING_CUSTOM: &[&str] = &["tool_execution_start", "session_exit"];
 
-fn omp_bookkeeping(block: &st3_client::TimelineBlock) -> bool {
+fn omp_bookkeeping(block: &fractal_client::TimelineBlock) -> bool {
     block.source_type == "custom"
         && block.payload["raw"]["customType"]
             .as_str()
@@ -718,7 +718,7 @@ fn claude_context_record(text: &str) -> bool {
 /// A failure, a cancellation, a status with any detail beyond the plain `working` and `idle`, and
 /// any withholding reason other than the routine `sensitive-content` are still shown.
 fn is_routine_record(entry: &TimelineEntry, filters: &[crate::DisplayFilter]) -> bool {
-    use st3_client::TimelineStatus;
+    use fractal_client::TimelineStatus;
     filters.contains(&crate::DisplayFilter::Telemetry)
         && match &entry.body {
             TimelineBody::Usage(_) => true,
@@ -912,7 +912,7 @@ fn bounded_preview(text: &str, max: usize) -> Cow<'_, str> {
 }
 
 /// Preserve authorized attachment references without fetching payloads or decoding unknown bodies.
-fn content_text(content: &st3_client::TimelineContentBody) -> String {
+fn content_text(content: &fractal_client::TimelineContentBody) -> String {
     let mut text = content.text.as_deref().unwrap_or("").to_owned();
     if let Some(reference) = &content.attachment_id {
         if !text.is_empty() {
@@ -1457,14 +1457,14 @@ fn tool_title(name: &str, arguments: &Value) -> String {
 }
 
 /// The typed view a block carries (contract §1): the first block with one wins.
-fn block_view(blocks: &[st3_client::TimelineBlock]) -> Option<&Value> {
+fn block_view(blocks: &[fractal_client::TimelineBlock]) -> Option<&Value> {
     blocks.iter().find_map(|block| block.view.as_ref())
 }
 
 /// A call's title and opening rows from its typed view, when it has one; otherwise the title
 /// today's rendering would draw.
 fn typed_call(
-    blocks: &[st3_client::TimelineBlock],
+    blocks: &[fractal_client::TimelineBlock],
     name: &str,
     arguments: &Value,
 ) -> (String, Vec<String>) {
@@ -1715,7 +1715,7 @@ fn typed_result(view: &Value, fallback: Vec<String>) -> (Vec<String>, Option<Too
 
 /// The rows a typed extension view (contract §2) draws, when a block carries one; `None`
 /// keeps today's rendering. `tool_start` draws nothing: it belongs to its call.
-fn typed_content(content: &st3_client::TimelineContentBody) -> Option<Vec<Body>> {
+fn typed_content(content: &fractal_client::TimelineContentBody) -> Option<Vec<Body>> {
     let view = content
         .blocks
         .iter()

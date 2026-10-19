@@ -5,8 +5,8 @@ use super::accounts::limit_binding_is_current;
 use super::*;
 use crate::model::DoctorCheck;
 use serde::Deserialize;
-pub use st3_missions::store::limits::*;
-pub use st3_missions::store::limits::{ACCOUNT_READING_WINDOW_MS, AccountLimit, LIMITS_CATCH_UP_PAGE, account_limits_at, create_limits_schema, flush_limits, flush_limits_page, open_limits, reading, refold_limits_tx};
+pub use fractal_missions::store::limits::*;
+pub use fractal_missions::store::limits::{ACCOUNT_READING_WINDOW_MS, AccountLimit, LIMITS_CATCH_UP_PAGE, account_limits_at, create_limits_schema, flush_limits, flush_limits_page, open_limits, reading, refold_limits_tx};
 
 /// The actor st records for what its limits policy does.
 pub const LIMITS_ACTOR: &str = "daemon/limits";
@@ -379,7 +379,7 @@ impl LimitsStore for Store {
                 self.connection
                     .batched(|tx| {
                         tx.execute(
-                            /* sqlite-large-value: allow-for-now lv-h0c70666c29e5 owner=st3_seats::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_limit_stops(account, episode, seat, stopped_at_unix_ms)
+                            /* sqlite-large-value: allow-for-now lv-h604d12b1d064 owner=fractal_seats::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_limit_stops(account, episode, seat, stopped_at_unix_ms)
                              VALUES (?1, ?2, ?3, ?4)",
                             params![episode_account, episode, seat, now as i64],
                         )
@@ -469,8 +469,8 @@ impl LimitsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::limits_tests_shared_seats::*;
-    use st3_missions::store::limits_tests_shared_seats::{HOUR, read, read_account, read_unnamed};
+    use fractal_missions::store::limits_tests_shared_seats::*;
+    use fractal_missions::store::limits_tests_shared_seats::{HOUR, read, read_account, read_unnamed};
 
     pub fn declare(store: &Store, seat: &str, host: &str) {
         let name = seat.trim_start_matches("agent/");
@@ -1052,7 +1052,7 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         assert_eq!(first.seats, ["agent/alder.first", "agent/alder.second"]);
         assert_eq!(
             first.account,
-            st_drivers::account::account_label("codex", "declared:ada/one")
+            fractal_drivers::account::account_label("codex", "declared:ada/one")
         );
         assert_ne!(limits[0].account, limits[1].account);
     }

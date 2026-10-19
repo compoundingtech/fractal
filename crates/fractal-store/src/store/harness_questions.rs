@@ -3,7 +3,7 @@
 //! `docs/st3/harness-questions.md` is the contract.
 use super::*;
 use smallclaims::store::checkpoint::claims_of_kind_in_order;
-use st3_schema::harness_questions::{Answer, OBSERVED, Question, RESOLVED, Receipt, Status, actor_key, answers, questions};
+use fractal_schema::harness_questions::{Answer, OBSERVED, Question, RESOLVED, Receipt, Status, actor_key, answers, questions};
 
 /// How a question ended.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

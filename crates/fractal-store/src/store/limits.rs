@@ -116,7 +116,7 @@ pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
     // stable declared label so one declared account cannot split as its provider label changes.
     let account = account_ref.as_ref().map_or_else(
         || identity.map_or_else(|| format!("{driver}/unknown"), str::to_owned),
-        |name| st_drivers::account::account_label(&driver, &format!("declared:{name}")),
+        |name| fractal_drivers::account::account_label(&driver, &format!("declared:{name}")),
     );
     let identified = account_ref.is_some() || identity.is_some();
     let percent = |name: &str| fields[name].as_f64().filter(|value| value.is_finite());
@@ -156,7 +156,7 @@ pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
 // version 1 build that opens this store can still fold into them after it empties them.
 const LIMITS_PROJECTION_VERSION: &str = "2";
 const LIMITS_CURSOR: &str = "account_limits_through_index";
-const LIMITS_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdd1418b2a7b3 owner=st3_store::store::limits TODO=chunk-or-reference-variable-columns */ r#"
+const LIMITS_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h36d2fcc0cc4f owner=fractal_store::store::limits TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS account_limit_readings (
     driver TEXT NOT NULL,
     account TEXT NOT NULL,
@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS account_limit_seats (
 
 pub fn create_limits_schema(connection: &Connection) -> Result<()> {
     connection
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h891332e2b343 owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ LIMITS_SCHEMA)
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hf8150ea039e8 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ LIMITS_SCHEMA)
         .context("creating the account limits projection")
 }
 
@@ -210,15 +210,15 @@ pub fn open_limits(transaction: &Transaction<'_>) -> Result<()> {
         // An earlier version's tables lack the canonical keys: they hold nothing but what the
         // claims fold to, so drop them and fold the claims again.
         transaction.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h9c16acb9f205 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE IF EXISTS account_limit_readings; DROP TABLE IF EXISTS account_limit_seats;",
+            /* sqlite-large-value: allow-for-now lv-hcb99c194170a owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE IF EXISTS account_limit_readings; DROP TABLE IF EXISTS account_limit_seats;",
         )?;
-        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h3cf8cc9dc3b0 owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ LIMITS_SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h423c3b87a417 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ LIMITS_SCHEMA)?;
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h5631f80b3027 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN (?1, ?2)",
+            /* sqlite-large-value: allow-for-now lv-h8a09ed0018a1 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN (?1, ?2)",
             [LIMITS_CURSOR, LIMITS_READY],
         )?;
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hd123f8c200e1 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('account_limits_version',?1)",
+            /* sqlite-large-value: allow-for-now lv-hc9a89786c83a owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('account_limits_version',?1)",
             [LIMITS_PROJECTION_VERSION],
         )?;
     }
@@ -241,7 +241,7 @@ pub fn open_limits(transaction: &Transaction<'_>) -> Result<()> {
 
 fn mark_limits_ready(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-h845998e6b7ff owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1, ?2)",
+        /* sqlite-large-value: allow-for-now lv-h7b845cb0a9d6 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1, ?2)",
         [LIMITS_READY, LIMITS_PROJECTION_VERSION],
     )?;
     Ok(())
@@ -290,11 +290,11 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
         let weekly = limit.weekly_percent.is_some();
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h98e4f96e3234 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
+                /* sqlite-large-value: allow-for-now lv-hf1ac321eba1a owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
                  (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body, head_key)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-hf84db196a868 owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-hc848209c8c7f owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 limit.driver,
                 limit.account,
                 account_ref,
@@ -309,7 +309,7 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
         // The seat's newest reading in canonical claim order.
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-hc0a799c8a976 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
+                /* sqlite-large-value: allow-for-now lv-hab71d076506e owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
                  (subject, driver, account, account_ref, accepted_at_unix_ms, store_index, head_key)
                  VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(subject) DO UPDATE SET driver=excluded.driver,
@@ -318,7 +318,7 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
                     store_index=excluded.store_index, head_key=excluded.head_key
                  WHERE excluded.head_key > head_key",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-ha4b507d528fd owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-h0bdd1001c4f9 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 subject,
                 limit.driver,
                 limit.account,
@@ -333,13 +333,13 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
     for (driver, account, account_ref, weekly) in touched {
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h46e007ef546d owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings
+                /* sqlite-large-value: allow-for-now lv-heddd3ac44bac owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings
                  WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4
                    AND measured_at_unix_ms < (
                        SELECT MAX(measured_at_unix_ms) FROM account_limit_readings
                        WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4) - ?5",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-h5e713525659d owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-heeda99e2cde0 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 driver,
                 account,
                 account_ref,
@@ -349,7 +349,7 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
     }
     if newest_index > through {
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h3e0be967fac0 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            /* sqlite-large-value: allow-for-now lv-h3764891d819e owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
             params![LIMITS_CURSOR, newest_index.to_string()],
         )?;
     }
@@ -369,9 +369,9 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
 /// Empty the projection and fold every `harness.limits` claim into it again, in one
 /// transaction: what a checkpoint proof's copy reads, as a node that never trimmed would.
 pub fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h46d8686f7309 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h231322b87279 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_seats", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-he2581cc0d3eb owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [LIMITS_CURSOR])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-he4e04bd23262 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h96bc76b659d9 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_seats", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h4b99368d5627 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [LIMITS_CURSOR])?;
     while flush_limits_page(transaction, LIMITS_CATCH_UP_PAGE)? == LIMITS_CATCH_UP_PAGE {}
     Ok(())
 }
@@ -430,7 +430,7 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
         match alias.get(&(driver.clone(), account.clone())) {
             Some(declared) if account_ref.is_empty() => (
                 driver.clone(),
-                st_drivers::account::account_label(&driver, &format!("declared:{declared}")),
+                fractal_drivers::account::account_label(&driver, &format!("declared:{declared}")),
                 Some(declared.clone()),
             ),
             _ => (driver, account, (!account_ref.is_empty()).then_some(account_ref)),

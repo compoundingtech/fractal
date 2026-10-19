@@ -127,9 +127,9 @@ pub struct Facts {
     pub down_since: Option<String>,
     pub fault: Option<String>,
     pub delivery: Option<Delivery>,
-    pub current_work: Vec<st3_client::WorkLabel>,
-    pub next_work: Option<st3_client::WorkLabel>,
-    pub upcoming_work: Vec<st3_client::WorkLabel>,
+    pub current_work: Vec<fractal_client::WorkLabel>,
+    pub next_work: Option<fractal_client::WorkLabel>,
+    pub upcoming_work: Vec<fractal_client::WorkLabel>,
     pub queued_work_count: u64,
 }
 
@@ -237,7 +237,7 @@ fn because(agent: &Facts, state: State) -> Option<String> {
     }
 }
 
-fn work(label: &st3_client::WorkLabel) -> Work {
+fn work(label: &fractal_client::WorkLabel) -> Work {
     Work {
         step: label.id.clone(),
         mission: label.mission_id.clone(),

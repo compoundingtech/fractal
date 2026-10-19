@@ -11,8 +11,8 @@ use serde_json::Value;
 use sha2::Digest as _;
 use crate::model::DesiredSubject;
 use crate::store::Store;
-pub use st3_seats::render::*;
-pub use st3_seats::render::{RenderReceipt, RenderResult, apply, name};
+pub use fractal_seats::render::*;
+pub use fractal_seats::render::{RenderReceipt, RenderResult, apply, name};
 
 /// Prepare every member before writing, so conflicting owners cannot win by iteration order.
 /// Preparation and commit failures belong to their member; unrelated members still render.
@@ -413,7 +413,7 @@ fn shared_worktrees(exclude: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_seats::render::shared_tests_attention_tests::{git, harness_agent};
+    use fractal_seats::render::shared_tests_attention_tests::{git, harness_agent};
 
     #[test]
     fn graph_render_rejects_two_owners_before_it_writes() {

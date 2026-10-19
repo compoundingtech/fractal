@@ -939,7 +939,7 @@ impl ClientRelay {
         person: &str,
         terminal_id: &str,
         incarnation: &str,
-        mode: st3_client::RawTerminalMode,
+        mode: fractal_client::RawTerminalMode,
         lease: Option<Arc<dyn RawTerminalLease>>,
     ) -> Result<(tokio::net::UnixStream, tokio::sync::mpsc::Sender<Value>)> {
         let target = host.strip_prefix("host/").context("invalid owner host")?;
@@ -947,8 +947,8 @@ impl ClientRelay {
             return Err(ClientReadRejected::dial_out_owner(host).into());
         }
         let mode = match mode {
-            st3_client::RawTerminalMode::Attach => "attach",
-            st3_client::RawTerminalMode::Peek => "peek",
+            fractal_client::RawTerminalMode::Attach => "attach",
+            fractal_client::RawTerminalMode::Peek => "peek",
         };
         let mut path = format!(
             "{RAW_TERMINAL_PATH}?person={}&terminal={}&incarnation={}&mode={mode}",
@@ -1098,7 +1098,7 @@ struct RawTerminalQuery {
     person: String,
     terminal: String,
     incarnation: String,
-    mode: st3_client::RawTerminalMode,
+    mode: fractal_client::RawTerminalMode,
     binding: Option<String>,
 }
 
@@ -1121,7 +1121,7 @@ async fn receive_raw_terminal(
         _ => return (StatusCode::UNAUTHORIZED, "untrusted raw terminal member").into_response(),
     };
     drop(auth_span);
-    if query.mode == st3_client::RawTerminalMode::Peek {
+    if query.mode == fractal_client::RawTerminalMode::Peek {
         let binding: RawLeaseBinding = match query
             .binding
             .as_deref()
@@ -1158,13 +1158,13 @@ async fn receive_raw_terminal(
     }
     // The owner daemon validates its current graph incarnation and person authority, then
     // connects once. The peer worker carries that one connection, not synthetic screens.
-    let client = st3_client::Client::unix_as(state.backend().socket(), &query.person);
+    let client = fractal_client::Client::unix_as(state.backend().socket(), &query.person);
     let transport = async {
         let attachment_span = profile.as_ref().map(|op| op.wall_span("raw/owner-attachment"));
         let attachment = client.raw_terminal_attachment(&query.terminal, &query.incarnation, query.mode).await?;
         drop(attachment_span);
         if attachment.owner_host_id != format!("host/{}", state.node()) {
-            return Err(st3_client::ClientError::Protocol("raw terminal route is not owner-local".into()));
+            return Err(fractal_client::ClientError::Protocol("raw terminal route is not owner-local".into()));
         }
         let open_span = profile.as_ref().map(|op| op.wall_span("raw/owner-open"));
         let transport = client.raw_terminal_stream(&attachment).await;
@@ -1176,7 +1176,7 @@ async fn receive_raw_terminal(
     }
     let transport = match transport {
         Ok(transport) => transport,
-        Err(st3_client::ClientError::Api(_, _, _)) => return (StatusCode::CONFLICT, "owner rejected raw terminal incarnation or authority").into_response(),
+        Err(fractal_client::ClientError::Api(_, _, _)) => return (StatusCode::CONFLICT, "owner rejected raw terminal incarnation or authority").into_response(),
         Err(_) => return (StatusCode::BAD_GATEWAY, "owner raw terminal unavailable").into_response(),
     };
     let signed = match state.auth().response_headers_for(path, state.node(), &[], &FleetAuth::body_digest(&[])) {
@@ -1286,7 +1286,7 @@ async fn receive_client_read(
                 return relay_trace::future(Phase::ForwardCall, forward_client_read(&state, &request)).await;
             }
         }
-        let client = st3_client::Client::unix_as(state.backend().socket(), &request.authority_actor);
+        let client = fractal_client::Client::unix_as(state.backend().socket(), &request.authority_actor);
         match request.request {
             ClientReadOperation::ConversationContent {
                 session_id,
@@ -1322,7 +1322,7 @@ async fn receive_client_read(
                 if let Some(trace) = relay_trace::current() {
                     match &answer {
                         Ok(envelope) => trace.response(&envelope.request_id),
-                        Err(st3_client::ClientError::Api(_, _, error)) => trace.response(&error.request_id),
+                        Err(fractal_client::ClientError::Api(_, _, error)) => trace.response(&error.request_id),
                         _ => {},
                     }
                 }
@@ -1377,7 +1377,7 @@ async fn receive_client_read(
                 // retry after an accepted input must not be refused because that input
                 // already changed the screen. Send the original terminal fence unchanged.
                 let snapshot = client.capabilities().await?.snapshot;
-                let fence = st3_client::Fence {
+                let fence = fractal_client::Fence {
                     snapshot_id: snapshot.id,
                     subject_revisions: Default::default(),
                     mission_generation: None,
@@ -1391,7 +1391,7 @@ async fn receive_client_read(
                 };
                 let result = match action_type.as_str() {
                     "terminal.input" => {
-                        let parameters: st3_client::TerminalInputParameters =
+                        let parameters: fractal_client::TerminalInputParameters =
                             serde_json::from_value(parameters)?;
                         anyhow::ensure!(
                             parameters.terminal_id == terminal_id,
@@ -1402,7 +1402,7 @@ async fn receive_client_read(
                             .await?
                     }
                     "terminal.resize" => {
-                        let parameters: st3_client::TerminalResizeParameters =
+                        let parameters: fractal_client::TerminalResizeParameters =
                             serde_json::from_value(parameters)?;
                         anyhow::ensure!(
                             parameters.terminal_id == terminal_id,
@@ -1433,7 +1433,7 @@ async fn receive_client_read(
                     if !advertised.value.capabilities.iter().any(|capability| {
                         capability.id == "messages-paging"
                             && capability.version == 2
-                            && capability.state == st3_client::CapabilityState::Granted
+                            && capability.state == fractal_client::CapabilityState::Granted
                     }) {
                         return Err(messages_paging_unsupported().into());
                     }
@@ -1509,16 +1509,16 @@ async fn receive_client_read(
                         rejected.details.clone(),
                     )
                 } else {
-                    match error.downcast_ref::<st3_client::ClientError>() {
-                        Some(st3_client::ClientError::Api(code, message, details)) => {
+                    match error.downcast_ref::<fractal_client::ClientError>() {
+                        Some(fractal_client::ClientError::Api(code, message, details)) => {
                             let status = match code {
-                                st3_client::ErrorCode::PageCursorExpired
-                                | st3_client::ErrorCode::ConversationContentInvalidated
-                                | st3_client::ErrorCode::CursorGap
-                                | st3_client::ErrorCode::BlobExpired => StatusCode::GONE,
-                                st3_client::ErrorCode::NotFound
-                                | st3_client::ErrorCode::BlobNotFound => StatusCode::NOT_FOUND,
-                                st3_client::ErrorCode::StaleFence => StatusCode::CONFLICT,
+                                fractal_client::ErrorCode::PageCursorExpired
+                                | fractal_client::ErrorCode::ConversationContentInvalidated
+                                | fractal_client::ErrorCode::CursorGap
+                                | fractal_client::ErrorCode::BlobExpired => StatusCode::GONE,
+                                fractal_client::ErrorCode::NotFound
+                                | fractal_client::ErrorCode::BlobNotFound => StatusCode::NOT_FOUND,
+                                fractal_client::ErrorCode::StaleFence => StatusCode::CONFLICT,
                                 _ => StatusCode::UNPROCESSABLE_ENTITY,
                             };
                             (

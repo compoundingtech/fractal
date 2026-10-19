@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_seats::*;
+pub use fractal_seats::*;
 
 pub mod render;
 pub mod store;

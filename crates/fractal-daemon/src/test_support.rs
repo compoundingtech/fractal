@@ -1,7 +1,7 @@
 //! Process-local fixture tools: st3-api's and st3-api-mailbox's, with the mailbox protocol routers
 //! over the router the daemon serves.
 
-pub use st3_api_mailbox::test_support::*;
+pub use fractal_api_mailbox::test_support::*;
 
 use crate::api::{AppState, ROUTE_FAMILIES};
 

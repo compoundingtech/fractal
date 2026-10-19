@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap_complete::engine::{CompletionCandidate, ValueCompleter};
-use st3_client::{Client, ClientError, Envelope, Page, Resource};
+use fractal_client::{Client, ClientError, Envelope, Page, Resource};
 
 /// All daemon calls of one completion request, joins included, finish within this deadline.
 pub const DEADLINE: Duration = Duration::from_millis(300);
@@ -186,14 +186,14 @@ impl LocalTarget {
     /// `--endpoint` in `words` wins over `ST3_ENDPOINT`, which wins over the configured socket.
     /// A non-Unix endpoint yields `None`: client-v0 lists need the trusted local socket.
     pub fn discover(words: &[String]) -> Option<Self> {
-        let config = st3::config::Config::load_client_unvalidated(None).ok()?.0;
-        let endpoint = endpoint_word(words).or_else(|| st_drivers::contracts::env("ST3_ENDPOINT"));
-        let socket = match endpoint.map(st3::client::Endpoint::parse) {
-            Some(st3::client::Endpoint::Unix(socket)) => socket,
+        let config = fractal_daemon::config::Config::load_client_unvalidated(None).ok()?.0;
+        let endpoint = endpoint_word(words).or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"));
+        let socket = match endpoint.map(fractal_daemon::client::Endpoint::parse) {
+            Some(fractal_daemon::client::Endpoint::Unix(socket)) => socket,
             Some(_) => return None,
             None => config.socket,
         };
-        let agent = st_drivers::contracts::env("ST_AGENT")
+        let agent = fractal_drivers::contracts::env("ST_AGENT")
             .filter(|agent| !agent.is_empty())
             .map(|agent| {
                 if agent.starts_with("agent/") {
@@ -668,7 +668,7 @@ pub fn select(
     found
 }
 
-fn work_accepts(filter: WorkFilter, work: &st3_client::Work, caller: Option<&str>) -> bool {
+fn work_accepts(filter: WorkFilter, work: &fractal_client::Work, caller: Option<&str>) -> bool {
     match filter {
         WorkFilter::Any => true,
         WorkFilter::Ready => work.state == "ready",
@@ -683,7 +683,7 @@ fn work_accepts(filter: WorkFilter, work: &st3_client::Work, caller: Option<&str
     }
 }
 
-fn agent_parts(agent: &st3_client::Agent) -> Vec<String> {
+fn agent_parts(agent: &fractal_client::Agent) -> Vec<String> {
     let mut parts = vec![agent.state.clone()];
     parts.extend(agent.host_id.as_deref().map(short_host).map(str::to_owned));
     parts.extend(agent.driver.clone());
@@ -707,7 +707,7 @@ impl Candidate {
     }
 }
 
-fn agent_work(agent: &st3_client::Agent) -> Option<String> {
+fn agent_work(agent: &fractal_client::Agent) -> Option<String> {
     agent
         .current_work
         .first()

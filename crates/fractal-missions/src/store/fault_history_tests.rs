@@ -201,13 +201,13 @@ fn a_history_row_decode_error_propagates_instead_of_returning_no_faults() {
     // Test-only corruption of the row's actor type: JSON and canonical sort stay valid.
     // Earlier reducers have no candidates; claim_from_row fails inside the history fold.
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h38e5a88ec1d2 owner=st3_missions::store::fault_history_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET actor=x'00' WHERE id=?1", [&failure.id],
+        /* sqlite-large-value: allow-for-now lv-hf6481bee96f5 owner=fractal_missions::store::fault_history_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET actor=x'00' WHERE id=?1", [&failure.id],
     ).unwrap();
     assert!(store.operational_attention_items_with_failures(None, now_ms()).is_err());
     assert!(store.fault_snapshot(now_ms()).is_err());
     assert!(store.broken_gate_items(None, now_ms()).is_err());
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hc1d669652316 owner=st3_missions::store::fault_history_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET actor='daemon/runtime' WHERE id=?1", [&failure.id],
+        /* sqlite-large-value: allow-for-now lv-h3a36e2e6f506 owner=fractal_missions::store::fault_history_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET actor='daemon/runtime' WHERE id=?1", [&failure.id],
     ).unwrap();
     assert_eq!(assert_fault_parity(&store, now_ms()).len(), 1);
 }

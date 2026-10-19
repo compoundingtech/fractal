@@ -2,15 +2,15 @@
 
 use ratatui::style::Style;
 use ratatui::text::Line;
-pub use st3_conversation_ui::pane::truncate;
+pub use fractal_conversation_ui::pane::truncate;
 #[cfg(test)]
-pub use st3_conversation_ui::text::plain;
-pub use st3_conversation_ui::text::{Run, run, sanitize, width, wrap};
+pub use fractal_conversation_ui::text::plain;
+pub use fractal_conversation_ui::text::{Run, run, sanitize, width, wrap};
 
 pub fn inline(text: &str, base: Style) -> Vec<Run> {
-    st3_conversation_ui::text::inline(text, base, &super::theme::conversation())
+    fractal_conversation_ui::text::inline(text, base, &super::theme::conversation())
 }
 
 pub fn markdown(input: &str, width: usize, base: Style) -> Vec<Line<'static>> {
-    st3_conversation_ui::text::markdown(input, width, base, &super::theme::conversation())
+    fractal_conversation_ui::text::markdown(input, width, base, &super::theme::conversation())
 }

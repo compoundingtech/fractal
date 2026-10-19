@@ -1,7 +1,7 @@
 //! The part of `store::client_summary` that moved up from st3-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_seats::store::client_summary::*;
+pub use fractal_seats::store::client_summary::*;
 
 type SummaryRunHeader = (String, String, String, String, String, String);
 
@@ -13,7 +13,7 @@ pub trait ClientSummaryStore {
     fn client_summary_missions(
             &self,
             at: u128,
-        ) -> Result<(Vec<st3_client::Mission>, Option<u128>)>;
+        ) -> Result<(Vec<fractal_client::Mission>, Option<u128>)>;
 }
 
 impl ClientSummaryStore for Store {
@@ -21,11 +21,11 @@ impl ClientSummaryStore for Store {
     fn client_summary_missions(
             &self,
             at: u128,
-        ) -> Result<(Vec<st3_client::Mission>, Option<u128>)> {
+        ) -> Result<(Vec<fractal_client::Mission>, Option<u128>)> {
         let c = self.readers.get();
         // Published definitions with no run always read NotStarted and cannot be active.
         let candidates: Vec<String> = c.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h8c3f0b508784 owner=st3_attention::store::client_summary TODO=trace-statement-and-value-representation */ "WITH states AS (
+            /* sqlite-large-value: allow-for-now lv-h90d7e998a875 owner=fractal_attention::store::client_summary TODO=trace-statement-and-value-representation */ "WITH states AS (
                 SELECT mission_id,MAX(status='running') running,MAX(status='standing') standing
                 FROM mission_runs GROUP BY mission_id
              ), latest AS (
@@ -56,7 +56,7 @@ impl ClientSummaryStore for Store {
         // Separate equal-width and longer-width ranges skip historical claims.
         for sql in [FUTURE_ASK_SAME_WIDTH, FUTURE_ASK_LONGER] {
             let next: Option<String> = c
-                .query_row(/* sqlite-large-value: allow-for-now lv-he68d1985a7ee owner=st3_attention::store::client_summary TODO=trace-statement-and-value-representation */ sql, [at.to_string()], |r| r.get(0))
+                .query_row(/* sqlite-large-value: allow-for-now lv-h8df79105754b owner=fractal_attention::store::client_summary TODO=trace-statement-and-value-representation */ sql, [at.to_string()], |r| r.get(0))
                 .optional()?;
             if let Some(next) = next {
                 let next = next.parse::<u128>()?;

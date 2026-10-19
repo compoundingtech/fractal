@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
-pub use st3_store::test_support::*;
-pub use st3_secrets::test_support::*;
+pub use fractal_store::test_support::*;
+pub use fractal_secrets::test_support::*;
 use crate::DeliveryStore;
 use std::sync::OnceLock;
 

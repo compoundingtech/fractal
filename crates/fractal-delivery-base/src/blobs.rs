@@ -236,7 +236,7 @@ pub async fn materialize(
     actor: &str,
     directory: &Path,
     message: &crate::model::MessageView,
-) -> anyhow::Result<Vec<st_drivers::ding::AttachmentNotice>> {
+) -> anyhow::Result<Vec<fractal_drivers::ding::AttachmentNotice>> {
     let mut notices = Vec::new();
     if message.attachments.is_empty() {
         return Ok(notices);
@@ -244,7 +244,7 @@ pub async fn materialize(
     let files = BlobDir::at(directory.to_path_buf());
     files.ensure()?;
     files.sweep(DEFAULT_RETENTION);
-    let client = st3_client::Client::unix_as(socket, actor);
+    let client = fractal_client::Client::unix_as(socket, actor);
     for attachment in &message.attachments {
         anyhow::ensure!(
             is_sha256(&attachment.sha256),
@@ -255,7 +255,7 @@ pub async fn materialize(
             attachment.sha256,
             file_extension(&attachment.media_type)
         ));
-        let mut notice = st_drivers::ding::AttachmentNotice {
+        let mut notice = fractal_drivers::ding::AttachmentNotice {
             path: Some(path.display().to_string()),
             media_type: attachment.media_type.clone(),
             name: attachment.name.clone(),
@@ -285,8 +285,8 @@ pub async fn materialize(
                 file.sync_all()?;
                 fs::rename(&temporary, &path)?;
             }
-            Err(st3_client::ClientError::Api(
-                st3_client::ErrorCode::BlobExpired | st3_client::ErrorCode::BlobNotFound,
+            Err(fractal_client::ClientError::Api(
+                fractal_client::ErrorCode::BlobExpired | fractal_client::ErrorCode::BlobNotFound,
                 _,
                 _,
             )) => {
@@ -306,7 +306,7 @@ pub async fn materialize_for_seat(
     subject: &str,
     directory: &Path,
     message: &crate::model::MessageView,
-) -> anyhow::Result<Vec<st_drivers::ding::AttachmentNotice>> {
+) -> anyhow::Result<Vec<fractal_drivers::ding::AttachmentNotice>> {
     if message.attachments.is_empty() {
         return Ok(Vec::new());
     }

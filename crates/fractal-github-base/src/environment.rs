@@ -68,11 +68,11 @@ pub fn normalize_aliases(environment: &mut Environment) {
         }
     }).collect();
     for old in names {
-        let new = st_drivers::contracts::fractal_env_name(&old).unwrap();
+        let new = fractal_drivers::contracts::fractal_env_name(&old).unwrap();
         if environment.get(&old).zip(environment.get(&new)).is_some_and(|(old, new)| old == new) {
             continue;
         }
-        let value = st_drivers::contracts::env_with(&old, &|name| environment.get(name).cloned())
+        let value = fractal_drivers::contracts::env_with(&old, &|name| environment.get(name).cloned())
             .unwrap_or_default();
         environment.insert(old, value.clone());
         environment.insert(new, value);
@@ -81,7 +81,7 @@ pub fn normalize_aliases(environment: &mut Environment) {
 
 /// A launcher-owned assignment overrides both spellings, independently of authored layers.
 pub fn set(environment: &mut Environment, name: &str, value: String) {
-    if let Some(new) = st_drivers::contracts::fractal_env_name(name) {
+    if let Some(new) = fractal_drivers::contracts::fractal_env_name(name) {
         environment.insert(new, value.clone());
     }
     environment.insert(name.to_owned(), value);
@@ -94,12 +94,12 @@ pub fn overlay(
     normalize_aliases(&mut inherited);
     let mut declared = declared.clone();
     normalize_aliases(&mut declared);
-    st_runtime::overlay_environment(inherited, &declared, executable)
+    fractal_runtime::overlay_environment(inherited, &declared, executable)
 }
 
 pub fn remove_aliases(environment: &mut Environment, name: &str) {
     environment.remove(name);
-    if let Some(new) = st_drivers::contracts::fractal_env_name(name) {
+    if let Some(new) = fractal_drivers::contracts::fractal_env_name(name) {
         environment.remove(&new);
     }
 }
@@ -158,7 +158,7 @@ impl Cache {
             result = capture(*timeout);
             match &result {
                 Err(error)
-                    if st_runtime::is_shell_startup_timeout(error)
+                    if fractal_runtime::is_shell_startup_timeout(error)
                         && index + 1 < attempts.len() =>
                 {
                     eprintln!(
@@ -191,9 +191,9 @@ fn cache() -> &'static Mutex<Cache> {
 fn capture_within(timeout: Duration) -> Result<Environment> {
     #[cfg(feature = "test-support")]
     if let Some(shell) = crate::test_support::login_shell() {
-        return st_runtime::login_environment_from(shell, timeout);
+        return fractal_runtime::login_environment_from(shell, timeout);
     }
-    st_runtime::login_environment_within(timeout)
+    fractal_runtime::login_environment_within(timeout)
 }
 
 /// Forget the captured environment, so the next use reads the login shell again. Setup does this
@@ -232,7 +232,7 @@ pub fn available_harnesses() -> Result<Vec<String>> {
     let environment = snapshot()?;
     Ok(HARNESSES
         .iter()
-        .filter(|name| st_runtime::resolve_executable(name, &environment).is_ok())
+        .filter(|name| fractal_runtime::resolve_executable(name, &environment).is_ok())
         .map(|name| (*name).into())
         .collect())
 }
@@ -268,7 +268,7 @@ pub enum LinkResult {
 pub fn check_build_tools(environment: &Environment) -> BuildTools {
     let (found, missing): (Vec<_>, Vec<_>) = build_tools()
         .into_iter()
-        .partition(|tool| st_runtime::resolve_executable(tool, environment).is_ok());
+        .partition(|tool| fractal_runtime::resolve_executable(tool, environment).is_ok());
     let can_link = ["cargo", "rustc"].iter().all(|tool| found.contains(tool));
     let link = if can_link {
         match link_small_crate(environment, LINK_TIMEOUT) {
@@ -356,7 +356,7 @@ pub fn command(program: &str) -> Result<Command> {
 }
 
 pub fn command_in(program: &str, environment: &Environment) -> Result<Command> {
-    let executable = st_runtime::resolve_executable(program, environment)?;
+    let executable = fractal_runtime::resolve_executable(program, environment)?;
     let mut command = Command::new(executable);
     command.env_clear().envs(environment);
     Ok(command)
@@ -423,7 +423,7 @@ mod tests {
     }
 
     fn slow() -> anyhow::Error {
-        st_runtime::ShellStartupTimeout {
+        fractal_runtime::ShellStartupTimeout {
             shell: "/bin/fish".into(),
             seconds: 10.0,
         }
@@ -477,7 +477,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(calls, 2);
-        assert!(st_runtime::is_shell_startup_timeout(&error), "{error:#}");
+        assert!(fractal_runtime::is_shell_startup_timeout(&error), "{error:#}");
     }
 
     #[test]
@@ -494,7 +494,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(calls, 1);
-        assert!(!st_runtime::is_shell_startup_timeout(&error));
+        assert!(!fractal_runtime::is_shell_startup_timeout(&error));
     }
 
     fn fake_tool(directory: &std::path::Path, name: &str, script: &str) {

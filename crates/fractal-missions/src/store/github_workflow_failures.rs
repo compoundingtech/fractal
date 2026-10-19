@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::resource::github_workflows::PerformanceFailure;
-pub use st3_delivery::store::github_workflow_failures::*;
+pub use fractal_delivery::store::github_workflow_failures::*;
 
 #[allow(clippy::too_many_arguments)]
 pub fn deliver_tx(

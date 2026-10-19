@@ -1,4 +1,4 @@
-import { Agent, Attention, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema'
 import { describe, expect, it } from 'vitest'
 
 import { askingAgentRefs } from './asking.ts'

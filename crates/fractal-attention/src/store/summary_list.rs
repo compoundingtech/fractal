@@ -3,8 +3,8 @@
 use crate::AttentionListStore;
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-pub use st3_seats::store::summary_list::*;
-pub use st3_seats::store::summary_list::{Lists, Selection, SummaryInputs, SummaryList, SummaryMachines, SummaryRow, SummaryShared};
+pub use fractal_seats::store::summary_list::*;
+pub use fractal_seats::store::summary_list::{Lists, Selection, SummaryInputs, SummaryList, SummaryMachines, SummaryRow, SummaryShared};
 
 /// At most this many selections are published; a busy fleet has a handful of people. Windows of
 /// any further selection read for themselves.
@@ -251,7 +251,7 @@ impl SummaryListStore for Store {
             .readers
             .get()
             .prepare_cached("SELECT COUNT(*) FROM operations WHERE state='conflict'")?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hfa1949440f78 owner=st3_attention::store::summary_list TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-h57e9ffb917c9 owner=fractal_attention::store::summary_list TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
     }
 
     fn summary_machines_hold(
@@ -270,7 +270,7 @@ impl SummaryListStore for Store {
                           AND runtime.store_index<=?2)"
             )
         };
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc81d7cab5ad5 owner=st3_attention::store::summary_list TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3674279d4b89 owner=fractal_attention::store::summary_list TODO=trace-statement-and-value-representation */ &format!(
             "SELECT subject, actor, kind, {CURRENT_VIEW_CLAIM}, {}, {}
              FROM claims WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3",
             runtime("subject"),

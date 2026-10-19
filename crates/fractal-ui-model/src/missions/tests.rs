@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 #[derive(Default)]
 struct Inputs {
-    missions: Vec<st3_client::Mission>,
-    agents: Vec<st3_client::Agent>,
-    attention: Vec<st3_client::Attention>,
+    missions: Vec<fractal_client::Mission>,
+    agents: Vec<fractal_client::Agent>,
+    attention: Vec<fractal_client::Attention>,
 }
 
 fn window<T: DeserializeOwned>(items: Vec<Value>) -> Vec<T> {

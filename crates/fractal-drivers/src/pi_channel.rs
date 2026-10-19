@@ -673,7 +673,7 @@ pub fn todo_observation(
     for key in ["observed_at", "source_op", "phases", "totals", "truncated"] {
         fields.insert(key.into(), frame.get(key)?.clone());
     }
-    st3_schema::registry().validate_claim(
+    fractal_schema::registry().validate_claim(
         "agent/channel", "harness.todo.observed", &fields,
     ).ok()?;
     Some(fields)

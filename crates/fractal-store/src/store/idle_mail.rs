@@ -2,7 +2,7 @@
 //! populate it. Startup backfill commits at most 64 message subjects at a time.
 use super::*;
 
-const FOLD: &str = /* sqlite-large-value: allow-for-now lv-h7de4ee08299e owner=st3_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ r#"
+const FOLD: &str = /* sqlite-large-value: allow-for-now lv-h3c489a0f77ec owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ r#"
 INSERT OR REPLACE INTO local_idle_messages(subject,recipient,wait_tag,source_prefix,sent_at,pending,delivered)
 SELECT sent.subject,COALESCE(json_extract(sent.body,'$.fields.to'),''),
        json_extract(sent.body,'$.fields.tags[1]'),
@@ -22,7 +22,7 @@ FROM claims sent WHERE sent.store_index=(
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h05cfc409c19d owner=st3_store::store::idle_mail TODO=chunk-or-reference-variable-columns */ r#"
+        /* sqlite-large-value: allow-for-now lv-h658083da337d owner=fractal_store::store::idle_mail TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_idle_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -49,7 +49,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
     ] {
         let subject = format!("{reference}.subject");
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-hf22fe59059e5 owner=st3_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_{name} {event} ON claims
+            /* sqlite-large-value: allow-for-now lv-hd7411ed7cf55 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_{name} {event} ON claims
              WHEN {reference}.kind IN ({kinds})
              BEGIN DELETE FROM local_idle_messages WHERE subject={subject}; {} END;",
             FOLD.replace("SUBJECT", &subject),
@@ -63,7 +63,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
     // Receipts are monotone. If replication brings one before its send, the sent fold finds it.
     // Updating only state avoids reading and parsing a potentially large sent body per receipt.
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-ha74451b577b2 owner=st3_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_receipt_v1 AFTER INSERT ON claims
+        /* sqlite-large-value: allow-for-now lv-h01bb95e3f33e owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_receipt_v1 AFTER INSERT ON claims
          WHEN NEW.kind IN ('message.delivered','message.read','message.closed')
          BEGIN UPDATE local_idle_messages SET pending=0,
            delivered=CASE WHEN NEW.kind IN ('message.delivered','message.read') THEN 1 ELSE delivered END
@@ -72,7 +72,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
     )?;
     // Claim bytes are immutable in normal admission; a migration can update them.
     connection.execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-hb28c95100846 owner=st3_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v1
+        /* sqlite-large-value: allow-for-now lv-h23e63f3afa29 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v1
          AFTER UPDATE OF subject,kind,body,accepted_at_unix_ms ON claims
          WHEN OLD.kind IN ('message.sent','message.delivered','message.read','message.closed')
            OR NEW.kind IN ('message.sent','message.delivered','message.read','message.closed')
@@ -98,9 +98,9 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
         .optional()?
         .unwrap_or_default();
     let fold_sql = FOLD.replace("SUBJECT", "?1");
-    let mut fold = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf79c5dfa2fa4 owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ &fold_sql)?;
+    let mut fold = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h30946cee5e8a owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ &fold_sql)?;
     let mut remove =
-        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4865bcde7b6 owner=st3_store::store::idle_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_idle_messages WHERE subject=?1")?;
+        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h63c96badd5b1 owner=fractal_store::store::idle_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_idle_messages WHERE subject=?1")?;
     loop {
         let subjects = connection
             .prepare_cached(
@@ -112,29 +112,29 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
             break;
         }
         // Idempotent batches also recover an interrupted first startup without a read-side build.
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hba7e74cee4b7 owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h28dc30b4e384 owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE")?;
         let started = std::time::Instant::now();
         let mut last_processed = &subjects[0];
         let result = (|| -> Result<()> {
             for subject in &subjects {
-                remove.execute(/* sqlite-large-value: allow-for-now lv-h88492ac0c460 owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ [subject])?;
-                fold.execute(/* sqlite-large-value: allow-for-now lv-h88bc7d5bc13d owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ [subject])?;
+                remove.execute(/* sqlite-large-value: allow-for-now lv-h223ed936348d owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ [subject])?;
+                fold.execute(/* sqlite-large-value: allow-for-now lv-h09be4b60e219 owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ [subject])?;
                 last_processed = subject;
                 if started.elapsed() >= std::time::Duration::from_millis(20) {
                     break;
                 }
             }
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h77508eff75ad owner=st3_store::store::idle_mail TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_idle_messages_backfill_after',?1)
+                /* sqlite-large-value: allow-for-now lv-h49b0765cc7af owner=fractal_store::store::idle_mail TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_idle_messages_backfill_after',?1)
                                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [last_processed],
             )?;
             Ok(())
         })();
         match result {
-            Ok(()) => connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hfa3e4c31fd19 owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ "COMMIT")?,
+            Ok(()) => connection.execute_batch(/* sqlite-large-value: allow-for-now lv-he38cc786086b owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ "COMMIT")?,
             Err(error) => {
-                connection.execute_batch(/* sqlite-large-value: allow-for-now lv-he2b633dc3f41 owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ "ROLLBACK")?;
+                connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf03890cb7755 owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ "ROLLBACK")?;
                 return Err(error);
             }
         }
@@ -143,7 +143,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
     // Both opens can finish the same idempotent backfill. Completion must be atomic and
     // tolerate the other opener's marker; a crash cannot clear the cursor without the marker.
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h0839c31978d0 owner=st3_store::store::idle_mail TODO=bound-or-reference-values-and-reclamation */ "BEGIN IMMEDIATE;
+        /* sqlite-large-value: allow-for-now lv-h0c48864065b9 owner=fractal_store::store::idle_mail TODO=bound-or-reference-values-and-reclamation */ "BEGIN IMMEDIATE;
          DELETE FROM meta WHERE key='local_idle_messages_backfill_after';
          INSERT OR IGNORE INTO meta(key,value) VALUES('local_idle_messages_v1','1');
          COMMIT;",
@@ -168,7 +168,7 @@ impl Store {
             .query_row("SELECT id FROM batches LIMIT 1", [], |row| row.get(0))
             .unwrap();
         let mut insert = transaction.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h4653eeffa1bd owner=st3_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h581d2d15b664 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
              VALUES(?1,?2,?3,?4,'fixture',NULL,?5,'[]',?6)",
         ).unwrap();
         for index in messages {
@@ -186,7 +186,7 @@ impl Store {
                 ),
             ] {
                 insert
-                    .execute(/* sqlite-large-value: allow-for-now lv-hd251dd25a1bb owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ params![
+                    .execute(/* sqlite-large-value: allow-for-now lv-he7af00d7ee1b owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ params![
                         format!("fixture-mail-{index}-{suffix}"),
                         batch,
                         subject,
@@ -199,7 +199,7 @@ impl Store {
         }
         for index in observations {
             insert
-                .execute(/* sqlite-large-value: allow-for-now lv-h4b7354a0a8a3 owner=st3_store::store::idle_mail TODO=trace-statement-and-value-representation */ params![
+                .execute(/* sqlite-large-value: allow-for-now lv-hcec6c5cbed30 owner=fractal_store::store::idle_mail TODO=trace-statement-and-value-representation */ params![
                     format!("fixture-pr-{index}"),
                     batch,
                     "resource/github/acme/garden/pull-request/12",

@@ -1,17 +1,17 @@
 //! Time the daemon's startup store phases on a private, previously copied store.
-//! Usage: cargo run --release -p st3 --example startup_phases -- CLONE NODE [FLEET_ID]
+//! Usage: cargo run --release -p fractal --example startup_phases -- CLONE NODE [FLEET_ID]
 //! Runs what `st up` runs before it binds its sockets, in the same order, then what it starts at
 //! bind, and prints each phase's wall time and the statements that cost the most. It starts no
 //! runtime, seat or listener. Never supply a live store: this opens and writes CLONE.
 
-use st3::MissionsStore;
+use fractal_daemon::MissionsStore;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use st3::store::Store;
+use fractal_daemon::store::Store;
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     let mut phases = Vec::new();
     let mut phase = |name: &'static str, work: &mut dyn FnMut() -> Result<Value>| -> Result<()> {
         let started = Instant::now();
-        let detail = st3::performance::task(name, &mut *work)?;
+        let detail = fractal_daemon::performance::task(name, &mut *work)?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         eprintln!("{name}: {elapsed_ms:.0} ms");
         phases.push(json!({"phase": name, "elapsed_ms": elapsed_ms, "detail": detail}));
@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     phase("complete-replication-activation", &mut || {
         Ok(json!(store.complete_replication_activation()?))
     })?;
-    let report = st3::performance::snapshot();
+    let report = fractal_daemon::performance::snapshot();
     let queries = report["queries"]
         .as_array()
         .map(|queries| queries.iter().take(25).cloned().collect::<Vec<_>>())

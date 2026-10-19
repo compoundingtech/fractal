@@ -1,5 +1,5 @@
 {
-  "name": "@smalltalk/st3-client",
+  "name": "@fractal/client",
   "version": "0.1.0",
   "private": true,
   "type": "module",

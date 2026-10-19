@@ -298,7 +298,7 @@ fn calendar_occurrence(
 /// Keep the existing Claude regression cases exercising the shared driver classifier.
 #[cfg(any(test, feature = "test-support"))]
 pub fn claude_login_expired(screen: &str) -> Option<&str> {
-    let matched = st_drivers::blocking_screen::detect("claude", screen)?;
+    let matched = fractal_drivers::blocking_screen::detect("claude", screen)?;
     screen
         .lines()
         .map(str::trim)
@@ -448,8 +448,8 @@ pub trait RuntimeControl: Send + Sync + 'static {
 }
 
 pub struct NativeRuntime {
-    pty: st_runtime::PtyRuntime,
-    exec: st_runtime::ExecRuntime,
+    pty: fractal_runtime::PtyRuntime,
+    exec: fractal_runtime::ExecRuntime,
     /// Goes first on every member's PATH so its `git` and `gh` calls are recorded.
     recorder: Option<PathBuf>,
 }
@@ -457,13 +457,13 @@ pub struct NativeRuntime {
 impl NativeRuntime {
     pub fn new(state_dir: &Path, pty_root: Option<&Path>, pty_binary: &Path) -> Self {
         Self {
-            pty: st_runtime::PtyRuntime::new(
+            pty: fractal_runtime::PtyRuntime::new(
                 pty_root
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| state_dir.join("pty")),
             )
             .with_binary(pty_binary.to_string_lossy()),
-            exec: st_runtime::ExecRuntime::new(state_dir.join("exec"), state_dir.join("logs")),
+            exec: fractal_runtime::ExecRuntime::new(state_dir.join("exec"), state_dir.join("logs")),
             recorder: None,
         }
     }
@@ -471,7 +471,7 @@ impl NativeRuntime {
         self.recorder = directory;
         self
     }
-    fn pty(&self) -> Result<st_runtime::PtyRuntime> {
+    fn pty(&self) -> Result<fractal_runtime::PtyRuntime> {
         Ok(self
             .pty
             .clone()
@@ -491,7 +491,7 @@ pub fn member_environment(
     let mut inherited = crate::environment::snapshot()?;
     for name in ["ST_AGENT", "ST_SUPERVISOR", "ST3_SUBJECT"] {
         if !declared.contains_key(name)
-            && !st_drivers::contracts::fractal_env_name(name)
+            && !fractal_drivers::contracts::fractal_env_name(name)
                 .is_some_and(|new| declared.contains_key(&new))
         {
             crate::environment::remove_aliases(&mut inherited, name);
@@ -517,7 +517,7 @@ fn record_member_commands(
     Ok(())
 }
 
-fn observed_pty_status(observation: &st_runtime::PtyObservation) -> String {
+fn observed_pty_status(observation: &fractal_runtime::PtyObservation) -> String {
     if observation.status == "running"
         && observation
             .pid
@@ -546,7 +546,7 @@ impl RuntimeControl for NativeRuntime {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
-        st_runtime::protect_servers(&observations);
+        fractal_runtime::protect_servers(&observations);
         observations
             .into_iter()
             .map(|item| {
@@ -571,21 +571,21 @@ impl RuntimeControl for NativeRuntime {
             .exec
             .observe(runtime_id)?
             .map(|observation| match observation {
-                st_runtime::ExecObservation::Running(generation) => RuntimeObservation {
+                fractal_runtime::ExecObservation::Running(generation) => RuntimeObservation {
                     runtime_id: runtime_id.into(),
                     terminal: false,
                     status: "running".into(),
                     exit_code: None,
                     incarnation_id: Some(generation.generation_id),
                 },
-                st_runtime::ExecObservation::Exited(generation) => RuntimeObservation {
+                fractal_runtime::ExecObservation::Exited(generation) => RuntimeObservation {
                     runtime_id: runtime_id.into(),
                     terminal: false,
                     status: "exited".into(),
                     exit_code: generation.exit_code.map(i64::from),
                     incarnation_id: Some(generation.generation_id),
                 },
-                st_runtime::ExecObservation::Indeterminate(reason) => RuntimeObservation {
+                fractal_runtime::ExecObservation::Indeterminate(reason) => RuntimeObservation {
                     runtime_id: runtime_id.into(),
                     terminal: false,
                     status: "indeterminate".into(),
@@ -656,7 +656,7 @@ impl RuntimeControl for NativeRuntime {
             }).and_then(|item| item.tags.get(start_jobs::OPERATION_TAG).cloned()))
         } else {
             Ok(match self.exec.observe(runtime_id)? {
-                Some(st_runtime::ExecObservation::Running(generation) | st_runtime::ExecObservation::Exited(generation))
+                Some(fractal_runtime::ExecObservation::Running(generation) | fractal_runtime::ExecObservation::Exited(generation))
                     if generation.generation_id == incarnation => generation.start_operation,
                 _ => None,
             })
@@ -675,7 +675,7 @@ impl RuntimeControl for NativeRuntime {
             return Ok(false);
         }
         Ok(matches!(self.exec.observe(&member.runtime_id)?,
-            Some(st_runtime::ExecObservation::Exited(generation))
+            Some(fractal_runtime::ExecObservation::Exited(generation))
                 if generation.start_operation.as_ref() == Some(operation)
                     && generation.group_exited))
     }
@@ -772,7 +772,7 @@ impl NativeRuntime {
                 if producer_entered {
                     error
                 } else {
-                    error.context(st_runtime::StartRejected {
+                    error.context(fractal_runtime::StartRejected {
                         operation: member.tags.get(start_jobs::OPERATION_TAG).cloned(),
                     })
                 }
@@ -788,41 +788,41 @@ impl NativeRuntime {
         let executable = launch_executable()?;
         let environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
-        let mut launch = st_runtime::Launch::from(&member.launch);
+        let mut launch = fractal_runtime::Launch::from(&member.launch);
         match &mut launch {
-            st_runtime::Launch::Shell(source) => {
-                st_runtime::expand_path_placeholder(source, &environment);
+            fractal_runtime::Launch::Shell(source) => {
+                fractal_runtime::expand_path_placeholder(source, &environment);
             }
-            st_runtime::Launch::Argv(argv) => {
+            fractal_runtime::Launch::Argv(argv) => {
                 for value in argv {
-                    st_runtime::expand_path_placeholder(value, &environment);
+                    fractal_runtime::expand_path_placeholder(value, &environment);
                 }
             }
         }
         // Resolve before crossing the PTY/isolation boundary; service-manager PATH is
         // unrelated to the environment captured from the account's login shell.
         match &mut launch {
-            st_runtime::Launch::Shell(source) => {
-                launch = st_runtime::Launch::Argv(vec![
-                    st_runtime::resolve_executable("sh", &environment)?
+            fractal_runtime::Launch::Shell(source) => {
+                launch = fractal_runtime::Launch::Argv(vec![
+                    fractal_runtime::resolve_executable("sh", &environment)?
                         .to_string_lossy()
                         .into_owned(),
                     "-c".into(),
                     source.clone(),
                 ]);
             }
-            st_runtime::Launch::Argv(argv) => {
+            fractal_runtime::Launch::Argv(argv) => {
                 let program = argv
                     .first_mut()
                     .context("an argv launch must contain a program")?;
-                *program = st_runtime::resolve_executable(program, &environment)?
+                *program = fractal_runtime::resolve_executable(program, &environment)?
                     .to_string_lossy()
                     .into_owned();
             }
         }
         let cwd = PathBuf::from(&member.cwd);
         if member.terminal {
-            let pty_binary = st_runtime::resolve_executable("pty", &environment)?;
+            let pty_binary = fractal_runtime::resolve_executable("pty", &environment)?;
             let runtime = self
                 .pty()?
                 .clone()
@@ -1291,15 +1291,15 @@ pub fn overlay_runtime_environment(
         }
     }
     if is_person_terminal(subject) {
-        crate::environment::set(member, st_runtime::PRIORITY_ENV,
-            st_runtime::SeatPriority::Normal.as_str().into());
+        crate::environment::set(member, fractal_runtime::PRIORITY_ENV,
+            fractal_runtime::SeatPriority::Normal.as_str().into());
     }
 }
 
 /// A standalone shell under a person: `pty/person/NAME/UUID`.
 fn is_person_terminal(subject: &str) -> bool {
     matches!(
-        st3_schema::owned_terminals::owner(subject),
+        fractal_schema::owned_terminals::owner(subject),
         Ok(Some(owner)) if owner.starts_with("person/")
     )
 }
@@ -1308,22 +1308,22 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// An unticked setup box makes Codex ask: its seats launch with Codex's own approval defaults.
     pub fn with_codex_asks(mut self, asks: bool) -> Self {
         if asks {
-            self.runtime_environment.insert(st_drivers::access::CODEX_ASKS_ENV.into(), "1".into());
+            self.runtime_environment.insert(fractal_drivers::access::CODEX_ASKS_ENV.into(), "1".into());
         }
         self
     }
 
-    pub fn with_access_mode(mut self, mode: st_drivers::access::AccessMode) -> Self {
-        self.runtime_environment.insert(st_drivers::access::MODE_ENV.into(), mode.as_str().into());
+    pub fn with_access_mode(mut self, mode: fractal_drivers::access::AccessMode) -> Self {
+        self.runtime_environment.insert(fractal_drivers::access::MODE_ENV.into(), mode.as_str().into());
         self
     }
 
     /// The priority every seat and exec task starts at unless it declares its own
     /// `ST_SEAT_PRIORITY`. Applies to launches after this call.
-    pub fn with_seat_priority(mut self, priority: st_runtime::SeatPriority) -> Self {
-        st_runtime::set_configured_seat_priority(priority);
+    pub fn with_seat_priority(mut self, priority: fractal_runtime::SeatPriority) -> Self {
+        fractal_runtime::set_configured_seat_priority(priority);
         self.runtime_environment
-            .insert(st_runtime::PRIORITY_ENV.into(), priority.as_str().into());
+            .insert(fractal_runtime::PRIORITY_ENV.into(), priority.as_str().into());
         self
     }
 
@@ -4252,7 +4252,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Ok(screen) = self.member_screen(&member.runtime_id) else {
             return Ok(());
         };
-        if !st_drivers::blocking_screen::claude_input_idle(&screen) {
+        if !fractal_drivers::blocking_screen::claude_input_idle(&screen) {
             return Ok(());
         }
         // This is a live-seat fence, not verification of a prepared launch operation:
@@ -4307,7 +4307,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         ) else {
             return Ok(());
         };
-        let shown = st_drivers::blocking_screen::screen_prompt(driver, screen)
+        let shown = fractal_drivers::blocking_screen::screen_prompt(driver, screen)
             .filter(|prompt| prompt.kind != "plan");
         let shown = match shown {
             Some(prompt) if driver == "claude" && prompt.kind == "trust" => {
@@ -4324,7 +4324,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shown => shown,
         };
         let open = self.store.open_screen_prompt(&subject.subject, incarnation)?;
-        let same = |fields: &Value, prompt: &st_drivers::blocking_screen::ScreenPrompt| {
+        let same = |fields: &Value, prompt: &fractal_drivers::blocking_screen::ScreenPrompt| {
             fields["status"] == prompt.kind && fields["matched_line"] == prompt.title.as_str()
         };
         if let Some((claim, _, fields)) = &open
@@ -4392,7 +4392,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(answer) = answer.filter(|_| !delivered) else {
             return Ok(());
         };
-        let Some(keys) = st_drivers::blocking_screen::screen_prompt_choices(driver, prompt.kind)
+        let Some(keys) = fractal_drivers::blocking_screen::screen_prompt_choices(driver, prompt.kind)
             .iter()
             .find(|(choice, _)| *choice == answer)
             .and_then(|(_, label)| prompt.keys_for(label))
@@ -4403,7 +4403,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Ok(fresh) = self.member_screen(&member.runtime_id) else {
             return Ok(());
         };
-        if st_drivers::blocking_screen::screen_prompt(driver, &fresh).as_ref() != Some(&prompt) {
+        if fractal_drivers::blocking_screen::screen_prompt(driver, &fresh).as_ref() != Some(&prompt) {
             return Ok(());
         }
         // Recorded before the keys: replay must never press them twice.
@@ -4503,7 +4503,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
-        let Some(dialog) = st_drivers::blocking_screen::screen_prompt("claude", screen)
+        let Some(dialog) = fractal_drivers::blocking_screen::screen_prompt("claude", screen)
             .filter(|dialog| dialog.kind == "plan")
         else {
             return Ok(());
@@ -4515,7 +4515,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Ok(fresh) = self.member_screen(&member.runtime_id) else {
             return Ok(());
         };
-        if st_drivers::blocking_screen::screen_prompt("claude", &fresh).as_ref() != Some(&dialog) {
+        if fractal_drivers::blocking_screen::screen_prompt("claude", &fresh).as_ref() != Some(&dialog) {
             return Ok(());
         }
         // Recorded before the keys: replay must never press them twice.
@@ -4573,7 +4573,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(screen) = screen else {
             return Ok(());
         };
-        let matched = st_drivers::blocking_screen::detect(driver, screen);
+        let matched = fractal_drivers::blocking_screen::detect(driver, screen);
         for (code, restored, prefix, condition) in [(
             "provider-update-prompt",
             "provider-update-restored",
@@ -4631,7 +4631,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 continue;
             }
             if let Some(fence) = &fence
-                && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
+                && fractal_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
             {
                 // Escape is asynchronous. Keep the readiness fence while giving
                 // Codex one existing screen-poll interval to process it. Register
@@ -4678,10 +4678,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             // The retained prompt claim is the once-per-episode action fence.
             // Re-read the terminal rather than acting on the cached member screen.
             if fence.is_none()
-                && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
+                && fractal_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
             {
                 let result = self.runtime.screen(&member.runtime_id).and_then(|fresh| {
-                    let key = st_drivers::blocking_screen::codex_update_skip_key(driver, &fresh)
+                    let key = fractal_drivers::blocking_screen::codex_update_skip_key(driver, &fresh)
                         .ok_or_else(|| anyhow::anyhow!("update menu changed before Skip"))?;
                     self.runtime
                         .send_key_if(&member.runtime_id, key, incarnation)
@@ -4780,14 +4780,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             .unwrap_or(0);
         let matched_line = if member.terminal {
             screen.and_then(|screen| {
-                let matched = st_drivers::blocking_screen::detect(driver, screen)?;
+                let matched = fractal_drivers::blocking_screen::detect(driver, screen)?;
                 if matched.code != "provider-auth-expired" {
                     return None;
                 }
                 // A successful native turn supersedes an old standalone reply in scrollback.
                 let reply = matched.text.trim_start_matches(['●', '⎿']).trim();
                 if auth_accepted == Some(true)
-                    && st_drivers::claude_session::claude_login_reply(reply)
+                    && fractal_drivers::claude_session::claude_login_reply(reply)
                 {
                     None
                 } else {
@@ -5507,7 +5507,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .filter_map(|message| message_sent_at(&self.store, message).map(|at| (at, message)))
                 .collect::<Vec<_>>();
             attempts.sort_by_key(|(at, _)| *at);
-            let claim_failure = self.store.operation_claim(&st_drivers::work_claim_failure::key(
+            let claim_failure = self.store.operation_claim(&fractal_drivers::work_claim_failure::key(
                 agent, &step.subject, step.attempt, step.readiness_epoch, incarnation))?;
             let acknowledged = work_wake_acknowledged(&attempts, harness.as_ref());
             let idle_unclaimed_deadline = harness
@@ -7307,7 +7307,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The configured person's latest `terminal.launch-geometry`: the size their client draws a
     /// seat at, so a seat started now needs no resize when they first open it. Nothing without a
     /// configured person or before they publish one.
-    fn launch_geometry(&self) -> Result<Option<st_runtime::TerminalSize>> {
+    fn launch_geometry(&self) -> Result<Option<fractal_runtime::TerminalSize>> {
         let Some(person) = &self.person else {
             return Ok(None);
         };
@@ -7321,11 +7321,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             claim
                 .body
                 .pointer(&format!("/fields/{name}"))
-                .and_then(st3_schema::terminal_dimension)
+                .and_then(fractal_schema::terminal_dimension)
         };
         Ok(dimension("rows")
             .zip(dimension("columns"))
-            .map(|(rows, columns)| st_runtime::TerminalSize { rows, columns }))
+            .map(|(rows, columns)| fractal_runtime::TerminalSize { rows, columns }))
     }
 
     /// The declared account whose login directory an unbound seat's harness is launched with, from
@@ -18168,7 +18168,7 @@ pub mod tests {
     #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;
-        use st_runtime::PRIORITY_ENV;
+        use fractal_runtime::PRIORITY_ENV;
         let runtime = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "background".to_string())]);
         let mut plain = std::collections::BTreeMap::new();
         overlay_runtime_environment("agent/example/worker", &mut plain, &runtime);
@@ -18187,7 +18187,7 @@ pub mod tests {
     #[test]
     fn a_terminal_a_person_opened_stays_at_normal_priority() {
         use super::overlay_runtime_environment;
-        use st_runtime::PRIORITY_ENV;
+        use fractal_runtime::PRIORITY_ENV;
         let runtime = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "background".to_string())]);
         let id = "019a0000-0000-7000-8000-000000000001";
         for declared in [None, Some("background")] {
@@ -18196,7 +18196,7 @@ pub mod tests {
                 .unwrap_or_default();
             overlay_runtime_environment(&format!("pty/person/avery/{id}"), &mut environment, &runtime);
             assert_eq!(environment[PRIORITY_ENV], "normal");
-            assert!(st_runtime::work_prefix(&environment).is_empty());
+            assert!(fractal_runtime::work_prefix(&environment).is_empty());
         }
         // A shell an agent opened is the agent's work, and so are mission terminals.
         for subject in [format!("pty/agent/example/worker/{id}"), "pty/example/helper".to_string()] {
@@ -18541,7 +18541,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     #[cfg(unix)]
     #[test]
     fn a_running_pty_with_a_dead_pid_is_observed_as_vanished() {
-        let observation = st_runtime::PtyObservation {
+        let observation = fractal_runtime::PtyObservation {
             name: "stale-worker".into(),
             status: "running".into(),
             exit_code: None,
@@ -18557,7 +18557,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     #[cfg(unix)]
     #[test]
     fn a_running_pty_with_a_live_pid_remains_running() {
-        let observation = st_runtime::PtyObservation {
+        let observation = fractal_runtime::PtyObservation {
             name: "live-worker".into(),
             status: "running".into(),
             exit_code: None,
@@ -18639,8 +18639,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
 
     #[test]
     fn unchanged_plain_harness_reapply_keeps_previous_build_revisions_and_running_seats() {
-        let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-he6b9d3eedfcd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
-            "../../st3-daemon/tests/fixtures/harness-access-previous-build.json"
+        let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hbc61d180f03e owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
+            "../../fractal-daemon/tests/fixtures/harness-access-previous-build.json"
         )).unwrap();
         let source = fixture["source"].as_str().unwrap();
         let current = parse_intent(source, "canary").unwrap();
@@ -18688,7 +18688,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(store.index().unwrap(), before);
 
         let upgraded = Reconciler::new(store.clone(), runtime.clone(), "canary".into(), Arc::new(Notify::new()))
-            .with_access_mode(st_drivers::access::AccessMode::Bypass);
+            .with_access_mode(fractal_drivers::access::AccessMode::Bypass);
         upgraded.reconcile_once().unwrap();
         upgraded.reconcile_once().unwrap();
         for subject in previous.subjects.keys() {
@@ -20208,7 +20208,7 @@ version 2
         assert!(seat.terminal);
         assert_eq!(
             seat.terminal_size,
-            Some(st_runtime::TerminalSize {
+            Some(fractal_runtime::TerminalSize {
                 rows: 48,
                 columns: 160
             })
@@ -21998,7 +21998,7 @@ mission "feedback-review" state="ready" {
             {
                 let mut writer = store.connection.write();
                 let tx = writer.transaction().unwrap();
-                tx.execute(/* sqlite-large-value: allow-for-now lv-h3ba9f26e1ed8 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_starts", [])
+                tx.execute(/* sqlite-large-value: allow-for-now lv-ha84a67f42942 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_starts", [])
                     .unwrap();
                 tx.rollback().unwrap();
             }
@@ -22012,32 +22012,32 @@ mission "feedback-review" state="ready" {
                 let tx = writer.transaction().unwrap();
                 match mutation {
                     "local-trim" => {
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-h9f826e5caec4 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-hed97f405e52f owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
                     }
                     "shared-trim" => {
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-he7e152c041a8 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&receipt.id])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h999f5676affd owner=fractal_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&receipt.id])
                             .unwrap();
                     }
                     "definition-trim" => {
                         // Native trimming retires operation identities before their
                         // canonical claims. Preserve that foreign-key ordering here.
                         tx.execute(
-                            /* sqlite-large-value: allow-for-now lv-h68e30ed2b008 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE canonical_claim_id=?1",
+                            /* sqlite-large-value: allow-for-now lv-hc7981c4c3717 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE canonical_claim_id=?1",
                             [&token],
                         )
                         .unwrap();
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-h9f7299386c3e owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&token])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h2b77c71b4824 owner=fractal_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&token])
                             .unwrap();
                     }
                     "definition-repair" => {
                         tx.execute(
-                            /* sqlite-large-value: allow-for-now lv-hf78d437f20fa owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+                            /* sqlite-large-value: allow-for-now lv-hfb64123b34c3 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
                             [&token],
                         )
                         .unwrap();
                     }
                     "replay" => {
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-h4fe1ade331da owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_bootstrap", [])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h49ae050d9e2f owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_bootstrap", [])
                             .unwrap();
                     }
                     _ => unreachable!(),
@@ -27014,9 +27014,9 @@ schedule "cycle" {{
             "step_path" => "'ghost'".into(),
             _ => column.clone(),
         }).collect::<Vec<_>>().join(",");
-        connection.execute(&format!(/* sqlite-large-value: allow-for-now lv-h477443b3b34f owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs ({}) SELECT {select} FROM step_runs LIMIT 1", columns.join(",")), []).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h6c9aeb7c32a1 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='occurrence_creation_projection_rules'", []).unwrap();
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7b22422f1cd5 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES
+        connection.execute(&format!(/* sqlite-large-value: allow-for-now lv-hd1d134afc90b owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs ({}) SELECT {select} FROM step_runs LIMIT 1", columns.join(",")), []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h8061a4b29e8f owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='occurrence_creation_projection_rules'", []).unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-he9cc6945c7ac owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES
             ('canonical_shared_projection_rules','2'), ('work_extended_projection_rules','1');").unwrap();
         drop(connection);
         let upgraded = Store::open(&copy, "ivory").unwrap();
@@ -33779,7 +33779,7 @@ observer "repo" {
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h89c5142ff1d1 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-h530c819d8d97 owner=fractal_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![(now_ms() - 3_600_001).to_string(), old.id],
             )
             .unwrap();
@@ -34274,7 +34274,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
             crate::store::configure_projection_writer(&connection).unwrap();
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h6ce76ec8b9fb owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                    /* sqlite-large-value: allow-for-now lv-h057235c6b53d owner=fractal_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                     rusqlite::params![
                         (now_ms() - FAULT_ATTENTION_AFTER_MS - 1).to_string(),
                         fault.id
@@ -36152,7 +36152,7 @@ subscription "pulls" { observer "observer/repo"; on "pull_requests"; to "agent/e
             .clone();
         assert_eq!(pull["base_branch"], "main");
         assert_eq!(pull["required_checks"]["state"], "pending");
-        st3_schema::registry()
+        fractal_schema::registry()
             .validate_resource_facts(
                 "vcs.pull-request",
                 &pull
@@ -36184,7 +36184,7 @@ subscription "pulls" { observer "observer/repo"; on "pull_requests"; to "agent/e
             .unwrap()
             .unwrap()["facts"]
             .clone();
-        st3_schema::registry()
+        fractal_schema::registry()
             .validate_resource_facts(
                 "vcs.pull-request",
                 &pull
@@ -38950,7 +38950,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             (
                 "node.seat-a".to_owned(),
                 concat!(
-                    "● Bash(grep -n 'Login expired' crates/st3/src/reconcile.rs)\n",
+                    "● Bash(grep -n 'Login expired' crates/fractal/src/reconcile.rs)\n",
                     "  ⎿  37:    screen.contains(\"Login expired · Please run /login\")\n",
                 )
                 .to_owned(),
@@ -39117,9 +39117,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     fn assert_claude_prompt_screen_resolution(restart: bool, see_dialog: bool) {
         let fixture = |name: &str| -> String {
             match name {
-                "claude-working.txt" => /* sqlite-large-value: allow-for-now lv-h77d3068340d4 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt"),
-                "claude-permission-dialog.txt" => /* sqlite-large-value: allow-for-now lv-h4d12287f9727 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-dialog.txt"),
-                "claude-permission-refused.txt" => /* sqlite-large-value: allow-for-now lv-h396d9bae4905 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-refused.txt"),
+                "claude-working.txt" => /* sqlite-large-value: allow-for-now lv-h8fd68bab8293 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/claude-working.txt"),
+                "claude-permission-dialog.txt" => /* sqlite-large-value: allow-for-now lv-h3933f68b777b owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/claude-permission-dialog.txt"),
+                "claude-permission-refused.txt" => /* sqlite-large-value: allow-for-now lv-he9d7601590c4 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/claude-permission-refused.txt"),
                 _ => unreachable!("{name}"),
             }
             .into()
@@ -39222,8 +39222,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// screen moves on.
     #[test]
     fn a_screen_only_prompt_is_an_alert_and_its_answer_is_pressed_into_the_dialog_once() {
-        let mcp = /* sqlite-large-value: allow-for-now lv-h37971c4ddd6b owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-mcp-server.txt");
-        let working = /* sqlite-large-value: allow-for-now lv-h17575a2c74b2 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let mcp = /* sqlite-large-value: allow-for-now lv-h6614b2cf6d26 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/claude-mcp-server.txt");
+        let working = /* sqlite-large-value: allow-for-now lv-hde2706920a90 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/claude-working.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39330,7 +39330,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// back for the person to finish in the terminal, saying why, and offers no answer.
     #[test]
     fn a_screen_prompt_answer_the_terminal_refused_part_way_goes_back_to_the_person() {
-        let trust = /* sqlite-large-value: allow-for-now lv-hbb8d5d2da8d1 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-trust.txt");
+        let trust = /* sqlite-large-value: allow-for-now lv-h543232f2dfe0 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/codex-trust.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39380,7 +39380,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             shown.detail
         );
         assert!(shown.detail.contains("Trust trusts that folder"), "{}", shown.detail);
-        let keys = st_drivers::blocking_screen::screen_prompt("codex", trust)
+        let keys = fractal_drivers::blocking_screen::screen_prompt("codex", trust)
             .unwrap()
             .keys_for("No, quit")
             .unwrap();
@@ -39417,8 +39417,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// while the dialog is on screen: Claude does not take a hook's allow for a plan.
     #[test]
     fn a_plan_approved_from_a_client_is_approved_in_its_dialog_once() {
-        let plan = /* sqlite-large-value: allow-for-now lv-h27368ac5df4c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
-        let working = /* sqlite-large-value: allow-for-now lv-h4534ae01fadd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let plan = /* sqlite-large-value: allow-for-now lv-hde73d4c02415 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
+        let working = /* sqlite-large-value: allow-for-now lv-h157e44be6c3c owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/claude-working.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39498,7 +39498,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     #[test]
     fn codex_update_skip_is_once_per_episode_and_requires_current_screen_and_incarnation() {
         let menu =
-            /* sqlite-large-value: allow-for-now lv-h2963143a3b13 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt");
+            /* sqlite-large-value: allow-for-now lv-hccd66fc7537f owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/codex-update.txt");
         for case in [
             "skip",
             "send-failed",
@@ -39662,19 +39662,19 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         for (driver, screen, code) in [
             (
                 "claude",
-                /* sqlite-large-value: allow-for-now lv-h8f0e65b36c60 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
-                    "../../st-drivers/tests/fixtures/blocking-screens/claude-wide-footer.txt"
+                /* sqlite-large-value: allow-for-now lv-hdd0b5313d7ac owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
+                    "../../fractal-drivers/tests/fixtures/blocking-screens/claude-wide-footer.txt"
                 ),
                 "provider-auth-expired",
             ),
             (
                 "codex",
-                /* sqlite-large-value: allow-for-now lv-h70d6fd0f599c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt"),
+                /* sqlite-large-value: allow-for-now lv-h966fd1345a16 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/codex-login.txt"),
                 "provider-auth-expired",
             ),
             (
                 "codex",
-                /* sqlite-large-value: allow-for-now lv-h493f3f1745e7 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt")
+                /* sqlite-large-value: allow-for-now lv-h30520be2e28c owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/codex-update.txt")
                     .split("enter continue")
                     .next()
                     .unwrap(),
@@ -39682,12 +39682,12 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ),
             (
                 "pi",
-                /* sqlite-large-value: allow-for-now lv-h91fbd820cdba owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/pi-no-key.txt"),
+                /* sqlite-large-value: allow-for-now lv-h893fd22ec1cb owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/pi-no-key.txt"),
                 "provider-auth-expired",
             ),
             (
                 "omp",
-                /* sqlite-large-value: allow-for-now lv-hb9d750a6c83c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/omp-no-key.txt"),
+                /* sqlite-large-value: allow-for-now lv-h604856482f09 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/omp-no-key.txt"),
                 "provider-auth-expired",
             ),
         ] {
@@ -39783,14 +39783,14 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
 
             if driver == "claude" {
                 for login_screen in [
-                    /* sqlite-large-value: allow-for-now lv-h4f3ec5adc2f4 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
-                        "../../st-drivers/tests/fixtures/blocking-screens/claude-login.txt"
+                    /* sqlite-large-value: allow-for-now lv-h193645d36e0f owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
+                        "../../fractal-drivers/tests/fixtures/blocking-screens/claude-login.txt"
                     ),
-                    /* sqlite-large-value: allow-for-now lv-he9ec12118b27 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
-                        "../../st-drivers/tests/fixtures/blocking-screens/claude-authenticating.txt"
+                    /* sqlite-large-value: allow-for-now lv-h622ef2d3a8e2 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
+                        "../../fractal-drivers/tests/fixtures/blocking-screens/claude-authenticating.txt"
                     ),
-                    /* sqlite-large-value: allow-for-now lv-h3ad4136f5595 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
-                        "../../st-drivers/tests/fixtures/blocking-screens/claude-code-prompt.txt"
+                    /* sqlite-large-value: allow-for-now lv-hb13d6650b12c owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
+                        "../../fractal-drivers/tests/fixtures/blocking-screens/claude-code-prompt.txt"
                     ),
                 ] {
                     runtime
@@ -39887,11 +39887,11 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
 
             if driver == "codex" {
                 let next = if code == "provider-auth-expired" {
-                    /* sqlite-large-value: allow-for-now lv-h339947247d46 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
-                        "../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt"
+                    /* sqlite-large-value: allow-for-now lv-hcdf81a2fb643 owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
+                        "../../fractal-drivers/tests/fixtures/blocking-screens/codex-update.txt"
                     ).split("enter continue").next().unwrap()
                 } else {
-                    /* sqlite-large-value: allow-for-now lv-hae98777c5efd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt")
+                    /* sqlite-large-value: allow-for-now lv-h2a49d532789c owner=fractal_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../fractal-drivers/tests/fixtures/blocking-screens/codex-login.txt")
                 };
                 runtime
                     .screens
@@ -40471,7 +40471,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .lock()
             .unwrap()
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h1ed1b65f008c owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
+                /* sqlite-large-value: allow-for-now lv-ha12250218f65 owner=fractal_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
                  WHEN NEW.kind='message.sent'
                  BEGIN SELECT RAISE(ABORT, 'injected session-start failure'); END;",
             )
@@ -40486,7 +40486,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .connection
             .lock()
             .unwrap()
-            .execute_batch(/* sqlite-large-value: allow-for-now lv-h36ce2ba3fbe2 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_session_start")
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-hb770cadb12c6 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_session_start")
             .unwrap();
         reconciler
             .deliver_session_start(&desired.subject, "worker-three")
@@ -43387,7 +43387,7 @@ mission "gated" state="ready" {
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hf5e65e6d2b33 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hf86d10b8f34c owner=fractal_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![
                     (now_ms() - WORK_WAKE_EXHAUST_GRACE_MS - 1).to_string(),
                     sent.id
@@ -43462,7 +43462,7 @@ mission "gated" state="ready" {
             seat.store.append_claim(&ClaimInput {
                 subject: SEAT.into(), kind: "harness.diagnostic".into(), actor: Some(SEAT.into()),
                 fields: BTreeMap::from([
-                    ("code".into(), st_drivers::work_claim_failure::CODE.into()),
+                    ("code".into(), fractal_drivers::work_claim_failure::CODE.into()),
                     ("status".into(), "failed".into()), ("severity".into(), "error".into()),
                     ("reason".into(), "st work claim could not connect to daemon Unix socket /tmp/st.sock: Operation not permitted (os error 1); inspect sandbox permissions and socket path".into()),
                     ("incarnation_id".into(), incarnation.into()),
@@ -43470,7 +43470,7 @@ mission "gated" state="ready" {
                     ("attempt".into(), step.attempt.into()),
                     ("readiness_epoch".into(), epoch.into()),
                 ]), evidence: vec![], expected_subject: None,
-                idempotency_key: Some(st_drivers::work_claim_failure::key(SEAT, &subject, step.attempt, epoch, incarnation)),
+                idempotency_key: Some(fractal_drivers::work_claim_failure::key(SEAT, &subject, step.attempt, epoch, incarnation)),
             }).unwrap()
         };
         let faults = || seat.store.claims_for(SEAT, Some("harness.diagnostic")).unwrap()

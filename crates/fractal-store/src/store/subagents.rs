@@ -112,7 +112,7 @@ fn open_subagents_sql(scope: Scope<'_>) -> String {
 
 /// Open subagents in `scope`, oldest first in the canonical claim order.
 pub fn open_subagents_at(connection: &Connection, scope: Scope<'_>) -> Result<Vec<SubagentView>> {
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h593466ebd586 owner=st3_store::store::subagents TODO=trace-statement-and-value-representation */ &open_subagents_sql(scope))?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-heb36cabb4877 owner=fractal_store::store::subagents TODO=trace-statement-and-value-representation */ &open_subagents_sql(scope))?;
     let read = |row: &rusqlite::Row<'_>| {
         Ok((
             row.get::<_, String>(0)?,
@@ -172,7 +172,7 @@ fn subagent_claim_tx(
     // The kind is written into the statement so SQLite can use that kind's partial index.
     transaction
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-he2f4e2be7bbb owner=st3_store::store::subagents TODO=trace-statement-and-value-representation */ &format!(
+            /* sqlite-large-value: allow-for-now lv-ha6cdde228bd4 owner=fractal_store::store::subagents TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
                  WHERE claims.kind='{kind}' AND claims.subject=?1
                    AND json_extract(claims.body, '$.fields.subagent_id')=?2
@@ -240,7 +240,7 @@ pub fn check_subagent_claim_tx(
 
 /// The newest runtime record of a seat: its status and incarnation.
 fn seat_runtime(connection: &Connection, seat: &str) -> Result<Option<(String, Option<String>)>> {
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h055df751c251 owner=st3_store::store::subagents TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h68d7bd968ef1 owner=fractal_store::store::subagents TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT body FROM claims
          WHERE subject=?1 AND kind='runtime.observed'
          ORDER BY CANONICAL_DESC(claims)",

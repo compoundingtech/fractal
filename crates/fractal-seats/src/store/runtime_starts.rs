@@ -5,8 +5,8 @@ use serde::Deserialize;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-pub use st3_missions::store::runtime_starts::*;
-pub use st3_missions::store::runtime_starts::{RuntimeStartOperation, create_schema};
+pub use fractal_missions::store::runtime_starts::*;
+pub use fractal_missions::store::runtime_starts::{RuntimeStartOperation, create_schema};
 
 /// Physical captures are synchronous and thread-scoped. Never carry the witness
 /// to another thread or allow a nested capture to erase its predecessor.
@@ -41,7 +41,7 @@ fn pin_evidence(tx: &Transaction<'_>, operation: &str, origin: &str, evidence: &
         evidence.strip_prefix(&format!("{LOCAL_OBSERVATION_ID_PREFIX}{origin}/"))
     {
         let position: i64 = position.parse()?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hc8db6bd52ab4 owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_runtime_start_evidence(operation_id,observation_id) VALUES (?1,?2)",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h6f4e404c6770 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_runtime_start_evidence(operation_id,observation_id) VALUES (?1,?2)",
             params![operation, position])?;
     }
     Ok(())
@@ -49,7 +49,7 @@ fn pin_evidence(tx: &Transaction<'_>, operation: &str, origin: &str, evidence: &
 
 fn release_evidence(tx: &Transaction<'_>, operation: &str) -> rusqlite::Result<()> {
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-hdca5e30b5913 owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_runtime_start_evidence WHERE operation_id=?1 AND EXISTS (
+        /* sqlite-large-value: allow-for-now lv-h22e06cd45265 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_runtime_start_evidence WHERE operation_id=?1 AND EXISTS (
         SELECT 1 FROM local_runtime_starts WHERE id=?1 AND finished=1 AND applied=1
           AND (revoked_by IS NULL OR cleanup_verified=1)
           AND (json_extract(result,'$.error') IS NULL OR cleanup_verified=1))",
@@ -76,8 +76,8 @@ fn retained_runtime_start_request(
             [position], |row| local_observation_from_row(origin, row),
         ).optional().map_err(Into::into)
     } else {
-        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h68f13fd7c168 owner=st3_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1 AND {UNREPAIRED_CLAIM}"))?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h9f113af1aa4f owner=st3_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ [id], claim_from_row).optional().map_err(Into::into)
+        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd8807d596c6a owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1 AND {UNREPAIRED_CLAIM}"))?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h38658386224e owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ [id], claim_from_row).optional().map_err(Into::into)
     }
 }
 
@@ -379,7 +379,7 @@ impl RuntimeStartsStore for Store {
                         // Positive no-effect proof survives repair/retraction. Do not
                         // manufacture receipts citing evidence that no longer exists.
                         tx.execute(
-                            /* sqlite-large-value: allow-for-now lv-h19fff27c34fe owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET receipted=1 WHERE id=?1",
+                            /* sqlite-large-value: allow-for-now lv-h7a70f3336d60 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET receipted=1 WHERE id=?1",
                             [id],
                         )?;
                         return Ok(true);
@@ -517,7 +517,7 @@ impl RuntimeStartsStore for Store {
                             // not regress that exact runtime from running to starting.
                             let current: Option<String> = tx
                                 .query_row(
-                                    /* sqlite-large-value: allow-for-now lv-hf9a3c41d1762 owner=st3_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!(
+                                    /* sqlite-large-value: allow-for-now lv-h78cc0dbbbfdf owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!(
                                         "{} LIMIT 1",
                                         newest_claims_of_kind_query(
                                             "claims.id",
@@ -606,7 +606,7 @@ impl RuntimeStartsStore for Store {
                     result["runtime_observation"] = observation;
                 }
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-hc72a65b1e745 owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET receipted=1,result=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-ha13d8dc7b51f owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET receipted=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
                 Ok(true)
@@ -644,14 +644,14 @@ impl RuntimeStartsStore for Store {
     fn runtime_start_for(&self, subject: &str) -> Result<Option<RuntimeStartOperation>> {
         smallclaims::touched::note_read(|| format!("local-runtime-start:{subject}"));
         self.readers.get().query_row(
-            /* sqlite-large-value: allow-for-now lv-h7735baf14c19 owner=st3_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT * FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}) ORDER BY id DESC LIMIT 1"),
+            /* sqlite-large-value: allow-for-now lv-h65bb2eb3b13f owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT * FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}) ORDER BY id DESC LIMIT 1"),
             [subject], read,
         ).optional().map_err(Into::into)
     }
 
     fn pending_runtime_starts(&self) -> Result<Vec<RuntimeStartOperation>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h88fa64917203 owner=st3_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1c1d0a07d9ef owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!(
             "SELECT * FROM local_runtime_starts WHERE {PENDING} ORDER BY id"
         ))?;
         statement
@@ -700,7 +700,7 @@ impl RuntimeStartsStore for Store {
             }
             let selected = selected.map(|row| row.claim_id);
             let busy: bool = tx.query_row(
-                /* sqlite-large-value: allow-for-now lv-hc311959e8f6a owner=st3_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}))"),
+                /* sqlite-large-value: allow-for-now lv-h983d9fe42c24 owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}))"),
                 [&operation.subject], |row| row.get(0))?;
             if busy { return Ok(RuntimeStartAdmission::SeatBusy); }
             if !operation.body["request"].is_null() {
@@ -776,7 +776,7 @@ impl RuntimeStartsStore for Store {
             operation.body["start_request_receipt"] = serde_json::to_value(&request)?;
             operation.body["start_request_position"] = json!(local_observation_position(&request).context("physical request needs its original local position")?);
             let body = serde_json::to_string(&operation.body)?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h64cbb821188b owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_runtime_starts(id,subject,owner,body) VALUES (?1,?2,?3,?4)",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h787cccc6af77 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_runtime_starts(id,subject,owner,body) VALUES (?1,?2,?3,?4)",
                 params![operation.id, operation.subject, operation.owner, body])?;
             if let Some(request) = operation.body["start_request"].as_str() {
                 pin_evidence(tx, &operation.id, self.origin(), request)?;
@@ -791,7 +791,7 @@ impl RuntimeStartsStore for Store {
         self.connection.batched(|tx| -> Result<bool> {
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
-            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-hd3105a09af18 owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-ha2a0e9b6e6e1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
@@ -829,7 +829,7 @@ impl RuntimeStartsStore for Store {
 
     fn unresolved_runtime_start_counts(&self) -> Result<(u64, u64)> {
         self.readers.get().query_row(
-            /* sqlite-large-value: allow-for-now lv-hd4d1bb76a4a0 owner=st3_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE {PENDING}"),
+            /* sqlite-large-value: allow-for-now lv-h80e6229504f6 owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE {PENDING}"),
             [], |row| Ok((row.get(0)?, row.get(1)?)),
         ).map_err(Into::into)
     }
@@ -847,7 +847,7 @@ impl RuntimeStartsStore for Store {
 
     fn revoke_runtime_start(&self, id: &str, request: &str) -> Result<()> {
         self.connection.batched(|tx| -> Result<()> {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h9c9c2cb49bbf owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2) WHERE id=?1", params![id, request])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h32d0f4bf9e74 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2) WHERE id=?1", params![id, request])?;
             pin_evidence(tx, id, self.origin(), request)?;
             Ok(())
         })
@@ -861,7 +861,7 @@ impl RuntimeStartsStore for Store {
             if operation.finished { return Ok(()); }
             let mut result = result.clone();
             closed_runtime_start_result(&operation, self.origin(), &mut result)?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-he754ad15de81 owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,result=?2,
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h7ab00a9247a2 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,result=?2,
                 cleanup_verified=CASE WHEN json_extract(?2,'$.error') IS NOT NULL AND json_extract(?2,'$.producer_closed')=1 THEN 1 ELSE cleanup_verified END
                 WHERE id=?1 AND finished=0", params![id, serde_json::to_string(&result)?])?;
             Ok(())
@@ -875,7 +875,7 @@ impl RuntimeStartsStore for Store {
             if operation.dispatched || operation.finished || operation.revoked_by.is_none() { return Ok(false); }
             let mut result = json!({"error":"start was revoked before dispatch","producer_closed":true,"closure_kind":"never-dispatched"});
             closed_runtime_start_result(&operation, self.origin(), &mut result)?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h681fbb5061de owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-haddf2c06fbd7 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
                 params![id, serde_json::to_string(&result)?])?;
             Ok(true)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
@@ -901,7 +901,7 @@ impl RuntimeStartsStore for Store {
                 result["producer_closed"] = Value::from(true);
                 closed_runtime_start_result(&operation, self.origin(), &mut result)?;
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h59b05bc5a82f owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h80e87fffa918 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
                 release_evidence(tx, id)?;
@@ -948,7 +948,7 @@ impl RuntimeStartsStore for Store {
                     json!({"kind":"exact-runtime-ended","status":status,"incarnation":incarnation}),
                 )?;
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h9f45e89ccbf0 owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h3c233cfbc1f1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
                 release_evidence(tx, id)?;
@@ -960,7 +960,7 @@ impl RuntimeStartsStore for Store {
     fn verify_runtime_start(&self, id: &str, incarnation: &str) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
             Ok(tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h138532d38dda owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET result=json_set(result,
+                /* sqlite-large-value: allow-for-now lv-h0589f022f6bc owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET result=json_set(result,
                     '$.incarnation',?2,'$.verification','operation-incarnation','$.phase','completed')
                  WHERE id=?1 AND finished=1 AND applied=0 AND receipted=0
                     AND revoked_by IS NULL AND json_extract(result,'$.error') IS NULL",
@@ -992,7 +992,7 @@ impl RuntimeStartsStore for Store {
                 result["producer_closed"] = Value::from(true);
                 closed_runtime_start_result(&operation, self.origin(), &mut result)?;
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h0d1e3b3cb743 owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-hec19c18c98e2 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
                 Ok(true)
@@ -1004,7 +1004,7 @@ impl RuntimeStartsStore for Store {
         self.connection
             .batched(|tx| {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h3eed6970349f owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET applied=1 WHERE id=?1 AND finished=1
+                    /* sqlite-large-value: allow-for-now lv-hd7aa74d89484 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET applied=1 WHERE id=?1 AND finished=1
                         AND (revoked_by IS NOT NULL OR json_extract(result,'$.error') IS NOT NULL
                             OR json_extract(result,'$.verification')='operation-incarnation')",
                     [id],
@@ -1075,7 +1075,7 @@ impl RuntimeStartsStore for Store {
                 "retirement_request":request,"retirement_request_receipt":requested,
                 "retirement_result":result["retirement_result"]});
             retain_runtime_start_closure(&operation, self.origin(), &mut result, witness)?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hebbee46dfe2a owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hf4609d462f80 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                 params![id, serde_json::to_string(&result)?])?;
             release_evidence(tx, id)?;
             Ok(true)
@@ -1086,7 +1086,7 @@ impl RuntimeStartsStore for Store {
         self.connection
             .batched(|tx| {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h65410f5dab3e owner=st3_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-hae4fa84d446d owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
                     [id],
                 )?;
                 release_evidence(tx, id)
@@ -1100,8 +1100,8 @@ impl RuntimeStartsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::runtime_starts_tests_shared_seats::*;
-    use st3_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+    use fractal_missions::store::runtime_starts_tests_shared_seats::*;
+    use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
 
     #[test]
     fn retirement_proof_requires_the_exact_subject_operation_request_and_incarnation() {
@@ -2334,6 +2334,6 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, smallclaims::store::CURRENT_SCHEMA_VERSION);
-        assert_eq!(version, st3_schema::STORAGE_VERSION);
+        assert_eq!(version, fractal_schema::STORAGE_VERSION);
     }
 }

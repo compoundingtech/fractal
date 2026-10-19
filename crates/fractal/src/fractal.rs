@@ -58,7 +58,7 @@ pub fn installed_binaries(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
 pub fn web(arguments: &[OsString]) -> ExitCode {
     if arguments.len() > 2 {
         if arguments.len() == 3 && matches!(arguments[2].to_str(), Some("--help" | "-h")) {
-            st3::cli_println!("Usage: fractal web\n\nOpen the running web UI (FRACTAL_WEB_URL; default http://127.0.0.1:5173). This command does not start a server.");
+            fractal_daemon::cli_println!("Usage: fractal web\n\nOpen the running web UI (FRACTAL_WEB_URL; default http://127.0.0.1:5173). This command does not start a server.");
             return ExitCode::SUCCESS;
         }
         eprintln!("Usage: fractal web");
@@ -92,7 +92,7 @@ pub fn web(arguments: &[OsString]) -> ExitCode {
         .status()
         .is_ok_and(|status| status.success());
     if !opened {
-        st3::cli_println!("{url}");
+        fractal_daemon::cli_println!("{url}");
     }
     ExitCode::SUCCESS
 }

@@ -1,5 +1,5 @@
 //! Measure the daemon's event migration worker on a private, previously copied store.
-//! Usage: cargo run --release -p st3 --example event_migration -- CLONE OUTPUT.json
+//! Usage: cargo run --release -p fractal --example event_migration -- CLONE OUTPUT.json
 //! Never supply a live store or the immutable capture: this opens and migrates CLONE.
 
 use std::os::unix::fs::PermissionsExt;
@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
-use st3::store::Store;
+use fractal_daemon::store::Store;
 
 fn cpu_seconds() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     let cpu_migration = cpu_seconds();
     let report = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        st3::maintenance::migrate_event_payloads(store.clone()),
+        fractal_daemon::maintenance::migrate_event_payloads(store.clone()),
     )
     .await
     .context("migration exceeded its 600 second cap")??;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { St3Client, type CollectionFrame } from '@smalltalk/st3-client'
-import { Arrangement, ArrangementPage, CollectionFrame as Frame, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { FractalClient, type CollectionFrame } from '@fractal/client'
+import { Arrangement, ArrangementPage, CollectionFrame as Frame, decodeUnknownSync } from '@fractal/client/schema'
 
 import { ANCHOR_MS, loadWorld, type World } from '../src/index.ts'
 import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
@@ -11,7 +11,7 @@ const setup = (world: World) => {
   const clock = manualClock(world.now)
   const replay = createReplay(world, { clock })
   replays.push(replay)
-  const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
+  const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
   return { world, clock, replay, client }
 }
 const fleet = () => loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })

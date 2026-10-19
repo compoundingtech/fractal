@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::post};
 use serde_json::{Value, json};
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 
 #[derive(Clone)]
 struct Daemon {
@@ -36,7 +36,7 @@ async fn start_daemon(socket: &Path, delay: Duration) -> (Daemon, tokio::task::J
         .route("/v1/claims", post(admit))
         .with_state(daemon.clone());
     let path = socket.to_owned();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&path, app).await.unwrap() });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, app).await.unwrap() });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket.exists() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -49,7 +49,7 @@ async fn start_daemon(socket: &Path, delay: Duration) -> (Daemon, tokio::task::J
 
 fn seat(root: &Path) -> std::path::PathBuf {
     let catalog = root.join("catalog");
-    let host = st_drivers::run::detect_host();
+    let host = fractal_drivers::run::detect_host();
     let agent = catalog.join("agents").join(&host).join("seat");
     std::fs::create_dir_all(&agent).unwrap();
     std::fs::write(
@@ -64,7 +64,7 @@ fn seat(root: &Path) -> std::path::PathBuf {
 }
 
 fn hook(root: &Path, event: &str, collector: &str) -> tokio::process::Command {
-    let mut command = st3::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -89,13 +89,13 @@ fn hook(root: &Path, event: &str, collector: &str) -> tokio::process::Command {
 
 #[tokio::test]
 async fn an_event_hook_hands_count_and_warnings_to_the_daemon_without_contacting_the_collector() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
     let agent = seat(root.path());
     // A failed timeline write is fail-open and must still be observable with RUST_LOG=off.
-    std::fs::create_dir(st_drivers::harness_timeline::timeline_path(&agent)).unwrap();
+    std::fs::create_dir(fractal_drivers::harness_timeline::timeline_path(&agent)).unwrap();
     let (daemon, server) = start_daemon(&root.path().join("daemon.sock"), Duration::ZERO).await;
     let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     collector.set_nonblocking(true).unwrap();
@@ -136,7 +136,7 @@ async fn an_event_hook_hands_count_and_warnings_to_the_daemon_without_contacting
 
 #[tokio::test]
 async fn an_undeclared_application_and_the_status_line_create_no_hook_count_or_exporter() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -155,7 +155,7 @@ async fn an_undeclared_application_and_the_status_line_create_no_hook_count_or_e
             .status
             .success()
     );
-    let mut status_line = st3::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut status_line = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
     status_line
         .env_clear()
         .env("HOME", root.path())
@@ -178,7 +178,7 @@ async fn an_undeclared_application_and_the_status_line_create_no_hook_count_or_e
 
 #[tokio::test]
 async fn a_daemon_that_delays_telemetry_acknowledgement_cannot_fail_or_hold_up_the_hook() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();

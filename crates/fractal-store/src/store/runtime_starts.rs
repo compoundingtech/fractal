@@ -15,12 +15,12 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         // The installation transaction replaces earlier draft triggers once. No
         // ledger backfill is needed: existing results predate every new capture.
         transaction.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h3e4747e0b2f9 owner=st3_store::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS local_runtime_starts_observation_insert;
+            /* sqlite-large-value: allow-for-now lv-hd90d9bade9c2 owner=fractal_store::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS local_runtime_starts_observation_insert;
              DROP TRIGGER IF EXISTS local_runtime_starts_observation_update;
              DROP TRIGGER IF EXISTS local_runtime_starts_observation_delete;",
         )?;
     }
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hc71fdd03449e owner=st3_store::store::runtime_starts TODO=chunk-or-reference-variable-columns */ r#"
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hfb0034c76478 owner=fractal_store::store::runtime_starts TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_runtime_start_observation_generation (
     id INTEGER PRIMARY KEY CHECK(id=1),
     value INTEGER NOT NULL CHECK(typeof(value)='integer' AND value>=0)
@@ -107,7 +107,7 @@ CREATE INDEX IF NOT EXISTS local_runtime_start_evidence_observation ON local_run
             "runtime-start ledger has operations but lacks immutable publication format cuts; preserve this store and roll forward with its original format-boundary evidence"
         );
         transaction.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h640c0652dca8 owner=st3_store::store::runtime_starts TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO meta(key,value)
+            /* sqlite-large-value: allow-for-now lv-h2c046fbe6a03 owner=fractal_store::store::runtime_starts TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO meta(key,value)
              SELECT 'publication-operation-format-shared-cut', CAST(COALESCE(MAX(store_index),0) AS TEXT) FROM claims;
              INSERT OR IGNORE INTO meta(key,value)
              SELECT 'publication-operation-format-local-cut', CAST(COALESCE(MAX(id),0) AS TEXT) FROM local_observations;",

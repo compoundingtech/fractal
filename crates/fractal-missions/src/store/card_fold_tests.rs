@@ -5,11 +5,11 @@ pub use crate::store::card_fold_tests_shared::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::card_fold_tests_shared::{agent_subjects, assert_card_fold_parity, assert_card_reads_parity, assert_card_reads_parity_with, per_subject_card_status};
-use st3_delivery::store::tests_shared::{exchange_from, receive_and_project};
-use st3_store::store::tests_shared_seats::exchange_of;
+use fractal_delivery::store::tests_shared::{exchange_from, receive_and_project};
+use fractal_store::store::tests_shared_seats::exchange_of;
 use super::*;
-use st3_store::store::card_fold_tests_shared_missions::*;
-use st3_store::store::card_fold_tests_shared_missions::{append, birch, declare, running, snapshots};
+use fractal_store::store::card_fold_tests_shared_missions::*;
+use fractal_store::store::card_fold_tests_shared_missions::{append, birch, declare, running, snapshots};
 
 
 /// A run and generation that own a declared agent, so card reductions read owner states.
@@ -316,7 +316,7 @@ fn card_fold_orders_claims_that_tie_in_one_batch_by_their_position() {
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hdbedb6933ba7 owner=st3_missions::store::card_fold_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET batch_id=?1, accepted_at_unix_ms=?2
+                /* sqlite-large-value: allow-for-now lv-h254e2af9f4e1 owner=fractal_missions::store::card_fold_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET batch_id=?1, accepted_at_unix_ms=?2
                  WHERE subject='agent/retired' AND kind='runtime.observed'",
                 params![first_batch, accepted],
             )

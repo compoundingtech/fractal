@@ -10,6 +10,6 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_github::*;
+pub use fractal_github::*;
 
 pub mod peer;

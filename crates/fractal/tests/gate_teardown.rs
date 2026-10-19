@@ -1,15 +1,15 @@
 #![cfg(target_os = "linux")]
 //! An unreadable adoption observation is not evidence that a gate group stopped.
-use st3::MissionsStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use st3::model::{ClaimInput, MissionRunRequest};
-use st3::reconcile::{NativeRuntime, Reconciler, RuntimeControl};
-use st3::store::Store;
+use fractal_daemon::model::{ClaimInput, MissionRunRequest};
+use fractal_daemon::reconcile::{NativeRuntime, Reconciler, RuntimeControl};
+use fractal_daemon::store::Store;
 use tokio::sync::Notify;
 
 fn live(pid: u32) -> bool {
@@ -38,13 +38,13 @@ fn indeterminate_adopted_gate_remains_scheduled_until_sigkill() {
     // This test binary has only this test. Select degraded mode without changing the
     // process environment or depending on whether the host has a user manager.
     assert_eq!(
-        st_runtime::initialize_isolation(&BTreeMap::new()),
-        st_runtime::Isolation::DegradedDetached,
+        fractal_runtime::initialize_isolation(&BTreeMap::new()),
+        fractal_runtime::Isolation::DegradedDetached,
     );
     let root = tempfile::tempdir().unwrap();
     let state = root.path();
     let store = Arc::new(Store::open_memory("node").unwrap());
-    let intent = st3::graph::parse_owned_set_intent(
+    let intent = fractal_daemon::graph::parse_owned_set_intent(
         "version 2\nmission \"cancel\" state=\"ready\" { goal \"Stop the gate.\"; step \"wait\" { agentless } }",
         "node",
     ).unwrap();
@@ -62,10 +62,10 @@ fn indeterminate_adopted_gate_remains_scheduled_until_sigkill() {
         fields: serde_json::from_value(serde_json::json!({"runner":"exec", "owner":step.subject})).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
-    let exec = st_runtime::ExecRuntime::new(state.join("exec"), state.join("logs"));
+    let exec = fractal_runtime::ExecRuntime::new(state.join("exec"), state.join("logs"));
     let generation = exec.spawn(
         &runtime_id,
-        &st_runtime::Launch::Shell("trap '' TERM; sleep 600 & echo $! > child.pid; echo ready > ready; wait".into()),
+        &fractal_runtime::Launch::Shell("trap '' TERM; sleep 600 & echo $! > child.pid; echo ready > ready; wait".into()),
         state, &std::env::vars().collect(),
     ).unwrap();
     let _cleanup = Group(generation.pid);

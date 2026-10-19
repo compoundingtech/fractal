@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { unreadableTranscript, cleanMessageText, conversationEntries, fetchedConversationEntries, entryMatches, foldDeliveryFlaps, fromHarness, headerLine, shownToolLines, subagentSession, toolTitle, DEFAULT_FILTERS, SHOW_EVERYTHING } from '@smalltalk/st3-views/conversationView';
+import { unreadableTranscript, cleanMessageText, conversationEntries, fetchedConversationEntries, entryMatches, foldDeliveryFlaps, fromHarness, headerLine, shownToolLines, subagentSession, toolTitle, DEFAULT_FILTERS, SHOW_EVERYTHING } from '@fractal/views/conversationView';
 
 let sequence = 0;
 const at = minute => `2026-09-30T12:${String(minute).padStart(2, '0')}:00Z`;
@@ -182,7 +182,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
 
 // A conversation st is refusing says why, how old what is shown is, and that the phone retries.
 {
-  const { staleLine } = await import('@smalltalk/st3-views/conversationView');
+  const { staleLine } = await import('@fractal/views/conversationView');
   assert.equal(staleLine('the list changed while it was being read', false, null, 0), 'Not loaded yet: the list changed while it was being read. Trying again.');
   assert.equal(staleLine('willow cannot be reached right now', true, 1_000, 76_000), 'willow cannot be reached right now · shown as of 1m ago · trying again');
   assert.equal(staleLine('st asked to slow down for a moment', true, 10_000, 22_000), 'st asked to slow down for a moment · shown as of 12s ago · trying again');
@@ -190,7 +190,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
 
 // A conversation st refused for good never claims to be loading or retrying: it says why and offers a retry.
 {
-  const { staleLine } = await import('@smalltalk/st3-views/conversationView');
+  const { staleLine } = await import('@fractal/views/conversationView');
   for (const loaded of [false, true]) {
     const line = staleLine('session/example-child was not found', loaded, null, 0, true);
     assert.equal(line, 'Could not load this conversation: session/example-child was not found · tap to try again');
@@ -347,7 +347,7 @@ assert.equal(cleanMessageText(rawText, SHOW_EVERYTHING), rawText);
 
 // A conversation says how fresh it is, and that the phone is asking again.
 {
-  const { freshnessLine } = await import('@smalltalk/st3-views/conversationView');
+  const { freshnessLine } = await import('@fractal/views/conversationView');
   const base = { issue: '', loaded: true, refreshing: false, lastFrame: 1_000, now: 61_000 };
   assert.deepEqual(freshnessLine(base), { text: '● live · updated 1m ago', tone: 'live' });
   assert.deepEqual(freshnessLine({ ...base, now: 5_000 }), { text: '● live · updated 4s ago', tone: 'live' });

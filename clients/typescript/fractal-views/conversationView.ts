@@ -1,7 +1,7 @@
-import type { ConversationContentRef, TimelineEntry } from '@smalltalk/st3-client';
+import type { ConversationContentRef, TimelineEntry } from '@fractal/client';
 import { contentReferences } from './conversationContent.ts';
 
-// A conversation drawn the way stui draws it (crates/stui/src/ui/adapt.rs conversation and
+// A conversation drawn the way stui draws it (crates/fractal-tui/src/ui/adapt.rs conversation and
 // from_harness, conversation.rs): the person's turns as tinted blocks, replies as markdown, tool
 // calls as small boxes tinted by outcome, Small Talk in the same stream with a bar, and graph
 // events and diagnostics as one dim line. Anything unexpected is shown as what it is, not dropped

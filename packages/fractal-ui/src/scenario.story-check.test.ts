@@ -1,5 +1,5 @@
-import { scenarioStoryCheck, withScenario } from '@smalltalk/st3-scenarios/storybook'
-import { loadWorld } from '@smalltalk/st3-scenarios'
+import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook'
+import { loadWorld } from '@fractal/scenarios'
 import { scenarioSections } from './scenario-transcript.story-harness'
 import { expect, test } from 'vitest'
 import * as React from 'react'

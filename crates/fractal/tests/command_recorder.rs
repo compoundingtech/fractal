@@ -38,8 +38,8 @@ fn write_program(path: &Path, source: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn install(state: &Path, real: &Path) -> st3::recorder::Installation {
-    st3::recorder::install(state, "test-host", st3(), &[real.as_os_str()]).unwrap()
+fn install(state: &Path, real: &Path) -> fractal_daemon::recorder::Installation {
+    fractal_daemon::recorder::install(state, "test-host", st3(), &[real.as_os_str()]).unwrap()
 }
 
 fn fixture(source: &str) -> Fixture {
@@ -148,7 +148,7 @@ impl Fixture {
     }
 
     fn receipts(&self) -> Vec<Value> {
-        fs::read_dir(st3::recorder::receipt_path(&self.root.path().join("state")))
+        fs::read_dir(fractal_daemon::recorder::receipt_path(&self.root.path().join("state")))
             .unwrap()
             .map(|entry| {
                 let path = entry.unwrap().path();
@@ -208,7 +208,7 @@ fn read_line(reader: &mut impl std::io::Read) -> String {
 
 #[test]
 fn a_recorded_call_is_byte_for_byte_the_real_call() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture(ECHO);
@@ -247,7 +247,7 @@ fn a_recorded_call_is_byte_for_byte_the_real_call() {
 
 #[test]
 fn each_call_appends_one_record_with_its_context() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture(ECHO);
@@ -322,7 +322,7 @@ fn each_call_appends_one_record_with_its_context() {
 
 #[test]
 fn the_recorder_leaves_unread_input_for_the_next_command() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture("#!/bin/sh\nexit 0\n");
@@ -340,7 +340,7 @@ fn the_recorder_leaves_unread_input_for_the_next_command() {
 
 #[test]
 fn a_real_program_ended_by_a_signal_ends_the_recorder_by_that_signal() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture("#!/bin/sh\nkill -TERM $$\nsleep 5\n");
@@ -355,7 +355,7 @@ fn a_real_program_ended_by_a_signal_ends_the_recorder_by_that_signal() {
 
 #[test]
 fn a_signal_sent_to_the_recorder_reaches_the_real_program() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture(
@@ -380,7 +380,7 @@ fn a_signal_sent_to_the_recorder_reaches_the_real_program() {
 
 #[test]
 fn a_closed_output_pipe_ends_the_recorder_as_it_ends_the_real_program() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture("#!/bin/sh\nwhile :; do echo line; done\n");
@@ -404,15 +404,15 @@ fn a_closed_output_pipe_ends_the_recorder_as_it_ends_the_real_program() {
 
 #[test]
 fn a_log_that_cannot_be_written_changes_nothing() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture(ECHO);
     let state = fixture.root.path().join("state");
-    assert!(st3::recorder::health(&state).0);
+    assert!(fractal_daemon::recorder::health(&state).0);
     fs::remove_file(&fixture.log).unwrap();
     fs::create_dir(&fixture.log).unwrap();
-    let (recording, message) = st3::recorder::health(&state);
+    let (recording, message) = fractal_daemon::recorder::health(&state);
     assert!(!recording);
     assert!(message.contains("cannot be appended"), "{message}");
     let run = |mut command: Command| {
@@ -429,14 +429,14 @@ fn a_log_that_cannot_be_written_changes_nothing() {
 
 #[test]
 fn a_log_fifo_without_a_reader_does_not_hold_the_command() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture("#!/bin/sh\necho done\n");
     fs::remove_file(&fixture.log).unwrap();
     let fifo = std::ffi::CString::new(fixture.log.to_str().unwrap()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    assert!(!st3::recorder::health(&fixture.root.path().join("state")).0);
+    assert!(!fractal_daemon::recorder::health(&fixture.root.path().join("state")).0);
     let mut child = fixture
         .recorded("git")
         .stdin(Stdio::null())
@@ -450,7 +450,7 @@ fn a_log_fifo_without_a_reader_does_not_hold_the_command() {
 
 #[test]
 fn a_recorder_never_runs_itself_or_another_recorder() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture("#!/bin/sh\necho real\n");
@@ -504,7 +504,7 @@ fn a_recorder_never_runs_itself_or_another_recorder() {
 
 #[test]
 fn concurrent_calls_append_whole_lines() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture("#!/bin/sh\nexit 0\n");
@@ -536,7 +536,7 @@ fn concurrent_calls_append_whole_lines() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_terminal_interrupt_ends_the_call_and_is_still_recorded() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::os::fd::FromRawFd as _;
@@ -611,7 +611,7 @@ fn a_terminal_interrupt_ends_the_call_and_is_still_recorded() {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_real_program_keeps_the_callers_ignored_and_blocked_signals() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::os::unix::process::CommandExt as _;
@@ -675,7 +675,7 @@ fn the_real_program_keeps_the_callers_ignored_and_blocked_signals() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_killed_recorder_takes_the_real_program_with_it() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = fixture("#!/bin/sh\necho $$\nexec sleep 30\n");
@@ -956,7 +956,7 @@ fn terminal_stdout_stays_interactive_and_does_not_publish_a_receipt() {
 #[test]
 fn a_receipt_spool_that_cannot_be_written_changes_nothing() {
     let fixture = fixture("#!/bin/sh\nprintf 'https://github.com/owner/repo/issues/123\\n'\nexit 17\n");
-    let spool = st3::recorder::receipt_path(&fixture.root.path().join("state"));
+    let spool = fractal_daemon::recorder::receipt_path(&fixture.root.path().join("state"));
     fs::remove_dir(&spool).unwrap();
     fs::write(&spool, "not a directory").unwrap();
     let recorded = fixture.recorded("gh").args(["issue", "create"]).output().unwrap();

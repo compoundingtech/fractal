@@ -191,7 +191,7 @@ fn attach_default_probe_worker() -> Result<()> {
 }
 
 /// What a key costs from press to drawn frame with an agent's terminal attached in a space,
-/// with an alert on top when `STUI_BENCH_ALERT` is set: `cargo test -p stui --lib --release
+/// with an alert on top when `STUI_BENCH_ALERT` is set: `cargo test -p fractal-tui --lib --release
 /// attach_redraw_cost -- --ignored --nocapture`. Run it on two trees to compare them.
 #[test]
 #[ignore = "a measurement, not a check"]

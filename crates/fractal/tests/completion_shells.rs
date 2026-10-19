@@ -10,8 +10,8 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 
 use crate::terminal_attach::{SilentDaemon, serve_unix, state};
 
@@ -374,11 +374,11 @@ fn declare_agents(store: &Store, names: &[&str]) {
             })
             .collect::<String>()
     );
-    let intent = st3::parse_intent(&source, "completion-test").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "completion-test").unwrap();
     let preview = store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: None,
             },
@@ -544,7 +544,7 @@ async fn attach_consultation_only_gets_the_budget_left_after_resolution() {
     let state = state(root.path());
     observe(&state.store, "agent/example/worker", "running");
     let socket = root.path().join("st3.sock");
-    let app = st3::api::router(state).layer(axum::middleware::from_fn(
+    let app = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         |request: axum::extract::Request, next: axum::middleware::Next| async move {
             if request.uri().path().starts_with("/v1/sessions/") {
                 return std::future::pending::<axum::response::Response>().await;
@@ -557,7 +557,7 @@ async fn attach_consultation_only_gets_the_budget_left_after_resolution() {
     ));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     let ready = Instant::now() + Duration::from_secs(5);
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {

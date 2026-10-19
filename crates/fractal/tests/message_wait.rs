@@ -11,8 +11,8 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use serde_json::Value;
-use st3::api::AppState;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const WORKER: &str = "agent/example/worker";
@@ -67,15 +67,15 @@ async fn counted_daemon(
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let store = state.store.clone();
     let requests = Arc::new(Requests::default());
-    let app = st3::api::router(state)
+    let app = fractal_daemon::api::router(state)
         .layer(axum::middleware::from_fn_with_state(requests.clone(), record));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     wait_for(&socket).await;
     (socket, store, requests, server)
@@ -102,7 +102,7 @@ async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
         .collect::<Vec<_>>();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        let mut command = st3::test_support::command(binary);
+        let mut command = fractal_daemon::test_support::command(binary);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("ST_") || name.starts_with("ST3_") {

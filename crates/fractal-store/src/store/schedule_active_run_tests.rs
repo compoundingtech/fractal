@@ -15,14 +15,14 @@ fn schedule_active_run_seek_keeps_malformed_json_an_error() {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h02f7ae3093e7 owner=st3_store::store::schedule_active_run_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(subject TEXT,kind TEXT,body TEXT);
+            /* sqlite-large-value: allow-for-now lv-h6be321a75331 owner=fractal_store::store::schedule_active_run_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(subject TEXT,kind TEXT,body TEXT);
          CREATE TABLE mission_runs(id TEXT PRIMARY KEY,status TEXT);
          INSERT INTO claims VALUES('schedule/bad','schedule.work-started','{');
          INSERT INTO mission_runs VALUES('run','running');",
         )
         .unwrap();
     for query in [LEGACY_QUERY, Store::SCHEDULE_ACTIVE_STARTED_RUN_QUERY] {
-        let result = connection.query_row(/* sqlite-large-value: allow-for-now lv-h21565fb9296f owner=st3_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ query, ["schedule/bad"], |row| row.get::<_, bool>(0));
+        let result = connection.query_row(/* sqlite-large-value: allow-for-now lv-h6c095182d2fd owner=fractal_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ query, ["schedule/bad"], |row| row.get::<_, bool>(0));
         assert!(
             result.is_err(),
             "malformed JSON must not become an empty result"
@@ -47,7 +47,7 @@ fn schedule_active_run_seek_uses_existing_id_index_without_unrelated_run_growth(
         );
     }
     let plan = transaction
-        .prepare(/* sqlite-large-value: allow-for-now lv-h21c303f88af9 owner=st3_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ &format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-hfd47d3decbb7 owner=fractal_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             Store::SCHEDULE_ACTIVE_STARTED_RUN_QUERY
         ))
@@ -77,7 +77,7 @@ fn schedule_active_run_seek_uses_existing_id_index_without_unrelated_run_growth(
         inserted = population;
         let mut steps = 0;
         let mut statement = transaction
-            .prepare(/* sqlite-large-value: allow-for-now lv-h313321078c4e owner=st3_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ Store::SCHEDULE_ACTIVE_STARTED_RUN_QUERY)
+            .prepare(/* sqlite-large-value: allow-for-now lv-h4bd147f61506 owner=fractal_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ Store::SCHEDULE_ACTIVE_STARTED_RUN_QUERY)
             .unwrap();
         for (subject, expected) in [
             ("schedule/active", true),
@@ -86,7 +86,7 @@ fn schedule_active_run_seek_uses_existing_id_index_without_unrelated_run_growth(
         ] {
             statement.reset_status(StatementStatus::VmStep);
             statement.reset_status(StatementStatus::FullscanStep);
-            let answer: bool = statement.query_row(/* sqlite-large-value: allow-for-now lv-h266412cdeca0 owner=st3_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0)).unwrap();
+            let answer: bool = statement.query_row(/* sqlite-large-value: allow-for-now lv-h28991f3f5745 owner=fractal_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0)).unwrap();
             assert_eq!(answer, expected);
             let fullscan = statement.get_status(StatementStatus::FullscanStep);
             let vm = statement.get_status(StatementStatus::VmStep);
@@ -118,7 +118,7 @@ fn schedule_active_run_seek_preserves_blob_storage_and_duplicate_typed_ids() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-hd93d1fc9c11d owner=st3_store::store::schedule_active_run_tests TODO=chunk-or-reference-variable-columns */ "PRAGMA encoding='{encoding}';
+                /* sqlite-large-value: allow-for-now lv-h44965c7b7b79 owner=fractal_store::store::schedule_active_run_tests TODO=chunk-or-reference-variable-columns */ "PRAGMA encoding='{encoding}';
              CREATE TABLE claims(subject TEXT,kind TEXT,body TEXT);
              CREATE TABLE mission_runs(id TEXT PRIMARY KEY,status TEXT);",
             ))
@@ -131,24 +131,24 @@ fn schedule_active_run_seek_preserves_blob_storage_and_duplicate_typed_ids() {
         // Exercise ordinary text IDs as well as equal-byte text/blob identities.
         for id in ["text", "é/雪", "text-nul\0tail"] {
             connection
-                .execute(/* sqlite-large-value: allow-for-now lv-he77749574a5f owner=st3_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES(?1,'running')", [id])
+                .execute(/* sqlite-large-value: allow-for-now lv-h680af4f29f70 owner=fractal_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES(?1,'running')", [id])
                 .unwrap();
         }
         for id in ["blob", "blob-nul\0tail"] {
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h4e515646a866 owner=st3_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES(CAST(?1 AS BLOB),'running')",
+                    /* sqlite-large-value: allow-for-now lv-hd15944f96a36 owner=fractal_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES(CAST(?1 AS BLOB),'running')",
                     [id],
                 )
                 .unwrap();
         }
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-h9a009800ec22 owner=st3_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES('blob','failed')", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-hff3ad7af7c33 owner=fractal_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES('blob','failed')", [])
             .unwrap();
         for id in ["text", "é/雪", "text-nul\0tail", "blob", "blob-nul\0tail"] {
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h5cacf279892f owner=st3_store::store::schedule_active_run_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES(?1,'schedule.work-started',?2)",
+                    /* sqlite-large-value: allow-for-now lv-h60e669c72d60 owner=fractal_store::store::schedule_active_run_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES(?1,'schedule.work-started',?2)",
                     params![
                         format!("schedule/{id}"),
                         json!({"fields":{"mission_run":format!("mission-run/{id}")}}).to_string()
@@ -159,7 +159,7 @@ fn schedule_active_run_seek_preserves_blob_storage_and_duplicate_typed_ids() {
         let check = |subject: &str, expected| {
             for query in [LEGACY_QUERY, Store::SCHEDULE_ACTIVE_STARTED_RUN_QUERY] {
                 let answer: bool = connection
-                    .query_row(/* sqlite-large-value: allow-for-now lv-hb164c021c0b8 owner=st3_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ query, [subject], |row| row.get(0))
+                    .query_row(/* sqlite-large-value: allow-for-now lv-h47cb1af0ce02 owner=fractal_store::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ query, [subject], |row| row.get(0))
                     .unwrap();
                 assert_eq!(answer, expected, "{encoding}: {subject}");
             }
@@ -169,7 +169,7 @@ fn schedule_active_run_seek_preserves_blob_storage_and_duplicate_typed_ids() {
         }
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h14dee3b88104 owner=st3_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='completed' WHERE typeof(id)='blob'",
+                /* sqlite-large-value: allow-for-now lv-hdb5da4c3cb77 owner=fractal_store::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='completed' WHERE typeof(id)='blob'",
                 [],
             )
             .unwrap();

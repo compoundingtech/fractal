@@ -3,12 +3,12 @@ import { composeStory, type Args, type Meta, type StoryObj } from '@storybook/re
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
-  applyWindow, ClientError, St3Client,
+  applyWindow, ClientError, FractalClient,
   type CollectionFrame, type CollectionWindow, type EnvelopeOf,
   type Page, type PageOptions, type Resource, type TimelineEntry,
-} from '@smalltalk/st3-client'
-import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { applyConversation, isConversational, type Conversation } from '../../st3-views/sessionView.ts'
+} from '@fractal/client'
+import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownSync } from '@fractal/client/schema'
+import { applyConversation, isConversational, type Conversation } from '../../fractal-views/sessionView.ts'
 
 import { decodeSlice } from '../scripts/decode.ts'
 import {
@@ -96,7 +96,7 @@ const verifyReplay = async (world: World) => {
     }
     return response
   }
-  const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl })
+  const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl })
   const frames: CollectionFrame[] = []
   const windows = new Map<string, CollectionWindow>()
   const conversations = new Map<string, Conversation<TimelineEntry>>()
@@ -364,7 +364,7 @@ describe.each(catalog.map(({ id }) => [id]))('catalog consumer end-to-end: %s', 
     for (const kind of SLICE_KINDS) expect(decodeSlice(world.id, world.slices[kind]), label(world, kind, `decode now=${now}`)).toEqual([])
   })
 
-  it('serves discovery, all pages, first socket frames and every timeline step to St3Client', async () => {
+  it('serves discovery, all pages, first socket frames and every timeline step to FractalClient', async () => {
     await verifyReplay(loadWorld(id!, { now: ANCHOR_MS }))
   }, 30_000)
 

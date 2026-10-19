@@ -1,10 +1,10 @@
 //! Pairing and private profile storage shared with `st devices complete`.
-pub use st3_client::device::{Profile, profile_path};
+pub use fractal_client::device::{Profile, profile_path};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_client::{
+    use fractal_client::{
         PersonPairedSession,
         device::{Device, validate_endpoint},
     };

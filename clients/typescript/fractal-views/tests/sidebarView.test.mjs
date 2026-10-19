@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { build, nodeKey, canPlace, planMove, rollup } from '@smalltalk/st3-views/sidebarView';
-import { build as publicBuild } from '@smalltalk/st3-views';
+import { build, nodeKey, canPlace, planMove, rollup } from '@fractal/views/sidebarView';
+import { build as publicBuild } from '@fractal/views';
 import { project } from '../../../../apps/fractal-web/src/folders/core.mts';
-import * as Schema from '@smalltalk/st3-client/schema';
+import * as Schema from '@fractal/client/schema';
 
 const fixtures = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/sidebar-v2.json', import.meta.url), 'utf8'));
 const folder = id => ({ _tag: 'Folder', id });

@@ -50,8 +50,8 @@ pub use crate::store::runtime::SmalltalkRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
-use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
-pub use st3_kernel::model::local_observation_position;
+use fractal_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
+pub use fractal_kernel::model::local_observation_position;
 pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
 use crate::store::*;
@@ -112,7 +112,7 @@ impl Store {
         let transaction = writer.transaction().unwrap();
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h5eb1db1a9333 owner=st3_store::store::shared TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('test-write-stall', '1')",
+                /* sqlite-large-value: allow-for-now lv-hea3bad2aa322 owner=fractal_store::store::shared TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('test-write-stall', '1')",
                 [],
             )
             .unwrap();
@@ -148,7 +148,7 @@ impl Store {
         for (hash, bytes) in &input.blobs {
             transaction
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-hbb66800c7218 owner=st3_store::store::shared TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
+                    /* sqlite-large-value: allow-for-now lv-h3ff69f258150 owner=fractal_store::store::shared TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
                     params![hash, bytes, bytes.len() as u64],
                 )
                 .map_err(internal)?;
@@ -216,7 +216,7 @@ impl Store {
             verify_replica_batch(batch)?;
             transaction
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h2c2cff9abb73 owner=st3_store::store::shared TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    /* sqlite-large-value: allow-for-now lv-hae19fbfd5a03 owner=fractal_store::store::shared TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![batch.id, batch.origin, batch.replica_sequence, batch.previous_hash, batch.hash, batch.accepted_at_unix_ms.to_string()],
                 )
                 .map_err(internal)?;
@@ -230,11 +230,11 @@ impl Store {
                 .map_err(internal)?;
                 let inserted = transaction
                     .prepare_cached(
-                        /* sqlite-large-value: allow-for-now lv-h5ee472647443 owner=st3_store::store::shared TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                        /* sqlite-large-value: allow-for-now lv-h1c315e6d5b5b owner=fractal_store::store::shared TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     )
                     .map_err(internal)?
-                    .execute(/* sqlite-large-value: allow-for-now lv-h5864f835da0e owner=st3_store::store::shared TODO=trace-statement-and-value-representation */ params![
+                    .execute(/* sqlite-large-value: allow-for-now lv-h56cd37600ce6 owner=fractal_store::store::shared TODO=trace-statement-and-value-representation */ params![
                         claim.id,
                         claim.batch_id,
                         claim.subject,
@@ -276,7 +276,7 @@ impl Store {
             }
             transaction
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h57f0dab9fb8f owner=st3_store::store::shared TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO peer_replica_cursors(peer, origin, accepted_through) VALUES (?1, ?2, ?3)
+                    /* sqlite-large-value: allow-for-now lv-hd0b3d016d111 owner=fractal_store::store::shared TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO peer_replica_cursors(peer, origin, accepted_through) VALUES (?1, ?2, ?3)
                      ON CONFLICT(peer, origin) DO UPDATE SET accepted_through=MAX(accepted_through, excluded.accepted_through)",
                     params![relay, batch.origin, batch.replica_sequence],
                 )
@@ -296,7 +296,7 @@ impl Store {
             .collect::<Vec<_>>();
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-he27d6f0f9355 owner=st3_store::store::shared TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO peer_cursors(peer, accepted_through) VALUES (?1, ?2)
+                /* sqlite-large-value: allow-for-now lv-he2dbbe85be2d owner=fractal_store::store::shared TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO peer_cursors(peer, accepted_through) VALUES (?1, ?2)
                  ON CONFLICT(peer) DO UPDATE SET accepted_through=excluded.accepted_through",
                 params![relay, accepted_through],
             )

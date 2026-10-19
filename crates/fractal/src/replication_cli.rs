@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 pub(super) async fn run_replication(
     client: &Client,
@@ -223,8 +223,8 @@ pub(super) async fn run_replication(
         ReplicationCommand::Checkpoint {
             command: CheckpointCommand::Plan { cut },
         } => {
-            let request = st3::store::CheckpointPlanRequest { day: cut };
-            let plan: st3::store::CheckpointPlanView =
+            let request = fractal_daemon::store::CheckpointPlanRequest { day: cut };
+            let plan: fractal_daemon::store::CheckpointPlanView =
                 client.post("/v1/checkpoint/plan", &request).await?;
             if json_output {
                 return print_value(&plan, true);
@@ -235,7 +235,7 @@ pub(super) async fn run_replication(
         ReplicationCommand::Checkpoint {
             command: CheckpointCommand::Status,
         } => {
-            let status: st3::store::CheckpointStatusView =
+            let status: fractal_daemon::store::CheckpointStatusView =
                 client.get("/v1/checkpoint/status").await?;
             if json_output {
                 return print_value(&status, true);
@@ -252,12 +252,12 @@ pub(super) async fn run_replication(
                 },
         } => {
             let actor = fleet_person(actor, config)?;
-            let request = st3::store::CheckpointExcuseRequest {
+            let request = fractal_daemon::store::CheckpointExcuseRequest {
                 writer,
                 reason,
                 actor,
             };
-            let claim: st3::model::ClaimRecord =
+            let claim: fractal_daemon::model::ClaimRecord =
                 client.post("/v1/checkpoint/excuse", &request).await?;
             print_value(&claim, json_output)
         }
@@ -265,8 +265,8 @@ pub(super) async fn run_replication(
             command: CheckpointCommand::Resume { reason, actor },
         } => {
             let actor = fleet_person(actor, config)?;
-            let request = st3::store::CheckpointResumeRequest { reason, actor };
-            let status: st3::store::CheckpointStatusView =
+            let request = fractal_daemon::store::CheckpointResumeRequest { reason, actor };
+            let status: fractal_daemon::store::CheckpointStatusView =
                 client.post("/v1/checkpoint/resume", &request).await?;
             if json_output {
                 return print_value(&status, true);
@@ -277,7 +277,7 @@ pub(super) async fn run_replication(
     }
 }
 
-fn render_checkpoint_plan(plan: &st3::store::CheckpointPlanView) -> String {
+fn render_checkpoint_plan(plan: &fractal_daemon::store::CheckpointPlanView) -> String {
     let mut output = String::new();
     let percent = |part: usize, whole: usize| {
         if whole == 0 {

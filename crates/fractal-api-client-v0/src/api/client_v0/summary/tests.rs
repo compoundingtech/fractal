@@ -105,8 +105,8 @@ fn native_summary_one_small_typed_row_and_authorized_person_scope() {
     assert_eq!(row[0]["active_missions"], 0);
     assert_eq!(row[0]["machines"]["connected"], 1);
     assert!(serde_json::to_vec(&row).unwrap().len() < 600);
-    let typed: st3_client::Resource = serde_json::from_value(row[0].clone()).unwrap();
-    assert!(matches!(typed, st3_client::Resource::Summary(_)));
+    let typed: fractal_client::Resource = serde_json::from_value(row[0].clone()).unwrap();
+    assert!(matches!(typed, fractal_client::Resource::Summary(_)));
     assert_eq!(
         person_filter(&session, Some("person/other"))
             .unwrap_err()
@@ -168,13 +168,13 @@ fn native_lean_mission_membership_matches_full_cards() {
         .read_snapshot(|index| {
             let ids = store.mission_collection_ids(false, 0, 1000)?;
             let full = mission_list_cards_at(store, &ids, now)?;
-            let full: Vec<st3_client::Mission> = full
+            let full: Vec<fractal_client::Mission> = full
                 .into_iter()
                 .map(serde_json::from_value)
                 .collect::<Result<_, _>>()?;
             let (lean, _) = store.client_summary_missions(now)?;
-            let project = |rows: &Vec<st3_client::Mission>| {
-                st3_ui_model::missions::adapt(
+            let project = |rows: &Vec<fractal_client::Mission>| {
+                fractal_ui_model::missions::adapt(
                     rows.iter(),
                     std::iter::empty(),
                     std::iter::empty(),
@@ -217,7 +217,7 @@ fn native_lean_mission_membership_matches_full_cards() {
     let expiry = client_now_ms() + 60_000;
     let c = rusqlite::Connection::open(root.path().join("graph.db")).unwrap();
     crate::store::configure_projection_writer(&c).unwrap();
-    c.execute(/* sqlite-large-value: allow-for-now lv-h1d7ae057bd03 owner=st3_api_client_v0::api::client_v0::summary::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='working',lease_owner='agent/builder',lease_incarnation='fixture',lease_expires_at_unix_ms=?2 WHERE subject=?1",
+    c.execute(/* sqlite-large-value: allow-for-now lv-h259852889a79 owner=fractal_api_client_v0::api::client_v0::summary::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='working',lease_owner='agent/builder',lease_incarnation='fixture',lease_expires_at_unix_ms=?2 WHERE subject=?1",
         rusqlite::params![step,expiry.to_string()]).unwrap();
     store
         .read_snapshot(|_| {
@@ -421,7 +421,7 @@ fn summary_does_not_hydrate_thousands_of_unstarted_definitions() {
     crate::store::configure_projection_writer(&c).unwrap();
     let tx = c.transaction().unwrap();
     for i in 0..3000 {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-ha9992859ca84 owner=st3_api_client_v0::api::client_v0::summary::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_definitions(mission_id,revision,state,claim_id) SELECT ?1,revision,state,claim_id FROM mission_definitions WHERE mission_id='summary-base'", [format!("summary-unused-{i}")]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hb0dab8208622 owner=fractal_api_client_v0::api::client_v0::summary::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_definitions(mission_id,revision,state,claim_id) SELECT ?1,revision,state,claim_id FROM mission_definitions WHERE mission_id='summary-base'", [format!("summary-unused-{i}")]).unwrap();
     }
     tx.commit().unwrap();
     let before = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
@@ -595,15 +595,15 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
         .read_snapshot(|_| {
             // Inject the hypothetical stale gate only into the presentation adapter:
             // current native attention normally fences terminal owning work itself.
-            let gate: st3_client::Attention = serde_json::from_value(json!({
+            let gate: fractal_client::Attention = serde_json::from_value(json!({
                 "id":"attention/summary-ended","kind":"attention","revision":"fixture",
                 "updated_at":client_timestamp(at),"attention_kind":"human-gate",
                 "source_id":"step-run/summary-ended/review","person_id":"person/avery",
                 "mission_id":"mission/summary-ended","title":"Fixture gate","detail":"Fixture",
                 "priority":"normal","state":"open","requested_at":client_timestamp(at)
             }))?;
-            let project = |missions: &[st3_client::Mission]| {
-                st3_ui_model::missions::adapt(
+            let project = |missions: &[fractal_client::Mission]| {
+                fractal_ui_model::missions::adapt(
                     missions.iter(),
                     std::iter::empty(),
                     std::iter::once(&gate),
@@ -616,13 +616,13 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
                     },
                 )
                 .into_iter()
-                .filter(|m| !m.system && (active(m) || m.word == st3_ui_model::missions::Word::Decision))
+                .filter(|m| !m.system && (active(m) || m.word == fractal_ui_model::missions::Word::Decision))
                 .map(|m| m.id)
                 .collect::<BTreeSet<_>>()
             };
             let current_ids = state.store.mission_collection_ids(false, 0, 1000)?;
             assert!(!current_ids.iter().any(|id| id == "mission/summary-ended"));
-            let full: Vec<st3_client::Mission> =
+            let full: Vec<fractal_client::Mission> =
                 mission_list_cards_at(&state.store, &current_ids, at)?
                     .into_iter()
                     .map(serde_json::from_value)
@@ -631,7 +631,7 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
             assert_eq!(project(&full), project(&lean));
             assert!(project(&lean).is_empty());
             let history_ids = state.store.mission_collection_ids(true, 0, 1000)?;
-            let history: Vec<st3_client::Mission> =
+            let history: Vec<fractal_client::Mission> =
                 mission_list_cards_at(&state.store, &history_ids, at)?
                     .into_iter()
                     .map(serde_json::from_value)

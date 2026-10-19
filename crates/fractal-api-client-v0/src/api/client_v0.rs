@@ -30,10 +30,10 @@ use std::collections::BTreeSet;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use smallclaims::fifo::{Kind, Queue};
-pub use st3_api_core::api::client_v0::*;
-pub use st3_api_core::api::client_v0::{ClientSession, CollectionSubscribe, EXACT_AGENT_SELECTOR_CAPABILITY, EventsQuery, Fence, LOCAL_PERSON_HEADER, NATIVE_PAGE_CURSOR_PREFIX, TIMELINE_PAGE_BYTE_BUDGET, acting_party, administrative_get, agent_todo_value, assistant_mission_list_cards_with};
-pub use st3_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
-pub use st3_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
+pub use fractal_api_core::api::client_v0::*;
+pub use fractal_api_core::api::client_v0::{ClientSession, CollectionSubscribe, EXACT_AGENT_SELECTOR_CAPABILITY, EventsQuery, Fence, LOCAL_PERSON_HEADER, NATIVE_PAGE_CURSOR_PREFIX, TIMELINE_PAGE_BYTE_BUDGET, acting_party, administrative_get, agent_todo_value, assistant_mission_list_cards_with};
+pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
+pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
 pub mod collection_ivm;
@@ -542,7 +542,7 @@ async fn collection_items_with_windows(
     } else if request.collection == "arrangements" {
         let person = arrangements::person(current, request.person.as_deref(), false)?;
         if let Some(subject) = &request.subject {
-            let owner = st3_schema::arrangements::owner(subject)
+            let owner = fractal_schema::arrangements::owner(subject)
                 .map_err(|error| validation(error.message))?;
             if owner != person {
                 return Err(validation("selected arrangement owner must match person"));
@@ -557,7 +557,7 @@ async fn collection_items_with_windows(
     if request.collection == "devices" && person.as_deref().is_none_or(|person| !person.starts_with("person/")) {
         return Err(forbidden("device inventory requires an explicitly authenticated person"));
     }
-    let prepared = windows.as_ref().and_then(|windows| windows.prepare(/* sqlite-large-value: allow-for-now lv-h91ae3c8fe2d6 owner=st3_api_client_v0::api::client_v0 TODO=trace-statement-and-value-representation */ state, current, request));
+    let prepared = windows.as_ref().and_then(|windows| windows.prepare(/* sqlite-large-value: allow-for-now lv-h5d92b2a013b1 owner=fractal_api_client_v0::api::client_v0 TODO=trace-statement-and-value-representation */ state, current, request));
     let state = state.clone();
     let session = session.clone();
     let request = request.clone();
@@ -2415,7 +2415,7 @@ pub async fn agent_declaration(
         crate::graph::redact_agent_env_values(&mut tree);
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree).map_err(ApiError::bad)?;
-    let accountable = st3_schema::accountable::from_desired(&tree)
+    let accountable = fractal_schema::accountable::from_desired(&tree)
         .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
     let mut value = json!({
         "id": subject,
@@ -5029,7 +5029,7 @@ pub async fn pairing_begin(
         .map_err(ApiError::bad)?
     {
         challenge["person_root_fingerprint"] =
-            json!(st3_client::device::person_root_fingerprint(&key).map_err(ApiError::internal)?);
+            json!(fractal_client::device::person_root_fingerprint(&key).map_err(ApiError::internal)?);
     }
     Ok(Json(challenge))
 }
@@ -5083,7 +5083,7 @@ fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, A
     };
     let proof=signature_grant_proofs(state, &[id])?.ok_or_else(cannot_prove)?
         .into_iter().next().ok_or_else(cannot_prove)?;
-    st3_client::device::verify_person_root_key_proof(person, &proof, None)
+    fractal_client::device::verify_person_root_key_proof(person, &proof, None)
         .map_err(|_| cannot_prove())?;
     Ok(Some(proof))
 }
@@ -5265,7 +5265,7 @@ pub async fn pairing_complete(
                 )
             };
             let proofs=signature_grant_proofs(&state, &chain)?.ok_or_else(cannot_prove)?;
-            st3_client::device::verify_device_key_proofs(&person_id, &chain, &proofs, key)
+            fractal_client::device::verify_device_key_proofs(&person_id, &chain, &proofs, key)
                 .map_err(|_| cannot_prove())?;
             Some((chain, proofs))
         }
@@ -7101,7 +7101,7 @@ async fn create_agent(
     request: &ActionRequest,
 ) -> Result<Vec<String>, ApiError> {
     require_creation_actor(session)?;
-    let mut parameters: st3_client::AgentCreateParameters =
+    let mut parameters: fractal_client::AgentCreateParameters =
         serde_json::from_value(request.parameters.clone())
             .map_err(|error| validation(error.to_string()))?;
     creation_string(&parameters.name, "name", 160)?;
@@ -7197,7 +7197,7 @@ async fn create_terminal(
     request: &ActionRequest,
 ) -> Result<Vec<String>, ApiError> {
     let person = require_creation_actor(session)?;
-    let parameters: st3_client::TerminalCreateParameters =
+    let parameters: fractal_client::TerminalCreateParameters =
         serde_json::from_value(request.parameters.clone())
             .map_err(|error| validation(error.to_string()))?;
     creation_string(&parameters.name, "name", 160)?;
@@ -7239,7 +7239,7 @@ async fn dispatch_action(
         "terminal.end" => {
             let person = require_creation_actor(session)?;
             let subject = terminal_subject(&parameter_string(p, "target_id")?);
-            if st3_schema::owned_terminals::owner(&subject)
+            if fractal_schema::owned_terminals::owner(&subject)
                 .map_err(|error| validation(error.message))?
                 != Some(person)
             {
@@ -7844,11 +7844,11 @@ async fn dispatch_action(
             let target = terminal_subject(&parameter_string(p, "terminal_id")?);
             let rows = p
                 .get("rows")
-                .and_then(st3_schema::terminal_dimension)
+                .and_then(fractal_schema::terminal_dimension)
                 .ok_or_else(|| validation("terminal resize rows must fit a positive u16"))?;
             let columns = p
                 .get("columns")
-                .and_then(st3_schema::terminal_dimension)
+                .and_then(fractal_schema::terminal_dimension)
                 .ok_or_else(|| validation("terminal resize columns must fit a positive u16"))?;
             let live = live_session(state, &target, request.fence.runtime_incarnation.as_deref())?;
             if !live.terminal {
@@ -7880,7 +7880,7 @@ async fn dispatch_action(
         "terminal.detach" => Ok(vec![detach_terminal_attachment(state, session, request)?]),
         "agent.retire" => {
             require_creation_actor(session)?;
-            let parameters = serde_json::from_value::<st3_client::AgentRetireParameters>(p.clone())
+            let parameters = serde_json::from_value::<fractal_client::AgentRetireParameters>(p.clone())
                 .map_err(|error| validation(error.to_string()))?;
             let agent = client_detail_id("agent", &parameters.agent);
             let token = request
@@ -7907,10 +7907,10 @@ async fn dispatch_action(
             require_creation_actor(session)?;
             let agent = client_detail_id("agent", &parameter_string(p, "agent")?);
             if action == "agent.stop" {
-                serde_json::from_value::<st3_client::AgentStopParameters>(p.clone())
+                serde_json::from_value::<fractal_client::AgentStopParameters>(p.clone())
                     .map_err(|error| validation(error.to_string()))?;
             } else {
-                serde_json::from_value::<st3_client::AgentStartParameters>(p.clone())
+                serde_json::from_value::<fractal_client::AgentStartParameters>(p.clone())
                     .map_err(|error| validation(error.to_string()))?;
             }
             let token = state
@@ -8009,11 +8009,11 @@ async fn dispatch_action(
         action @ ("agent.suspend" | "agent.resume") => {
             let agent = client_detail_id("agent", &parameter_string(p, "agent")?);
             let reason = if action == "agent.suspend" {
-                serde_json::from_value::<st3_client::AgentSuspendParameters>(p.clone())
+                serde_json::from_value::<fractal_client::AgentSuspendParameters>(p.clone())
                     .map_err(|error| validation(error.to_string()))?
                     .reason
             } else {
-                serde_json::from_value::<st3_client::AgentResumeParameters>(p.clone())
+                serde_json::from_value::<fractal_client::AgentResumeParameters>(p.clone())
                     .map_err(|error| validation(error.to_string()))?;
                 None
             };
@@ -8780,7 +8780,7 @@ async fn action_inner(
 }
 
 fn glass_subject(person: &str, id: &str) -> Result<String, ApiError> {
-    if !st3_schema::glasses::valid_uuid(id) {
+    if !fractal_schema::glasses::valid_uuid(id) {
         return Err(validation("a glass ID must be a canonical lowercase UUID"));
     }
     Ok(format!("glass/{person}/{id}"))
@@ -8863,7 +8863,7 @@ async fn glass_write(
     let idempotency_key = format!("glass:{}:{key}", session.actor);
     let mut fields = BTreeMap::from([("base_revision".into(), json!(base_revision))]);
     let kind = if let Some(body) = body {
-        st3_schema::glasses::validate_body(&body).map_err(|e| validation(e.message))?;
+        fractal_schema::glasses::validate_body(&body).map_err(|e| validation(e.message))?;
         fields.insert("body".into(), body);
         "glass.upserted"
     } else {
@@ -12411,7 +12411,7 @@ mission "differential" state="ready" {
                 "name": "paste.png", "size": image.len(), "origin": "host/terminal-test"
             }])
         );
-        let typed: st3_client::TimelineMessageBody = serde_json::from_value(body).unwrap();
+        let typed: fractal_client::TimelineMessageBody = serde_json::from_value(body).unwrap();
         assert_eq!(typed.attachments[0].blob, format!("blob/{hash}"));
         // A message without attachments has no such key.
         let plain = accept_message(
@@ -12718,7 +12718,7 @@ mission "differential" state="ready" {
                 revision: None, show_env_values: false,
             })).await.unwrap().0;
         assert_eq!(value["accountable"], "person/avery");
-        let decoded: st3_client::AgentDeclaration = serde_json::from_value(value).unwrap();
+        let decoded: fractal_client::AgentDeclaration = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.accountable.as_deref(), Some("person/avery"));
     }
 
@@ -13082,15 +13082,15 @@ subscription "watch/source" {
         let declaration = state.store.agent_declaration(agent, None).unwrap().unwrap();
         let person = ClientSession::local(Some("person/alex")).unwrap();
         let snapshot = new_client_snapshot(&state);
-        let stop = st3_client::ActionRequest::agent_stop(
+        let stop = fractal_client::ActionRequest::agent_stop(
             "action/stop-down-seat",
             "stop-down-seat-key-0001",
-            st3_client::Fence {
+            fractal_client::Fence {
                 snapshot_id: snapshot.id.clone(),
                 runtime_desired_revision: Some(declaration.0.clone()),
                 ..Default::default()
             },
-            st3_client::AgentStopParameters {
+            fractal_client::AgentStopParameters {
                 agent: agent.into(),
                 reason: Some("maintenance".into()),
             },
@@ -13138,15 +13138,15 @@ subscription "watch/source" {
             declaration.1
         );
         let snapshot = new_client_snapshot(&state);
-        let start = st3_client::ActionRequest::agent_start(
+        let start = fractal_client::ActionRequest::agent_start(
             "action/start-down-seat",
             "start-down-seat-key-0001",
-            st3_client::Fence {
+            fractal_client::Fence {
                 snapshot_id: snapshot.id.clone(),
                 runtime_desired_revision: Some(stopped),
                 ..Default::default()
             },
-            st3_client::AgentStartParameters {
+            fractal_client::AgentStartParameters {
                 agent: agent.into(),
             },
         )
@@ -13256,20 +13256,20 @@ subscription "watch/source" {
         );
         let mut current = request;
         current.fence.runtime_desired_revision = Some(desired);
-        let typed_fence = st3_client::Fence {
+        let typed_fence = fractal_client::Fence {
             snapshot_id: snapshot.id.clone(),
             runtime_incarnation: Some(incarnation.into()),
             runtime_desired_revision: current.fence.runtime_desired_revision.clone(),
-            ..st3_client::Fence::default()
+            ..fractal_client::Fence::default()
         };
-        let parameters = st3_client::TargetParameters {
+        let parameters = fractal_client::TargetParameters {
             target_id: "runtime/client-control-runtime".into(),
             reason: Some("operator control".into()),
-            ..st3_client::TargetParameters::default()
+            ..fractal_client::TargetParameters::default()
         };
         // Before the generated Rust `Fence` carried the desired revision, these typed requests
         // reached the daemon without it and were refused with 422.
-        let restart = st3_client::ActionRequest::runtime_restart(
+        let restart = fractal_client::ActionRequest::runtime_restart(
             "action/restart-worker",
             "restart-worker-client-0001",
             typed_fence.clone(),
@@ -13289,7 +13289,7 @@ subscription "watch/source" {
                 .message,
             "runtime control requires a desired revision fence"
         );
-        let stop = st3_client::ActionRequest::runtime_stop(
+        let stop = fractal_client::ActionRequest::runtime_stop(
             "action/stop-worker",
             "stop-worker-client-0001",
             typed_fence,
@@ -17801,7 +17801,7 @@ mission "example/zero-run" state="ready" {
         let snapshot = new_client_snapshot(&state);
         let identity = |subject: &str| vec![json!({"_delivery_correlation": {
             "kind":"codex", "thread_id":"native-cap",
-            "id":st_drivers::codex_app_server::stable_client_user_message_id("agent/cap", "native-cap", subject),
+            "id":fractal_drivers::codex_app_server::stable_client_user_message_id("agent/cap", "native-cap", subject),
         }})];
         for number in 0..257 {
             state.store.append_claim(&ClaimInput {
@@ -17884,7 +17884,7 @@ mission "example/zero-run" state="ready" {
                 ]),
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
-            let client_id = st_drivers::codex_app_server::stable_client_user_message_id(
+            let client_id = fractal_drivers::codex_app_server::stable_client_user_message_id(
                 owner, "paging-test", &subject,
             );
             minute += 1;
@@ -17899,7 +17899,7 @@ mission "example/zero-run" state="ready" {
             let subject = format!("message/send-identity-pages-{number}");
             minute += 1;
             transcript += &line(&format!("echo-{number}"), "user", Some(
-                st_drivers::codex_app_server::stable_client_user_message_id(owner, "paging-test", &subject),
+                fractal_drivers::codex_app_server::stable_client_user_message_id(owner, "paging-test", &subject),
             ), minute);
         }
         let path = root.path().join("pages.jsonl");
@@ -18000,7 +18000,7 @@ mission "example/zero-run" state="ready" {
                 ]),
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
-            st_drivers::codex_app_server::stable_client_user_message_id(owner, "paging-test", &subject)
+            fractal_drivers::codex_app_server::stable_client_user_message_id(owner, "paging-test", &subject)
         };
         // Oldest to newest: answer-old, a hidden run longer than the budget, answer-new, 3 hidden.
         let mut second = 0;
@@ -18053,7 +18053,7 @@ mission "example/zero-run" state="ready" {
             ]),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
-        st_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject)
+        fractal_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject)
     }
 
     /// A Codex transcript line at `second` (seconds from 2099-01-01); an echo carries `client_id`.
@@ -18754,7 +18754,7 @@ mission "example/zero-run" state="ready" {
             .join("drivers")
             .join(&hex::encode(Sha256::digest(owner.as_bytes()))[..24])
             .join("catalog/agents")
-            .join(st_drivers::run::detect_host())
+            .join(fractal_drivers::run::detect_host())
             .join(&hex::encode(Sha256::digest(identity.as_bytes()))[..16]);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(
@@ -19035,7 +19035,7 @@ mission "example/zero-run" state="ready" {
             .join("drivers")
             .join(&hex::encode(Sha256::digest(owner.as_bytes()))[..24])
             .join("catalog/agents")
-            .join(st_drivers::run::detect_host())
+            .join(fractal_drivers::run::detect_host())
             .join(&hex::encode(Sha256::digest(identity.as_bytes()))[..16])
             .join("provider-sessions");
         std::fs::create_dir_all(&directory).unwrap();
@@ -20207,9 +20207,9 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let mut state = test_state(root.path());
         state.pty_binary = pty.clone();
-        let runtime = st_runtime::PtyRuntime::new(state.pty_root.clone())
+        let runtime = fractal_runtime::PtyRuntime::new(state.pty_root.clone())
             .with_binary(pty.to_string_lossy());
-        struct Cleanup(st_runtime::PtyRuntime);
+        struct Cleanup(fractal_runtime::PtyRuntime);
         impl Drop for Cleanup {
             fn drop(&mut self) {
                 let _ = self.0.stop("fence-test");
@@ -20923,7 +20923,7 @@ mission "example/zero-run" state="ready" {
             ..Default::default()
         })
         .unwrap();
-        let mut registry = st3_schema::registry().clone();
+        let mut registry = fractal_schema::registry().clone();
         registry.claims.remove("harness.limits").unwrap();
         follower.store.set_claim_registry(registry);
         let subject = "agent/fleet-terminal";

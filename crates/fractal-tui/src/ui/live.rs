@@ -7,7 +7,7 @@
 //! data in place: it never empties a list or a conversation while the fresh copy is on its way.
 
 #[cfg(test)]
-use st3::MissionsStore;
+use fractal_daemon::MissionsStore;
 use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
@@ -22,7 +22,7 @@ use crossterm::{
     terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use st3_client::{
+use fractal_client::{
     Client, ClientError, Fence, LaunchReviseParameters, MessageSendParameters, Resource, TargetParameters,
     TimelineBody,
 };
@@ -107,7 +107,7 @@ enum ReceiptOutcome {
 /// Whether a failed read receipt is worth trying again: a refusal st marks as not retryable
 /// (this identity may not read it) is final, except a stale fence, which a fresh one answers.
 fn receipt_outcome(error: &anyhow::Error) -> ReceiptOutcome {
-    use st3_client::{ClientError, ErrorCode};
+    use fractal_client::{ClientError, ErrorCode};
     match error.downcast_ref::<ClientError>() {
         Some(ClientError::Api(code, _, envelope))
             if !envelope.retryable && !matches!(code, ErrorCode::StaleFence) =>
@@ -282,8 +282,8 @@ impl InventoryGrace {
 enum InventoryRead {
     Rows(Inventory, Result<Collection, String>),
     Terminals(Result<(Vec<Resource>, bool), String>),
-    Clients(Result<st3_client::ClientConnections, String>),
-    Usage(u64, Result<st3_client::UsagePeriod, String>),
+    Clients(Result<fractal_client::ClientConnections, String>),
+    Usage(u64, Result<fractal_client::UsagePeriod, String>),
 }
 impl InventoryRead {
     fn inventory(&self) -> Inventory {
@@ -299,7 +299,7 @@ async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRea
         Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
         Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.plain())),
         Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
-            ClientError::Api(st3_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
+            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
             error => error.plain(),
         })),
         Inventory::Usage(hours) => {
@@ -347,13 +347,13 @@ fn window_label(window: Window) -> String {
 }
 
 /// Why usage could not be read, saying so plainly when the daemon predates the read.
-fn usage_error(error: &st3_client::ClientError) -> String {
+fn usage_error(error: &fractal_client::ClientError) -> String {
     match error {
         // A daemon from before the read answers its path with a bare 404.
-        st3_client::ClientError::Api(st3_client::ErrorCode::NotFound, _, _) => {
+        fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound, _, _) => {
             "This st does not serve usage yet: its daemon needs an update.".into()
         }
-        st3_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
+        fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
             "This st does not serve usage yet: its daemon needs an update.".into()
         }
         error => format!("Could not read usage: {}", error.plain()),
@@ -397,19 +397,19 @@ enum Fetched {
     Notice(String),
     AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
-    Session(String, Result<Box<st3_client::Session>, String>),
+    Session(String, Result<Box<fractal_client::Session>, String>),
     /// The Fleet tab's machines and paired devices.
-    Observations { generation: u64, outcome: Result<(Vec<st3_client::ResourceObservation>, bool), String> },
+    Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
     /// st's conversation search for the palette's query, or why st could not say.
-    Said(String, Result<st3_client::ConversationSearch, String>),
+    Said(String, Result<fractal_client::ConversationSearch, String>),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
     /// answer is unknown.
     Sent(String, Result<Option<String>, (String, bool)>),
     /// The longest message st says it takes, in UTF-8 bytes; None when it does not say.
     MessageLimit(Result<Option<usize>, ()>),
     /// The `sync` notice on a one-row Attention page: None when st says nothing is missing.
-    Sync(Result<Option<st3_client::SyncNotice>, ()>),
+    Sync(Result<Option<fractal_client::SyncNotice>, ()>),
     /// st started an agent asked for here.
     /// st started a shell asked for here.
     TerminalStarted(String),
@@ -456,7 +456,7 @@ fn save_glass(
                 Ok(body) => client
                     .put_glass(
                         id,
-                        &st3_client::GlassPut {
+                        &fractal_client::GlassPut {
                             body,
                             base_revision: base.clone(),
                         },
@@ -470,7 +470,7 @@ fn save_glass(
             GlassWrite::Delete { id, base, key } => client
                 .delete_glass(
                     id,
-                    &st3_client::GlassDelete {
+                    &fractal_client::GlassDelete {
                         base_revision: base.clone(),
                     },
                     key,
@@ -513,7 +513,7 @@ pub fn run(context: Context) -> Result<()> {
     model.actor = person.clone();
     let mut extras = Extras::default();
     // Each conversation st has sent, kept after it closes so reopening it shows its last entries.
-    let mut timelines: BTreeMap<String, st3_conversation_ui::Timeline> = BTreeMap::new();
+    let mut timelines: BTreeMap<String, fractal_conversation_ui::Timeline> = BTreeMap::new();
     let mut failed: BTreeMap<String, String> = BTreeMap::new();
     // How many earlier pages each conversation read on its own to fill its first screen.
     let mut filled: BTreeMap<String, usize> = BTreeMap::new();
@@ -636,7 +636,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut said_typed: Option<(String, Instant)> = None;
     let mut last_cache_save = Instant::now();
     // The notice the page read last found, carried onto every window the stream rebuilds.
-    let mut page_sync: Option<st3_client::SyncNotice> = None;
+    let mut page_sync: Option<fractal_client::SyncNotice> = None;
     let mut sync_read_at: Option<Instant> = None;
     // When a read is wanted, because a frame after the first showed the graph moving.
     let mut sync_due: Option<Instant> = None;
@@ -886,7 +886,7 @@ pub fn run(context: Context) -> Result<()> {
                     timelines
                         .entry(target)
                         .or_default()
-                        .apply(st3_conversation_ui::Frame {
+                        .apply(fractal_conversation_ui::Frame {
                             replace,
                             has_more,
                             items,
@@ -917,7 +917,7 @@ pub fn run(context: Context) -> Result<()> {
                     if opens.remove(&target).is_some() {
                         super::slo::METRICS.add(
                             match code {
-                                Some(st3_client::ErrorCode::RemoteUnavailable) => {
+                                Some(fractal_client::ErrorCode::RemoteUnavailable) => {
                                     "open_remote_unavailable"
                                 }
                                 _ => "open_cannot_load",
@@ -1550,8 +1550,8 @@ pub fn run(context: Context) -> Result<()> {
                     runtime.spawn(async move {
                         let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| {
                             let retired = error.chain().any(|cause| matches!(
-                                cause.downcast_ref::<st3_client::ClientError>(),
-                                Some(st3_client::ClientError::Api(st3_client::ErrorCode::ArrangementRetired, ..))
+                                cause.downcast_ref::<fractal_client::ClientError>(),
+                                Some(fractal_client::ClientError::Api(fractal_client::ErrorCode::ArrangementRetired, ..))
                             ));
                             (plain(&error), retired)
                         });
@@ -1739,7 +1739,7 @@ pub fn run(context: Context) -> Result<()> {
             }
             let names = names.get_or_insert_with(|| adapt::names(&model, &person));
             let entries = adapt::conversation(&timeline.items, names);
-            if st3_conversation_ui::display_rows(&entries) < FILL_ROWS {
+            if fractal_conversation_ui::display_rows(&entries) < FILL_ROWS {
                 *filled.entry(target.clone()).or_default() += 1;
                 wanted.insert(target.clone());
             }
@@ -2188,16 +2188,16 @@ fn read_sync(runtime: &tokio::runtime::Runtime, client: &Client, tx: &std::sync:
 /// window the stream rebuilds takes the page's, or the one with the newest snapshot would drop it.
 fn window_collection(
     items: Vec<Resource>,
-    snapshot: st3_client::Snapshot,
+    snapshot: fractal_client::Snapshot,
     has_more: bool,
-    sync: Option<&st3_client::SyncNotice>,
+    sync: Option<&fractal_client::SyncNotice>,
 ) -> Collection {
     Collection { items, snapshot: Some(snapshot), truncated: has_more, sync: sync.cloned() }
 }
 
 /// Put a fresh page notice on every collection the stream follows, so `Model::sync_notice` finds it
 /// whichever of them holds the newest snapshot.
-fn fill_notice(model: &mut Model, sync: Option<&st3_client::SyncNotice>) {
+fn fill_notice(model: &mut Model, sync: Option<&fractal_client::SyncNotice>) {
     for collection in [
         &mut model.now,
         &mut model.missions,
@@ -2219,7 +2219,7 @@ fn save_cache(path: Option<&std::path::Path>, person: &str, model: &Model) {
 }
 
 /// A terminal screen as styled lines, the way the old screens drew it.
-fn screen_lines(screen: &st3_client::TerminalScreen) -> Vec<ratatui::text::Line<'static>> {
+fn screen_lines(screen: &fractal_client::TerminalScreen) -> Vec<ratatui::text::Line<'static>> {
     use ratatui::text::{Line, Span};
     screen
         .lines
@@ -2256,7 +2256,7 @@ fn screen_lines(screen: &st3_client::TerminalScreen) -> Vec<ratatui::text::Line<
 fn conversations(
     model: &Model,
     person: &str,
-    timelines: &BTreeMap<String, st3_conversation_ui::Timeline>,
+    timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>,
     failed: &BTreeMap<String, String>,
     conversing: &[String],
 ) -> BTreeMap<String, Load<Vec<super::view::Entry>>> {
@@ -2345,7 +2345,7 @@ fn slow_page(took: Duration) -> bool {
 
 /// Whether a conversation may read one more earlier page on its own: there is more before it,
 /// no page is in flight or has just failed, and it has not used up its pages.
-fn wants_fill(timeline: &st3_conversation_ui::Timeline, pages_read: usize) -> bool {
+fn wants_fill(timeline: &fractal_conversation_ui::Timeline, pages_read: usize) -> bool {
     !timeline.older.loading
         && timeline.older.failed.is_none()
         && timeline.more_before()
@@ -2356,7 +2356,7 @@ fn wants_fill(timeline: &st3_conversation_ui::Timeline, pages_read: usize) -> bo
 const OLDER_CURSOR_LIFE: Duration = Duration::from_secs(240);
 
 struct OlderPage {
-    items: Vec<st3_client::TimelineEntry>,
+    items: Vec<fractal_client::TimelineEntry>,
     has_more: bool,
     cursor: Option<String>,
 }
@@ -2383,7 +2383,7 @@ async fn older_page(
     if cursor.is_some() {
         match read(cursor).await {
             Ok(page) => return Ok(page),
-            Err(ClientError::Api(st3_client::ErrorCode::PageCursorExpired, _, _)) => {}
+            Err(ClientError::Api(fractal_client::ErrorCode::PageCursorExpired, _, _)) => {}
             Err(error) => return Err(error.plain()),
         }
     }
@@ -2428,7 +2428,7 @@ fn mark_unanswered(pending: &mut [Pending]) -> bool {
 fn moved_sessions(
     conversing: &[String],
     model: &Model,
-    timelines: &BTreeMap<String, st3_conversation_ui::Timeline>,
+    timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>,
     resubscribed: &mut BTreeMap<String, String>,
 ) -> Vec<String> {
     let mut moved = Vec::new();
@@ -2458,8 +2458,8 @@ fn moved_sessions(
 /// The entry above a conversation's oldest that says how far back it goes.
 pub(crate) const HISTORY_NOTE: &str = "history";
 
-fn history_note(timeline: &st3_conversation_ui::Timeline) -> Option<super::view::Entry> {
-    use st3_conversation_ui::Body;
+fn history_note(timeline: &fractal_conversation_ui::Timeline) -> Option<super::view::Entry> {
+    use fractal_conversation_ui::Body;
     let older = &timeline.older;
     let text = if older.loading {
         "Loading earlier entries…".to_owned()
@@ -2509,7 +2509,7 @@ async fn acknowledge_visible_message(client: &Client, person: &str, id: &str) ->
         )
         .await?;
     anyhow::ensure!(
-        matches!(result.value.status, st3_client::ActionStatus::Completed),
+        matches!(result.value.status, fractal_client::ActionStatus::Completed),
         "read receipt was not completed"
     );
     Ok(())
@@ -2550,8 +2550,8 @@ fn not_applied(error: &anyhow::Error, effect: &Effect) -> bool {
         .any(|error| match error {
             // st said it queued nothing, so a fresh try with a fresh fence is safe.
             _ if error.applied() == Some("none") => true,
-            ClientError::Api(st3_client::ErrorCode::StaleFence, ..) => !attention,
-            ClientError::Api(st3_client::ErrorCode::RateLimited, ..)
+            ClientError::Api(fractal_client::ErrorCode::StaleFence, ..) => !attention,
+            ClientError::Api(fractal_client::ErrorCode::RateLimited, ..)
             | ClientError::Unreachable(_) => true,
             _ => false,
         })
@@ -2569,7 +2569,7 @@ pub(crate) fn plain(error: &anyhow::Error) -> String {
 /// One agent action, fenced to the seat's current declaration as st asks. A restart is a stop
 /// and then a start, each on the declaration st selects at that moment.
 async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> Result<()> {
-    let fence = |definition: st3_client::Envelope<st3_client::SubjectDefinition>| Fence {
+    let fence = |definition: fractal_client::Envelope<fractal_client::SubjectDefinition>| Fence {
         snapshot_id: definition.snapshot.id,
         runtime_desired_revision: Some(definition.value.desired_token),
         ..Fence::default()
@@ -2589,7 +2589,7 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
                         id,
                         idem,
                         fence,
-                        st3_client::AgentStopParameters {
+                        fractal_client::AgentStopParameters {
                             agent: agent.to_owned(),
                             reason: reason.clone(),
                         },
@@ -2602,7 +2602,7 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
                         id,
                         idem,
                         fence,
-                        st3_client::AgentStartParameters {
+                        fractal_client::AgentStartParameters {
                             agent: agent.to_owned(),
                         },
                     )
@@ -2614,7 +2614,7 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
                         id,
                         idem,
                         fence,
-                        st3_client::AgentSuspendParameters {
+                        fractal_client::AgentSuspendParameters {
                             agent: agent.to_owned(),
                             reason: reason.clone(),
                         },
@@ -2627,7 +2627,7 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
                         id,
                         idem,
                         fence,
-                        st3_client::AgentResumeParameters {
+                        fractal_client::AgentResumeParameters {
                             agent: agent.to_owned(),
                             host: None,
                         },
@@ -2645,9 +2645,9 @@ async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -
     let reply = client.arrangement_edit(
         format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
         Fence { snapshot_id: snapshot.id, ..Default::default() },
-        st3_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
+        fractal_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
     ).await?;
-    anyhow::ensure!(matches!(reply.value.status, st3_client::ActionStatus::Completed), "Sidebar edit is not completed.");
+    anyhow::ensure!(matches!(reply.value.status, fractal_client::ActionStatus::Completed), "Sidebar edit is not completed.");
     Ok(())
 }
 
@@ -2716,7 +2716,7 @@ async fn perform(
                         snapshot_id: snapshot,
                         ..Fence::default()
                     },
-                    st3_client::TerminalCreateParameters {
+                    fractal_client::TerminalCreateParameters {
                         name: name.clone(),
                         host: None,
                         cwd: None,
@@ -2864,7 +2864,7 @@ async fn perform(
                     id,
                     idem,
                     fence,
-                    st3_client::TargetParameters {
+                    fractal_client::TargetParameters {
                         target_id: run.clone(),
                         reason: Some(format!("cancelled from stui by {person}")),
                         ..Default::default()
@@ -2889,10 +2889,10 @@ async fn perform(
                         snapshot_id: snapshot,
                         ..Fence::default()
                     },
-                    st3_client::LaunchCreateParameters {
+                    fractal_client::LaunchCreateParameters {
                         title,
                         request,
-                        target: st3_client::LaunchTarget::NewMission {
+                        target: fractal_client::LaunchTarget::NewMission {
                             mission_id: mission,
                             workspace,
                         },
@@ -2918,7 +2918,7 @@ async fn perform(
                         snapshot_id: snapshot,
                         ..Fence::default()
                     },
-                    st3_client::TargetParameters {
+                    fractal_client::TargetParameters {
                         target_id: id,
                         ..Default::default()
                     },
@@ -2951,7 +2951,7 @@ async fn perform(
                     .upload_blob(bytes, super::attach::media_type(path))
                     .await
                 {
-                    Ok(upload) => attachments.push(st3_client::AttachmentInput {
+                    Ok(upload) => attachments.push(fractal_client::AttachmentInput {
                         blob: upload.value.blob,
                         media_type: upload.value.media_type,
                         name: path
@@ -2959,9 +2959,9 @@ async fn perform(
                             .map(|name| name.to_string_lossy().into_owned()),
                     }),
                     // An st from before attachments: name the files, as stui did then.
-                    Err(st3_client::ClientError::Api(
-                        st3_client::ErrorCode::NotFound
-                        | st3_client::ErrorCode::UnsupportedCapability,
+                    Err(fractal_client::ClientError::Api(
+                        fractal_client::ErrorCode::NotFound
+                        | fractal_client::ErrorCode::UnsupportedCapability,
                         ..,
                     )) => {
                         let rest = images[index..]
@@ -3017,7 +3017,7 @@ async fn send_message(
     in_reply_to: Option<String>,
     session_id: Option<String>,
     tags: Vec<String>,
-    attachments: Vec<st3_client::AttachmentInput>,
+    attachments: Vec<fractal_client::AttachmentInput>,
     sent: Option<&Mutex<Option<Sent>>>,
     snapshot_hint: Option<String>,
 ) -> Result<Option<String>> {
@@ -3028,11 +3028,11 @@ async fn send_message(
         in_reply_to,
         session_id,
         tags,
-        kind: st3_client::MessageKind::Wake,
+        kind: fractal_client::MessageKind::Wake,
         attachments,
         signature: None,
     };
-    let message_id = |result: st3_client::Envelope<st3_client::ActionResult>| {
+    let message_id = |result: fractal_client::Envelope<fractal_client::ActionResult>| {
         // The new message's id, so the pending copy can give way to the real one.
         result
             .value
@@ -3057,7 +3057,7 @@ async fn send_message(
         {
             Ok(result) => return Ok(message_id(result)),
             // st checks a repeat before the fence: a stale fence means it never took it.
-            Err(ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {}
+            Err(ClientError::Api(fractal_client::ErrorCode::StaleFence, ..)) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -3093,7 +3093,7 @@ async fn send_message(
             .await
         {
             Ok(result) => return Ok(message_id(result)),
-            Err(error @ ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {
+            Err(error @ ClientError::Api(fractal_client::ErrorCode::StaleFence, ..)) => {
                 last = Some(error)
             }
             Err(error) => return Err(error.into()),
@@ -3175,12 +3175,12 @@ mod tests {
             assert!(said.is_empty(), "{reason} must not be retried");
         }
         // The retried reasons are the words st's own messages use.
-        assert!(super::worth_retrying(&st3_client::plain_message(
-            Some(&st3_client::ErrorCode::RuntimeAuthorityIndeterminate),
+        assert!(super::worth_retrying(&fractal_client::plain_message(
+            Some(&fractal_client::ErrorCode::RuntimeAuthorityIndeterminate),
             ""
         )));
-        assert!(!super::worth_retrying(&st3_client::plain_message(
-            Some(&st3_client::ErrorCode::NotFound),
+        assert!(!super::worth_retrying(&fractal_client::plain_message(
+            Some(&fractal_client::ErrorCode::NotFound),
             "terminal/x"
         )));
         // A refusal that passes waits about a minute and a half before the tab gives up.
@@ -3221,8 +3221,8 @@ mod tests {
 
     #[test]
     fn a_send_st_may_have_taken_is_unconfirmed_and_one_it_never_queued_is_tried_afresh() {
-        let answer = |applied: &str, code: st3_client::ErrorCode| -> anyhow::Error {
-            let envelope = st3_client::ErrorEnvelope {
+        let answer = |applied: &str, code: fractal_client::ErrorCode| -> anyhow::Error {
+            let envelope = fractal_client::ErrorEnvelope {
                 api_version: "st3.client.v0".into(),
                 error_version: "st3.client.error.v0".into(),
                 request_id: "request/test".into(),
@@ -3246,7 +3246,7 @@ mod tests {
         };
         // `applied: "unknown"` (a code this build does not know decodes as Unknown): the exact
         // request may have been taken. It is not retried here, and it is shown as unconfirmed.
-        let unknown = answer("unknown", st3_client::ErrorCode::Unknown);
+        let unknown = answer("unknown", fractal_client::ErrorCode::Unknown);
         assert!(!not_applied(&unknown, &send));
         assert!(unknown.downcast_ref::<ClientError>().unwrap().outcome_unknown());
         assert_eq!(
@@ -3254,8 +3254,8 @@ mod tests {
             "st may have taken it and has not confirmed it yet; sending it again is safe"
         );
         // `applied: "none"` with a full queue (rate limited): nothing was queued, so try again.
-        assert!(not_applied(&answer("none", st3_client::ErrorCode::RateLimited), &send));
-        assert!(!answer("none", st3_client::ErrorCode::RateLimited)
+        assert!(not_applied(&answer("none", fractal_client::ErrorCode::RateLimited), &send));
+        assert!(!answer("none", fractal_client::ErrorCode::RateLimited)
             .downcast_ref::<ClientError>()
             .unwrap()
             .outcome_unknown());
@@ -3416,7 +3416,7 @@ mod tests {
 
     #[test]
     fn a_first_screen_reads_earlier_pages_only_while_it_may() {
-        let mut timeline = st3_conversation_ui::Timeline {
+        let mut timeline = fractal_conversation_ui::Timeline {
             has_more: true,
             ..Default::default()
         };
@@ -3447,8 +3447,8 @@ mod tests {
 
     use super::*;
 
-    fn peer(host: &str, missing: u64, diverged: bool) -> st3_client::SyncPeer {
-        st3_client::SyncPeer {
+    fn peer(host: &str, missing: u64, diverged: bool) -> fractal_client::SyncPeer {
+        fractal_client::SyncPeer {
             last_successful_exchange: None,
             last_failed_exchange: None,
             host_id: host.into(),
@@ -3460,8 +3460,8 @@ mod tests {
         }
     }
 
-    fn snapshot(store_index: u64) -> st3_client::Snapshot {
-        st3_client::Snapshot {
+    fn snapshot(store_index: u64) -> fractal_client::Snapshot {
+        fractal_client::Snapshot {
             id: format!("snapshot/{store_index}"),
             host_id: "host/hearth".into(),
             store_index,
@@ -3472,7 +3472,7 @@ mod tests {
 
     /// The world a running stui shows after the stream delivered Attention (older) and Agents
     /// (newest) windows, built by the same function the live loop uses.
-    fn running_world(sync: Option<&st3_client::SyncNotice>) -> super::super::view::World {
+    fn running_world(sync: Option<&fractal_client::SyncNotice>) -> super::super::view::World {
         let mut model = Model::default();
         let now = window_collection(Vec::new(), snapshot(5), false, sync);
         let agents = window_collection(Vec::new(), snapshot(9), false, sync);
@@ -3485,20 +3485,20 @@ mod tests {
     #[test]
     fn a_running_stui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
         use super::super::view::Link;
-        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        let diverged = fractal_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
         let shown = running_world(Some(&diverged));
         assert!(matches!(shown.link, Link::Live));
         assert_eq!(shown.diverged, vec!["harbor".to_owned()]);
         assert!(shown.behind.is_empty());
 
-        let behind = st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/harbor", 26_820, false)] };
+        let behind = fractal_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/harbor", 26_820, false)] };
         let shown = running_world(Some(&behind));
         assert!(shown.diverged.is_empty());
         assert_eq!(shown.behind.len(), 1, "{:?}", shown.behind);
         assert!(shown.behind[0].starts_with("harbor has 26,820 envelopes"), "{:?}", shown.behind);
 
         // No notice, or one that names nothing missing: nothing is claimed, and the link is live.
-        for sync in [None, Some(st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/dock", 0, false)] })] {
+        for sync in [None, Some(fractal_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/dock", 0, false)] })] {
             let shown = running_world(sync.as_ref());
             assert!(matches!(shown.link, Link::Live));
             assert!(shown.diverged.is_empty() && shown.behind.is_empty(), "{:?} {:?}", shown.diverged, shown.behind);
@@ -3522,7 +3522,7 @@ mod tests {
 
     #[test]
     fn the_page_read_fills_the_notice_and_a_rebuilt_window_keeps_it_until_the_next_read() {
-        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        let diverged = fractal_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
         // The stream's windows arrive with nothing known, the newest being Agents.
         let mut model = Model::default();
         let now = window_collection(Vec::new(), snapshot(5), false, None);
@@ -3705,11 +3705,11 @@ mod tests {
         assert!(ui.home_open());
     }
 
-    fn refusal(code: st3_client::ErrorCode, retryable: bool) -> anyhow::Error {
-        anyhow::Error::new(st3_client::ClientError::Api(
+    fn refusal(code: fractal_client::ErrorCode, retryable: bool) -> anyhow::Error {
+        anyhow::Error::new(fractal_client::ClientError::Api(
             code.clone(),
             "refused".into(),
-            Box::new(st3_client::ErrorEnvelope {
+            Box::new(fractal_client::ErrorEnvelope {
                 api_version: "st3.client.v0".into(),
                 error_version: "st3.client.error.v0".into(),
                 request_id: "request/test".into(),
@@ -3726,16 +3726,16 @@ mod tests {
     fn a_read_receipt_st_refuses_for_good_is_dropped_and_never_asked_again() {
         // Read-only identity: st says forbidden and not retryable.
         assert_eq!(
-            receipt_outcome(&refusal(st3_client::ErrorCode::Forbidden, false)),
+            receipt_outcome(&refusal(fractal_client::ErrorCode::Forbidden, false)),
             ReceiptOutcome::Refused
         );
         // A stale fence is answered by a fresh one, and a retryable refusal or a lost connection is retried.
         assert_eq!(
-            receipt_outcome(&refusal(st3_client::ErrorCode::StaleFence, false)),
+            receipt_outcome(&refusal(fractal_client::ErrorCode::StaleFence, false)),
             ReceiptOutcome::Retry
         );
         assert_eq!(
-            receipt_outcome(&refusal(st3_client::ErrorCode::Forbidden, true)),
+            receipt_outcome(&refusal(fractal_client::ErrorCode::Forbidden, true)),
             ReceiptOutcome::Retry
         );
         assert_eq!(
@@ -3777,8 +3777,8 @@ mod tests {
         use std::sync::Arc;
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("daemon.sock");
-        let store = Arc::new(st3::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
-        let state = st3::api::AppState {
+        let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
+        let state = fractal_daemon::api::AppState {
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -3795,7 +3795,7 @@ mod tests {
         };
         let path = socket.clone();
         let server = tokio::spawn(async move {
-            st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap();
+            fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap();
         });
         for _ in 0..200 {
             if socket.exists() {
@@ -3810,7 +3810,7 @@ mod tests {
             .await
             .unwrap();
         assert!(first.is_some(), "a snapshot from before the store moved is accepted");
-        let count = |store: &st3::store::Store, text: &str| {
+        let count = |store: &fractal_daemon::store::Store, text: &str| {
             store.message(first.as_deref().unwrap()).unwrap().map(|m| m.content == text).unwrap_or(false)
         };
         assert!(count(&store, "one"));
@@ -3828,19 +3828,19 @@ mod tests {
     #[tokio::test]
     async fn sidebar_register_edits_merge_and_survive_daemon_restart() {
         use std::sync::Arc;
-        use st3_client::ArrangementOperation as Op;
+        use fractal_client::ArrangementOperation as Op;
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("sidebar.sock");
-        async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
-            let store = Arc::new(st3::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
-            let state = st3::api::AppState {
+        async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
+            let store = Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
+            let state = fractal_daemon::api::AppState {
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
                 fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
             };
             let path = socket.to_owned();
-            let server = tokio::spawn(async move { st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap(); });
+            let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
             for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
             (store, server)
         }
@@ -3882,10 +3882,10 @@ mod tests {
         async fn serve(
             root: &std::path::Path,
             socket: &std::path::Path,
-        ) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
+        ) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store =
-                Arc::new(st3::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
-            let state = st3::api::AppState {
+                Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
+            let state = fractal_daemon::api::AppState {
                 owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
@@ -3902,7 +3902,7 @@ mod tests {
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
-                st3::api::serve_unix(&path, st3::api::router(state))
+                fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state))
                     .await
                     .unwrap();
             });
@@ -3959,7 +3959,7 @@ mod tests {
                 .unwrap()
                 .attachments
                 .iter()
-                .map(|a| st3_client::AttachmentInput {
+                .map(|a| fractal_client::AttachmentInput {
                     blob: format!("blob/{}", a.sha256),
                     media_type: a.media_type.clone(),
                     name: a.name.clone(),
@@ -4035,8 +4035,8 @@ mod tests {
         }
         assert_eq!(store.planning_sessions(true).unwrap().len(), 1);
         let launch = store.planning_sessions(true).unwrap().pop().unwrap();
-        let transport = st3::client::Client::unix_as(&socket, "person/avery").unwrap();
-        let _: serde_json::Value = transport.post(&format!("/v1/launches/{}/variants/default/submit", launch.id), &st3::model::PlanningCandidateSubmitRequest {
+        let transport = fractal_daemon::client::Client::unix_as(&socket, "person/avery").unwrap();
+        let _: serde_json::Value = transport.post(&format!("/v1/launches/{}/variants/default/submit", launch.id), &fractal_daemon::model::PlanningCandidateSubmitRequest {
             actor: launch.planner.clone(), markdown: b"Copper proof".to_vec(),
             kdl: b"version 2\nmission \"example/copper\" state=\"ready\" { goal \"Record the copper proof.\"; step \"proof\" { agentless } }\n".to_vec(),
             idempotency_key: "ui-prepare-candidate".into(),
@@ -4110,11 +4110,11 @@ mod tests {
         );
         assert_eq!(store.index().unwrap(), index);
         let source = "version 2\nmission \"example/cancel\" state=\"ready\" { goal \"Record the proof.\"; step \"proof\" { agentless } }\n";
-        let intent = st3::parse_intent(source, "ui-actions").unwrap();
+        let intent = fractal_daemon::parse_intent(source, "ui-actions").unwrap();
         let preview = store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl: source.into(),
                     source_name: None,
                 },
@@ -4129,7 +4129,7 @@ mod tests {
             )
             .unwrap();
         let run = store
-            .create_mission_run(&st3::model::MissionRunRequest {
+            .create_mission_run(&fractal_daemon::model::MissionRunRequest {
                 mission: "example/cancel".into(),
                 revision: None,
                 workspace: root.path().display().to_string(),
@@ -4178,11 +4178,11 @@ mod tests {
     /// st is retried for both.
     #[test]
     fn an_attention_action_is_not_retried_on_a_stale_fence() {
-        let refused = |code: st3_client::ErrorCode| {
+        let refused = |code: fractal_client::ErrorCode| {
             anyhow::Error::new(ClientError::Api(
                 code.clone(),
                 "refused".into(),
-                Box::new(st3_client::ErrorEnvelope {
+                Box::new(fractal_client::ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: "request/1".into(),
@@ -4203,14 +4203,14 @@ mod tests {
         let terminal = Effect::CreateTerminal {
             name: "shell".into(),
         };
-        let stale = refused(st3_client::ErrorCode::StaleFence);
+        let stale = refused(fractal_client::ErrorCode::StaleFence);
         assert!(!not_applied(&stale, &attention));
         assert!(not_applied(&stale, &terminal));
-        let busy = refused(st3_client::ErrorCode::RateLimited);
+        let busy = refused(fractal_client::ErrorCode::RateLimited);
         assert!(not_applied(&busy, &attention));
         assert!(not_applied(&busy, &terminal));
         assert!(!not_applied(
-            &refused(st3_client::ErrorCode::ValidationFailed),
+            &refused(fractal_client::ErrorCode::ValidationFailed),
             &attention
         ));
     }
@@ -4266,7 +4266,7 @@ mod tests {
             90,
             &HashSet::new(),
             "*",
-            st3_conversation_ui::Density::Full,
+            fractal_conversation_ui::Density::Full,
         );
         let body_start = doc.messages[0].1.start as u16;
         let ui = Ui::new(super::super::demo::world());
@@ -4287,10 +4287,10 @@ mod tests {
     #[tokio::test]
     async fn displayed_person_reply_changes_sender_status_without_reading_hidden_mail() {
         use super::super::view::{Body, Entry};
-        use st3::model::ClaimInput;
+        use fractal_daemon::model::ClaimInput;
         use std::sync::Arc;
         let root = tempfile::tempdir().unwrap();
-        let store = Arc::new(st3::store::Store::open_memory("person-read").unwrap());
+        let store = Arc::new(fractal_daemon::store::Store::open_memory("person-read").unwrap());
         for id in ["message/reply", "message/hidden"] {
             store
                 .append_claim(&ClaimInput {
@@ -4309,7 +4309,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        let state = st3::api::AppState {
+        let state = fractal_daemon::api::AppState {
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -4322,12 +4322,12 @@ mod tests {
             configured_peers: vec![],
             client_relay: None,
             native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
         };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();
         let server = tokio::spawn(async move {
-            st3::api::serve_unix(&server_path, st3::api::router(state))
+            fractal_daemon::api::serve_unix(&server_path, fractal_daemon::api::router(state))
                 .await
                 .unwrap();
         });
@@ -4411,7 +4411,7 @@ mod tests {
                 .len(),
             1
         );
-        let status: serde_json::Value = st3::client::Client::unix(&socket)
+        let status: serde_json::Value = fractal_daemon::client::Client::unix(&socket)
             .get("/v1/messages/delivery/message/reply")
             .await
             .unwrap();
@@ -4449,7 +4449,7 @@ mod tests {
 
     #[test]
     fn a_conversation_without_its_transcript_is_one_failure_not_half_a_conversation() {
-        let items: Vec<st3_client::TimelineEntry> = serde_json::from_value(serde_json::json!([
+        let items: Vec<fractal_client::TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"m","sequence":1,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"user","type":"message","final":true,
              "body":{"message_id":"message/one","from":"person/avery","to":"agent/example/harbor/keeper","title":"Status?"}},
             {"id":"c","sequence":2,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"user","type":"content","final":true,
@@ -4465,7 +4465,7 @@ mod tests {
             "person/avery",
             &BTreeMap::from([(
                 target.to_owned(),
-                st3_conversation_ui::Timeline {
+                fractal_conversation_ui::Timeline {
                     items,
                     ..Default::default()
                 },
@@ -4496,14 +4496,14 @@ mod tests {
                 ui.glasses = Some(glass::Glasses::open(None, None));
             }
             let target = if child {
-                ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(
+                ui.click(Hit::Pane(fractal_conversation_ui::PaneIntent::Open(
                     "session/tester-child".into(),
                 )));
                 "session/tester-child".to_owned()
             } else {
                 let target = selected;
                 if spaces {
-                    ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(target.clone())));
+                    ui.click(Hit::Pane(fractal_conversation_ui::PaneIntent::Open(target.clone())));
                 }
                 target
             };
@@ -4587,13 +4587,13 @@ mod tests {
 
     #[test]
     fn a_conversation_says_above_its_oldest_entry_how_far_back_it_goes() {
-        let items: Vec<st3_client::TimelineEntry> = serde_json::from_value(serde_json::json!([
+        let items: Vec<fractal_client::TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"c","sequence":2,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"assistant","type":"content","final":true,
              "body":{"media_type":"text/plain","text":"The audit is done."}},
         ]))
         .unwrap();
         let target = "agent/example/harbor/keeper";
-        let note = |timeline: st3_conversation_ui::Timeline| {
+        let note = |timeline: fractal_conversation_ui::Timeline| {
             let shown = conversations(
                 &Model::default(),
                 "person/avery",
@@ -4605,31 +4605,31 @@ mod tests {
                 panic!("expected entries");
             };
             match &entries[0].body {
-                st3_conversation_ui::Body::Event(text) => text.clone(),
+                fractal_conversation_ui::Body::Event(text) => text.clone(),
                 _ => String::new(),
             }
         };
-        let mut timeline = st3_conversation_ui::Timeline {
+        let mut timeline = fractal_conversation_ui::Timeline {
             items: items.clone(),
             has_more: true,
             ..Default::default()
         };
         assert_eq!(note(timeline), "Scroll up for earlier entries");
-        timeline = st3_conversation_ui::Timeline {
+        timeline = fractal_conversation_ui::Timeline {
             items: items.clone(),
             has_more: true,
             ..Default::default()
         };
         timeline.older.loading = true;
         assert_eq!(note(timeline), "Loading earlier entries…");
-        timeline = st3_conversation_ui::Timeline {
+        timeline = fractal_conversation_ui::Timeline {
             items: items.clone(),
             has_more: true,
             ..Default::default()
         };
         timeline.older_failed("st did not answer".into());
         assert!(note(timeline).starts_with("Could not load earlier entries: st did not answer"));
-        timeline = st3_conversation_ui::Timeline {
+        timeline = fractal_conversation_ui::Timeline {
             items,
             ..Default::default()
         };
@@ -4645,8 +4645,8 @@ mod tests {
                 .unwrap(),
         );
         let mut timelines = BTreeMap::new();
-        let mut timeline = st3_conversation_ui::Timeline::default();
-        timeline.apply(st3_conversation_ui::Frame {
+        let mut timeline = fractal_conversation_ui::Timeline::default();
+        timeline.apply(fractal_conversation_ui::Frame {
             replace: true,
             session_id: Some("session/old".into()),
             ..Default::default()
@@ -4661,7 +4661,7 @@ mod tests {
         // Asked once for that session, not on every pass.
         assert!(moved_sessions(&conversing, &model, &timelines, &mut asked).is_empty());
         // Once the conversation shows the new session, nothing more is asked.
-        timelines.get_mut(&target).unwrap().apply(st3_conversation_ui::Frame {
+        timelines.get_mut(&target).unwrap().apply(fractal_conversation_ui::Frame {
             replace: true,
             session_id: Some("session/new".into()),
             ..Default::default()
@@ -4701,7 +4701,7 @@ mod tests {
         assert!(!mark_unanswered(&mut waiting));
     }
 
-    fn fixture_screen() -> st3_client::TerminalScreen {
+    fn fixture_screen() -> fractal_client::TerminalScreen {
         let text = include_str!("../../../../docs/st3/client-v0/fixtures/terminal-screen.json");
         let envelope: serde_json::Value = serde_json::from_str(text).unwrap();
         serde_json::from_value(envelope["value"].clone()).unwrap()
@@ -4955,7 +4955,7 @@ async fn attach_terminal(
         direct::Opened::UseGateway { route } => route,
     };
     let attachment = client
-        .raw_terminal_attachment(terminal, &incarnation, st3_client::RawTerminalMode::Attach)
+        .raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
         .await
         .map_err(|error| format!("{route}: {}", error.plain()))?;
     let stream = client
@@ -4978,7 +4978,7 @@ async fn attach_terminal(
 fn terminal_owner(
     model: &Model,
     agent: &str,
-    found: Option<&st3_client::Agent>,
+    found: Option<&fractal_client::Agent>,
     runtime_ids: &[String],
 ) -> Option<String> {
     found

@@ -18,7 +18,7 @@ pub struct State {
     confirmed: BTreeSet<String>,
     #[serde(default)]
     accepted: BTreeSet<String>,
-    lines: st_drivers::reexec::LineBuffer,
+    lines: fractal_drivers::reexec::LineBuffer,
 }
 #[derive(Default, Deserialize, Serialize)]
 pub struct Handoffs {
@@ -34,17 +34,17 @@ pub async fn run(
     client: &Client,
     subject: &str,
     incarnation: impl std::future::Future<Output = Result<String>>,
-    paths: &st_drivers::driver_paths::Paths,
+    paths: &fractal_drivers::driver_paths::Paths,
     identity: &str,
     runtime_id: &str,
 ) -> Result<()> {
     let agent_dir = &paths.agent_dir;
     let ledger_path = agent_dir.join("native-channel-handoffs.json");
     let mut state = if let Some(path) =
-        st_drivers::reexec::resume_path(st_drivers::reexec::CHANNEL_RESUME_ENV)
+        fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV)
     {
-        let state = st_drivers::reexec::read_state::<State>(&path);
-        st_drivers::reexec::unblock_stop_signals();
+        let state = fractal_drivers::reexec::read_state::<State>(&path);
+        fractal_drivers::reexec::unblock_stop_signals();
         state.context("resuming st's Claude channel")?
     } else {
         let ledger = std::fs::read(&ledger_path)
@@ -65,8 +65,8 @@ pub async fn run(
     };
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     let spawn_reader =
-        |sender: tokio::sync::mpsc::UnboundedSender<st_drivers::reexec::StdinChunk>| {
-            st_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
+        |sender: tokio::sync::mpsc::UnboundedSender<fractal_drivers::reexec::StdinChunk>| {
+            fractal_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
         };
     let mut reader = Some(spawn_reader(input_tx.clone()));
     let mut stdout = tokio::io::stdout();
@@ -92,7 +92,7 @@ pub async fn run(
         tokio::select! {
             bound = &mut binding => { state.fence = bound?; break; },
             chunk = input_rx.recv() => match chunk {
-                Some(st_drivers::reexec::StdinChunk::Bytes(bytes)) => {
+                Some(fractal_drivers::reexec::StdinChunk::Bytes(bytes)) => {
                     state.lines.push(&bytes);
                     while let Some(line) = state.lines.next_line() {
                         if let Some(response) = request(&line, &mut state.initialized)? {
@@ -100,20 +100,20 @@ pub async fn run(
                         }
                     }
                 },
-                Some(st_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
-                Some(st_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
+                Some(fractal_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
+                Some(fractal_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
             },
         }
     }
     let report = || {
         json!({"transport":"claude-channel", "pid":std::process::id(),
-        "image":st_drivers::reexec::running_identity().map(|i| i.token()),
-        "follows":st_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
-        "channel":{"pid":std::process::id(),"image":st_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
+        "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
+        "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
+        "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
         "ready":state.initialized})
     };
     let mut subscription = Subscription::start(client.clone(), state.fence.clone(), report());
-    let mut watch = st_drivers::reexec::ReplacementWatch::for_current_process();
+    let mut watch = fractal_drivers::reexec::ReplacementWatch::for_current_process();
     // Retry the identical claim after a failed acknowledgement. The existing tick
     // schedules retries; polling the POST separately keeps MCP input and EOF live.
     let initialization_input = channel_initialization_claim(&state.fence);
@@ -127,7 +127,7 @@ pub async fn run(
     let mut replayed = false;
     let mut content = BTreeMap::<String, String>::new();
     let mut transcript = Transcript::default();
-    let wrapper = std::env::var(st_drivers::claude_session::SESSION_ENV).unwrap_or_default();
+    let wrapper = std::env::var(fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default();
     let mut retries = BTreeMap::<String, Retry>::new();
     let mut unconfirmed_since = BTreeMap::<String, Instant>::new();
     let mut diagnostics = BTreeMap::<String, DiagnosticReport>::new();
@@ -154,7 +154,7 @@ pub async fn run(
                 None => return Ok(()),
             },
             chunk = input_rx.recv() => match chunk {
-                Some(st_drivers::reexec::StdinChunk::Bytes(bytes)) => {
+                Some(fractal_drivers::reexec::StdinChunk::Bytes(bytes)) => {
                     state.lines.push(&bytes);
                     while let Some(line) = state.lines.next_line() {
                         if let Some(response) = request(&line, &mut state.initialized)? {
@@ -162,8 +162,8 @@ pub async fn run(
                         }
                     }
                 },
-                Some(st_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
-                Some(st_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
+                Some(fractal_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
+                Some(fractal_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
             },
             _ = interval.tick() => {
                 if state.initialized && !initialization_recorded && !initialization_pending
@@ -172,9 +172,9 @@ pub async fn run(
                     initialization_pending = true;
                 }
                 subscription.report(json!({"transport":"claude-channel", "pid":std::process::id(),
-                    "image":st_drivers::reexec::running_identity().map(|i| i.token()),
-                    "follows":st_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
-                    "channel":{"pid":std::process::id(),"image":st_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
+                    "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
+                    "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
+                    "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
                     "ready":state.initialized}));
                 if state.initialized && replayed {
                     // The stream grants eligibility only to live mail. Retained handoffs can
@@ -219,10 +219,10 @@ pub async fn run(
                             }
                             let body = body(client, message).await?;
                             let attachments = crate::blobs::materialize_for_seat(client, subject, &agent_dir.join("attachments"), message).await?;
-                            Ok::<_, anyhow::Error>(Some(st_drivers::ding::with_tag_notices(
-                                st_drivers::ding::st3_notification_with_metadata(&message.subject, &message.from, &message.to,
-                                    message.title.as_deref(), &body, &st_drivers::ding::st3_body_sha256(&body),
-                                    st_drivers::ding::NotificationMetadata {
+                            Ok::<_, anyhow::Error>(Some(fractal_drivers::ding::with_tag_notices(
+                                fractal_drivers::ding::st3_notification_with_metadata(&message.subject, &message.from, &message.to,
+                                    message.title.as_deref(), &body, &fractal_drivers::ding::st3_body_sha256(&body),
+                                    fractal_drivers::ding::NotificationMetadata {
                                         attachments: &attachments,
                                         assistant: message.assistant_metadata().as_ref(),
                                     }), &message.tags)))
@@ -272,7 +272,7 @@ pub async fn run(
                     // consumption proof. An enqueue or writing stdout is not a receipt.
                     if !content.is_empty() && retry_ready(&retries, "transcript") {
                         let records = (|| {
-                            let path = st_drivers::claude_session::channel_transcript_recovering(paths, identity, runtime_id, &wrapper)?
+                            let path = fractal_drivers::claude_session::channel_transcript_recovering(paths, identity, runtime_id, &wrapper)?
                                 .context("Claude has not bound this wrapper to a native transcript")?;
                             transcript.appended(&path)
                         })();
@@ -364,17 +364,17 @@ pub async fn run(
                     if let Some(reader) = reader.take() { tokio::task::block_in_place(|| reader.stop()); }
                     while let Ok(chunk) = input_rx.try_recv() {
                         match chunk {
-                            st_drivers::reexec::StdinChunk::Bytes(bytes) => state.lines.push(&bytes),
-                            st_drivers::reexec::StdinChunk::Eof => return Ok(()),
-                            st_drivers::reexec::StdinChunk::Failed(error) => return Err(error.into()),
+                            fractal_drivers::reexec::StdinChunk::Bytes(bytes) => state.lines.push(&bytes),
+                            fractal_drivers::reexec::StdinChunk::Eof => return Ok(()),
+                            fractal_drivers::reexec::StdinChunk::Failed(error) => return Err(error.into()),
                         }
                     }
                     while let Some(line) = state.lines.next_line() {
                         if let Some(response) = request(&line, &mut state.initialized)? { write(&mut stdout, &response).await?; }
                     }
                     stdout.flush().await?;
-                    let path = st_drivers::reexec::write_state(agent_dir, "st-channel-resume", &state)?;
-                    let _ = st_drivers::reexec::exec(&binary, st_drivers::reexec::CHANNEL_RESUME_ENV, &path, &[]);
+                    let path = fractal_drivers::reexec::write_state(agent_dir, "st-channel-resume", &state)?;
+                    let _ = fractal_drivers::reexec::exec(&binary, fractal_drivers::reexec::CHANNEL_RESUME_ENV, &path, &[]);
                     let _ = std::fs::remove_file(path);
                     if let Some(watch) = &mut watch { watch.refuse_current(); }
                     reader = Some(spawn_reader(input_tx.clone()));
@@ -385,19 +385,19 @@ pub async fn run(
 }
 
 async fn notifications_held(client: &Client, subject: &str, agent_dir: &Path, wrapper: &str) -> bool {
-    let observed = st_drivers::harness_state::read(
-        &st_drivers::harness_state::harness_state_path(agent_dir),
+    let observed = fractal_drivers::harness_state::read(
+        &fractal_drivers::harness_state::harness_state_path(agent_dir),
         None,
     );
     let Some(observed) = observed.as_ref() else { return true; };
     if !current_notification_observation(observed, wrapper) { return true; }
-    if observed.blocked_on != st_drivers::harness_state::BlockedOn::Human {
-        return observed.blocked_on != st_drivers::harness_state::BlockedOn::None;
+    if observed.blocked_on != fractal_drivers::harness_state::BlockedOn::Human {
+        return observed.blocked_on != fractal_drivers::harness_state::BlockedOn::None;
     }
     if !matches!(observed.ask,
-        st_drivers::harness_state::Ask::Permission
-            | st_drivers::harness_state::Ask::Question
-            | st_drivers::harness_state::Ask::Review)
+        fractal_drivers::harness_state::Ask::Permission
+            | fractal_drivers::harness_state::Ask::Question
+            | fractal_drivers::harness_state::Ask::Review)
     {
         return true;
     }
@@ -422,8 +422,8 @@ async fn notifications_held(client: &Client, subject: &str, agent_dir: &Path, wr
     }
     // An answer to the previous prompt cannot release a new prompt that opened
     // while the daemon lookup was in flight.
-    let latest = st_drivers::harness_state::read(
-        &st_drivers::harness_state::harness_state_path(agent_dir),
+    let latest = fractal_drivers::harness_state::read(
+        &fractal_drivers::harness_state::harness_state_path(agent_dir),
         None,
     );
     !latest.as_ref().is_some_and(|latest| {
@@ -433,15 +433,15 @@ async fn notifications_held(client: &Client, subject: &str, agent_dir: &Path, wr
     })
 }
 
-fn current_notification_observation(observed: &st_drivers::harness_state::Observed, wrapper: &str) -> bool {
+fn current_notification_observation(observed: &fractal_drivers::harness_state::Observed, wrapper: &str) -> bool {
     !wrapper.is_empty()
         && observed.evidence_incarnation.as_deref() == Some(wrapper)
         && observed.harness.as_deref() == Some("claude")
         && matches!(observed.state,
-            st_drivers::harness_state::Activity::Ready
-                | st_drivers::harness_state::Activity::Idle
-                | st_drivers::harness_state::Activity::Active
-                | st_drivers::harness_state::Activity::Child)
+            fractal_drivers::harness_state::Activity::Ready
+                | fractal_drivers::harness_state::Activity::Idle
+                | fractal_drivers::harness_state::Activity::Active
+                | fractal_drivers::harness_state::Activity::Child)
 }
 
 async fn announce_initialization(client: &Client, input: &ClaimInput) -> Result<ClaimRecord> {
@@ -625,7 +625,7 @@ pub struct Transcript {
     path: std::path::PathBuf,
     identity: Option<(u64, u64)>,
     offset: u64,
-    lines: st_drivers::reexec::LineBuffer,
+    lines: fractal_drivers::reexec::LineBuffer,
     recover: bool,
     discard_line: bool,
 }
@@ -853,7 +853,7 @@ fn request(line: &str, initialized: &mut bool) -> Result<Option<Value>> {
         Some("initialize") => {
             json!({"protocolVersion":"2025-03-26","capabilities":{"experimental":{"claude/channel":{}}},
             "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")},
-            "instructions":st_drivers::ding::CHANNEL_INSTRUCTIONS})
+            "instructions":fractal_drivers::ding::CHANNEL_INSTRUCTIONS})
         }
         Some("notifications/initialized") => {
             *initialized = true;
@@ -1033,7 +1033,7 @@ mod tests {
     async fn claude_new_notification_gate_uses_current_prompt_resolution_and_fails_closed() {
         use axum::{Json, Router, routing::get};
         use crate::store::NativePromptState;
-        use st_drivers::harness_state::{Activity, Ask, BlockedOn, InputBuffer, Observation, Writer};
+        use fractal_drivers::harness_state::{Activity, Ask, BlockedOn, InputBuffer, Observation, Writer};
 
         let (prompt, response) = tokio::sync::watch::channel(NativePromptState::Open);
         let app = Router::new().route("/v1/harness-prompts/state", get(move || {
@@ -1044,8 +1044,8 @@ mod tests {
         let client = Client::new(crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let dir = tempfile::tempdir().unwrap();
-        let path = st_drivers::harness_state::harness_state_path(dir.path());
-        let now = st_drivers::message::now_ms();
+        let path = fractal_drivers::harness_state::harness_state_path(dir.path());
+        let now = fractal_drivers::message::now_ms();
         let record = |ask: &str, blocked: &str, incarnation: &str, written: u64| json!({
             "schema":"st.harness-state.v1", "agent":"worker", "harness":"claude",
             "state":"active", "blockedOn":blocked, "inputBuffer":"unknown", "ask":ask,
@@ -1057,7 +1057,7 @@ mod tests {
         for ask in [Ask::Permission, Ask::Question, Ask::Review] {
             writer.observe(Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)
                 .with_ask(ask)).unwrap();
-            let observed = st_drivers::harness_state::read(&path, None).unwrap();
+            let observed = fractal_drivers::harness_state::read(&path, None).unwrap();
             assert!(current_notification_observation(&observed, "current"), "{observed:?}");
             assert_eq!(observed.ask, ask);
             let episode = format!("/v1/harness-prompts/state?agent=agent%2Fworker&ownership={}&transition={}",
@@ -1079,7 +1079,7 @@ mod tests {
             for _ in 0..20 {
                 writer.observe(Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)
                     .with_ask(ask)).unwrap();
-                let heartbeat = st_drivers::harness_state::read(&path, None).unwrap();
+                let heartbeat = fractal_drivers::harness_state::read(&path, None).unwrap();
                 assert_eq!(heartbeat.ownership_sequence, observed.ownership_sequence);
                 assert_eq!(heartbeat.transition_sequence, observed.transition_sequence);
                 assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask:?}");
@@ -1133,7 +1133,7 @@ mod tests {
         );
         assert_eq!(
             initialize["result"]["instructions"],
-            st_drivers::ding::CHANNEL_INSTRUCTIONS
+            fractal_drivers::ding::CHANNEL_INSTRUCTIONS
         );
         assert!(
             initialize["result"]["instructions"]
@@ -1216,13 +1216,13 @@ mod tests {
 
     #[test]
     fn claude_native_proof_requires_the_exact_envelope_in_a_user_record() {
-        let envelope = st_drivers::ding::st3_notification_text(
+        let envelope = fractal_drivers::ding::st3_notification_text(
             "message/quartz",
             "person/eval",
             "agent/eval.worker",
             Some("Signal"),
             "QUARTZ SIGNAL",
-            &st_drivers::ding::st3_body_sha256("QUARTZ SIGNAL"),
+            &fractal_drivers::ding::st3_body_sha256("QUARTZ SIGNAL"),
         );
         assert!(!native_receipt(
             &json!({"type":"assistant","message":{"role":"assistant","content":envelope}}),
@@ -1275,13 +1275,13 @@ mod tests {
     fn claude_revisits_native_proof_when_an_uncertain_body_becomes_available() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("native.jsonl");
-        let envelope = st_drivers::ding::st3_notification_text(
+        let envelope = fractal_drivers::ding::st3_notification_text(
             "message/quartz",
             "person/eval",
             "agent/eval.worker",
             None,
             "QUARTZ SIGNAL",
-            &st_drivers::ding::st3_body_sha256("QUARTZ SIGNAL"),
+            &fractal_drivers::ding::st3_body_sha256("QUARTZ SIGNAL"),
         );
         let record = json!({"type":"user","message":{"role":"user","content":envelope}});
         std::fs::write(&path, format!("{record}\n")).unwrap();

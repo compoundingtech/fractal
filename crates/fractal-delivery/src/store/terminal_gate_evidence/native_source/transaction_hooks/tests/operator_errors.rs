@@ -1,12 +1,12 @@
 #![allow(unused_imports)]
-use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_operator_error_shared_seats::{Cell, Disposition, Origin};
-use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::*;
+use fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_operator_error_shared_seats::{Cell, Disposition, Origin};
+use fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::*;
 use super::*;
 use rusqlite::{ErrorCode, ffi};
-use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::*;
-use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::{answer, update_exit};
-use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_operator_errors_shared_delivery::*;
-use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_operator_errors_shared_delivery::{Pages, pages, sqlite};
+use fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::*;
+use fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::{answer, update_exit};
+use fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_operator_errors_shared_delivery::*;
+use fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_operator_errors_shared_delivery::{Pages, pages, sqlite};
 
 
 fn report(f: &Fixture, phase: &str) {
@@ -21,7 +21,7 @@ fn managed_operator_error_real_full_aborts_all_callers_and_writer_recovers() {
         let mut old_max = None;
         f.raw(|c| {
             c.execute_batch(
-                /* sqlite-large-value: allow-for-now lv-he219b4e2883d owner=st3_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=chunk-or-reference-variable-columns */ "CREATE TABLE test_terminal_operator_probe(payload BLOB NOT NULL); VACUUM;",
+                /* sqlite-large-value: allow-for-now lv-ha60d509d545d owner=fractal_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=chunk-or-reference-variable-columns */ "CREATE TABLE test_terminal_operator_probe(payload BLOB NOT NULL); VACUUM;",
             )
             .unwrap();
             let initial = pages(c);
@@ -32,7 +32,7 @@ fn managed_operator_error_real_full_aborts_all_callers_and_writer_recovers() {
             old_max = Some(initial.max);
             let actual: i64 = c
                 .query_row(
-                    /* sqlite-large-value: allow-for-now lv-h4d94f0a055a1 owner=st3_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=trace-statement-and-value-representation */ &format!("PRAGMA max_page_count={}", initial.count),
+                    /* sqlite-large-value: allow-for-now lv-hf46189c5926f owner=fractal_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=trace-statement-and-value-representation */ &format!("PRAGMA max_page_count={}", initial.count),
                     [],
                     |r| r.get(0),
                 )
@@ -93,7 +93,7 @@ fn managed_operator_error_real_full_aborts_all_callers_and_writer_recovers() {
             );
             let max = old_max.unwrap();
             let restored: i64 = c
-                .query_row(/* sqlite-large-value: allow-for-now lv-h5653bc7baf57 owner=st3_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=trace-statement-and-value-representation */ &format!("PRAGMA max_page_count={max}"), [], |r| r.get(0))
+                .query_row(/* sqlite-large-value: allow-for-now lv-h28c9f90473a5 owner=fractal_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=trace-statement-and-value-representation */ &format!("PRAGMA max_page_count={max}"), [], |r| r.get(0))
                 .unwrap();
             assert_eq!(restored, max);
         });
@@ -121,7 +121,7 @@ fn managed_operator_error_real_full_aborts_all_callers_and_writer_recovers() {
 fn managed_operator_error_witness_constraint_fences_without_aborting_admission() {
     let f = Fixture::new(true);
     let before = f.saved();
-    f.raw(|c| c.execute_batch(/* sqlite-large-value: allow-for-now lv-h3bb356a61648 owner=st3_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER test_terminal_operator_constraint BEFORE UPDATE OF body ON main.test_terminal_members WHEN NEW.key='gate/native' BEGIN SELECT RAISE(ABORT,'private witness constraint'); END;").unwrap());
+    f.raw(|c| c.execute_batch(/* sqlite-large-value: allow-for-now lv-hc32465ca1f77 owner=fractal_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER test_terminal_operator_constraint BEFORE UPDATE OF body ON main.test_terminal_members WHEN NEW.key='gate/native' BEGIN SELECT RAISE(ABORT,'private witness constraint'); END;").unwrap());
     let native = f.store.append_claim(&observation(&f, 7)).unwrap();
     assert_eq!(f.counts(), (1, 1));
     let seen = f.adapter.operator_error.observed().unwrap().unwrap();
@@ -152,7 +152,7 @@ fn managed_operator_error_witness_constraint_fences_without_aborting_admission()
     assert_eq!(f.line()["status"], "unknown");
     assert!(f.line()["message"].as_str().unwrap().contains("constraint"));
     f.raw(|c| {
-        c.execute_batch(/* sqlite-large-value: allow-for-now lv-h700e5e950bb7 owner=st3_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER test_terminal_operator_constraint")
+        c.execute_batch(/* sqlite-large-value: allow-for-now lv-hf954e39720ff owner=fractal_delivery::store::terminal_gate_evidence::native_source::transaction_hooks::tests::operator_errors TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER test_terminal_operator_constraint")
             .unwrap()
     });
     f.store.append_claim(&observation(&f, 0)).unwrap();

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Session } from '@smalltalk/st3-client'
+import type { Session } from '@fractal/client'
 import { ANCHOR_MS, agent, buildWorld, foldSlice, genericVariants, terminalRecord, terminalRun, wireValues, type RawResource, type Slice, type SyncEvent, type TerminalRecord, type WorldDefinition } from '../src/index.ts'
 import { drawCast } from '../src/kit/cast.ts'
 import { rngFromSeed } from '../src/kit/rng.ts'

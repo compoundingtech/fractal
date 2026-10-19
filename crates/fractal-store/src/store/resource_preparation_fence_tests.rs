@@ -72,7 +72,7 @@ fn repair_state(connection: &Connection, claim: &str) {
     // This supplies no new signed repair declaration and makes no repair-authorization claim.
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h0be507064f20 owner=st3_store::store::resource_preparation_fence_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+            /* sqlite-large-value: allow-for-now lv-h6a2d7e505657 owner=fractal_store::store::resource_preparation_fence_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
             [claim],
         )
         .unwrap();
@@ -135,19 +135,19 @@ fn canonical_batch_order_is_not_covered_by_the_global_projection_generation() {
     // the candidate token. This tests coverage of physical source changes, not valid signing.
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h574d1374fb1f owner=st3_store::store::resource_preparation_fence_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='10' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h3f9834e02ae8 owner=fractal_store::store::resource_preparation_fence_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='10' WHERE subject=?1",
             [subject],
         )
         .unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h965e08ce5b84 owner=st3_store::store::resource_preparation_fence_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=1 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h5f29f3ec2477 owner=fractal_store::store::resource_preparation_fence_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=1 WHERE id=?1",
             [&degraded.batch_id],
         )
         .unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h3b24ef06efe9 owner=st3_store::store::resource_preparation_fence_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=2 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h7aaba2baadbd owner=fractal_store::store::resource_preparation_fence_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=2 WHERE id=?1",
             [&healthy.batch_id],
         )
         .unwrap();
@@ -160,7 +160,7 @@ fn canonical_batch_order_is_not_covered_by_the_global_projection_generation() {
 
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hfa11755eacc8 owner=st3_store::store::resource_preparation_fence_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=3 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-he808bdaf1a84 owner=fractal_store::store::resource_preparation_fence_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=3 WHERE id=?1",
             [&degraded.batch_id],
         )
         .unwrap();

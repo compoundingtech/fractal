@@ -5,7 +5,7 @@
 mod daemon_bench;
 
 use serde_json::Value;
-use st3::{api::AppState, client::Client, store::Store};
+use fractal_daemon::{api::AppState, client::Client, store::Store};
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio::sync::{Notify, watch};
 
@@ -70,12 +70,12 @@ async fn main() -> anyhow::Result<()> {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: Some(root.join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
-            async move { st3::api::serve_unix(&server_socket, st3::api::router(state)).await },
+            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
         );
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

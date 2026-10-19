@@ -1,7 +1,7 @@
 # Fractal feed
 
-`st3-feed` owns the live collection subscriptions, member reconnects, snapshot model and private
-display cache used by stui. It depends on the generated `st3-client` and the conversation model;
+`fractal-feed` owns the live collection subscriptions, member reconnects, snapshot model and private
+display cache used by stui. It depends on the generated `fractal-client` and the conversation model;
 its normal dependencies contain no terminal renderer. It changes no server protocol.
 
 `run_members_with_sidebar` additionally takes an explicit person selector. It follows
@@ -18,14 +18,14 @@ member before waiting, and rotates to the next member when a socket drops. Crede
 on their own clients. `run` is the convenience form for one local member without glasses.
 
 ```rust,no_run
-use st3_client::Client;
-use st3_feed::{Command, Update};
+use fractal_client::Client;
+use fractal_feed::{Command, Update};
 
 #[tokio::main]
 async fn main() {
     let (updates, received) = std::sync::mpsc::channel();
     let (commands, command_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(st3_feed::run_members(
+    let task = tokio::spawn(fractal_feed::run_members(
         vec![Client::unix_as("/tmp/example.sock", "person/avery")],
         false, // local connection; true identifies a remote device gateway
         false, // request the optional glasses window
@@ -87,7 +87,7 @@ versions, nonprivate files, future timestamps and snapshots older than seven day
 have the status `Cached · refreshing…`. They are display data: actions still require live
 snapshots and fresh fences; there is no offline mutation queue.
 
-Run `cargo test --locked -p st3-feed -p stui -p st3-e2e` to check the extracted feed, cursor-gap recovery,
+Run `cargo test --locked -p fractal-feed -p fractal-tui -p fractal-e2e` to check the extracted feed, cursor-gap recovery,
 cache and consumers. Server-backed tests run outside an st seat's `ST_AGENT` environment.
 
 Optional screen inventories use `Command::Inventories(Inventories { .. })`.

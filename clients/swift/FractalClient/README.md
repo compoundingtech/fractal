@@ -1,11 +1,11 @@
-# St3Client
+# FractalClient
 
 Swift 6 package for iOS 17/macOS 14 clients of `st3.client.v0`. It is an online thin client over an
 authenticated Fabric-loopback URL and includes typed capabilities, resources, timeline/events,
 actions, pairing, and styled terminal screens; `terminalStream` yields each changed screen.
 
 ```swift
-let client = St3Client(fabricLoopbackURL: gatewayURL, credential: credential)
+let client = FractalClient(fabricLoopbackURL: gatewayURL, credential: credential)
 let capabilities = try await client.capabilities()
 let work = try await client.workList(limit: 100)
 ```
@@ -27,8 +27,8 @@ func makeClient(
     gatewayURL: URL,
     credential: String,
     activeSpanContext: @escaping @Sendable () -> TraceContext?
-) -> St3Client {
-    St3Client(
+) -> FractalClient {
+    FractalClient(
         fabricLoopbackURL: gatewayURL,
         credential: credential,
         traceContext: activeSpanContext
@@ -56,5 +56,5 @@ trace propagation ignore both headers.
 ## Generated artifacts
 
 The generated models and complete typed operation surfaces are refreshed from the normative schema
-and machine manifest with `cargo run -p st3-client-codegen`; `--check` renders every artifact in
+and machine manifest with `cargo run -p fractal-client-codegen`; `--check` renders every artifact in
 memory and byte-compares it to the checked-in output.

@@ -91,16 +91,16 @@ proptest! {
         prop_assert_eq!(&actual["nullable"], &if nullable { Value::Null } else { json!("set") });
         // A named repair excludes an original already represented in a warm reduction.
         target.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-hf58087e2e0aa owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&new_id]).unwrap();
+            /* sqlite-large-value: allow-for-now lv-h8c4637c155a8 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&new_id]).unwrap();
         let repaired = read(&target);
         prop_assert!(repaired.1 > 0);
         prop_assert_eq!(&repaired.0.unwrap()["facts"]["state"], &json!("open"));
         // Undo and direct source mutations are conservatively global invalidations.
         target.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h3332273f6629 owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_digest_repaired_claims WHERE id=?1", [&new_id]).unwrap();
+            /* sqlite-large-value: allow-for-now lv-ha217fa8e64a8 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_digest_repaired_claims WHERE id=?1", [&new_id]).unwrap();
         read(&target);
         target.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-hdc8067202b66 owner=st3_store::store::observer_actuals_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.carried','changed') WHERE id=?1", [&old_id]).unwrap();
+            /* sqlite-large-value: allow-for-now lv-h9d654011ce51 owner=fractal_store::store::observer_actuals_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.carried','changed') WHERE id=?1", [&old_id]).unwrap();
         prop_assert_eq!(&read(&target).0.unwrap()["carried"], &json!("changed"));
     }
 }
@@ -114,7 +114,7 @@ fn observer_actuals_external_writer_invalidates_warm_result() {
     read(&store);
     assert_eq!(read(&store).1, 0);
     let external = Connection::open(&path).unwrap();
-    external.execute(/* sqlite-large-value: allow-for-now lv-hb46268097df5 owner=st3_store::store::observer_actuals_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.carried','external') WHERE id=?1", [&id]).unwrap();
+    external.execute(/* sqlite-large-value: allow-for-now lv-hafbfc3a3c9a7 owner=fractal_store::store::observer_actuals_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.carried','external') WHERE id=?1", [&id]).unwrap();
     let changed = read(&store);
     assert!(changed.1 > 0);
     assert_eq!(changed.0.unwrap()["carried"], "external");
@@ -124,7 +124,7 @@ fn observer_actuals_external_writer_invalidates_warm_result() {
 fn observer_actuals_lru_is_bounded() {
     let cache = Actuals::default();
     let connection = Connection::open_in_memory().unwrap();
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h483ca304fb64 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h449350f5b2b3 owner=fractal_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
         CREATE TABLE claims(store_index INTEGER PRIMARY KEY,id TEXT,batch_id TEXT,subject TEXT,kind TEXT,body TEXT,accepted_at_unix_ms TEXT);
         CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
         CREATE TABLE replica_records(claim_id TEXT,position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
@@ -146,18 +146,18 @@ fn observer_actuals_unsupported_coverage_stays_disabled_until_verified_recovery(
     read(&store);
     assert_eq!(read(&store).1, 0);
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-he860f6b73409 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-hd7dc4a36d272 owner=fractal_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
     ).unwrap();
     assert!(read(&store).1 > 0);
     assert!(read(&store).1 > 0, "seed must not clear failed native coverage");
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hb2aea767ee4b owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
+        /* sqlite-large-value: allow-for-now lv-hdb3e31923c76 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
     let repaired = read(&store);
     assert_eq!(repaired.0, None, "WITHOUT ROWID repairs must not reuse stale state");
     assert!(repaired.1 > 0);
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h9cf9d3ce95b6 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-h9b34dd42fcf7 owner=fractal_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
     ).unwrap();
     assert!(read(&store).1 > 0);
@@ -214,10 +214,10 @@ fn observer_actuals_production_sources_forbid_implicit_replacement_deletes() {
             assert!(replaces_fold_source(&format!("{prefix} main.\"{table}\" VALUES(1)")));
         }
         assert!(replaces_fold_source(&format!(
-            /* sqlite-large-value: allow-for-now lv-h3b43e0536175 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE {table}(id TEXT UNIQUE ON CONFLICT REPLACE)"
+            /* sqlite-large-value: allow-for-now lv-ha4db748eb72c owner=fractal_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE {table}(id TEXT UNIQUE ON CONFLICT REPLACE)"
         )));
         assert!(!replaces_fold_source(&format!(
-            /* sqlite-large-value: allow-for-now lv-h32b37b540af1 owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO {table}(id) VALUES(1) ON CONFLICT(id) DO UPDATE SET id=excluded.id"
+            /* sqlite-large-value: allow-for-now lv-h1b7651caeeb8 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO {table}(id) VALUES(1) ON CONFLICT(id) DO UPDATE SET id=excluded.id"
         )));
     }
     let manifest = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"));
@@ -253,19 +253,19 @@ fn observer_actuals_external_ddl_requires_verified_physical_coverage() {
     assert_eq!(read(&store).1, 0);
     let external = Connection::open(&path).unwrap();
     external.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hc5f780da2b96 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-ha4e915a6a4ef owner=fractal_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
     ).unwrap();
     assert!(read(&store).1 > 0);
     assert!(read(&store).1 > 0, "external unsupported DDL must latch reuse off");
     external.execute(
-        /* sqlite-large-value: allow-for-now lv-h00b4bf9bcc04 owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h0bf0a666fa19 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
     let repaired = read(&store);
     assert_eq!(repaired.0, None);
     assert!(repaired.1 > 0);
     assert!(read(&store).1 > 0, "external repair writes must not bypass the coverage latch");
     external.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hb9cf185509a0 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-h1d713955564a owner=fractal_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
     ).unwrap();
     assert!(read(&store).1 > 0);
@@ -293,7 +293,7 @@ fn observer_actuals_sealing_preserves_ranks_but_late_rank_changes_invalidate() {
     // Synthetic canonical metadata, not admitted replication evidence: the second claim
     // gets an earlier position than the first while the claim bodies remain unchanged.
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h1167f94cdc28 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,
+        /* sqlite-large-value: allow-for-now lv-h5c7073d4c441 owner=fractal_store::store::observer_actuals_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,
              claim_id,updated_at_unix_ms)
          VALUES('record/late-rank','fixture',1,'fixture',-1,X'','valid',?1,'0')",
         [&second]).unwrap();
@@ -327,7 +327,7 @@ fn observer_actuals_full_replay_invalidates_a_warm_changed_subject() {
     assert_eq!(admitted.as_ref().unwrap()["facts"]["state"], "closed");
     assert_eq!(read(&store).1, 0);
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-he07ad2bc3e6e owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", []).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h270a0a1ecf8b owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", []).unwrap();
     assert_eq!(read(&store).1, 0, "health deletion alone does not mutate the actual fold");
     let mut logs = Vec::new();
     assert!(store.project_replication_backlog_with_log(

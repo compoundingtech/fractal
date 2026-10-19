@@ -7,8 +7,8 @@ pub use crate::store::conversation_reads_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::conversation_reads_shared_seats::{BEFORE_MESSAGE_DECODE, BEFORE_OWNER_PUBLISH};
 use super::*;
-pub use st3_store::store::conversation_reads::*;
-pub use st3_store::store::conversation_reads::{Owner, Owners};
+pub use fractal_store::store::conversation_reads::*;
+pub use fractal_store::store::conversation_reads::{Owner, Owners};
 
 // Keep the existing physical owner window before selecting the kinds the fallback renders.
 // Filtering kinds before LIMIT would incorrectly bring old entries back into the view.
@@ -68,13 +68,13 @@ fn conversation_owner_from_connection(
 ) -> Result<Option<Owner>> {
     let exists: bool = connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND store_index<=?2)",
-    )?.query_row(/* sqlite-large-value: allow-for-now lv-h6782172e979f owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-he1164e71c552 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
     if !exists {
         return Ok(None);
     }
     let read = |query: &str| -> Result<Option<String>> {
-        Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf17f87b50202 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ query)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h51aa70b523b0 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get::<_, Option<String>>(0))
+        Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h04708f4ab37c owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ query)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h0987f6de26d0 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get::<_, Option<String>>(0))
             .optional()?.flatten())
     };
     let runtime = read(&IDENTITY_FIELD_READS[0])?;
@@ -148,7 +148,7 @@ impl ConversationReadsStore for Store {
     fn conversation_local_position(&self) -> Result<u64> {
         Ok(self.readers.get().prepare_cached(
             "SELECT COALESCE(MAX(id),0) FROM local_observations",
-        )?.query_row(/* sqlite-large-value: allow-for-now lv-hb1ff1b52b636 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hfb705e540146 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
     }
 
     fn conversation_changed_at(
@@ -157,8 +157,8 @@ impl ConversationReadsStore for Store {
         if after == through && local_after == local_through {
             return Ok(false);
         }
-        Ok(self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h5d6619ff3fff owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hc9cc1afde011 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
+        Ok(self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h3794736069fe owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hdcbe3463817e owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
     }
 
     fn conversation_owner_at(&self, subject: &str, through: u64) -> Result<Option<Owner>> {
@@ -229,7 +229,7 @@ impl ConversationReadsStore for Store {
             _ => {
                 let connection = self.readers.get();
                 let names = connection
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h33a3d5939c7f owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hcedec9147930 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                     .query_map(params![through, "agent/", "agent0"], |row| {
                         row.get::<_, String>(0)
                     })?
@@ -312,14 +312,14 @@ impl ConversationReadsStore for Store {
                         "SELECT store_index FROM claims WHERE kind='message.sent' AND store_index<?1
                      ORDER BY store_index DESC LIMIT 1 OFFSET 9999",
                     )?
-                    .query_row(/* sqlite-large-value: allow-for-now lv-hd856db76cb0f owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [before], |row| row.get::<_, u64>(0))
+                    .query_row(/* sqlite-large-value: allow-for-now lv-h7ddc6a187ef8 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [before], |row| row.get::<_, u64>(0))
                     .optional()?
                     .unwrap_or(0)
                     .max(after.saturating_add(1))
             };
             connection
                 .prepare_cached(
-                    /* sqlite-large-value: allow-for-now lv-h8a2180677f3c owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
+                    /* sqlite-large-value: allow-for-now lv-h38124a8abf3f owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
                     SELECT store_index FROM claims INDEXED BY claims_message_to_order_index
                     WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1
                       AND store_index>=?2 AND store_index<?3
@@ -352,7 +352,7 @@ impl ConversationReadsStore for Store {
         let ids = {
             let connection = self.readers.get();
             connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h274133e2032c owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ TIMELINE_OWNER_IDS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd7107683547f owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ TIMELINE_OWNER_IDS)?
                 .query_map(params![owner, before.unwrap_or(i64::MAX as u64)], |row| {
                     row.get::<_, String>(0)
                 })?
@@ -373,7 +373,7 @@ impl ConversationReadsStore for Store {
             let batch = &ids[offset..end];
             let raw = {
                 let connection = self.readers.get();
-                let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h48b93e361562 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
+                let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h29d8b28e7f44 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
                     "SELECT {CLAIM_COLUMNS} FROM claims
                      WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY store_index DESC",
                 ))?;
@@ -445,22 +445,22 @@ impl ConversationReadsStore for Store {
         ) -> Result<(Option<u128>, Option<u128>)> {
         let connection = self.readers.get();
         let started: Option<String> = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6446ec9963c5 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf0f831e76397 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
             "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_incarnation_accepted_index
              WHERE subject=?1 AND {INCARNATION_OF_CLAIM}=?2 AND kind='runtime.observed'
                AND json_type(body,'$.fields.incarnation_id')='text'
              ORDER BY length(accepted_at_unix_ms), accepted_at_unix_ms LIMIT 1",
         ))?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h2f9d8b58ce93 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h27af8f0b37c3 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation], |row| row.get(0))
             .optional()?;
         let ended = started.as_ref().map(|started| -> Result<Option<String>> {
-            Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h61ad8a2f63e4 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
+            Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h803c3550faa3 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_kind_accepted_index
                  WHERE subject=?1 AND kind='runtime.observed' AND json_type(body,'$.fields.incarnation_id')='text'
                    AND {INCARNATION_OF_CLAIM}!=?2
                    AND (length(accepted_at_unix_ms),accepted_at_unix_ms)>(length(?3),?3)
                  ORDER BY length(accepted_at_unix_ms),accepted_at_unix_ms LIMIT 1",
-            ))?.query_row(/* sqlite-large-value: allow-for-now lv-hb991a5d01744 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation, started], |row| row.get(0)).optional()?)
+            ))?.query_row(/* sqlite-large-value: allow-for-now lv-h680fbaf20f4d owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation, started], |row| row.get(0)).optional()?)
         }).transpose()?.flatten();
         Ok((
             started.and_then(|value| value.parse().ok()),

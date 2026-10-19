@@ -184,7 +184,7 @@ pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
 pub fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
     let connection = store.readers.get();
     let mut views = connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hba5d9054968a owner=st3_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ &seat_work_at_snapshot_query(false))?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha3063a1f5575 owner=fractal_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ &seat_work_at_snapshot_query(false))?
         .query_map(params![actor, true, false], step_run_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let carried = carried_claimants_tx(
@@ -199,7 +199,7 @@ pub fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
         .map(|view| view.run.strip_prefix("mission-run/").unwrap_or(&view.run))
         .collect::<BTreeSet<_>>();
     let phases = connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h91a6fd6a805d owner=st3_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ PHASES)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h59ec772a6701 owner=fractal_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ PHASES)?
         .query_map([serde_json::to_string(&runs)?], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?
@@ -219,7 +219,7 @@ pub fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
     for chunk in generations.chunks(CHUNK) {
         definitions.extend(
             connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h80baffb584ff owner=st3_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ DEFINITIONS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf3fb4eeb2031 owner=fractal_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ DEFINITIONS)?
                 .query_map([serde_json::to_string(chunk)?], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                 })?
@@ -253,7 +253,7 @@ pub fn support(connection: &Connection, views: &[StepRunView]) -> Result<Vec<(bo
     for chunk in views.chunks(CHUNK) {
         let subjects = chunk.iter().map(|view| &view.subject).collect::<Vec<_>>();
         let rows = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hc484c93fc4f4 owner=st3_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ SUPPORT)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7718bea7996f owner=fractal_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ SUPPORT)?
             .query_map([serde_json::to_string(&subjects)?], |row| {
                 Ok((
                     row.get::<_, usize>(0)?,
@@ -309,7 +309,7 @@ pub fn owners(
             })
             .collect::<Vec<_>>();
         let rows = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h859f9812178c owner=st3_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ OWNERS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-haafcc587bbc1 owner=fractal_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ OWNERS)?
             .query_map([serde_json::to_string(&requested)?], |row| {
                 let owner = if row.get::<_, bool>(1)? {
                     Some((

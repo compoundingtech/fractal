@@ -1,5 +1,5 @@
-import { St3Client } from '@smalltalk/st3-client'
-import { Envelope, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import { Envelope, decodeUnknownSync } from '@fractal/client/schema'
 import { describe, expect, it } from 'vitest'
 
 import { decodeSlice } from '../scripts/decode.ts'
@@ -147,7 +147,7 @@ describe('red and long narrative worlds', () => {
   it('long-debug-rabbit-hole: delivers every older page through the real client', async () => {
     const world = buildWorld(longDebugRabbitHole, genericVariants, ANCHOR_MS)
     const replay = createReplay(world, { clock: manualClock(world.now) })
-    const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl: async (input, init) => {
+    const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl: async (input, init) => {
       const response = await replay.fetch(input, init)
       decodeUnknownSync(Envelope, 'strict')(await response.clone().json())
       return response

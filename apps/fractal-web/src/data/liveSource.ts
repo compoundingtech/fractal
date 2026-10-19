@@ -1,6 +1,6 @@
-import { ClientError, St3Client, isTransient } from '@smalltalk/st3-client'
-import { Runtime, Snapshot, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type { Agent, Attention, Mission, TerminalScreen } from '@smalltalk/st3-client/schema'
+import { ClientError, FractalClient, isTransient } from '@fractal/client'
+import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
+import type { Agent, Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
   St3,
   St3Live,
@@ -12,7 +12,7 @@ import {
   type St3Options,
   type SyncStatus,
   syncStatusFromFailure,
-} from '@st3/sdk/effect'
+} from '@fractal/sdk/effect'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -158,7 +158,7 @@ export const liveSource = ({
   // Each sync-status consumer is owned by the corresponding follow fiber.
   let freshnessConsumers = 0
   setDebug('Wf.freshnessConsumers', 0)
-  const client = new St3Client({
+  const client = new FractalClient({
     baseUrl,
     // Remove the browser receiver workaround after smalltalk#1040 / #1247 lands.
     fetchImpl: fetch,
@@ -1112,7 +1112,7 @@ export const liveSource = ({
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.
-        connect: (fetchImpl) => new St3Client({ baseUrl, fetchImpl }),
+        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl }),
         transport: fetch,
         snapshot: async () => {
           const current = await messageSnapshot()

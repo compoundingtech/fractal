@@ -103,7 +103,7 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64, predecessors: &[String]
         oid(id)?;
     }
     let home = PathBuf::from(std::env::var_os("HOME").context("protected profile HOME")?);
-    let directory = st3_client::product_dirs::resolve(
+    let directory = fractal_client::product_dirs::resolve(
         home.join(".config/st"),
         home.join(".config/fractal"),
     );

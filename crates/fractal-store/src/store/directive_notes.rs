@@ -16,7 +16,7 @@ pub struct DirectiveNote {
 pub const CURRENT_QUERY: &str = "SELECT c.id,c.store_index,c.batch_id,c.subject,c.kind,c.origin,c.actor,c.body,c.predecessors,c.accepted_at_unix_ms
     FROM person_directive_notes n JOIN claims c ON c.id=n.claim_id WHERE n.person=?1";
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2aaa16339e75 owner=st3_store::store::directive_notes TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h01afe75cd96c owner=fractal_store::store::directive_notes TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS person_directive_notes (
     person TEXT PRIMARY KEY,
     claim_id TEXT NOT NULL,
@@ -124,7 +124,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     // definition exactly once. The fixed definitions contain no whitespace-bearing literals.
     for suffix in ["insert", "update", "delete"] {
         let name = format!("directive_note_record_{suffix}");
-        let marker = format!(/* sqlite-large-value: allow-for-now lv-h7358615098b0 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {name}");
+        let marker = format!(/* sqlite-large-value: allow-for-now lv-h3bb2a6750188 owner=fractal_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {name}");
         let start = SCHEMA
             .find(&marker)
             .context("missing directive-note trigger definition")?;
@@ -150,15 +150,15 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
             .as_deref()
             .is_some_and(|sql| tokens(sql) != tokens(&expected))
         {
-            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h476206fc7944 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER {name}"))?;
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hed3665597560 owner=fractal_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER {name}"))?;
         }
     }
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2cced01813a3 owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ SCHEMA)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3a3a58673aaa owner=fractal_store::store::directive_notes TODO=trace-statement-and-value-representation */ SCHEMA)?;
     Ok(())
 }
 
 pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h4911e953fa4d owner=st3_store::store::directive_notes TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM person_directive_notes;
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h95a09d5cc836 owner=fractal_store::store::directive_notes TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM person_directive_notes;
         DELETE FROM local_directive_note_pending;
         DELETE FROM local_directive_note_dirty;
         INSERT INTO local_directive_note_pending SELECT id FROM claims WHERE kind='person.directive-note-set'
@@ -172,8 +172,8 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for person in dirty {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h44baba168680 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM person_directive_notes WHERE person=?1", [&person])?;
-        let latest = tx.query_row(/* sqlite-large-value: allow-for-now lv-ha09a9fdb6d38 owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='person.directive-note-set'
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hbd02e2691590 owner=fractal_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM person_directive_notes WHERE person=?1", [&person])?;
+        let latest = tx.query_row(/* sqlite-large-value: allow-for-now lv-hb8b7436cf276 owner=fractal_store::store::directive_notes TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='person.directive-note-set'
             AND NOT EXISTS (SELECT 1 FROM replica_records repaired
                 WHERE repaired.claim_id=claims.id AND repaired.state='repaired')
             ORDER BY CANONICAL_DESC(claims) LIMIT 1"), [&person], |row| row.get::<_, String>(0)).optional()?;
@@ -186,13 +186,13 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (person, id) in pending { project(tx, &person, &id)?; }
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hbdc0ad73cc41 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_directive_note_dirty; DELETE FROM local_directive_note_pending;")?;
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h198683860b03 owner=fractal_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_directive_note_dirty; DELETE FROM local_directive_note_pending;")?;
     Ok(())
 }
 
 pub fn project(tx: &Transaction<'_>, person: &str, id: &str) -> Result<()> {
     let key = canonical::sortable_key(&canonical::claim_key(tx, id)?);
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h88d1aeed0c6e owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_directive_notes(person,claim_id,head_key) VALUES(?1,?2,?3)
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h1abca1927a82 owner=fractal_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_directive_notes(person,claim_id,head_key) VALUES(?1,?2,?3)
         ON CONFLICT(person) DO UPDATE SET claim_id=excluded.claim_id,head_key=excluded.head_key
         WHERE excluded.head_key>person_directive_notes.head_key", params![person, id, key])?;
     Ok(())
@@ -206,7 +206,7 @@ pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St
     }
     // A newly staged local admission/removal is not in the signed membership fold yet.
     // Do not publish against yesterday's members while the replication writer seals it.
-    let pending: bool = tx.query_row(/* sqlite-large-value: allow-for-now lv-h0f0a95d925de owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
+    let pending: bool = tx.query_row(/* sqlite-large-value: allow-for-now lv-hf5fde31dab79 owner=fractal_store::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
         "SELECT EXISTS(SELECT 1 FROM claims c JOIN batches b ON b.id=c.batch_id
          LEFT JOIN replica_envelopes e ON e.batch_id=b.id
          WHERE c.origin=?1 AND c.kind IN ({})
@@ -228,7 +228,7 @@ pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St
         if !matches!(membership.state(&member.name), crate::fleet::MemberState::Current(_)) {
             return Err(refused("conflicted fleet membership cannot enable directive notes"));
         }
-        let supported: Option<bool> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h81352151898a owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let supported: Option<bool> = tx.query_row(/* sqlite-large-value: allow-for-now lv-hde61199740a2 owner=fractal_store::store::directive_notes TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT json_extract(claims.body,'$.fields.features.person_directive_note')=1
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
@@ -247,11 +247,11 @@ pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St
         ("batches", "origin"),
         ("checkpoint_envelopes", "writer"),
     ] {
-        let mut statement = tx.prepare(/* sqlite-large-value: allow-for-now lv-h05ec825e07b5 owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = tx.prepare(/* sqlite-large-value: allow-for-now lv-h8a863346e8fa owner=fractal_store::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1"
         )).map_err(internal)?;
         let mut previous = String::new();
-        while let Some(writer) = statement.query_row(/* sqlite-large-value: allow-for-now lv-h56014f7f4dad owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0))
+        while let Some(writer) = statement.query_row(/* sqlite-large-value: allow-for-now lv-h01fc37dd9772 owner=fractal_store::store::directive_notes TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0))
             .optional().map_err(internal)?
         {
             if !membership.is_keyed_writer(&writer) && !fenced.contains(&writer) {
@@ -265,7 +265,7 @@ pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St
 
 pub fn current(connection: &Connection, person: &str, now: u128) -> Result<Option<DirectiveNote>> {
     smallclaims::touched::note_read(|| person.to_owned());
-    let claim = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd742fa0a89fd owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ CURRENT_QUERY, [person], claim_from_row).optional()?;
+    let claim = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd6a4af8b389b owner=fractal_store::store::directive_notes TODO=trace-statement-and-value-representation */ CURRENT_QUERY, [person], claim_from_row).optional()?;
     let Some(mut claim) = claim else { return Ok(None); };
     let fields = claim.body.get_mut("fields").and_then(Value::as_object_mut)
         .context("admitted directive note has no fields")?;
@@ -276,7 +276,7 @@ pub fn current(connection: &Connection, person: &str, now: u128) -> Result<Optio
         Some(_) => anyhow::bail!("admitted directive note has an invalid expiry"),
     };
     if let Some(at) = expires_at.as_deref() {
-        let expires = st3_schema::directive_notes::expiry(at).map_err(anyhow::Error::new)?;
+        let expires = fractal_schema::directive_notes::expiry(at).map_err(anyhow::Error::new)?;
         let expires_nanos = i128::from(expires.timestamp()) * 1_000_000_000
             + i128::from(expires.timestamp_subsec_nanos());
         let now_nanos = i128::try_from(now).unwrap_or(i128::MAX).saturating_mul(1_000_000);

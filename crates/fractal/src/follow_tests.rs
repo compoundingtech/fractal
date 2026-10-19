@@ -1,7 +1,7 @@
 //! Follow loops use a scripted client and Tokio's injected clock. This tests actual
 //! request deadlines and backoff without sleeping through 15 or 35 seconds per case.
 use super::*;
-use st3::client::FollowTestReply as Reply;
+use fractal_daemon::client::FollowTestReply as Reply;
 
 const SUBJECT: &str = "host/follow-fixture";
 const RUN: &str = "mission-run/example/follow-fixture";

@@ -1,4 +1,4 @@
-import type { Agent, CollectionFrame, Resource, Snapshot } from '@smalltalk/st3-client'
+import type { Agent, CollectionFrame, Resource, Snapshot } from '@fractal/client'
 
 export const snapshot: Snapshot = {
   id: 'snapshot/roster-perf',

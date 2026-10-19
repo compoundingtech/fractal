@@ -80,7 +80,7 @@ observer "github/acme/demo/pull/1" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h3458ee3a0d6e owner=st3_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
+            /* sqlite-large-value: allow-for-now lv-h702cace76f72 owner=fractal_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
             [resource],
         )
         .unwrap();
@@ -109,12 +109,12 @@ observer "github/acme/demo/pull/1" {
         let connection = target.connection.write();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h2f53f09d5b16 owner=st3_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
+                /* sqlite-large-value: allow-for-now lv-h3549cc7e9c10 owner=fractal_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
                 [resource],
             )
             .unwrap();
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-hd493c0a77500 owner=st3_seats::store::resource_pending_receive_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-hf8bf8f1f5f43 owner=fractal_seats::store::resource_pending_receive_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'", [])
             .unwrap();
     }
     drop(target);
@@ -124,7 +124,7 @@ observer "github/acme/demo/pull/1" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h83925536e060 owner=st3_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
+            /* sqlite-large-value: allow-for-now lv-h82c8c9885e9b owner=fractal_seats::store::resource_pending_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
             [resource],
         )
         .unwrap();

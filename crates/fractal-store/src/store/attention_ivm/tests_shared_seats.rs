@@ -31,7 +31,7 @@ pub fn install(store: &Store, views: &Views) {
         }
     }
     while !backfill_page(&tx, 0, 2).unwrap() {}
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h7e339cb2e3e4 owner=st3_store::store::attention_ivm::tests_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_views SET ready=1", []).unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h277021197eb9 owner=fractal_store::store::attention_ivm::tests_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_views SET ready=1", []).unwrap();
     tx.commit().unwrap();
 }
 
@@ -48,7 +48,7 @@ pub fn input(subject: &str, kind: &str, actor: &str, fields: Value) -> ClaimInpu
 }
 
 pub fn custom(store: &Store, subject: &str, person: &str) {
-    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hb7c32c9e941f owner=st3_store::store::attention_ivm::tests_shared_seats TODO=trace-statement-and-value-representation */ include_str!(
+    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9cf5f74c21f6 owner=fractal_store::store::attention_ivm::tests_shared_seats TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/custom-review.json"
     ))
     .unwrap();

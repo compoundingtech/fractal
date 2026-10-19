@@ -1,4 +1,4 @@
-import type { Attention, TimelineEntry, Work } from '@smalltalk/st3-client'
+import type { Attention, TimelineEntry, Work } from '@fractal/client'
 
 import { child, type FactoryContext } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'

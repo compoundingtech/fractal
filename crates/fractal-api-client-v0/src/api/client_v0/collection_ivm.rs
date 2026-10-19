@@ -5,8 +5,8 @@ use super::*;
 use crate::graph_watch_ivm::{IvmViewBridge, ViewPage};
 use smallclaims::ivm::{Readiness, events};
 use std::cell::RefCell;
-pub use st3_api_core::api::client_v0::collection_ivm::*;
-pub use st3_api_core::api::client_v0::collection_ivm::{Adapter, Candidate, Delivered, Held, Output, RowReader, Sources, Window, read};
+pub use fractal_api_core::api::client_v0::collection_ivm::*;
+pub use fractal_api_core::api::client_v0::collection_ivm::{Adapter, Candidate, Delivered, Held, Output, RowReader, Sources, Window, read};
 
 #[cfg(test)]
 mod tests {

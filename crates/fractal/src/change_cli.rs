@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde_json::Value;
-use st3::client::Client;
+use fractal_daemon::client::Client;
 
 #[derive(Args)]
 pub struct ChangesArgs {
@@ -85,7 +85,7 @@ pub async fn run(client: &Client, arguments: ChangesArgs, json: bool) -> Result<
             repository,
             offline,
         } => {
-            st3::changes::change_id(&id)?;
+            fractal_daemon::changes::change_id(&id)?;
             let mut query = reqwest::Url::parse("http://localhost/v1/client/change")?;
             query
                 .query_pairs_mut()

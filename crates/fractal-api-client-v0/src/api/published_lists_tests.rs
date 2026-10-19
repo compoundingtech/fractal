@@ -2,7 +2,7 @@
 use super::*;
 use crate::model::{MissionRunRequest, WorkRequest};
 use smallclaims::store::set_thread_clock;
-use st3_api_core::api::published_lists::tests_shared_client_v0_tests::{app_state, fold, mission, oracle, presented, publish, rows};
+use fractal_api_core::api::published_lists::tests_shared_client_v0_tests::{app_state, fold, mission, oracle, presented, publish, rows};
 
 
 #[tokio::test]

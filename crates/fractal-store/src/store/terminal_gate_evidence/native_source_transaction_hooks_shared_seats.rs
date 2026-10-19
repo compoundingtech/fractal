@@ -45,7 +45,7 @@ impl Adapter {
         let before = adapter.clone();
         let after = adapter.clone();
         store.connection.install_transaction_hooks(
-            move |tx| before.prepare(/* sqlite-large-value: allow-for-now lv-hac6c8f6f53d2 owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=trace-statement-and-value-representation */ tx),
+            move |tx| before.prepare(/* sqlite-large-value: allow-for-now lv-h68fa8181f703 owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=trace-statement-and-value-representation */ tx),
             move |tx| after.finalize(tx),
         )?;
         Ok(adapter)
@@ -85,13 +85,13 @@ impl Adapter {
                     .as_deref()
                     .unwrap_or("preexisting raw pending or managed scope");
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h9e348c5b3561 owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
+                    /* sqlite-large-value: allow-for-now lv-h9904e5cee507 owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
                     [reason],
                 )?;
                 source.installer.source_gap(tx, SOURCE, reason)?;
             }
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-hb385958b9b86 owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET managed_scope=1 WHERE id=1",
+                /* sqlite-large-value: allow-for-now lv-hbebfb65a13fe owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET managed_scope=1 WHERE id=1",
                 [],
             )?;
             if self.fault.load(Ordering::Relaxed) == 1 {
@@ -122,7 +122,7 @@ impl Adapter {
         if let Some(reason) = self.operator_error.constraint_reason()? {
             self.measured("operator-constraint-fence", || {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h0acb04ff580a owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
+                    /* sqlite-large-value: allow-for-now lv-hb5f027ea8580 owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
                     [&reason],
                 )?;
                 source.installer.source_gap(tx, SOURCE, &reason)
@@ -136,7 +136,7 @@ impl Adapter {
         self.measured("marker-clear", || {
             ensure!(
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-hced5231cd0cc owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET managed_scope=0 WHERE id=1",
+                    /* sqlite-large-value: allow-for-now lv-h0e000aaf5f4c owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET managed_scope=0 WHERE id=1",
                     []
                 )? == 1,
                 "missing scope row"
@@ -153,7 +153,7 @@ impl Adapter {
             .set(source)
             .map_err(|_| anyhow::anyhow!("source already attached"))?;
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h899e3fc1850c owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET managed_scope=1 WHERE id=1",
+            /* sqlite-large-value: allow-for-now lv-hbdabd507b971 owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET managed_scope=1 WHERE id=1",
             [],
         )?;
         if seed {

@@ -3,8 +3,8 @@
 use crate::AttentionListStore;
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-pub use st3_seats::store::owner_lists::*;
-pub use st3_seats::store::owner_lists::{OwnerList, OwnerListPublication};
+pub use fractal_seats::store::owner_lists::*;
+pub use fractal_seats::store::owner_lists::{OwnerList, OwnerListPublication};
 #[cfg(test)]
 #[path = "owner_lists/tests.rs"]
 mod tests;
@@ -108,7 +108,7 @@ impl OwnerView {
 }
 
 fn glass_owner(subject: &str) -> Option<String> {
-    st3_schema::glasses::owner(subject).ok().map(str::to_owned)
+    fractal_schema::glasses::owner(subject).ok().map(str::to_owned)
 }
 
 pub trait OwnerListsStore {

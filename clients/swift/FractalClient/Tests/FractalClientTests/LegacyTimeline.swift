@@ -2,7 +2,7 @@
 // Only the Timeline prefix is renamed; enum cases and decoding remain unchanged.
 // Frozen pre-#1561 timeline decoder (34c5cdcff); names prefixed only to coexist.
 import Foundation
-import St3Client
+import FractalClient
 public enum LegacyTimelineRole: String, Codable, Sendable { case system, user, assistant, tool }
 public enum LegacyTimelineType: String, Codable, Sendable { case message, content, toolCall = "tool_call", toolResult = "tool_result", status, error, usage, redaction, truncation }
 public enum LegacyTimelineToolStatus: String, Codable, Sendable { case success, error }

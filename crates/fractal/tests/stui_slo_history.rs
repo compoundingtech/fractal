@@ -40,7 +40,7 @@ fn history_prints_every_fixed_measurement_and_its_historical_targets() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("cache/st3/stui/slo");
     std::fs::create_dir_all(&directory).unwrap();
-    let fixture = include_str!("../../stui/tests/fixtures/quality-hour.json");
+    let fixture = include_str!("../../fractal-tui/tests/fixtures/quality-hour.json");
     let file = directory.join("0.jsonl");
     std::fs::write(&file, fixture.replace('\n', "") + "\n").unwrap();
     let output = history(root.path());

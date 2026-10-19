@@ -26,15 +26,15 @@ use crate::checkout::Checkout;
 use crate::mission::{ CANDIDATE_INDEX_INPUT, LOOP_FEEDBACK_INPUT, LOOP_ITEM_INPUT, LOOP_ROUND_INPUT, };
 use crate::model::{ AttentionItemView, AttentionRequest, CalendarSchedule, ClaimInput, CurrentHarnessView, DependencySpec, DesiredSubject, GateContext, GateSpec, LaunchSpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MemberKind, MemberLifecycle, MemberSpec, MessageView, MetricSource, MissionInputKind, MissionRunRequest, MissionRunView, MissionSpec, MissionState, RestartIntensity, RestartType, StepRunView, StepSpec, SubscriptionSpec, UsedMissionSpec, WorkSelector, };
 use crate::resource::{ ObservationRequest, ObserverCondition, ProviderRateLimit, RegisteredResourceProvider, ResourceProvider, };
-use st3_reconcile::reconcile::idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
+use fractal_reconcile::reconcile::idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 use crate::model::FIRST_READINESS_FAULT_SCOPE;
 use std::os::unix::fs::PermissionsExt as _;
 use crate::suspension as suspended;
-use st3_reconcile::reconcile::overlay_runtime_environment;
-use st_runtime::PRIORITY_ENV;
-use st3_reconcile::reconcile::{NativeRuntime, RuntimeControl};
-use st3_reconcile::reconcile::*;
-use st3_reconcile::reconcile::tests::*;
+use fractal_reconcile::reconcile::overlay_runtime_environment;
+use fractal_runtime::PRIORITY_ENV;
+use fractal_reconcile::reconcile::{NativeRuntime, RuntimeControl};
+use fractal_reconcile::reconcile::*;
+use fractal_reconcile::reconcile::tests::*;
 use tokio::sync::mpsc;
 use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
 use std::io::Write as _;
@@ -64,9 +64,9 @@ ready: tokio::net::UnixListener,
 impl NativeLatePty {
 fn new() -> Self {
     use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
-    st_runtime::initialize_isolation(&BTreeMap::new());
+    fractal_runtime::initialize_isolation(&BTreeMap::new());
     let real_pty =
-        st_runtime::resolve_executable("pty", &crate::environment::snapshot().unwrap())
+        fractal_runtime::resolve_executable("pty", &crate::environment::snapshot().unwrap())
             .unwrap();
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
@@ -134,7 +134,7 @@ fn dispatch(&self) -> Result<bool> {
         "PATH".into(),
         format!("{}:${{PATH}}", self.root.path().join("bin").display()),
     );
-    self.reconciler.dispatch_start(st3_reconcile::reconcile::start_jobs::PreparedStart {
+    self.reconciler.dispatch_start(fractal_reconcile::reconcile::start_jobs::PreparedStart {
         subject: self.desired.clone(),
         member,
         launch_member,

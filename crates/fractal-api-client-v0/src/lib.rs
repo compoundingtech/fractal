@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_api_core::*;
+pub use fractal_api_core::*;
 
 pub mod api;
 

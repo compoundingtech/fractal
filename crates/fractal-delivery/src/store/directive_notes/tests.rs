@@ -8,10 +8,10 @@ pub use crate::store::directive_notes::tests_shared_seats::{FLEET, advertise, cl
 use super::*;
 use crate::fleet::MemberKey;
 use rusqlite::StatementStatus;
-use st3_store::store::directive_notes::tests_shared_delivery::*;
-use st3_store::store::directive_notes::tests_shared_delivery::{sync};
-use st3_store::store::fleet_admission_tests_shared_delivery::*;
-use st3_store::store::fleet_admission_tests_shared_delivery::{fleet};
+use fractal_store::store::directive_notes::tests_shared_delivery::*;
+use fractal_store::store::directive_notes::tests_shared_delivery::{sync};
+use fractal_store::store::fleet_admission_tests_shared_delivery::*;
+use fractal_store::store::fleet_admission_tests_shared_delivery::{fleet};
 
 
 #[test]
@@ -37,12 +37,12 @@ fn directive_note_lifecycle_author_time_bounds_expiry_and_tombstones() {
     assert!(store.set_directive_note("person/avery", "person/avery", None, None).unwrap().is_none());
     assert!(store.directive_notes("person/avery").unwrap().is_empty());
     let expiring = store.set_directive_note("person/avery", "person/avery", Some("Temporary focus"), Some("2099-01-01T00:00:00.500Z")).unwrap().unwrap();
-    let expiry = st3_schema::directive_notes::expiry(expiring.expires_at.as_deref().unwrap()).unwrap().timestamp_millis() as u128;
+    let expiry = fractal_schema::directive_notes::expiry(expiring.expires_at.as_deref().unwrap()).unwrap().timestamp_millis() as u128;
     assert!(current(&store.readers.get(), "person/avery", expiry - 1).unwrap().is_some());
     assert!(current(&store.readers.get(), "person/avery", expiry).unwrap().is_none());
     assert!(current(&store.readers.get(), "person/avery", u128::MAX).unwrap().is_none());
     let precise = store.set_directive_note("person/avery", "person/avery", Some("Short focus"), Some("2099-01-01T00:00:00.000500Z")).unwrap().unwrap();
-    let floor = st3_schema::directive_notes::expiry(precise.expires_at.as_deref().unwrap()).unwrap().timestamp_millis() as u128;
+    let floor = fractal_schema::directive_notes::expiry(precise.expires_at.as_deref().unwrap()).unwrap().timestamp_millis() as u128;
     assert!(current(&store.readers.get(), "person/avery", floor).unwrap().is_some());
     assert!(current(&store.readers.get(), "person/avery", floor + 1).unwrap().is_none());
     assert!(store.set_directive_note("person/avery", "person/avery", Some("Already expired"), Some("2000-01-01T00:00:00Z")).unwrap().is_none());
@@ -66,18 +66,18 @@ fn directive_note_local_and_replicated_admission_require_subject_person() {
     for actor in [None, Some("person/robin"), Some("agent/worker")] {
         let mut record = original.clone();
         record.actor = actor.map(str::to_owned);
-        assert_eq!(classify_replicated_claim_with_registry(&record, st3_schema::registry()).err().unwrap().code, "directive-note-forbidden");
+        assert_eq!(classify_replicated_claim_with_registry(&record, fractal_schema::registry()).err().unwrap().code, "directive-note-forbidden");
     }
     for text in [json!(""), json!("é".repeat(2049)), json!(42)] {
         let mut record = original.clone();
         record.body["fields"]["text"] = text;
-        assert_eq!(classify_replicated_claim_with_registry(&record, st3_schema::registry()).err().unwrap().code, "invalid-replicated-claim");
+        assert_eq!(classify_replicated_claim_with_registry(&record, fractal_schema::registry()).err().unwrap().code, "invalid-replicated-claim");
     }
     let mut record = original.clone();
     record.body["fields"]["expires_at"] = json!("2099-01-01T00:00:00+01:00");
-    assert_eq!(classify_replicated_claim_with_registry(&record, st3_schema::registry()).err().unwrap().code, "invalid-replicated-claim");
-    assert!(matches!(classify_replicated_claim_with_registry(&original, st3_schema::registry()).unwrap(), ReplicatedClaimAdmission::Valid));
-    let mut legacy = st3_schema::registry().clone();
+    assert_eq!(classify_replicated_claim_with_registry(&record, fractal_schema::registry()).err().unwrap().code, "invalid-replicated-claim");
+    assert!(matches!(classify_replicated_claim_with_registry(&original, fractal_schema::registry()).unwrap(), ReplicatedClaimAdmission::Valid));
+    let mut legacy = fractal_schema::registry().clone();
     legacy.claims.remove(KIND);
     assert!(matches!(classify_replicated_claim_with_registry(&original, &legacy).unwrap(), ReplicatedClaimAdmission::UnknownKind));
 }
@@ -211,7 +211,7 @@ fn directive_note_repaired_original_is_excluded_after_round_trip_and_replay() {
         [&original.revision], |row| row.get(0),
     ).unwrap();
     peer.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-ha3a62ff8fd3d owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record_ref])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h63277827a27e owner=fractal_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record_ref])?;
         Ok(())
     }).unwrap().unwrap();
     peer.repair_replica_record(&record_ref, &fallback.revision,
@@ -228,17 +228,17 @@ fn directive_note_repaired_original_is_excluded_after_round_trip_and_replay() {
     }
     // Exercise the incremental dirty selector without the repair-triggered full replay.
     source.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h86fc8255624d owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='valid',replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h77397d572db7 owner=fractal_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='valid',replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
         flush(tx)?;
         assert_eq!(current(tx, "person/avery", now_ms()).unwrap(), Some(original.clone()));
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h3046ff7110fa owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired',replacement_claim_id=?2 WHERE record_ref=?1",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h01e4717fbdf4 owner=fractal_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired',replacement_claim_id=?2 WHERE record_ref=?1",
             params![record_ref, fallback.revision])?;
         flush(tx)?;
         assert_eq!(current(tx, "person/avery", now_ms()).unwrap(), Some(fallback.clone()));
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h4d5006271587 owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h25c08f09bd4b owner=fractal_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
         let dirty: usize = tx.query_row("SELECT COUNT(*) FROM local_directive_note_dirty WHERE subject='person/avery'", [], |row| row.get(0))?;
         assert_eq!(dirty, 1, "replacement-only changes must invalidate the person's note");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h4d33e3b464fe owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=?2 WHERE record_ref=?1",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h431b5d6fe264 owner=fractal_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=?2 WHERE record_ref=?1",
             params![record_ref, fallback.revision])?;
         flush(tx)?;
         assert_eq!(current(tx, "person/avery", now_ms()).unwrap(), Some(fallback.clone()));
@@ -259,13 +259,13 @@ fn directive_note_projection_rollback_and_canonical_metadata_corrections() {
     assert_eq!(store.directive_notes("person/avery").unwrap(), vec![first.clone()]);
     let second = store.set_directive_note("person/avery", "person/avery", Some("Second"), None).unwrap().unwrap();
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h032e0c3fe4b3 owner=st3_delivery::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms+100000 WHERE id=?1", [&first.revision])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4edaa415bb3c owner=fractal_delivery::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms+100000 WHERE id=?1", [&first.revision])?;
         flush(tx)?;
         Ok(())
     }).unwrap().unwrap();
     assert_eq!(store.directive_notes("person/avery").unwrap()[0].revision, first.revision);
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hbee5a86c2688 owner=st3_delivery::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&first.revision])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4d3e66caadd7 owner=fractal_delivery::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&first.revision])?;
         flush(tx)?;
         Ok(())
     }).unwrap().unwrap();
@@ -286,8 +286,8 @@ fn directive_note_keyed_read_work_and_statements_ignore_history_size() {
         assert_eq!(store.directive_notes("person/avery").unwrap().len(), 1);
         let statements = STATEMENTS_RUN.with(std::cell::Cell::get) - before;
         let connection = store.readers.get();
-        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8f1c8289710b owner=st3_delivery::store::directive_notes::tests TODO=trace-statement-and-value-representation */ CURRENT_QUERY).unwrap();
-        query.query_row(/* sqlite-large-value: allow-for-now lv-h0c2d6d7a8196 owner=st3_delivery::store::directive_notes::tests TODO=trace-statement-and-value-representation */ ["person/avery"], claim_from_row).unwrap();
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf734678b3d0a owner=fractal_delivery::store::directive_notes::tests TODO=trace-statement-and-value-representation */ CURRENT_QUERY).unwrap();
+        query.query_row(/* sqlite-large-value: allow-for-now lv-h92a3a8901a21 owner=fractal_delivery::store::directive_notes::tests TODO=trace-statement-and-value-representation */ ["person/avery"], claim_from_row).unwrap();
         let vm = query.get_status(StatementStatus::VmStep);
         assert_eq!(query.get_status(StatementStatus::FullscanStep), 0);
         assert!(vm < 100, "one person and one claim lookup must stay keyed: {vm}");

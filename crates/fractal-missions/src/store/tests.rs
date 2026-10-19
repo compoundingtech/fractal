@@ -22,12 +22,12 @@ use crate::ArrangementsStore;
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
-use st3_delivery::store::shared_missions::*;
-use st3_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
-use st3_delivery::store::shared_seats_shared_missions::*;
-use st3_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
-use st3_store::store::tests_shared_missions::*;
-use st3_store::store::tests_shared_missions::{CARRY_SOURCE, carry_request, listed, misproject_a_step, publish_carry, request_fault};
+use fractal_delivery::store::shared_missions::*;
+use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
+use fractal_delivery::store::shared_seats_shared_missions::*;
+use fractal_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+use fractal_store::store::tests_shared_missions::*;
+use fractal_store::store::tests_shared_missions::{CARRY_SOURCE, carry_request, listed, misproject_a_step, publish_carry, request_fault};
 
 
 #[test]
@@ -148,7 +148,7 @@ fn a_start_keeps_the_derived_tables_it_built_before() {
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-he68d134d716d owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
+                /* sqlite-large-value: allow-for-now lv-h774c911bd0f7 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
                      VALUES ('op/kept', 'digest', 'claim/kept', 'active')",
                 [],
             )
@@ -173,7 +173,7 @@ fn a_start_keeps_the_derived_tables_it_built_before() {
     {
         let connection = Connection::open(&path).unwrap();
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-h51fd0683ae75 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='derived_tables_version'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-hc120b98c033f owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='derived_tables_version'", [])
             .unwrap();
     }
     let rebuilt = Store::open(&path, "node").unwrap();
@@ -280,7 +280,7 @@ mission "summary-child" state="ready" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h1c15117b773d owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='working', lease_owner='agent/tree/worker',
+            /* sqlite-large-value: allow-for-now lv-h938e543b607c owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='working', lease_owner='agent/tree/worker',
                  lease_incarnation='expired', lease_expires_at_unix_ms='0' WHERE subject=?1",
             [work],
         )
@@ -484,7 +484,7 @@ mission "page-root" state="ready" {
         let generation = format!("page-generation-{index:03}");
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h9423c7bf7997 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
+                /* sqlite-large-value: allow-for-now lv-h24034aba4bf3 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
                      SELECT ?1,mission_id,initial_revision,?2,root_revision,
                             root_run_id,parent_step_run,workspace,requester,inputs,mode,status,
                             phase,created_at_unix_ms,updated_at_unix_ms
@@ -494,7 +494,7 @@ mission "page-root" state="ready" {
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h9f8db40c191d owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations
+                /* sqlite-large-value: allow-for-now lv-h2f21d6774a60 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations
                      SELECT ?1,?2,revision,NULL,status,actor,reason,
                             created_at_unix_ms,updated_at_unix_ms
                      FROM run_generations
@@ -508,7 +508,7 @@ mission "page-root" state="ready" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hfa98c3c613ff owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
+            /* sqlite-large-value: allow-for-now lv-h48c97b07300c owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs
                  SELECT 'page-other',mission_id,initial_revision,current_generation_id,
                         root_revision,'another-root',parent_step_run,workspace,requester,inputs,
                         mode,status,phase,created_at_unix_ms,updated_at_unix_ms
@@ -539,10 +539,10 @@ mission "page-root" state="ready" {
     );
     let connection = store.connection.write();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-hacccf68f6079 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE run_id=?1", [&cursor])
+        .execute(/* sqlite-large-value: allow-for-now lv-hf5140af438b4 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE run_id=?1", [&cursor])
         .unwrap();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-h241907b5016c owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [&cursor])
+        .execute(/* sqlite-large-value: allow-for-now lv-h81f8c3a10c9a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [&cursor])
         .unwrap();
     drop(connection);
     assert!(store
@@ -633,7 +633,7 @@ mission "clock-automatic" state="ready" {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h496f0f4abfe1 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='1' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h30c50ff23c8b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='1' WHERE id=?1",
                 [&excluded.id],
             )
             .unwrap();
@@ -666,7 +666,7 @@ mission "clock-automatic" state="ready" {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hf54012a06057 owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h0bf1533269f6 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
                 params![claim.id, at],
             )
             .unwrap();
@@ -717,7 +717,7 @@ mission "clock-automatic" state="ready" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h430405a61ee7 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET generation_id=?2 WHERE run_id=?1",
+            /* sqlite-large-value: allow-for-now lv-he8f446dbd57e owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET generation_id=?2 WHERE run_id=?1",
             params![child.id, generation_id_from_subject(&parent.generation)],
         )
         .unwrap();
@@ -739,13 +739,13 @@ mission "clock-automatic" state="ready" {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-hb5e5588429c2 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE run_id=?1", [&empty.id])
+        .execute(/* sqlite-large-value: allow-for-now lv-h43d796c2dd69 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE run_id=?1", [&empty.id])
         .unwrap();
     store
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h08f2cc9e20b2 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='50' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h776a38ab964c owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='50' WHERE id=?1",
             [&empty.id],
         )
         .unwrap();
@@ -766,7 +766,7 @@ fn first_readiness_order_prioritizes_current_pending_generations_then_newest() {
     // Fixed timestamps prove both the priority class and numeric newest-first ordering.
     for (run, at) in [(&first, "9"), (&second, "10"), (&third, "11")] {
         store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-hc9b898eb6e53 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms=?1 WHERE id=?2",
+            /* sqlite-large-value: allow-for-now lv-hbdf0f9d10b7a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms=?1 WHERE id=?2",
             params![at, run.id],
         ).unwrap();
     }
@@ -777,7 +777,7 @@ fn first_readiness_order_prioritizes_current_pending_generations_then_newest() {
     assert_eq!(store.active_mission_run_ids_for_origin("node").unwrap(),
         [first.id.clone(), third.id.clone(), second.id.clone()]);
     // The order is deterministic even when two creations share the same millisecond.
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h0e7a06a9ef2d owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='12'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hf3c68163766a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET created_at_unix_ms='12'", []).unwrap();
     let ids = store.active_mission_run_ids_for_origin("node").unwrap();
     assert_eq!(ids[0], first.id);
     assert!(ids[1] > ids[2]);
@@ -881,13 +881,13 @@ mission "terminal-replay" state="ready" {
     let transaction = connection.transaction().unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h5c175e483e55 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled', blocked_reason='the root mission run is terminal' WHERE generation_id=?1 AND step_path='provisional'",
+            /* sqlite-large-value: allow-for-now lv-h64a6eecfdbfe owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled', blocked_reason='the root mission run is terminal' WHERE generation_id=?1 AND step_path='provisional'",
             [generation],
         )
         .unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hd8fce59d2c6a owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='completed', blocked_reason='preserved completion' WHERE generation_id=?1 AND step_path='finished'",
+            /* sqlite-large-value: allow-for-now lv-h12b054ea787b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='completed', blocked_reason='preserved completion' WHERE generation_id=?1 AND step_path='finished'",
             [generation],
         )
         .unwrap();
@@ -2717,12 +2717,12 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
         projection_digest::register(&connection).unwrap();
         // A pre-fix full replay left the last claim's state rather than the extension's.
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h4dba05b757b8 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
+            /* sqlite-large-value: allow-for-now lv-h2516ab120465 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
                  INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version','2');",
         ).unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hcf9343fb3883 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=?2, lease_expires_at_unix_ms=?3,
+                /* sqlite-large-value: allow-for-now lv-hca63c44c2b36 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=?2, lease_expires_at_unix_ms=?3,
                     updated_at_unix_ms=?4 WHERE subject=?1",
                 params![
                     step,
@@ -2736,14 +2736,14 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-he4cca7e88b63 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
+                /* sqlite-large-value: allow-for-now lv-h86a884b5d8d7 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
                 [],
             )
             .unwrap();
         // A full-store/operations rebuild would remove this unrelated derived row.
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h8a5dea6a671d owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+                /* sqlite-large-value: allow-for-now lv-he4843520f193 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
                  SELECT 'op/unrelated-upgrade','digest',id,'active' FROM claims
                  WHERE kind='work.extended' LIMIT 1",
                 [],
@@ -2789,7 +2789,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     upgraded
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-hc77ed769a657 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id='op/unrelated-upgrade'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-ha39be727e750 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id='op/unrelated-upgrade'", [])
         .unwrap();
     assert_eq!(corrected, graph_digest_of(&upgraded));
     drop(upgraded);
@@ -2885,14 +2885,14 @@ fn work_extensions_upgrade_and_adopt_a_v5_certificate_without_changing_its_terms
         let connection = Connection::open(&path).unwrap();
         projection_digest::register(&connection).unwrap();
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h835c0bca5c7e owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
+            /* sqlite-large-value: allow-for-now lv-hbe225c4c0cdb owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2');
                  INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version','2');",
         ).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h019ad9700ebe owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=?2, updated_at_unix_ms=?3 WHERE subject=?1",
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hb17e92309d45 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=?2, updated_at_unix_ms=?3 WHERE subject=?1",
             params![step, previous.blocked_reason, previous.updated_at_unix_ms.to_string()]).unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h6cbfc49a1eed owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
+                /* sqlite-large-value: allow-for-now lv-h2b33b795fddc owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
                 [],
             )
             .unwrap();
@@ -3018,7 +3018,7 @@ fn work_extensions_waiting_for_run_creation_survive_upgrade_and_later_projection
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hf242deb43280 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
+            /* sqlite-large-value: allow-for-now lv-h5a92ceea7d6f owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
             [],
         )
         .unwrap();
@@ -3042,7 +3042,7 @@ fn work_extensions_waiting_for_run_creation_survive_upgrade_and_later_projection
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hfb20f7db47bf owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='canonical_shared_projection_rules'",
+            /* sqlite-large-value: allow-for-now lv-h528549379644 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='canonical_shared_projection_rules'",
             [],
         )
         .unwrap();
@@ -3097,7 +3097,7 @@ fn work_extensions_sync_authority_with_previous_projection_rules_without_compari
     worker_extend(&worker, &step);
     let legacy = canonical_hash(&(
         "st3.shared-projections.resources.v1",
-        st3_schema::registry().digest(),
+        fractal_schema::registry().digest(),
     ))
     .unwrap();
     let mut exchange = exchange_from(&worker, &controller.replication_inventory().unwrap());
@@ -4048,7 +4048,7 @@ version 2
         let mut connection = target.connection.lock().unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hae08ef8a198d owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled', blocked_reason='the owning run generation was superseded'
+                /* sqlite-large-value: allow-for-now lv-hb4080225a0ee owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled', blocked_reason='the owning run generation was superseded'
                      WHERE subject=?1",
                 [format!("step-run/{}/waiting", revised.generation)],
             )
@@ -4285,7 +4285,7 @@ fn arrangement_vocabulary_upgrade_applies_the_original_waiting_claim() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("claims.sqlite3");
         let older = Store::open(&path, "target").unwrap();
-        let mut registry = st3_schema::registry().clone();
+        let mut registry = fractal_schema::registry().clone();
         if operation["op"] == "rename" {
             registry.arrangement_operations.retain(|tag| tag != "rename");
         } else {
@@ -4536,7 +4536,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hc2ffa3454ff9 owner=st3_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+                /* sqlite-large-value: allow-for-now lv-ha816dc01de1b owner=fractal_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
                 [&original.id],
             )
             .unwrap();
@@ -4556,7 +4556,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h41e3d22cee9d owner=st3_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='unknown' WHERE record_ref=?1",
+            /* sqlite-large-value: allow-for-now lv-h578db4595b27 owner=fractal_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='unknown' WHERE record_ref=?1",
             [&record.record_ref],
         )
         .unwrap();
@@ -4573,7 +4573,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .connection
         .lock()
         .unwrap()
-        .execute(/* sqlite-large-value: allow-for-now lv-hd7359d887e4d owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&original.id])
+        .execute(/* sqlite-large-value: allow-for-now lv-h0297c222ae64 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&original.id])
         .unwrap();
     receive_and_project(
         &source,
@@ -4613,7 +4613,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h39fc8cfe88d9 owner=st3_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1",
+            /* sqlite-large-value: allow-for-now lv-hebe6bd67d02d owner=fractal_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1",
             [&original.id],
         )
         .unwrap();
@@ -4632,7 +4632,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hb04d8b69e459 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='old-registry' WHERE key='projection_digest_registry'",
+            /* sqlite-large-value: allow-for-now lv-h75b2000582ae owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='old-registry' WHERE key='projection_digest_registry'",
             [],
         )
         .unwrap();
@@ -4705,7 +4705,7 @@ fn a_runtime_claim_span_is_its_first_and_last_claim() {
         // Acceptance times out of store order, as claims replicated from a peer arrive.
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hd5eb6e491400 owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(1000 + (store_index * 37) % 97 AS TEXT)
+                /* sqlite-large-value: allow-for-now lv-h72d6e3ed93eb owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(1000 + (store_index * 37) % 97 AS TEXT)
                      WHERE subject=?1",
                 [subject],
             )
@@ -5594,7 +5594,7 @@ fn terminal_roots_reap_nested_orphans_idempotently_across_restart_and_replicatio
         .lock()
         .unwrap()
         .execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-h034e4afda61e owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running', phase='normal' WHERE id='{}';
+            /* sqlite-large-value: allow-for-now lv-h9d1a4529329e owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running', phase='normal' WHERE id='{}';
                  UPDATE run_generations SET status='running' WHERE id='{}';
                  UPDATE step_runs SET status='ready', blocked_reason=NULL WHERE subject='{}';",
             child.id,
@@ -5935,7 +5935,7 @@ mission "cancelled-final-repair" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h260d50b5cb86 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h82251dbdbf0f owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
             [&run.id],
         )
         .unwrap();
@@ -6008,7 +6008,7 @@ mission "dispatch-repair" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-ha8c09e3ad647 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h80ad1593edbf owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='0' WHERE id=?1",
             [&run.id],
         )
         .unwrap();
@@ -6232,7 +6232,7 @@ mission "nested-work" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h7035fab119d8 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h96d7cb75d46b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
             [&parent.subject],
         )
         .unwrap();
@@ -6436,7 +6436,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
             assert_eq!(
                 connection
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-hf7551b1656a6 owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                        /* sqlite-large-value: allow-for-now lv-h4ac970caebd6 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                         params![time, claim.id],
                     )
                     .unwrap(),
@@ -6448,7 +6448,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     let connection = store.readers.get();
     let oracle = |cut| {
         let mut statement = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-ha093cc2bd715 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ &format!(
+            .prepare(/* sqlite-large-value: allow-for-now lv-h21121b909ab8 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT json_extract(claims.body, '$.fields.state'), claims.accepted_at_unix_ms
                  FROM claims JOIN batches ON batches.id=claims.batch_id
                  WHERE claims.subject=?1 AND claims.kind='harness.observed'
@@ -6491,7 +6491,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
         let writer = store.connection.write();
         writer
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hf5cc05b4bb84 owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.state') WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h87f8b2df6443 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.state') WHERE id=?1",
                 [&ids[5].id],
             )
             .unwrap();
@@ -6506,7 +6506,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
         let writer = store.connection.write();
         writer
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h81e9ed03044a owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_extract(body,'$.fields') WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h588570f9435e owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_extract(body,'$.fields') WHERE id=?1",
                 [&ids[3].id],
             )
             .unwrap();
@@ -6529,7 +6529,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     assert!(!connection.is_autocommit());
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hcccec790cfce owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "ROLLBACK; PRAGMA query_only=OFF; DROP INDEX claims_incarnation_accepted_index",
+            /* sqlite-large-value: allow-for-now lv-ha3efb3788a3d owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "ROLLBACK; PRAGMA query_only=OFF; DROP INDEX claims_incarnation_accepted_index",
         )
         .unwrap();
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
@@ -6540,7 +6540,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h0c97adf6212a owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h0334b131dc24 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
         .unwrap();
 }
 
@@ -6553,7 +6553,7 @@ fn working_episode_reverse_seek_ignores_completed_history_growth() {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h14d5291859c3 owner=st3_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h825403c36366 owner=fractal_missions::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                 VALUES ('episode-batch','episode-growth',1,'synthetic','1')",
             [],
         )
@@ -6568,14 +6568,14 @@ fn working_episode_reverse_seek_ignores_completed_history_growth() {
             };
             let body =
                 json!({"fields":{"state":state,"driver":"codex","incarnation_id":"inc-1"}});
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hf371e452216f owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h66696d4cc5f8 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                     VALUES (?1,?2,'episode-batch','agent/episode-growth','harness.observed','episode-growth',?3,'[]',?4)",
                 params![index, format!("synthetic-episode-{index}"), body.to_string(), if tied_tail && index==100003 {"100001".to_owned()} else {index.to_string()}]).unwrap();
         }
         tx.commit().unwrap();
         let query = working_episode_query();
         let plans = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-hac9b4ec48a06 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h9188e4d7bebf owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap()
             .query_map(params!["agent/episode-growth", "inc-1", 100003], |row| {
                 row.get::<_, String>(3)
@@ -6648,7 +6648,7 @@ fn a_planning_rebuild_leaves_the_operations_alone() {
         .connection
         .lock()
         .unwrap()
-        .execute(/* sqlite-large-value: allow-for-now lv-hbe402e7d9b5a owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h8534772cd776 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations", [])
         .unwrap();
     // A planning write rebuilds the planning tables only: it must not re-derive operations
     // (241,000 rows, 19 s on a real store).
@@ -6824,14 +6824,14 @@ fn retention_expired_step_retry_refuses_before_any_second_effect() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h485c2ac22c31 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-he4888a40f1d9 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("expired-retry")],
         )
         .unwrap();
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-hc9979b82252e owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h64447ce47255 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
         .unwrap();
     assert_eq!(store.cleanup_idempotency(0).unwrap().deleted, 1);
     let before = store.index().unwrap();
@@ -6866,14 +6866,14 @@ fn retention_expired_quiet_renewal_cannot_extend_a_released_lease() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h6734d254153b owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-h515662cf31df owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("expired-quiet-renew")],
         )
         .unwrap();
     worker
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-he654dfd6b3ec owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h7d84468a5931 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
         .unwrap();
     assert_eq!(worker.cleanup_idempotency(0).unwrap().deleted, 1);
     let before = worker.index().unwrap();
@@ -6911,7 +6911,7 @@ fn retention_retry_response_failure_rolls_back_the_transition() {
         .connection
         .write()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h75e87c2068e0 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_receipt_failure BEFORE INSERT ON idempotency
+            /* sqlite-large-value: allow-for-now lv-h44b0b8d8add9 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_receipt_failure BEFORE INSERT ON idempotency
              BEGIN SELECT RAISE(ABORT,'injected lost receipt'); END;",
         )
         .unwrap();
@@ -6929,7 +6929,7 @@ fn retention_retry_response_failure_rolls_back_the_transition() {
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h0c8354300ad6 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_receipt_failure")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h20b2093f43d9 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_receipt_failure")
         .unwrap();
     let result = store
         .retry_failed_step(&subject, "person/operator", "retry", "retention-retry")
@@ -6997,7 +6997,7 @@ fn retention_retry_survives_restart_and_active_generation_expiry() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h5d44968975e5 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-hfd475aaaa7f1 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("retention-retry")],
         )
         .unwrap();
@@ -7005,7 +7005,7 @@ fn retention_retry_survives_restart_and_active_generation_expiry() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h92a872ea0030 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h1037de9a3d37 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
             [opaque_cache_key("retention-retry")],
         )
         .unwrap();
@@ -7034,7 +7034,7 @@ fn retention_active_response_shapes_remain_pinned_until_the_run_finishes() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h04dab544edc1 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h2e16900e1d47 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency", [])
         .unwrap();
     let responses = [
         serde_json::to_value(&run).unwrap(),
@@ -7053,7 +7053,7 @@ fn retention_active_response_shapes_remain_pinned_until_the_run_finishes() {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h0965e97b0cbc owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
+                /* sqlite-large-value: allow-for-now lv-hf6937c1b98cb owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
                 [opaque_cache_key(key)],
             )
             .unwrap();
@@ -7078,7 +7078,7 @@ fn retention_active_response_shapes_remain_pinned_until_the_run_finishes() {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-he9b16d4ae9dc owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
+                /* sqlite-large-value: allow-for-now lv-h5c2b0145338f owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id=?1",
                 [opaque_cache_key(key)],
             )
             .unwrap();
@@ -7176,11 +7176,11 @@ fn mission_collection_keyset_preserves_zero_run_and_live_run_semantics() {
     {
         let connection = store.connection.lock().unwrap();
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h734fabdede7d owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */
+            /* sqlite-large-value: allow-for-now lv-h90bde31d325b owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */
             "UPDATE claims SET accepted_at_unix_ms='900' WHERE id=(SELECT claim_id FROM mission_definitions WHERE mission_id='zero')",
             [],
         ).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-hc0ef180f74f0 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET state='retired' WHERE mission_id='retired'", []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hce8236f92242 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET state='retired' WHERE mission_id='retired'", []).unwrap();
         for (id, mission, status, created, updated) in [
             ("live-standing", "live", "standing", "1", "800"),
             ("live-running", "live", "running", "2", "800"),
@@ -7194,7 +7194,7 @@ fn mission_collection_keyset_preserves_zero_run_and_live_run_semantics() {
             ("orphan-terminal", "orphan", "standing", "1", "900"),
         ] {
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-ha05d1586ee98 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
+                /* sqlite-large-value: allow-for-now lv-h4d601fe7b5f8 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
                 "INSERT INTO mission_runs(id,mission_id,initial_revision,current_generation_id,
                  root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,
                  created_at_unix_ms,updated_at_unix_ms)
@@ -7223,7 +7223,7 @@ fn mission_collection_keyset_preserves_zero_run_and_live_run_semantics() {
     }
     // Standing alone also overrides the newer terminal header.
     store.connection.lock().unwrap().execute(
-        /* sqlite-large-value: allow-for-now lv-h4693babd3624 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
+        /* sqlite-large-value: allow-for-now lv-heb2ec51b5921 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
         "DELETE FROM mission_runs WHERE id='live-running'", [],
     ).unwrap();
     assert!(collect(false).contains(&"mission/live".to_owned()));
@@ -7236,7 +7236,7 @@ fn mission_collection_seek_indexes_upgrade_existing_stores() {
     {
         let store = Store::open(&path, "node").unwrap();
         store.connection.lock().unwrap().execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h88c34ab03a0f owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
+            /* sqlite-large-value: allow-for-now lv-h8de0181462e7 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
             "DROP INDEX mission_runs_collection_latest_index;
              DROP INDEX mission_runs_collection_live_index;",
         ).unwrap();
@@ -7266,7 +7266,7 @@ fn a_failed_mission_stays_in_the_current_view_for_a_day() {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h1bde22462135 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hde9d47928e45 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
             params![failed.id, old.to_string()],
         )
         .unwrap();
@@ -7619,7 +7619,7 @@ fn a_store_written_before_the_log_diet_upgrades_and_syncs_to_the_same_graph() {
     let path = directory.path().join("claims.sqlite3");
     let mut bytes = Vec::new();
     flate2::read::GzDecoder::new(
-        &include_bytes!("../../../st3-daemon/tests/fixtures/pre-diet-store.sqlite3.gz")[..],
+        &include_bytes!("../../../fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz")[..],
     )
     .read_to_end(&mut bytes)
     .unwrap();
@@ -8827,7 +8827,7 @@ fn revise_notes_inheritance_uses_the_cutover_snapshot() {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h96d7eab20fc2 owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h917b0134e9be owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
                 params![claim.id, at],
             )
             .unwrap();
@@ -8971,7 +8971,7 @@ fn revise_notes_replicated_carries_choose_the_newest_link_and_stop_at_cycles() {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h3be7061daf71 owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h20b3d3205d64 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
                 params![claim.id, at],
             )
             .unwrap();
@@ -10115,7 +10115,7 @@ fn repository_pull_head_changes_and_closure_emit_exact_item_claims() {
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_resource_facts("vcs.pull-request", &facts)
         .unwrap();
     // An item that only an older build's repository facts knew is recorded once, without a
@@ -10763,50 +10763,50 @@ fn work_orphaning_requires_terminal_or_replacement_runtime_evidence() {
 
 mod seat_queue_purity_tests {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-hb8ba0ece1dda owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("seat_queue_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-hb914ffd15eec owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("seat_queue_purity_tests.rs");
 }
 
 mod step_timing_purity_tests {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-hd83d7b318965 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("step_timing_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h304e314668e9 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("step_timing_purity_tests.rs");
 }
 
 mod declarative_revision_timestamp_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h0888135da141 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("declarative_revision_timestamp_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h81e0f9d92336 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("declarative_revision_timestamp_tests.rs");
 }
 
 mod fault_history_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h4861708d0a7e owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("fault_history_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h90250a56832c owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("fault_history_tests.rs");
 }
 
 mod mission_deadline_probe {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h338cc1799a26 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("mission_deadline_probe.rs");
+    /* sqlite-large-value: allow-for-now lv-h4e2308a48e9d owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("mission_deadline_probe.rs");
 }
 
 mod mission_deadline_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h5cab096380a1 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("mission_deadline_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h1cfeccc638b4 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("mission_deadline_tests.rs");
 }
 
 mod mission_eval_reuse_tests {
-    /* sqlite-large-value: allow-for-now lv-h39572921444a owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("mission_eval_reuse_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h13eab70f805e owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("mission_eval_reuse_tests.rs");
 }
 
 mod run_capacity_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h4fcd89ec8d90 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("run_capacity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h32bc64f4521e owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("run_capacity_tests.rs");
 }
 
 mod terminal_projection_date_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h57c08895c9da owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("terminal_projection_date_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h68fae53a4501 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("terminal_projection_date_tests.rs");
 }

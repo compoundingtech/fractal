@@ -14,7 +14,7 @@ pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationEx
         projection_digests: Default::default(),
         peer: peer.into(),
         fleet_id: TEST_FLEET.into(),
-        schema_digest: runtime::compatibility_digest(&st3_schema::registry().digest()),
+        schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
         authority_digest: String::new(),

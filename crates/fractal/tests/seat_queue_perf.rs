@@ -4,11 +4,11 @@
 //!
 //! ```sh
 //! ST3_PERF_STORE=/path/to/copy/claims.sqlite3 \
-//!   cargo test --release -p st3 --test integration seat_queue_perf:: -- --ignored --nocapture
+//!   cargo test --release -p fractal --test integration seat_queue_perf:: -- --ignored --nocapture
 //! ```
 
-use st3::MissionsStore;
-use st3::SeatsStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStore;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,7 @@ fn time(label: &str, rounds: u32, mut read: impl FnMut()) {
 #[ignore = "needs ST3_PERF_STORE pointing at a copy of the performance fixture"]
 fn seat_queue_reads_on_the_performance_fixture() {
     let path = PathBuf::from(std::env::var("ST3_PERF_STORE").expect("set ST3_PERF_STORE"));
-    let store = st3::store::Store::open(&path, "perfnode").unwrap();
+    let store = fractal_daemon::store::Store::open(&path, "perfnode").unwrap();
     let orders = store.seat_run_orders().unwrap();
     let seats = orders.keys().cloned().collect::<Vec<_>>();
     println!(

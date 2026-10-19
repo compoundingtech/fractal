@@ -3,7 +3,7 @@
 //! daemon's CPU goes over its budget, or more than [`WORSE`] past main's baseline.
 //!
 //! ```sh
-//! ST_LOAD_GATE=1 TMPDIR=/var/tmp cargo test --release -p st3 --test integration \
+//! ST_LOAD_GATE=1 TMPDIR=/var/tmp cargo test --release -p fractal --test integration \
 //!     daemon_load:: -- --nocapture
 //! ```
 //!
@@ -35,8 +35,8 @@
 //!   `agents-v1`, holds the agents roster only. A report compares only with main's reports of
 //!   its own profile.
 
-use st3::MissionsStore;
-use st3::SeatsStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -45,10 +45,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::client::Client;
-use st3::model::WorkRequest;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::client::Client;
+use fractal_daemon::model::WorkRequest;
+use fractal_daemon::store::Store;
 use tokio::sync::{Barrier, Notify, mpsc, watch};
 
 use crate::daemon_bench::{
@@ -79,7 +79,7 @@ const CPU_SLACK: f64 = 0.05;
 /// `slo/targets.toml`, built into st3. A missing file fails the build and an invalid one fails
 /// the run; there is no default.
 fn cpu_budget() -> f64 {
-    st3::slo::targets().cpu.max_cores
+    fractal_daemon::slo::targets().cpu.max_cores
 }
 
 /// Requests in flight at once before the load stops adding more; a daemon this far behind fails.
@@ -258,7 +258,7 @@ struct Report {
     #[serde(default)]
     actual_ci_checkout: Option<String>,
     #[serde(default)]
-    event_migration: Option<st3::maintenance::EventMigrationReport>,
+    event_migration: Option<fractal_daemon::maintenance::EventMigrationReport>,
     #[serde(default)]
     migration_pending_at_load_start: bool,
     #[serde(default)]
@@ -332,7 +332,7 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
         println!("skipped: set ST_LOAD_GATE=1 to run the load test");
         return;
     }
-    if !st3::test_support::optimized_build() {
+    if !fractal_daemon::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -407,7 +407,7 @@ const HOG_MEASURES: &[&str] = &["person-read", "person-read-fresh", "write-ack",
 ///
 /// ```sh
 /// ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out TMPDIR=/var/tmp cargo test --release \
-///     -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+///     -p fractal --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
 /// ```
 ///
 /// - `ST_LOAD_HOG=1` runs it; `ST_LOAD_GATE=1` is needed too.
@@ -425,7 +425,7 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
         println!("skipped: set ST_LOAD_GATE=1 and ST_LOAD_HOG=1 to run the hog load test");
         return;
     }
-    if !st3::test_support::optimized_build() {
+    if !fractal_daemon::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -704,7 +704,7 @@ fn cpu_by_kind() -> BTreeMap<String, f64> {
 /// pays them. Its gates are those of [`the_daemon_keeps_its_budgets_under_a_busy_hosts_load`]:
 ///
 /// ```sh
-/// ST_LOAD_GATE=1 TMPDIR=/var/tmp cargo test --release -p st3 --features perf-load \
+/// ST_LOAD_GATE=1 TMPDIR=/var/tmp cargo test --release -p fractal --features perf-load \
 ///     --test perf_load daemon_load::a_cold_roster_rebuild -- --nocapture
 /// ```
 #[test]
@@ -713,7 +713,7 @@ fn a_cold_roster_rebuild_reads_the_fleet_in_few_statements() {
         println!("skipped: set ST_LOAD_GATE=1 to run the load test");
         return;
     }
-    if !st3::test_support::optimized_build() {
+    if !fractal_daemon::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -746,7 +746,7 @@ fn a_cold_roster_rebuild_reads_the_fleet_in_few_statements() {
         let index = store.index().unwrap();
         let before = smallclaims::sqlite::work::total();
         let started = Instant::now();
-        let cards = st3::api::cold_agent_roster_rebuild(&store, index).unwrap();
+        let cards = fractal_daemon::api::cold_agent_roster_rebuild(&store, index).unwrap();
         let elapsed = started.elapsed();
         let statements = (smallclaims::sqlite::work::total() - before).statements;
         println!(
@@ -1181,10 +1181,10 @@ fn unchanged_work_tolerates_bounded_shared_runner_variation() {
 #[test]
 fn targets_come_from_the_targets_file_and_describe_without_gating() {
     // The CPU budget is the file's, not a copy of it here.
-    assert_eq!(cpu_budget(), st3::slo::targets().cpu.max_cores);
+    assert_eq!(cpu_budget(), fractal_daemon::slo::targets().cpu.max_cores);
     // Each request stands for the path in the file that serves it, and takes that target's
     // owner-side p99, so editing the file moves these without editing this test.
-    let targets = st3::slo::targets();
+    let targets = fractal_daemon::slo::targets();
     for (name, path) in [
         ("harness event", "POST /v1/harness-events"),
         ("message send", "POST /v1/messages"),
@@ -1492,7 +1492,7 @@ struct Context {
     client: Client,
     /// Client reads come from a person, as stui and the app make them.
     person: Client,
-    collections: st3_client::Client,
+    collections: fractal_client::Client,
     store: Arc<Store>,
     peer: Arc<Store>,
     daemon: tokio::runtime::Handle,
@@ -1517,7 +1517,7 @@ impl LoadRegime {
 }
 
 type MigrationTask =
-    tokio::task::JoinHandle<anyhow::Result<st3::maintenance::EventMigrationReport>>;
+    tokio::task::JoinHandle<anyhow::Result<fractal_daemon::maintenance::EventMigrationReport>>;
 
 fn start_event_migration(
     daemon: &tokio::runtime::Runtime,
@@ -1525,9 +1525,9 @@ fn start_event_migration(
     regime: LoadRegime,
 ) -> (
     Option<MigrationTask>,
-    Option<st3::maintenance::EventMigrationReport>,
+    Option<fractal_daemon::maintenance::EventMigrationReport>,
 ) {
-    let migration = daemon.spawn(st3::maintenance::migrate_event_payloads(store.clone()));
+    let migration = daemon.spawn(fractal_daemon::maintenance::migrate_event_payloads(store.clone()));
     if matches!(regime, LoadRegime::Steady) {
         let report = daemon.block_on(migration).unwrap().unwrap();
         assert!(report.pending_at_start && report.completed);
@@ -1551,7 +1551,7 @@ fn load_fixture_starts_the_shared_worker_and_steady_waits_for_completion() {
         let store = Store::open(&path, NODE).unwrap();
         for number in 0..65 {
             store
-                .append_claim(&st3::model::ClaimInput {
+                .append_claim(&fractal_daemon::model::ClaimInput {
                     subject: format!("custom/test/migration-{number}"),
                     kind: "custom.test.recorded".into(),
                     actor: None,
@@ -1681,19 +1681,19 @@ fn run(
         configured_peers: vec![PEER.into()],
         client_relay: None,
         native_session_home: Some(root.join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let subjects = {
         let _entered = daemon.enter();
-        st3::api::start_operation_report(&state);
+        fractal_daemon::api::start_operation_report(&state);
         // As the daemon starts: it folds the roster once and keeps it published.
-        st3::api::start_agent_roster(&state);
+        fractal_daemon::api::start_agent_roster(&state);
         // And the attention, summary, glasses and arrangements views.
-        st3::api::start_attention_list(&state);
-        st3::api::start_published_lists(&state);
+        fractal_daemon::api::start_attention_list(&state);
+        fractal_daemon::api::start_published_lists(&state);
         let server_socket = socket.clone();
         daemon.spawn(
-            async move { st3::api::serve_unix(&server_socket, st3::api::router(state)).await },
+            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
         );
         let subjects = fleet_subjects(&store, SEATS);
         // Every seat runs, so its driver may publish harness events.
@@ -1716,7 +1716,7 @@ fn run(
     // The reconciler runs as on a host that owns none of the store's members: it passes over the
     // whole store, as the busy host's does, and starts nothing.
     let reconciler = Arc::new(
-        st3::reconcile::Reconciler::native(
+        fractal_daemon::reconcile::Reconciler::native(
             store.clone(),
             &root.join("state"),
             Some(&root.join("pty")),
@@ -1755,7 +1755,7 @@ fn run(
     let context = Arc::new(Context {
         client: Client::unix(&socket),
         person: Client::unix_as(&socket, "person/bench-operator").unwrap(),
-        collections: st3_client::Client::unix_as(&socket, "person/bench-operator"),
+        collections: fractal_client::Client::unix_as(&socket, "person/bench-operator"),
         store,
         peer,
         daemon: daemon.handle().clone(),
@@ -1952,7 +1952,7 @@ fn run(
             mpsc::channel(ROSTER_SUBSCRIBERS * (1 + profile.windows().len()));
         let mut subscribers = Vec::new();
         for subscriber in 0..ROSTER_SUBSCRIBERS {
-            let client = st3_client::Client::unix_as(&socket, OPERATOR);
+            let client = fractal_client::Client::unix_as(&socket, OPERATOR);
             let (barrier, stopped, snapshots, failed, changes, collection_changes, resyncs) = (
                 barrier.clone(),
                 stopped.clone(),
@@ -2169,7 +2169,7 @@ struct HeldWindow {
 
 #[allow(clippy::too_many_arguments)]
 async fn roster_subscriber(
-    client: st3_client::Client,
+    client: fractal_client::Client,
     subscriber: usize,
     barrier: Arc<Barrier>,
     mut stopped: watch::Receiver<bool>,
@@ -2296,7 +2296,7 @@ fn roster_row_ids(items: &Value) -> Result<BTreeSet<String>, String> {
         .ok_or_else(|| "roster rows are not an array".to_owned())?;
     let mut ids = BTreeSet::new();
     for item in items {
-        let agent = <st3_client::Agent as serde::Deserialize>::deserialize(item)
+        let agent = <fractal_client::Agent as serde::Deserialize>::deserialize(item)
             .map_err(|error| format!("invalid agent card: {error}"))?;
         if item["kind"] != "agent" || !agent.header.id.starts_with("agent/") || agent.name.is_empty() {
             return Err("roster row is not a named agent".into());
@@ -2320,11 +2320,11 @@ fn window_row_ids(collection: &str, items: &Value) -> Result<BTreeSet<String>, S
     let mut ids = BTreeSet::new();
     for item in items {
         let id = match collection {
-            "missions" => <st3_client::Mission as serde::Deserialize>::deserialize(item)
+            "missions" => <fractal_client::Mission as serde::Deserialize>::deserialize(item)
                 .map_err(|error| format!("invalid mission card: {error}"))?
                 .header
                 .id,
-            "work" => <st3_client::Work as serde::Deserialize>::deserialize(item)
+            "work" => <fractal_client::Work as serde::Deserialize>::deserialize(item)
                 .map_err(|error| format!("invalid work card: {error}"))?
                 .header
                 .id,
@@ -2373,7 +2373,7 @@ fn apply_window_frame(
     if frame["kind"] != kind || frame["id"] != id || frame["collection"] != collection {
         return Err(format!("expected {collection} {kind} for {id}, received {frame}"));
     }
-    let snapshot = <st3_client::Snapshot as serde::Deserialize>::deserialize(&frame["snapshot"])
+    let snapshot = <fractal_client::Snapshot as serde::Deserialize>::deserialize(&frame["snapshot"])
         .map_err(|error| format!("invalid {collection} snapshot fence: {error}"))?;
     if frame["has_more"].as_bool().is_none() {
         return Err(format!("{collection} has no pagination flag"));
@@ -2590,7 +2590,7 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             claim
                 .fields
                 .insert("incarnation_id".into(), json!(runtime_of(seat)));
-            let publication = st3::harness_events::Publication {
+            let publication = fractal_daemon::harness_events::Publication {
                 runtime_incarnation: runtime_of(seat),
                 sequence: turn as u64 + 1,
                 claim,
@@ -2691,7 +2691,7 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
                         .await.map_err(|e| e.to_string())?;
                     let event = tokio::time::timeout(Duration::from_secs(10), stream.next_event())
                         .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-                    if !matches!(event, Some(st3_client::CollectionEvent::Snapshot { .. })) {
+                    if !matches!(event, Some(fractal_client::CollectionEvent::Snapshot { .. })) {
                         return Err(format!("{collection}: expected initial snapshot, got {event:?}"));
                     }
                     Ok::<_, String>(stream)
@@ -2760,7 +2760,7 @@ fn target_rows(timings: &BTreeMap<String, Vec<Duration>>) -> BTreeMap<String, Ta
     let mut pooled = BTreeMap::<String, (Duration, Vec<Duration>)>::new();
     for (name, samples) in timings {
         let Some(path) = target_path(name) else { continue };
-        let Some(latency) = st3::slo::targets().for_path(&path) else { continue };
+        let Some(latency) = fractal_daemon::slo::targets().for_path(&path) else { continue };
         let target = latency.target(false);
         let mut keys = vec![latency.name.clone()];
         if name == "message send" {
@@ -2791,7 +2791,7 @@ fn target_rows(timings: &BTreeMap<String, Vec<Duration>>) -> BTreeMap<String, Ta
 /// A request's descriptive p99 target from `slo/targets.toml`, served on its owner.
 fn descriptive_target(name: &str) -> Option<Duration> {
     let path = target_path(name)?;
-    Some(st3::slo::targets().for_path(&path)?.target(false))
+    Some(fractal_daemon::slo::targets().for_path(&path)?.target(false))
 }
 
 /// A request's budget: its kind's, or for a person read, its route's.

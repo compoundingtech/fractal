@@ -1,7 +1,7 @@
 #![cfg(unix)]
 //! Setup uses only this HOME, state directory and sockets; no host daemon or service.
 
-use st3::MissionsStore;
+use fractal_daemon::MissionsStore;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -16,7 +16,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = st3::test_support::canonical_tempdir();
+        let root = fractal_daemon::test_support::canonical_tempdir();
         for dir in ["home/.config/st3", "run", "archive", "bin"] {
             fs::create_dir_all(root.path().join(dir)).unwrap();
         }
@@ -32,7 +32,7 @@ impl Fixture {
     }
 
     fn command(&self, executable: &Path) -> Command {
-        let mut command = st3::test_support::command(executable);
+        let mut command = fractal_daemon::test_support::command(executable);
         command
             .env_clear()
             .env("HOME", self.path("home"))
@@ -106,7 +106,7 @@ impl Drop for Fixture {
 /// does not exist on other platforms, where the socket's own peer is the daemon.
 fn daemon_pid(socket: &Path) -> Option<u32> {
     if cfg!(target_os = "linux") {
-        return st3::startup::read(socket).map(|readiness| readiness.pid);
+        return fractal_daemon::startup::read(socket).map(|readiness| readiness.pid);
     }
     #[cfg(target_os = "macos")]
     use std::os::fd::AsRawFd as _;
@@ -167,7 +167,7 @@ fi
 #[cfg(target_os = "linux")]
 #[test]
 fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = Fixture::new();
@@ -209,7 +209,7 @@ fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() 
 #[cfg(target_os = "linux")]
 #[test]
 fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = Fixture::new();
@@ -220,7 +220,7 @@ fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
     fs::write(&config, "node = 'studio'\nperson = 'person/ada'\n").unwrap();
     // Deliberately unreadable membership: conflict refusal must precede even loading it,
     // and therefore precede fleet_leave, settings saves, endpoint publication or exposure.
-    let membership = st3::config::FleetFile::path(&state);
+    let membership = fractal_daemon::config::FleetFile::path(&state);
     fs::create_dir_all(membership.parent().unwrap()).unwrap();
     fs::write(&membership, "membership must not be read or replaced").unwrap();
     let identity = state.join("node-identity.json");
@@ -324,13 +324,13 @@ fn uninstall_stops_an_instance_daemon_that_runs_without_a_service() {
     fixture.unpack_archive();
     let instance_socket = fixture.path("home/.st-instance/kept/run/st3.sock");
     success(&setup_without_service(&fixture, Some("kept")));
-    let pid = st3::startup::read(&instance_socket)
+    let pid = fractal_daemon::startup::read(&instance_socket)
         .expect("instance setup started a live daemon")
         .pid;
     fixture.daemon_pid = Some(pid);
     // A second daemon in the default install must not be touched by the instance's uninstall.
     success(&setup_without_service(&fixture, None));
-    let default_pid = st3::startup::read(&fixture.path("run/st3.sock"))
+    let default_pid = fractal_daemon::startup::read(&fixture.path("run/st3.sock"))
         .expect("default setup started a live daemon")
         .pid;
     assert_ne!(pid, default_pid);
@@ -342,7 +342,7 @@ fn uninstall_stops_an_instance_daemon_that_runs_without_a_service() {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
-    assert!(st3::startup::read(&fixture.path("run/st3.sock")).is_some());
+    assert!(fractal_daemon::startup::read(&fixture.path("run/st3.sock")).is_some());
 
     let stdout = success(&erase(&fixture, Some("kept")));
     assert!(stdout.contains("stopped\t"), "{stdout}");
@@ -359,7 +359,7 @@ fn uninstall_stops_an_instance_daemon_that_runs_without_a_service() {
     );
     assert!(!fixture.path("home/.st-instance").exists());
     assert!(
-        st3::startup::read(&fixture.path("run/st3.sock")).is_some(),
+        fractal_daemon::startup::read(&fixture.path("run/st3.sock")).is_some(),
         "the default install's daemon must keep running"
     );
     unsafe {
@@ -369,7 +369,7 @@ fn uninstall_stops_an_instance_daemon_that_runs_without_a_service() {
 
 #[test]
 fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for custom_data_home in [false, true] {
@@ -475,7 +475,7 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
 
 #[test]
 fn setup_does_not_claim_managed_executables_or_no_install_runs() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = Fixture::new();
@@ -509,7 +509,7 @@ fn setup_does_not_claim_managed_executables_or_no_install_runs() {
 #[cfg(target_os = "linux")]
 #[test]
 fn removing_services_skips_absent_replication_but_preserves_installed_unit_errors() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = Fixture::new();
@@ -680,7 +680,7 @@ fn seats_cannot_run_setup_or_open_a_plain_st_prompt() {
 
 #[test]
 fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_alone() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = Fixture::new();
@@ -717,7 +717,7 @@ fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_
 
 #[test]
 fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harness() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut fixture = Fixture::new();
@@ -768,7 +768,7 @@ fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harnes
         .enable_all()
         .build()
         .unwrap()
-        .block_on(st3_client::Client::unix(fixture.path("run/st3.sock")).agents_list_after(None, None, false, 0))
+        .block_on(fractal_client::Client::unix(fixture.path("run/st3.sock")).agents_list_after(None, None, false, 0))
         .expect("the fixture must publish its initial roster");
     let agents = fixture.cli().args(["agents", "ls", "--json"]).output().unwrap();
     assert!(!success(&agents).contains("fixture-missing"), "missing binary must not publish a restarting seat");
@@ -794,7 +794,7 @@ fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harnes
 
 #[test]
 fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut fixture = Fixture::new();
@@ -848,7 +848,7 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
     // by itself and the interface opens.
     for (prompt, answer) in [
         ("Fractal setup", "\t\u{15}studio\t \t\r"),
-        (stui::HOME_IDLE_TEXT, "\u{11}"),
+        (fractal_tui::HOME_IDLE_TEXT, "\u{11}"),
     ] {
         while !String::from_utf8_lossy(&output).contains(prompt) {
             assert!(
@@ -888,8 +888,8 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
 async fn onboarding_api(
     fixture: &Fixture,
 ) -> (
-    std::sync::Arc<st3::store::Store>,
-    st3::client::Client,
+    std::sync::Arc<fractal_daemon::store::Store>,
+    fractal_daemon::client::Client,
     tokio::task::JoinHandle<()>,
 ) {
     let state_dir = fixture.path("home/.local/state/st3");
@@ -900,9 +900,9 @@ async fn onboarding_api(
     )
     .unwrap();
     let store = std::sync::Arc::new(
-        st3::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
+        fractal_daemon::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
     );
-    let state = st3::api::AppState {
+    let state = fractal_daemon::api::AppState {
         owning_person: None,
         store: store.clone(),
         notify: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -918,7 +918,7 @@ async fn onboarding_api(
         planner_default: Default::default(),
     };
     // These declarations use a simulated provider; no host provider or daemon is touched.
-    let router = st3::api::router(state).layer(axum::middleware::from_fn(
+    let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         |request: axum::extract::Request, next: axum::middleware::Next| async move {
             if request.uri().path() == "/v1/harnesses" {
                 return axum::response::IntoResponse::into_response(axum::Json(
@@ -933,9 +933,9 @@ async fn onboarding_api(
     let socket = fixture.path("run/st3.sock");
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        let _ = st3::api::serve_unix(&server_socket, router).await;
+        let _ = fractal_daemon::api::serve_unix(&server_socket, router).await;
     });
-    let client = st3::client::Client::unix(&socket);
+    let client = fractal_daemon::client::Client::unix(&socket);
     for _ in 0..100 {
         if client.get::<serde_json::Value>("/v1/health").await.is_ok() {
             break;
@@ -947,7 +947,7 @@ async fn onboarding_api(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn onboarding_publication_is_graph_decided_and_preserves_stopped_assistant() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = Fixture::new();
@@ -989,7 +989,7 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_assistant
         .selected_desired_token("agent/st/assistant")
         .unwrap()
         .unwrap();
-    let claim: st3::model::ClaimRecord = client
+    let claim: fractal_daemon::model::ClaimRecord = client
         .get(&format!("/v1/claims/by-id/{token}"))
         .await
         .unwrap();
@@ -1004,7 +1004,7 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_assistant
     let declared = serde_json::to_string(assistant).unwrap();
     assert!(!declared.contains("--dangerously-bypass-approvals-and-sandbox"), "{declared}");
     assert!(!declared.contains("--dangerously-skip-permissions"), "{declared}");
-    let guides: st3::model::DocumentListResponse = client
+    let guides: fractal_daemon::model::DocumentListResponse = client
         .get("/v1/documents?name=doc%2Fst%2Fguide")
         .await
         .unwrap();
@@ -1070,7 +1070,7 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_assistant
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_assistant_asks_first_and_an_existing_setup_never_starts_it_on_its_own() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let fixture = Fixture::new();
@@ -1183,7 +1183,7 @@ fn play(
             if let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(100)) {
                 output.extend(bytes);
             }
-            if let Some(readiness) = st3::startup::read(&fixture.path("run/st3.sock")) {
+            if let Some(readiness) = fractal_daemon::startup::read(&fixture.path("run/st3.sock")) {
                 fixture.daemon_pid = Some(readiness.pid);
             }
         }
@@ -1222,7 +1222,7 @@ fn fake(fixture: &Fixture, name: &str, script: &str) {
 
 #[test]
 fn the_setup_screen_sets_up_each_agent_on_its_own_and_stores_an_unticked_codex_box() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut fixture = Fixture::new();
@@ -1276,7 +1276,7 @@ fn the_setup_screen_sets_up_each_agent_on_its_own_and_stores_an_unticked_codex_b
 
 #[test]
 fn leaving_the_setup_screen_before_the_button_changes_nothing() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut fixture = Fixture::new();
@@ -1292,7 +1292,7 @@ fn leaving_the_setup_screen_before_the_button_changes_nothing() {
 
 #[test]
 fn skipping_sets_up_st_and_no_agent() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let mut fixture = Fixture::new();

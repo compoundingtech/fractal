@@ -21,7 +21,7 @@ fn an_unknown_non_authority_claim_leaves_runtime_routing_alone() {
     admit(&current, "current", &anchor_key, "anchor", None);
     admit(&current, "older", &older_key, "invite", None);
     let older = node("older", Some(&older_key), Some(&anchor_key));
-    let mut registry = st3_schema::registry().clone();
+    let mut registry = fractal_schema::registry().clone();
     for kind in ["harness.limits", "runtime.restart-window-reset"] {
         registry.claims.remove(kind).unwrap();
     }

@@ -1,17 +1,17 @@
 use super::*;
-use st_drivers::{harness_events, harness_state};
+use fractal_drivers::{harness_events, harness_state};
 use std::sync::atomic::Ordering::SeqCst;
-use st3_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
+use fractal_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
 
 
 fn native_peer_process() -> std::process::Child {
     // Physical capture reads the peer's real /proc identity, not an unrelated
     // native driver path contract inherited from the test runner.
     std::process::Command::new("sleep").arg("300")
-        .env_remove(st_drivers::driver_paths::ROOT_ENV)
-        .env_remove(st_drivers::driver_paths::AGENT_DIR_ENV)
-        .env_remove(st_drivers::driver_paths::SESSION_DIR_ENV)
-        .env_remove(st_drivers::driver_paths::IDENTITY_ENV)
+        .env_remove(fractal_drivers::driver_paths::ROOT_ENV)
+        .env_remove(fractal_drivers::driver_paths::AGENT_DIR_ENV)
+        .env_remove(fractal_drivers::driver_paths::SESSION_DIR_ENV)
+        .env_remove(fractal_drivers::driver_paths::IDENTITY_ENV)
         .spawn().unwrap()
 }
 
@@ -59,7 +59,7 @@ impl NativeReplay {
         let sequence = harness_state::claim(&agent_dir, name, "codex", "replay-session").unwrap();
         let peer = NativeDeliveryPeer { agent: subject.clone(), transport: "app-server", pid, archives_inbox: false };
         let owner = crate::mailbox::Authority { provider: "codex".into(), session: "replay-session".into(),
-            sequence, pid, process_token: st_runtime::process_start_token(pid).unwrap() };
+            sequence, pid, process_token: fractal_runtime::process_start_token(pid).unwrap() };
         let fence = state.store.bind_mailbox_with_lease(
             &Fence::new(&subject, &incarnation, "delivery"), Some(&owner),
         ).unwrap();
@@ -216,7 +216,7 @@ async fn consumed_replay_does_not_authorize_a_changed_epoch_or_replaced_peer() {
     let mut successor_peer = fixture.peer.clone();
     successor_peer.pid = fixture.process.id();
     owner.pid = successor_peer.pid;
-    owner.process_token = st_runtime::process_start_token(owner.pid).unwrap();
+    owner.process_token = fractal_runtime::process_start_token(owner.pid).unwrap();
     let successor = fixture.state.store.bind_mailbox_with_lease(
         &Fence::new(&fixture.fence.subject, &fixture.fence.incarnation, "delivery"), Some(&owner),
     ).unwrap();

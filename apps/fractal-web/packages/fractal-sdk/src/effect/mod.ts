@@ -1,5 +1,5 @@
 /**
- * `@st3/sdk/effect`: the st client-v0 transport for wf, as one Effect service.
+ * `@fractal/sdk/effect`: the st client-v0 transport for wf, as one Effect service.
  *
  * One collections socket carries every follow (`socket.ts`). Each follow is a scoped
  * `Stream<FollowEvent<A>>` decoded tolerantly at this edge with smalltalk's generated codecs, so
@@ -38,8 +38,8 @@ import {
   type CollectionStream,
   isTransientCode,
   isTransient,
-  St3Client,
-} from '@smalltalk/st3-client'
+  FractalClient,
+} from '@fractal/client'
 import {
   ActionResult,
   type Capabilities,
@@ -52,7 +52,7 @@ import {
   TerminalScreen,
   TimelineEntry,
   Snapshot,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 import * as Context from 'effect/Context'
 import * as Data from 'effect/Data'
 import * as Effect from 'effect/Effect'
@@ -314,7 +314,7 @@ export class St3 extends Context.Service<
     /** Socket reachability is not Live: only a successfully decoded data frame establishes it. */
     readonly gatewaySyncStatus: Stream.Stream<SyncStatus>
   }
->()('@st3/sdk/St3') {}
+>()('@fractal/sdk/St3') {}
 
 /** Gateway configuration and transport seams for the scoped SDK layer. */
 export interface St3Options {
@@ -379,7 +379,7 @@ export interface ArrangementActionPort {
   readonly submitAction: (request: ActionOf<'arrangement.edit'>) => Effect.Effect<typeof ActionResult.Type, ActionFailure>
 }
 
-export const arrangementActions = (client: Pick<St3Client, 'capabilities' | 'arrangementEdit'>): ArrangementActionPort => ({
+export const arrangementActions = (client: Pick<FractalClient, 'capabilities' | 'arrangementEdit'>): ArrangementActionPort => ({
   snapshot: Effect.tryPromise({
     try: () => client.capabilities(),
     catch: actionFailure,
@@ -484,7 +484,7 @@ const make = (options: St3Options) =>
   Effect.gen(function* () {
     /** A subscribe's own attempt context while the client issues it; otherwise the caller's. */
     let outbound: TraceContext | undefined
-    const client = new St3Client({
+    const client = new FractalClient({
       baseUrl: options.baseUrl,
       // Remove the browser receiver workaround after smalltalk#1040 / #1247 lands.
       fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis),
@@ -501,7 +501,7 @@ const make = (options: St3Options) =>
      * One SDK HTTP call under its own `st3.*` span, a child of the caller's active span when it has
      * one; the call's requests carry that span's `traceparent`, not the caller's.
      */
-    const sdkRequest = <A, E>(name: string, request: (traced: St3Client) => Effect.Effect<A, E>) =>
+    const sdkRequest = <A, E>(name: string, request: (traced: FractalClient) => Effect.Effect<A, E>) =>
       Effect.suspend(() => {
         const parent = options.parentSpan?.()
         return Effect.currentSpan.pipe(

@@ -8,21 +8,21 @@
 //! names itself `smalltalk-ios 0.1.0 [LABEL]` in `x-st3-client`. Its transport is the local
 //! Unix socket, not the paired gateway; that difference is the limit of this measurement.
 //!
-//! cargo run --release -p stui --example phone_client -- --seconds 180 --label measure-phone
+//! cargo run --release -p fractal-tui --example phone_client -- --seconds 180 --label measure-phone
 use std::time::{Duration, Instant};
 
-use st3_client::{Client, set_client_name};
+use fractal_client::{Client, set_client_name};
 
 /// One JSON line for an observation: routes, outcomes, statuses, sizes and durations, with every
 /// string escaped by serde_json, never contents.
-fn timing_line(at_ms: u64, observation: &st3_client::Observation<'_>) -> String {
+fn timing_line(at_ms: u64, observation: &fractal_client::Observation<'_>) -> String {
     match observation {
-        st3_client::Observation::Request { method, route, outcome, status, took } => serde_json::json!({
+        fractal_client::Observation::Request { method, route, outcome, status, took } => serde_json::json!({
             "at_ms": at_ms, "type": "request", "method": method, "route": route,
             "outcome": format!("{outcome:?}"), "status": status,
             "took_ms": took.as_secs_f64() * 1000.0,
         }),
-        st3_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
+        fractal_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
             "at_ms": at_ms, "type": "frame", "id": id, "kind": kind, "bytes": bytes,
             "since_subscribe_ms": since_subscribe.map(|d| d.as_secs_f64() * 1000.0),
         }),
@@ -57,14 +57,14 @@ async fn main() {
             .map_or(0, |since| since.as_millis() as u64);
         let _ = writeln!(log, "{}", serde_json::json!({ "at_ms": 0, "type": "start", "epoch_ms": epoch_ms }));
         let file = std::sync::Mutex::new(log);
-        st3_client::set_observer(move |observation| {
+        fractal_client::set_observer(move |observation| {
             let line = timing_line(started.elapsed().as_millis() as u64, observation);
             if let Ok(mut file) = file.lock() {
                 let _ = writeln!(file, "{line}");
             }
         });
     }
-    let path = st3_client::discover_unix_endpoint(None).expect("a local st endpoint");
+    let path = fractal_client::discover_unix_endpoint(None).expect("a local st endpoint");
     // The person as stui resolves it: ST3_PERSON, else `person` in the st config.
     let person = std::env::var("ST3_PERSON").ok().or_else(|| {
         let home = std::env::var_os("HOME")?;
@@ -111,7 +111,7 @@ mod tests {
     fn identifiers_with_quotes_and_backslashes_stay_one_valid_json_line() {
         let line = super::timing_line(
             7,
-            &st3_client::Observation::Frame {
+            &fractal_client::Observation::Frame {
                 id: "a\"b\\c\nd",
                 kind: "snap\"shot",
                 bytes: 3,

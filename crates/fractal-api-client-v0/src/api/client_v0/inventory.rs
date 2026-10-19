@@ -4,8 +4,8 @@ use crate::LimitsStore;
 use crate::SeatsStore;
 use super::*;
 use std::path::PathBuf;
-pub use st3_api_core::api::client_v0::inventory::*;
-pub use st3_api_core::api::client_v0::inventory::{items, next_expiry, usage_value, validate};
+pub use fractal_api_core::api::client_v0::inventory::*;
+pub use fractal_api_core::api::client_v0::inventory::{items, next_expiry, usage_value, validate};
 
 pub fn is_inventory(collection: &str) -> bool {
     matches!(

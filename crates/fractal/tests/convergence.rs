@@ -35,9 +35,9 @@
 //! On a failure the suite prints the seed and the schedule. To explore further:
 //!
 //! ```sh
-//! cargo test -p st3 --test integration convergence::                   # the fixed seeds
-//! CONVERGENCE_SEED=42 cargo test -p st3 --test integration -- --ignored --nocapture convergence::one_seed
-//! CONVERGENCE_RUNS=200 cargo test -p st3 --test integration -- --ignored --nocapture convergence::explore
+//! cargo test -p fractal --test integration convergence::                   # the fixed seeds
+//! CONVERGENCE_SEED=42 cargo test -p fractal --test integration -- --ignored --nocapture convergence::one_seed
+//! CONVERGENCE_RUNS=200 cargo test -p fractal --test integration -- --ignored --nocapture convergence::explore
 //! ```
 //!
 //! Stores run in this process, each in its own file, and exchange through the same export and
@@ -49,12 +49,12 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
-use st3::model::{ClaimInput, ClaimRecord};
-use st3::store::{
+use fractal_daemon::model::{ClaimInput, ClaimRecord};
+use fractal_daemon::store::{
     CheckpointAction, CheckpointContext, CheckpointExcuseRequest, Store, TrimFault, certificates,
     checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
 };
-use st3_schema::{FieldSpec, Retention, ValueType};
+use fractal_schema::{FieldSpec, Retention, ValueType};
 
 const FLEET: &str = "7d3f9a2e-5b6c-4e1d-8a0f-2c9b8e7d6f5a";
 const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -74,8 +74,8 @@ const SEEDS: &[u64] = &[
 
 /// Both revisions draw the same kinds and fields. Native admission still uses each
 /// revision's registry; the snapshot includes kinds a revision may refuse.
-fn corpus() -> &'static BTreeMap<String, st3_schema::ClaimSpec> {
-    static CORPUS: std::sync::LazyLock<BTreeMap<String, st3_schema::ClaimSpec>> =
+fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
+    static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
             serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v3.json"))
                 .expect("versioned convergence input schema")
@@ -85,7 +85,7 @@ fn corpus() -> &'static BTreeMap<String, st3_schema::ClaimSpec> {
 
 #[test]
 fn the_corpus_includes_every_registry_kind() {
-    for kind in st3_schema::registry().claims.keys() {
+    for kind in fractal_schema::registry().claims.keys() {
         assert!(
             corpus().contains_key(kind),
             "add {kind} to a versioned corpus"
@@ -609,7 +609,7 @@ impl World {
                 self.restart(index);
                 self.nodes[index]
                     .store
-                    .set_trim_chunk_envelopes(st3::store::TRIM_CHUNK_ENVELOPES);
+                    .set_trim_chunk_envelopes(fractal_daemon::store::TRIM_CHUNK_ENVELOPES);
                 return Vec::new();
             }
             Err(error) => {
@@ -708,7 +708,7 @@ impl World {
             *self.written.entry(claim.kind.clone()).or_default() += 1;
             // Observations a node keeps to itself never replicate, whoever wrote them.
             let replicated =
-                st3_schema::registry()
+                fractal_schema::registry()
                     .claim(&claim.kind)
                     .is_some_and(|spec| match spec.retention {
                         Retention::Durable => true,

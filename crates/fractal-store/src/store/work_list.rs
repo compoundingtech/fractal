@@ -441,7 +441,7 @@ impl Store {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h8599d89040f4 owner=st3_store::store::work_list TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h6650f69e1632 owner=fractal_store::store::work_list TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
                  VALUES ('graph', 'healthy', ?1, '0')
                  ON CONFLICT(aggregate) DO UPDATE SET last_good_store_index=excluded.last_good_store_index",
                 [index],
@@ -455,7 +455,7 @@ impl Store {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hbb3763b1c034 owner=st3_store::store::work_list TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position,
+                /* sqlite-large-value: allow-for-now lv-hd0455fe99589 owner=fractal_store::store::work_list TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position,
                     raw, state, claim_id, updated_at_unix_ms)
                  VALUES (?1, 'peer', 1, 'envelope', 0, x'00', ?3, ?2, '0')",
                 params![record_ref, claim, state],

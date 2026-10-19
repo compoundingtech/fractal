@@ -26,14 +26,14 @@
 //! measurement in `doc/fleet/smalltalk/claim-log-diet` is the ten-minute run:
 //!
 //! ```sh
-//! cargo test -p st3 --test integration log_diet:: -- --ignored --nocapture
+//! cargo test -p fractal --test integration log_diet:: -- --ignored --nocapture
 //! ```
 //!
 //! Inside an st3 harness, unset `ST_AGENT` first: the local API binds a caller to the agent in
 //! its process ancestry, and these drivers write as their own agents.
 
-use st3::MissionsStore;
-use st3::EvidenceStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,11 +42,11 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use st3::api::AppState;
-use st3::client::{Client, Endpoint};
-use st3::model::{ClaimInput, ClaimRecord, IntentInput, MissionRunRequest};
-use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
-use st3::store::{Store, local_observation_position};
+use fractal_daemon::api::AppState;
+use fractal_daemon::client::{Client, Endpoint};
+use fractal_daemon::model::{ClaimInput, ClaimRecord, IntentInput, MissionRunRequest};
+use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::store::{Store, local_observation_position};
 use tokio::sync::{Notify, watch};
 
 const NODE: &str = "diet-node";
@@ -69,7 +69,7 @@ impl RuntimeControl for NoRuntime {
     fn observe_exec(&self, _: &str) -> Result<Option<RuntimeObservation>> {
         Ok(None)
     }
-    fn start(&self, _: &st3::model::MemberSpec) -> Result<()> {
+    fn start(&self, _: &fractal_daemon::model::MemberSpec) -> Result<()> {
         Ok(())
     }
     fn stop(&self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
@@ -167,12 +167,12 @@ impl Daemon {
             configured_peers: Vec::new(),
             client_relay: None,
             native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
         };
         let socket = root.join("st3.sock");
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
-            let _ = st3::api::serve_unix(&server_socket, st3::api::router(state)).await;
+            let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await;
         });
         // The workload runs every reconcile pass itself; see `reconcile`.
         let reconciler = Arc::new(Reconciler::new(
@@ -235,7 +235,7 @@ impl Daemon {
     }
 
     fn publish(&self, source: &str, workspace: &Path) -> Vec<String> {
-        let intent = st3::parse_intent(source, NODE).unwrap();
+        let intent = fractal_daemon::parse_intent(source, NODE).unwrap();
         let plan = self
             .store
             .mission(

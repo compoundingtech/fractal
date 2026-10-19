@@ -3,7 +3,7 @@
 //! stui writes these files and the iOS app tests against them, so both apps clean the same
 //! transcripts the same way, use the same words and colours, draw a conversation's entries
 //! by the same rules, and share one demo world.
-//! Run `STUI_UPDATE_CONTRACT=1 cargo test -p stui contract` after an intended change.
+//! Run `STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract` after an intended change.
 
 use super::adapt;
 use super::demo;
@@ -126,7 +126,7 @@ pub fn words() -> Value {
 /// The cleaned conversation. `at` is a local display time, so it is left out: it depends on
 /// the machine's time zone, not on the cleaning rules.
 fn conversation_of(fixture: &str) -> Value {
-    let timeline: Vec<st3_client::TimelineEntry> = serde_json::from_str(fixture).unwrap();
+    let timeline: Vec<fractal_client::TimelineEntry> = serde_json::from_str(fixture).unwrap();
     let mut value =
         serde_json::to_value(adapt::conversation(&timeline, &Default::default())).unwrap();
     for entry in value.as_array_mut().unwrap() {
@@ -145,7 +145,7 @@ fn files() -> Vec<(&'static str, Value)> {
         ("words.json", words()),
         (
             "conversation-style.json",
-            serde_json::to_value(st3_conversation_ui::style::RULES).unwrap(),
+            serde_json::to_value(fractal_conversation_ui::style::RULES).unwrap(),
         ),
         (
             "transcripts/claude.expected.json",
@@ -175,7 +175,7 @@ fn files() -> Vec<(&'static str, Value)> {
 }
 
 /// Sorts every object's keys, so the files read the same whether or not another crate in the
-/// build turns on serde_json's `preserve_order` (the workspace build does; `-p stui` does not).
+/// build turns on serde_json's `preserve_order` (the workspace build does; `-p fractal-tui` does not).
 fn sorted_keys(value: Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -207,7 +207,7 @@ fn the_shared_client_contract_matches_stui() {
             .unwrap_or_else(|_| panic!("{name} is missing; run with STUI_UPDATE_CONTRACT=1"));
         assert!(
             current == text,
-            "{name} no longer matches stui; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p stui contract and update the iOS app"
+            "{name} no longer matches stui; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
         );
     }
 }
@@ -220,13 +220,13 @@ fn agent_branch_and_checkout_label_match_the_phone() {
     .unwrap();
     for case in fixture["branches"].as_array().unwrap() {
         assert_eq!(
-            st3_client::agent_branch(case["name"].as_str().unwrap()),
+            fractal_client::agent_branch(case["name"].as_str().unwrap()),
             case["branch"]
         );
     }
     let checkout = serde_json::from_value(fixture["checkout"].clone()).unwrap();
     assert_eq!(
-        st3_client::checkout_label(&checkout),
+        fractal_client::checkout_label(&checkout),
         fixture["checkout_label"]
     );
 }

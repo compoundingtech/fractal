@@ -369,7 +369,7 @@ async fn a_claim_naming_a_body_is_accepted_by_a_build_that_predates_bodies() {
     let subject = send(&writer, "old-reader", &text(50 * 1024)).unwrap().message.subject;
     let claim = writer.store.latest_claim(&subject, Some("message.sent")).unwrap().unwrap();
     let fields = claim.body["fields"].as_object().unwrap();
-    let registry = st3_schema::registry();
+    let registry = fractal_schema::registry();
     registry
         .validate_claim(
             &subject,

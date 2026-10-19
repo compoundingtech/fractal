@@ -1,8 +1,8 @@
 //! The part of `store::published_views` that moved up from st3-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_seats::store::published_views::*;
-pub use st3_seats::store::published_views::{PUBLISHED_COLLECTIONS, PublishedViews, Revisions, View, revision};
+pub use fractal_seats::store::published_views::*;
+pub use fractal_seats::store::published_views::{PUBLISHED_COLLECTIONS, PublishedViews, Revisions, View, revision};
 
 pub trait PublishedViewsAttentionStore {
     /// Say that `collection`'s refresher has swapped in a newer published view. Call it after

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { homeRows, homeSections, keepClosed, onHome } from '@smalltalk/st3-views/homeView';
+import { homeRows, homeSections, keepClosed, onHome } from '@fractal/views/homeView';
 
 const now = Date.parse('2026-09-30T12:00:00Z');
 const item = (id, attention_kind, extra = {}) => ({ id: `attention/${id}`, kind: 'attention', attention_kind, title: id, detail: '', priority: 'normal', state: 'open', person_id: 'person/alex', requested_at: '2026-09-30T11:00:00Z', source_id: 'x', actions: [], ...extra });

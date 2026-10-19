@@ -1,9 +1,9 @@
 #[cfg(test)]
 #[cfg(test)]
-use st3::MissionsStore;
+use fractal_daemon::MissionsStore;
 #[cfg(test)]
-use st3::PersonWorkStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::PersonWorkStore;
+use fractal_daemon::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -16,10 +16,10 @@ use hyper::client::conn::http1;
 use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
-use st3::api::AppState;
-use st3::model::ClaimInput;
-use st3::store::Store;
-use st3_client::{
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
+use fractal_client::{
     Capabilities, Client, ClientError, CollectionEvent, Envelope, ErrorCode, Fence,
     LaunchVariantParameters, PersonPairingBegin, PairingComplete, PersonStepParameters, RawTerminalMode,
     Resource, TargetParameters, TerminalAttachment, TerminalColor, TerminalInputMode,
@@ -43,15 +43,15 @@ fn state(root: &Path, name: &str) -> AppState {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     }
 }
 
 async fn publish_fixture_lists(state: &AppState) {
     let seeded_cut = state.store.index().unwrap();
-    st3::api::start_published_lists(state);
+    fractal_daemon::api::start_published_lists(state);
     tokio::time::timeout(Duration::from_secs(10),
-        st3::api::wait_published_lists_at_least(&state.store, seeded_cut))
+        fractal_daemon::api::wait_published_lists_at_least(&state.store, seeded_cut))
         .await.expect("transport fixture publishes every seeded graph cut").unwrap();
 }
 
@@ -262,9 +262,9 @@ async fn serve_terminal_state(
     let state = state(root.path(), name);
     publish_terminal(&state, "terminal-demo-runtime:i1").await;
     let pty = FakePty::start(&state, rows, columns);
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     wait_for_socket(&socket).await;
     (
         root,
@@ -450,7 +450,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
     let incarnation = format!("{}:2026-09-30T00:00:00.000Z", std::process::id());
     publish_terminal(&state, &incarnation).await;
     let challenge = local.pairing_begin_person(&PersonPairingBegin {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         device_name: "Raw terminal device".into(),
         person_id: "person/avery".into(),
         full_control: Some(true),
@@ -458,20 +458,20 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
     }).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let http_server = tokio::spawn(async move { axum::serve(listener, app).await });
     let paired = Client::fabric_pairing(&base).pairing_complete_person(&challenge.value.pairing_id,
     &PairingComplete {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: "raw-terminal-public-key-000000000000000000000".into(),
         key_storage: None,
     },).await.unwrap();
     let gateway_socket = state.state_dir.join("raw-client-gateway.sock");
     let server_socket = gateway_socket.clone();
-    let app = st3::api::fabric_router(state);
+    let app = fractal_daemon::api::fabric_router(state);
     let gateway_server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await
+        fractal_daemon::api::serve_unix(&server_socket, app).await
     });
     wait_for_socket(&gateway_socket).await;
     let clients = [
@@ -531,9 +531,9 @@ async fn nested_launch_ids_reach_detail_and_child_routes() {
             )
             .unwrap();
     }
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     wait_for_socket(&socket).await;
     let client = Client::unix(&socket);
     for id in [
@@ -650,7 +650,7 @@ async fn terminal_stream_sends_changed_screens_and_nothing_while_idle() {
 
 /// The next collection event, or a panic naming what did not arrive.
 async fn next_collection_event(
-    stream: &mut st3_client::CollectionStream,
+    stream: &mut fractal_client::CollectionStream,
     waiting_for: &str,
 ) -> CollectionEvent {
     tokio::time::timeout(Duration::from_secs(5), stream.next_event())
@@ -813,7 +813,7 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk(
     let header = items
         .iter()
         .find_map(|item| match &item.body {
-            st3_client::TimelineBody::Message(message) => Some(message),
+            fractal_client::TimelineBody::Message(message) => Some(message),
             _ => None,
         })
         .expect("the message header");
@@ -822,7 +822,7 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk(
     assert_eq!(header.title.as_deref(), Some("A question"));
     assert!(items.iter().any(|item| matches!(
         &item.body,
-        st3_client::TimelineBody::Content(content) if content.text.as_deref() == Some("hello from a peer")
+        fractal_client::TimelineBody::Content(content) if content.text.as_deref() == Some("hello from a peer")
     )));
 
     assert!(
@@ -1034,12 +1034,12 @@ mission "example/definition" state="ready" {
   step "inspect" { agentless }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, "client-definition").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "client-definition").unwrap();
     state.store.apply_internal(&intent, "definition-fixture").unwrap();
     // An observed runtime alone has no desired declaration to reconstruct.
     publish_terminal(&state, "terminal-demo-runtime:i1").await;
-    let app = st3::api::router(state.clone());
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     wait_for_socket(&socket).await;
     let client = Client::unix(&socket);
 
@@ -1050,9 +1050,9 @@ mission "example/definition" state="ready" {
         let definition = response.value;
         assert_eq!(definition.subject, subject);
         let mut redacted = intent.subjects[subject].desired.clone();
-        st3::graph::redact_agent_env_values(&mut redacted);
+        fractal_daemon::graph::redact_agent_env_values(&mut redacted);
         assert_eq!(serde_json::to_value(&definition.desired).unwrap(), redacted);
-        let reparsed = st3::graph::parse_intent(&definition.kdl, "client-definition").unwrap();
+        let reparsed = fractal_daemon::graph::parse_intent(&definition.kdl, "client-definition").unwrap();
         assert_eq!(reparsed.subjects[subject].desired, redacted, "{}", definition.kdl);
         assert!(!serde_json::to_string(&definition).unwrap().contains("fixture-secret"));
         let status = state.store.status(Some(subject)).unwrap();
@@ -1073,8 +1073,8 @@ mission "example/definition" state="ready" {
         assert_eq!(ast, intent.subjects[subject].desired);
         assert!(definition.kdl.contains("fixture-secret"), "{}", definition.kdl);
 
-        let rendered = st3::graph::parse_intent(&definition.kdl, "client-definition").unwrap();
-        let preview = state.store.mission(&rendered, st3::model::IntentInput {
+        let rendered = fractal_daemon::graph::parse_intent(&definition.kdl, "client-definition").unwrap();
+        let preview = state.store.mission(&rendered, fractal_daemon::model::IntentInput {
             kdl: definition.kdl,
             source_name: None,
         }).unwrap();
@@ -1101,7 +1101,7 @@ mission "example/definition" state="ready" {
         "version 2\nagent \"example/large-definition\" {{ command \"true {}\" }}",
         "x".repeat(1_100_000),
     );
-    let oversized = st3::graph::parse_intent(&oversized, "client-definition").unwrap();
+    let oversized = fractal_daemon::graph::parse_intent(&oversized, "client-definition").unwrap();
     state.store.apply_internal(&oversized, "large-definition-fixture").unwrap();
     assert!(matches!(
         client.subject_definition("agent/example/large-definition", false).await,
@@ -1126,9 +1126,9 @@ async fn conversation_search_uses_the_typed_unix_client_and_private_reader() {
             ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     wait_for_socket(&socket).await;
     let client = Client::unix_as(&socket,"person/ada");
     let hits = client.conversation_search("café orchid",Some("agent/scribe"),None,None,Some(50)).await.unwrap();
@@ -1147,7 +1147,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
     let state = state(root.path(), "client-unix");
     publish_terminal(&state, "terminal-demo-runtime:i1").await;
     let _pty = FakePty::start(&state, 24, 80);
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         state.store.origin(),
     )
@@ -1159,7 +1159,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
     let ask = |person: &str| {
         state
             .store
-            .ask_person(&st3::model::PersonAskRequest {
+            .ask_person(&fractal_daemon::model::PersonAskRequest {
                 legacy_request: None,
                 person: person.into(),
                 title: "Choose a date".into(),
@@ -1176,8 +1176,8 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
     let ada_step = ask("person/ada");
     let alex_step = ask("person/alex");
     publish_fixture_lists(&state).await;
-    let app = st3::api::router(state.clone());
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     wait_for_socket(&socket).await;
 
     let client = Client::unix_as(&socket, "person/ada");
@@ -1189,7 +1189,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
     assert!(
         read_only
             .pairing_begin_person(&PersonPairingBegin {
-                api_version: st3_client::API_VERSION.into(),
+                api_version: fractal_client::API_VERSION.into(),
                 device_name: "Unattributed device".into(),
                 person_id: "person/ada".into(),
                 full_control: None,
@@ -1202,7 +1202,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
     let capabilities = client.capabilities().await.unwrap();
     assert_eq!(
         capabilities.value.transport,
-        st3_client::TransportKind::Unix
+        fractal_client::TransportKind::Unix
     );
     assert_eq!(capabilities.value.session_actor, "person/ada");
     let work = client.work_list(None, Some(7), false).await.unwrap();
@@ -1558,12 +1558,12 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
 
     let socket = root.path().join("st3.sock");
     let server_socket = socket.clone();
-    let unix_app = st3::api::router(state.clone());
+    let unix_app = fractal_daemon::api::router(state.clone());
     let unix_server =
-        tokio::spawn(async move { st3::api::serve_unix(&server_socket, unix_app).await });
+        tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, unix_app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, "person/ada");
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Conformance phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
@@ -1573,12 +1573,12 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let base = format!("http://{address}");
     let paired = Client::fabric_pairing(&base).pairing_complete_person(&challenge.value.pairing_id,
     &PairingComplete {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: "conformance-public-key-000000000000000000000000".into(),
         key_storage: None,
@@ -1588,10 +1588,10 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
 
     let gateway_socket = root.path().join("st3-client.sock");
     let server_gateway_socket = gateway_socket.clone();
-    let gateway_app = st3::api::fabric_router(state.clone());
+    let gateway_app = fractal_daemon::api::fabric_router(state.clone());
     let gateway_server =
         tokio::spawn(
-            async move { st3::api::serve_unix(&server_gateway_socket, gateway_app).await },
+            async move { fractal_daemon::api::serve_unix(&server_gateway_socket, gateway_app).await },
         );
     wait_for_socket(&gateway_socket).await;
     assert_private_socket(&gateway_socket);
@@ -1605,7 +1605,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         &advertised.into_body().collect().await.unwrap().to_bytes(),
     ).unwrap();
     assert_eq!(advertisement, serde_json::json!({
-        "api_version": st3_client::API_VERSION,
+        "api_version": fractal_client::API_VERSION,
         "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
     }));
     assert_eq!(
@@ -1621,7 +1621,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     let direct_capabilities = direct_gateway.capabilities().await.unwrap();
     assert_eq!(
         direct_capabilities.value.transport,
-        st3_client::TransportKind::FabricLoopback
+        fractal_client::TransportKind::FabricLoopback
     );
     assert_eq!(
         unix_status(
@@ -1649,7 +1649,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     let capabilities: Envelope<Capabilities> = client.capabilities().await.unwrap();
     assert_eq!(
         capabilities.value.transport,
-        st3_client::TransportKind::FabricLoopback
+        fractal_client::TransportKind::FabricLoopback
     );
     assert_eq!(capabilities.value.session_actor, paired.value.session_actor);
     assert_eq!(paired.value.person_id, "person/ada");
@@ -1670,8 +1670,8 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         .await
         .unwrap();
     assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
-    let error: st3_client::ErrorEnvelope = denied.json().await.unwrap();
-    assert_eq!(error.code, st3_client::ErrorCode::Forbidden);
+    let error: fractal_client::ErrorEnvelope = denied.json().await.unwrap();
+    assert_eq!(error.code, fractal_client::ErrorCode::Forbidden);
 
     // A phone's one socket: the paired gateway passes the collections subprotocol, holds a
     // window, and carries a terminal on the same socket. A bad credential never opens it.
@@ -1808,14 +1808,14 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     let _ = unix_server.await;
 
     let restarted_local_socket = socket.clone();
-    let restarted_local_app = st3::api::router(state.clone());
+    let restarted_local_app = fractal_daemon::api::router(state.clone());
     let restarted_local = tokio::spawn(async move {
-        st3::api::serve_unix(&restarted_local_socket, restarted_local_app).await
+        fractal_daemon::api::serve_unix(&restarted_local_socket, restarted_local_app).await
     });
     let restarted_gateway_socket = gateway_socket.clone();
-    let restarted_gateway_app = st3::api::fabric_router(state);
+    let restarted_gateway_app = fractal_daemon::api::fabric_router(state);
     let restarted_gateway = tokio::spawn(async move {
-        st3::api::serve_unix(&restarted_gateway_socket, restarted_gateway_app).await
+        fractal_daemon::api::serve_unix(&restarted_gateway_socket, restarted_gateway_app).await
     });
     wait_for_socket(&socket).await;
     wait_for_socket(&gateway_socket).await;
@@ -1861,13 +1861,13 @@ schedule "example/daily" {
 }
 "#;
     let intent =
-        st3::graph::parse_owned_set_intent(source, "client-publication-definition").unwrap();
+        fractal_daemon::graph::parse_owned_set_intent(source, "client-publication-definition").unwrap();
     state
         .store
         .apply_internal(&intent, "readback-fixture")
         .unwrap();
-    let app = st3::api::router(state.clone());
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     wait_for_socket(&socket).await;
     let reader = Client::unix(&socket);
     let publisher = Client::unix_as(&socket, "person/test");

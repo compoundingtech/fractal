@@ -76,47 +76,47 @@ pub use smallclaims::store::{
     configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
     newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
 };
-pub use st3_store::store::runtime_starts::RuntimeStartOperation;
-pub use st3_store::store::attention_snapshot::{
+pub use fractal_store::store::runtime_starts::RuntimeStartOperation;
+pub use fractal_store::store::attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
-pub use st3_store::store::mission_eligibility::MISSING_AGENT_CONDITION;
-pub use st3_store::store::database_size::DatabaseSize;
-pub use st3_store::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
-pub use st3_store::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
-pub use st3_store::store::limits::ACCOUNT_READING_WINDOW_MS;
-pub use st3_store::store::subagents::{SUBAGENT_KINDS, SubagentView};
-pub use st3_store::store::runtime::SmalltalkRuntime;
+pub use fractal_store::store::mission_eligibility::MISSING_AGENT_CONDITION;
+pub use fractal_store::store::database_size::DatabaseSize;
+pub use fractal_store::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
+pub use fractal_store::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
+pub use fractal_store::store::limits::ACCOUNT_READING_WINDOW_MS;
+pub use fractal_store::store::subagents::{SUBAGENT_KINDS, SubagentView};
+pub use fractal_store::store::runtime::SmalltalkRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
-use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
-pub use st3_kernel::model::local_observation_position;
+use fractal_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
+pub use fractal_kernel::model::local_observation_position;
 pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
-pub use st3_store::store::*;
-pub use st3_store::store::{ACTUAL_CACHE_LIMIT, ACTUAL_STATE_CLAIM, AgentStatusEntry, AgentWorkQueue, Aggregate, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, ClockFold, CumulativeUsage};
-pub use st3_store::store::{DesiredRow, EffectiveStepOwner, GATE_BROKEN_CONDITION, GRAPH_DIGEST_TABLES, HumanAttention, INCARNATION_OF_CLAIM, IdempotencyConflict, LOCAL_OBSERVATION_COLUMNS, MISSION_RUN_HEADER_SELECT, MessageCacheEntry, MissionRunEnrichment, OPEN_MISSION_RUN};
-pub use st3_store::store::{PinnedDefinitions, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUNTIME_ID_FIELD, RUNTIME_SUBJECTS, RecordedSeatMove, ReferenceGraph, RollupSpend, RosterStepRow, SeatQueueInputs, StatusEntry, StepLabel};
-pub use st3_store::store::{StepTiming, Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_BUCKETS, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND};
-pub use st3_store::store::{accounts, active_step_blockers_tx, adhoc_work, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx, append_claim_with_commit_context, append_claim_with_fences, append_claim_with_subject_fences, append_latest_observation_publication, append_receipt_claim_tx};
-pub use st3_store::store::{apply_effective_step_state, apply_effective_step_state_with_owner, arm_waiting_mission_deadline_tx, arrangements, attention, attention_list, attention_snapshot, backup, backup_format, cancel_descendant_mission_runs_tx, cancel_mission_run_tx, card_fold};
-pub use st3_store::store::{carried_claimants_tx, carried_revision_step_paths, carried_step_lease, carried_step_projection, check_mailbox_fence, check_observer_completion, checkpoint, checkpoint_rules, checkpoint_status, claim_append_error, claim_by_id_tx, claim_log_order};
-pub use st3_store::store::{classify_replicated_claim_with_registry, client_summary, compatible_step_paths, current_desired_row, current_desired_row_tx, current_harness_at, database_size, declarations, delegation, descendant_mission_run_ids_tx, desired_from_row, desired_lineage_from_tx};
-pub use st3_store::store::{desired_revision, desired_row_at, dropped_claimant, enforce_mission_run_capacity, enrich_step_definition_cached, enrich_step_nudge_at, enrich_step_queue, enrich_step_queue_at, enrich_step_queue_cached, enrich_step_summaries_at, evidence, first_readiness_fault_tx};
-pub use st3_store::store::{flatten_mission_step_specs, flatten_steps, fold_step_clock, fold_step_clock_open, fold_step_timing, fresh_context_ready_tx, generation_id_from_subject, git_change_tables, github_workflow_failures, glass_heads, harness_fold_at, harness_questions};
-pub use st3_store::store::{has_unknown_claim_at, idle_mail, insert_local_observation_tx, intent_leaves_tx, interpolate_goals, interpolate_selector, is_failed_terminal, is_terminal_generation_state, is_terminal_run_state, lanes, latest_actual, latest_actual_at};
-pub use st3_store::store::{latest_claim_of_kind_tx, latest_retention, limits, listed_head_tx, local_observation_dedupe_key, local_observation_from_row, local_retention, loop_run_views_tx, mark_replay_safe_receipt_tx, message_subscriptions, migrate_local_usage_seen, mission_definition_token_tx};
-pub use st3_store::store::{mission_eligibility, mission_ivm, mission_list, mission_provenance, mission_run_header_from_row, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, mission_run_view_and_definition_tx, mission_run_view_for_projection_tx, mission_run_view_for_reconcile_tx, mission_run_view_tx};
-pub use st3_store::store::{mission_state_name, missions, newest_claims_of_kind_query, normalize_message_party, normalize_mission_run, normalize_resource_observation, normalize_seat, normalize_step_run, observer_actuals, observer_subscription_detail, operation_audit, operational_repair_plan_tx};
-pub use st3_store::store::{operations, owned_sets, owner_lists, person_work, pinned_generation_mission_tx, planning_session_view_tx, pricing_identity, project_claim_isolated_tx, project_mission_run_created, project_mission_run_update, project_replicated_base_claims, project_replicated_mission_runs};
-pub use st3_store::store::{project_revision_proposal, projection_digest, projectors, publication, publication_facts, published_list, published_views, reapply_local_work_lease_renewals_tx, rebuild_planning_tx, rebuild_run_part_tx, rebuild_run_tree_tx, recently_ended_since};
-pub use st3_store::store::{reconcile_work_context, replay_graph_from_nothing_tx, resource_preparation, resources, retirements, revision_cutover_name, revision_proposal_view_tx, revision_seats, rollouts, roster_admission, run_part_of_tx, run_tree_of_tx};
-pub use st3_store::store::{runtime, runtime_list, runtime_starts, same_declared_launch, schema_fields_for_body, seat_queue_inputs_of_tx, seat_queue_inputs_tx, seat_queue_joins_query, seat_queue_moves_query, seat_status, seat_work_at_snapshot_query, seats};
-pub use st3_store::store::{select_replicated_desired, select_replicated_mission, selected_actual_source_at, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_owner_is_terminal_tx, step_run_from_row, step_run_row_tx, step_timeout_episode, step_timeout_extension_at, step_timing_events};
-pub use st3_store::store::{stop_deferral, subagents, subject_status_at, subscription_started_run_tx, summary_list, system_local_retention, terminalize_generation_steps_tx, terminalize_projected_generation_steps_tx, terminalize_run_steps_tx, trace_principal, try_project_simple_replication_tx, usage_native_session};
-pub use st3_store::store::{usage_period, usage_slot, validate_claim_input, validate_local_observation, work_list};
+pub use fractal_store::store::*;
+pub use fractal_store::store::{ACTUAL_CACHE_LIMIT, ACTUAL_STATE_CLAIM, AgentStatusEntry, AgentWorkQueue, Aggregate, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, ClockFold, CumulativeUsage};
+pub use fractal_store::store::{DesiredRow, EffectiveStepOwner, GATE_BROKEN_CONDITION, GRAPH_DIGEST_TABLES, HumanAttention, INCARNATION_OF_CLAIM, IdempotencyConflict, LOCAL_OBSERVATION_COLUMNS, MISSION_RUN_HEADER_SELECT, MessageCacheEntry, MissionRunEnrichment, OPEN_MISSION_RUN};
+pub use fractal_store::store::{PinnedDefinitions, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUNTIME_ID_FIELD, RUNTIME_SUBJECTS, RecordedSeatMove, ReferenceGraph, RollupSpend, RosterStepRow, SeatQueueInputs, StatusEntry, StepLabel};
+pub use fractal_store::store::{StepTiming, Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_BUCKETS, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND};
+pub use fractal_store::store::{accounts, active_step_blockers_tx, adhoc_work, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx, append_claim_with_commit_context, append_claim_with_fences, append_claim_with_subject_fences, append_latest_observation_publication, append_receipt_claim_tx};
+pub use fractal_store::store::{apply_effective_step_state, apply_effective_step_state_with_owner, arm_waiting_mission_deadline_tx, arrangements, attention, attention_list, attention_snapshot, backup, backup_format, cancel_descendant_mission_runs_tx, cancel_mission_run_tx, card_fold};
+pub use fractal_store::store::{carried_claimants_tx, carried_revision_step_paths, carried_step_lease, carried_step_projection, check_mailbox_fence, check_observer_completion, checkpoint, checkpoint_rules, checkpoint_status, claim_append_error, claim_by_id_tx, claim_log_order};
+pub use fractal_store::store::{classify_replicated_claim_with_registry, client_summary, compatible_step_paths, current_desired_row, current_desired_row_tx, current_harness_at, database_size, declarations, delegation, descendant_mission_run_ids_tx, desired_from_row, desired_lineage_from_tx};
+pub use fractal_store::store::{desired_revision, desired_row_at, dropped_claimant, enforce_mission_run_capacity, enrich_step_definition_cached, enrich_step_nudge_at, enrich_step_queue, enrich_step_queue_at, enrich_step_queue_cached, enrich_step_summaries_at, evidence, first_readiness_fault_tx};
+pub use fractal_store::store::{flatten_mission_step_specs, flatten_steps, fold_step_clock, fold_step_clock_open, fold_step_timing, fresh_context_ready_tx, generation_id_from_subject, git_change_tables, github_workflow_failures, glass_heads, harness_fold_at, harness_questions};
+pub use fractal_store::store::{has_unknown_claim_at, idle_mail, insert_local_observation_tx, intent_leaves_tx, interpolate_goals, interpolate_selector, is_failed_terminal, is_terminal_generation_state, is_terminal_run_state, lanes, latest_actual, latest_actual_at};
+pub use fractal_store::store::{latest_claim_of_kind_tx, latest_retention, limits, listed_head_tx, local_observation_dedupe_key, local_observation_from_row, local_retention, loop_run_views_tx, mark_replay_safe_receipt_tx, message_subscriptions, migrate_local_usage_seen, mission_definition_token_tx};
+pub use fractal_store::store::{mission_eligibility, mission_ivm, mission_list, mission_provenance, mission_run_header_from_row, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, mission_run_view_and_definition_tx, mission_run_view_for_projection_tx, mission_run_view_for_reconcile_tx, mission_run_view_tx};
+pub use fractal_store::store::{mission_state_name, missions, newest_claims_of_kind_query, normalize_message_party, normalize_mission_run, normalize_resource_observation, normalize_seat, normalize_step_run, observer_actuals, observer_subscription_detail, operation_audit, operational_repair_plan_tx};
+pub use fractal_store::store::{operations, owned_sets, owner_lists, person_work, pinned_generation_mission_tx, planning_session_view_tx, pricing_identity, project_claim_isolated_tx, project_mission_run_created, project_mission_run_update, project_replicated_base_claims, project_replicated_mission_runs};
+pub use fractal_store::store::{project_revision_proposal, projection_digest, projectors, publication, publication_facts, published_list, published_views, reapply_local_work_lease_renewals_tx, rebuild_planning_tx, rebuild_run_part_tx, rebuild_run_tree_tx, recently_ended_since};
+pub use fractal_store::store::{reconcile_work_context, replay_graph_from_nothing_tx, resource_preparation, resources, retirements, revision_cutover_name, revision_proposal_view_tx, revision_seats, rollouts, roster_admission, run_part_of_tx, run_tree_of_tx};
+pub use fractal_store::store::{runtime, runtime_list, runtime_starts, same_declared_launch, schema_fields_for_body, seat_queue_inputs_of_tx, seat_queue_inputs_tx, seat_queue_joins_query, seat_queue_moves_query, seat_status, seat_work_at_snapshot_query, seats};
+pub use fractal_store::store::{select_replicated_desired, select_replicated_mission, selected_actual_source_at, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_owner_is_terminal_tx, step_run_from_row, step_run_row_tx, step_timeout_episode, step_timeout_extension_at, step_timing_events};
+pub use fractal_store::store::{stop_deferral, subagents, subject_status_at, subscription_started_run_tx, summary_list, system_local_retention, terminalize_generation_steps_tx, terminalize_projected_generation_steps_tx, terminalize_run_steps_tx, trace_principal, try_project_simple_replication_tx, usage_native_session};
+pub use fractal_store::store::{usage_period, usage_slot, validate_claim_input, validate_local_observation, work_list};
 pub mod agent_messages;
 pub mod agent_queue_values;
 pub mod assistant_write;
@@ -164,7 +164,7 @@ pub fn runtime_only_authority(
     through: u64,
     fields: &[&str],
 ) -> Result<Option<(Value, String)>> {
-    let mut sources = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0ae5e6c1c684 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut sources = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he689627b23bd owner=fractal_delivery::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT DISTINCT claims.kind, claims.origin FROM claims INDEXED BY claims_subject_kind_index
          WHERE claims.subject=?1 AND claims.store_index<=?2 AND {ACTUAL_STATE_CLAIM}
            AND {UNREPAIRED_CLAIM} LIMIT 2"
@@ -178,12 +178,12 @@ pub fn runtime_only_authority(
     if rows.next()?.is_some() {
         return Ok(None);
     }
-    let body: String = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h504931f32da7 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ &format!(
+    let body: String = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9431d68673d3 owner=fractal_delivery::store TODO=trace-statement-and-value-representation */ &format!(
         "{} LIMIT 1", newest_claims_of_kind_query("claims.body", "runtime.observed"),
-    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h805550de30f9 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-hcff78302ba86 owner=fractal_delivery::store TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
     let latest: Value = serde_json::from_str(&body)?;
     let latest = latest.get("fields").unwrap_or(&latest);
-    let mut older = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7d40261a11f4 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut older = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h555bfa5aa4b3 owner=fractal_delivery::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.body FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='runtime.observed' AND claims.store_index<=?4
@@ -200,7 +200,7 @@ pub fn runtime_only_authority(
             actual.insert(field.into(), value.clone());
         } else {
             let body: Option<String> = older.query_row(
-                /* sqlite-large-value: allow-for-now lv-h41dabf229cb0 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ params![subject, root_path, fields_path, through],
+                /* sqlite-large-value: allow-for-now lv-h30ac4ee31f5b owner=fractal_delivery::store TODO=trace-statement-and-value-representation */ params![subject, root_path, fields_path, through],
                 |row| row.get(0),
             ).optional()?;
             if let Some(body) = body {

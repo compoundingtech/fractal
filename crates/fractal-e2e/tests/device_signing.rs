@@ -17,9 +17,9 @@ use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair as 
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use smallclaims::principal::{FIELDS_FORMAT, Verdict, fields_signing_bytes};
-use st3::api::AppState;
-use st3::store::Store;
-use st3_client::{
+use fractal_daemon::api::AppState;
+use fractal_daemon::store::Store;
+use fractal_client::{
     Client, ClientError, DeviceSignature, Fence, MessageSendParameters, PersonPairingBegin,
     PairingComplete,
 };
@@ -32,15 +32,15 @@ async fn complete(
     endpoint: &str,
     pairing_id: &str,
     code: &str,
-    key: st3_client::device::SigningKey,
-) -> anyhow::Result<st3_client::device::Device> {
-    st3_client::device::complete_with_options(
+    key: fractal_client::device::SigningKey,
+) -> anyhow::Result<fractal_client::device::Device> {
+    fractal_client::device::complete_with_options(
         path,
         endpoint,
         pairing_id,
         code,
         key,
-        st3_client::device::CompletionOptions {
+        fractal_client::device::CompletionOptions {
             unpinned: true,
             ..Default::default()
         },
@@ -102,14 +102,14 @@ fn shared_pairing_vectors_match_the_rust_verifier_and_fingerprint_encoding() {
     let person = vector["person"].as_str().unwrap();
     let key = vector["device_key"].as_str().unwrap();
     let pin = vector["fingerprint"].as_str().unwrap();
-    st3_client::device::verify_device_key_proofs_pinned(person, &chain, proofs, key, pin).unwrap();
+    fractal_client::device::verify_device_key_proofs_pinned(person, &chain, proofs, key, pin).unwrap();
     let root_key = proofs[1]["body"]["fields"]["key"].as_str().unwrap();
     assert_eq!(
-        st3_client::device::person_root_fingerprint(root_key).unwrap(),
+        fractal_client::device::person_root_fingerprint(root_key).unwrap(),
         pin
     );
     assert!(
-        st3_client::device::verify_device_key_proofs_pinned(
+        fractal_client::device::verify_device_key_proofs_pinned(
             person,
             &chain,
             proofs,
@@ -123,7 +123,7 @@ fn shared_pairing_vectors_match_the_rust_verifier_and_fingerprint_encoding() {
 #[tokio::test]
 async fn a_self_consistent_forged_chain_passes_unpinned_checks_but_cannot_replace_a_pinned_profile()
 {
-    use st3_client::device::{
+    use fractal_client::device::{
         CompletionOptions, KeyAlgorithm, SigningKey, complete_with_options, person_root_fingerprint,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -140,9 +140,9 @@ async fn a_self_consistent_forged_chain_passes_unpinned_checks_but_cannot_replac
         .enroll_device_key(PERSON, &public, "Forged receipt")
         .unwrap();
     let proofs = grant_proofs(&attacker.store, &chain);
-    st3_client::device::verify_device_key_proofs(PERSON, &chain, &proofs, &public).unwrap();
+    fractal_client::device::verify_device_key_proofs(PERSON, &chain, &proofs, &public).unwrap();
     let error =
-        st3_client::device::verify_device_key_proofs_pinned(PERSON, &chain, &proofs, &public, &pin)
+        fractal_client::device::verify_device_key_proofs_pinned(PERSON, &chain, &proofs, &public, &pin)
             .unwrap_err();
     assert!(error.to_string().contains("fingerprint mismatch"));
     // Export public receipts only when explicitly generating the cross-client fixture.
@@ -163,13 +163,13 @@ async fn a_self_consistent_forged_chain_passes_unpinned_checks_but_cannot_replac
     let observed = posts.clone();
     let app = axum::Router::new()
         .route("/v1/client/capabilities", axum::routing::get(|| async { axum::Json(json!({
-            "api_version": st3_client::API_VERSION, "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
+            "api_version": fractal_client::API_VERSION, "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
         })) }))
         .route("/v1/client/pairings/{id}/complete", axum::routing::post(move || {
             let observed = observed.clone(); let chain = chain.clone(); let proofs = proofs.clone();
             async move {
                 observed.fetch_add(1, Ordering::SeqCst);
-                axum::Json(json!({ "api_version": st3_client::API_VERSION, "request_id": "request/forged", "snapshot": {
+                axum::Json(json!({ "api_version": fractal_client::API_VERSION, "request_id": "request/forged", "snapshot": {
                     "id":"snapshot/forged", "host_id":"host/forged", "store_index":1, "projection_version":"client-projection.v0", "created_at":"2026-10-01T00:00:00Z"
                 }, "value": { "kind":"paired-session", "device_id":"device/0123456789abcdef01234567", "person_id":PERSON,
                     "session_actor":"person/avery/session/forged", "credential":"forged-bearer-not-to-be-retained-0000000000",
@@ -235,18 +235,18 @@ async fn a_self_consistent_forged_chain_passes_unpinned_checks_but_cannot_replac
 
 #[tokio::test]
 async fn pinned_read_only_pairing_verifies_the_root_without_enrolling_a_signing_device() {
-    use st3_client::device::{
+    use fractal_client::device::{
         CompletionOptions, KeyAlgorithm, Profile, SigningKey, complete_with_options,
     };
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Pinned display".into(),
     person_id: PERSON.into(),
     full_control: None,
@@ -256,7 +256,7 @@ async fn pinned_read_only_pairing_verifies_the_root_without_enrolling_a_signing_
         .value;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let path = root.path().join("client/devices.json");
     let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
@@ -301,13 +301,13 @@ async fn pinned_read_only_pairing_verifies_the_root_without_enrolling_a_signing_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs ST3_PRE_PIN_BIN: a released CLI with v1 device proofs but no fingerprint support"]
 async fn a_pre_pin_cli_completes_against_the_current_daemon() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::io::Write as _;
     use std::process::Stdio;
     let old = std::env::var("ST3_PRE_PIN_BIN").expect("pre-pin CLI path");
-    let help = st3::test_support::command(&old)
+    let help = fractal_daemon::test_support::command(&old)
         .args(["devices", "complete", "--help"])
         .output()
         .unwrap();
@@ -317,16 +317,16 @@ async fn a_pre_pin_cli_completes_against_the_current_daemon() {
     let state = state(root.path());
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     for signs in [true, false] {
-        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
         device_name: "Older CLI".into(),
         person_id: PERSON.into(),
         full_control: signs.then_some(true),
@@ -340,7 +340,7 @@ async fn a_pre_pin_cli_completes_against_the_current_daemon() {
         let endpoint = base.clone();
         let path = profile.clone();
         let output = tokio::task::spawn_blocking(move || {
-            let mut child = st3::test_support::command(old)
+            let mut child = fractal_daemon::test_support::command(old)
                 .env_clear()
                 .env("HOME", path.parent().unwrap())
                 .args([
@@ -366,7 +366,7 @@ async fn a_pre_pin_cli_completes_against_the_current_daemon() {
             "Older CLI refused additive response: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let profile = st3_client::device::Profile::load(&profile)
+        let profile = fractal_client::device::Profile::load(&profile)
             .unwrap()
             .unwrap();
         assert!(profile.devices[0].person_root_fingerprint.is_none());
@@ -379,13 +379,13 @@ async fn a_pre_pin_cli_completes_against_the_current_daemon() {
 
 #[tokio::test]
 async fn pre_pin_response_shapes_work_for_pinned_messages_and_explicitly_unpinned_observers() {
-    use st3_client::device::{CompletionOptions, KeyAlgorithm, SigningKey, complete_with_options};
+    use fractal_client::device::{CompletionOptions, KeyAlgorithm, SigningKey, complete_with_options};
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     // An old v1 proof-capable member returns no new optional root-proof field.
@@ -401,11 +401,11 @@ async fn pre_pin_response_shapes_work_for_pinned_messages_and_explicitly_unpinne
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone()).layer(remove_new_fields);
+    let app = fractal_daemon::api::fabric_router(state.clone()).layer(remove_new_fields);
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let profile = root.path().join("client/devices.json");
     for (signs, unpinned) in [(true, false), (false, false), (false, true)] {
-        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(), device_name: "Earlier member".into(), person_id: PERSON.into(), full_control: signs.then_some(true), scopes: None }).await.unwrap().value;
+        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Earlier member".into(), person_id: PERSON.into(), full_control: signs.then_some(true), scopes: None }).await.unwrap().value;
         let previous = std::fs::read(&profile).ok();
         let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
         let result = complete_with_options(&profile, &base, &challenge.pairing_id, &challenge.code, key,
@@ -520,7 +520,7 @@ fn now_ms() -> u64 {
 
 #[tokio::test]
 async fn shared_completion_persists_both_key_types_and_preserves_a_working_device_on_failure() {
-    use st3_client::device::{KeyAlgorithm, Profile, SigningKey};
+    use fractal_client::device::{KeyAlgorithm, Profile, SigningKey};
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -529,20 +529,20 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
     state.store.pin_fleet_anchor(anchor.public()).unwrap();
     state.store.set_member_key(Some(anchor.clone())).unwrap();
-    state.store.append_claim(&st3::model::ClaimInput {
+    state.store.append_claim(&fractal_daemon::model::ClaimInput {
         subject: "host/signing-node".into(), kind: "fleet.member-admitted".into(), actor: None,
         fields: serde_json::from_value(json!({ "fleet_id": FLEET, "member_key": anchor.public(), "via": "anchor", "mode": "listening" })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let gateway = st3::api::fabric_router(state.clone());
+    let gateway = fractal_daemon::api::fabric_router(state.clone());
     let http_server = tokio::spawn(async move { axum::serve(listener, gateway).await });
     let path = root.path().join("client/devices.json");
     for algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::P256] {
@@ -568,7 +568,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
                 SigningKey::generate(algorithm).unwrap()
             };
             let public = key.public_key().unwrap();
-            let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+            let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
             device_name: "CLI device".into(),
             person_id: PERSON.into(),
             full_control: Some(true),
@@ -610,13 +610,13 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
             );
             assert_eq!(std::fs::read(&path).ok(), previous);
             drop(lock);
-            let device = st3_client::device::complete_with_options(
+            let device = fractal_client::device::complete_with_options(
                 &path,
                 &base,
                 &challenge.pairing_id,
                 &challenge.code,
                 key.clone(),
-                st3_client::device::CompletionOptions {
+                fractal_client::device::CompletionOptions {
                     fingerprint: challenge.person_root_fingerprint.as_deref(),
                     ..Default::default()
                 },
@@ -684,7 +684,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
                         in_reply_to: None,
                         session_id: None,
                         tags: vec!["zeta".into(), "alpha".into()],
-                        kind: st3_client::MessageKind::Wake,
+                        kind: fractal_client::MessageKind::Wake,
                         attachments: vec![],
                         signature: None,
                     },
@@ -733,7 +733,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
                         in_reply_to: None,
                         session_id: None,
                         tags: vec![],
-                        kind: st3_client::MessageKind::Wake,
+                        kind: fractal_client::MessageKind::Wake,
                         attachments: vec![],
                         signature: None,
                     },
@@ -780,7 +780,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     // without losing its previous working device or exposing either credential/private key.
     // An older member's refusal or missing advertisement must never receive the code.
     for forbidden_capabilities in [false, true] {
-        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
         device_name: "Preflight device".into(),
         person_id: PERSON.into(),
         full_control: Some(true),
@@ -823,7 +823,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let old_base = format!("http://{}", listener.local_addr().unwrap());
-        let app = st3::api::fabric_router(state.clone()).layer(proxy);
+        let app = fractal_daemon::api::fabric_router(state.clone()).layer(proxy);
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
         let error = complete(
@@ -854,7 +854,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         "tampered-proof",
         "secret-in-malformed-proof",
     ] {
-        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
         device_name: "Proxy regression".into(),
         person_id: PERSON.into(),
         full_control: Some(true),
@@ -925,7 +925,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_base = format!("http://{}", listener.local_addr().unwrap());
-        let app = st3::api::fabric_router(state.clone()).layer(proxy);
+        let app = fractal_daemon::api::fabric_router(state.clone()).layer(proxy);
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let error = complete(
             &path,
@@ -980,7 +980,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     // A local commit failure after remote success must retain the previous key and credential.
     // The member's consumed code is a separate outcome, not a client-side rollback.
     let saved = std::fs::read(&path).unwrap();
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Unwritable device".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1021,7 +1021,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
                 response
             }
         });
-    let app = st3::api::fabric_router(state.clone()).layer(write_failure);
+    let app = fractal_daemon::api::fabric_router(state.clone()).layer(write_failure);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let blocked_base = format!("http://{}", listener.local_addr().unwrap());
     let blocked_server = tokio::spawn(async move { axum::serve(listener, app).await });
@@ -1066,7 +1066,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     blocked_server.abort();
     let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
     let public = key.public_key().unwrap();
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Hall display".into(),
     person_id: PERSON.into(),
     full_control: None,
@@ -1106,24 +1106,24 @@ async fn anonymous_pairing_advertisement_is_static_and_never_notes_presence() {
     let state = state(root.path());
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let http = reqwest::Client::new();
     let expected = json!({
-        "api_version": st3_client::API_VERSION,
+        "api_version": fractal_client::API_VERSION,
         "capabilities": [{"id": "device-key-proofs", "version": 1, "state": "granted"}],
     });
     for phase in 0..3 {
         if phase > 0 {
             state
                 .store
-                .append_claim(&st3::model::ClaimInput {
+                .append_claim(&fractal_daemon::model::ClaimInput {
                     subject: format!("message/advertisement-{phase}"),
                     kind: "message.sent".into(),
                     actor: None,
@@ -1164,24 +1164,24 @@ async fn anonymous_pairing_advertisement_is_static_and_never_notes_presence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key() {
-    use st3_client::device::{KeyAlgorithm, SigningKey};
+    use fractal_client::device::{KeyAlgorithm, SigningKey};
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
     state.store.pin_fleet_anchor(anchor.public()).unwrap();
     state.store.set_member_key(Some(anchor.clone())).unwrap();
-    state.store.append_claim(&st3::model::ClaimInput {
+    state.store.append_claim(&fractal_daemon::model::ClaimInput {
         subject: "host/signing-node".into(), kind: "fleet.member-admitted".into(), actor: None,
         fields: serde_json::from_value(json!({ "fleet_id": FLEET, "member_key": anchor.public(), "via": "anchor", "mode": "listening" })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Failed first attempt".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1191,7 +1191,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
         .value;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     // Refuse only the final commit, after enrollment and both signed proofs exist.
     state
@@ -1207,7 +1207,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
     let attacker = Device::new().public();
     let refused = Client::fabric_pairing(&base).pairing_complete_person(&challenge.pairing_id,
     &PairingComplete {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         code: challenge.code.clone(),
         device_public_key: attacker.clone(),
         key_storage: Some("software".into()),
@@ -1261,7 +1261,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
         .unwrap();
     let reused_key = Client::fabric_pairing(&base).pairing_complete_person(&challenge.pairing_id,
     &PairingComplete {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         code: challenge.code.clone(),
         device_public_key: attacker.clone(),
         key_storage: Some("software".into()),
@@ -1302,16 +1302,16 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_sealed_root_proof_does_not_consume_code_or_create_a_bearer() {
-    use st3_client::device::{KeyAlgorithm, SigningKey};
+    use fractal_client::device::{KeyAlgorithm, SigningKey};
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Historical proof".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1340,7 +1340,7 @@ async fn missing_sealed_root_proof_does_not_consume_code_or_create_a_bearer() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
     let profile = root.path().join("client/devices.json");
@@ -1398,11 +1398,11 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
     let state = state_on(root.path(), store);
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
-    let app = st3::api::router(state.clone());
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Concurrent device".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1412,12 +1412,12 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
         .value;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let first = Client::fabric_pairing(&base);
     let second = Client::fabric_pairing(&base);
     let request = |public| PairingComplete {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         code: challenge.code.clone(),
         device_public_key: public,
         key_storage: Some("software".into()),
@@ -1457,7 +1457,7 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
         .collect::<Vec<_>>();
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].body["fields"]["key"], key);
-    st3_client::device::verify_device_key_proofs(
+    fractal_client::device::verify_device_key_proofs(
         &winner.person_id,
         &winner.device_key_chain,
         &winner.device_key_proofs,
@@ -1492,7 +1492,7 @@ fn state_on(root: &Path, store: Store) -> AppState {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     }
 }
 
@@ -1529,7 +1529,7 @@ async fn send(
                 in_reply_to: None,
                 session_id: None,
                 tags: vec![],
-                kind: st3_client::MessageKind::Wake,
+                kind: fractal_client::MessageKind::Wake,
                 attachments: Vec::new(),
                 signature: Some(signature),
             },
@@ -1550,19 +1550,19 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let socket = root.path().join("st3.sock");
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let served = socket.clone();
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let gateway = st3::api::fabric_router(state.clone());
+    let gateway = fractal_daemon::api::fabric_router(state.clone());
     let http_server = tokio::spawn(async move { axum::serve(listener, gateway).await });
 
     // The phone pairs with its own key and learns the chain it signs with.
     let phone = Device::new();
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Avery's phone".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1571,7 +1571,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
         .unwrap();
     let paired = Client::fabric_pairing(&base).pairing_complete_person(&challenge.value.pairing_id,
     &PairingComplete {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: phone.public(),
         key_storage: Some("secure-enclave".into()),
@@ -1597,7 +1597,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
 
     // A device paired only to read gets no signing key.
     let viewer = Device::new();
-    let limited = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let limited = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Hall display".into(),
     person_id: PERSON.into(),
     full_control: None,
@@ -1606,7 +1606,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
         .unwrap();
     let display = Client::fabric_pairing(&base).pairing_complete_person(&limited.value.pairing_id,
     &PairingComplete {
-        api_version: st3_client::API_VERSION.into(),
+        api_version: fractal_client::API_VERSION.into(),
         code: limited.value.code,
         device_public_key: viewer.public(),
         key_storage: None,
@@ -1798,7 +1798,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
                 snapshot_id: snapshot,
                 ..Fence::default()
             },
-            st3_client::TargetParameters {
+            fractal_client::TargetParameters {
                 target_id: paired.device_id.clone(),
                 reason: None,
                 evidence: Vec::new(),
@@ -1831,7 +1831,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
     let (written, _) = state
         .store
         .append_signed_claim(
-            &st3::model::ClaimInput {
+            &fractal_daemon::model::ClaimInput {
                 subject: message_subject("phone-message-send-7"),
                 kind: "message.sent".into(),
                 actor: Some(PERSON.into()),
@@ -1909,9 +1909,9 @@ fn the_shared_vectors_match_the_bytes_the_daemon_verifies() {
     for (name, to, content, title, tags, session_id) in cases {
         let idempotency_key = format!("vector-message-{name}");
         let subject = message_subject(&idempotency_key);
-        let long = content.len() > st3_client::device::INLINE_MAX_BYTES;
+        let long = content.len() > fractal_client::device::INLINE_MAX_BYTES;
         let mut fields = json!({
-            "content": if long { st3_client::device::long_message_preview(&content) } else { content.clone() },
+            "content": if long { fractal_client::device::long_message_preview(&content) } else { content.clone() },
             "from": PERSON, "in_reply_to": null, "session_id": session_id,
             "tags": tags, "title": title, "to": to,
         });

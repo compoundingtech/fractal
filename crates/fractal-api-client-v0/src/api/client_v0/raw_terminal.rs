@@ -4,8 +4,8 @@ use super::*;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 pub use lease::{Binding as LeaseBinding, Lease, ORIGIN_HEADER};
-pub use st3_api_core::api::client_v0::raw_terminal::*;
-pub use st3_api_core::api::client_v0::raw_terminal::{splice};
+pub use fractal_api_core::api::client_v0::raw_terminal::*;
+pub use fractal_api_core::api::client_v0::raw_terminal::{splice};
 pub mod lease;
 pub mod peek_capability;
 
@@ -15,24 +15,24 @@ const SUBPROTOCOL: &str = "st3.client.pty.v0";
 #[serde(deny_unknown_fields)]
 pub struct AttachmentRequest {
     runtime_incarnation: String,
-    mode: st3_client::RawTerminalMode,
+    mode: fractal_client::RawTerminalMode,
 }
 
-fn mode_name(mode: st3_client::RawTerminalMode) -> &'static str {
+fn mode_name(mode: fractal_client::RawTerminalMode) -> &'static str {
     match mode {
-        st3_client::RawTerminalMode::Attach => "attach",
-        st3_client::RawTerminalMode::Peek => "peek",
+        fractal_client::RawTerminalMode::Attach => "attach",
+        fractal_client::RawTerminalMode::Peek => "peek",
     }
 }
 
-fn authorize(session: &ClientSession, mode: st3_client::RawTerminalMode) -> Result<(), ApiError> {
+fn authorize(session: &ClientSession, mode: fractal_client::RawTerminalMode) -> Result<(), ApiError> {
     require_scope(session, "terminal.read")?;
     if !session.authority_actor.starts_with("person/") {
         return Err(forbidden(
             "raw terminal transport requires a concrete person",
         ));
     }
-    if mode == st3_client::RawTerminalMode::Attach {
+    if mode == fractal_client::RawTerminalMode::Attach {
         require_scope(session, "terminal.control")?;
     }
     Ok(())
@@ -66,7 +66,7 @@ pub async fn attachment(
     {
         return Err(remote_unavailable_for_owner(&state, &live.owner_host_id));
     }
-    if request.mode == st3_client::RawTerminalMode::Peek {
+    if request.mode == fractal_client::RawTerminalMode::Peek {
         let capability = peek_capability::issue(&state, &session, &terminal_id, &live)?;
         return Ok(Json(json!({
             "terminal_id": terminal_id,
@@ -122,7 +122,7 @@ pub async fn attachment(
 #[derive(Deserialize)]
 pub struct StreamQuery {
     incarnation: String,
-    mode: st3_client::RawTerminalMode,
+    mode: fractal_client::RawTerminalMode,
 }
 
 pub async fn stream(
@@ -149,7 +149,7 @@ pub async fn stream(
     // The upgrade is already authenticated. Native PEEK clients need no capability;
     // browsers may continue using their capability and ATTACH still requires one.
     let (selected, capability) = super::super::wire_names::terminal_protocol(
-        &protocols, SUBPROTOCOL, query.mode == st3_client::RawTerminalMode::Peek,
+        &protocols, SUBPROTOCOL, query.mode == fractal_client::RawTerminalMode::Peek,
     ).ok_or_else(|| validation("raw terminal requires one supported pty protocol plus one capability protocol (optional for peek)"))?;
     let direct_peek = capability.is_none();
     let live = remote_terminal_live_session(&state, &terminal_subject(&id), &query.incarnation)?;
@@ -158,7 +158,7 @@ pub async fn stream(
     }
     let acquisition_epoch = if direct_peek {
         Some(authorization_epoch(&state, &session)?)
-    } else if query.mode == st3_client::RawTerminalMode::Peek {
+    } else if query.mode == fractal_client::RawTerminalMode::Peek {
         Some(peek_capability::consume(
             &state, &session, &client_detail_id("terminal", &id), &live, capability.unwrap(),
         )?)
@@ -176,7 +176,7 @@ pub async fn stream(
     let origin = headers
         .get(ORIGIN_HEADER)
         .map(|header| {
-            if session.transport != "unix" || query.mode != st3_client::RawTerminalMode::Peek {
+            if session.transport != "unix" || query.mode != fractal_client::RawTerminalMode::Peek {
                 return Err(forbidden(
                     "raw origin bindings require a trusted Unix PEEK route",
                 ));
@@ -184,7 +184,7 @@ pub async fn stream(
             serde_json::from_slice::<LeaseBinding>(header.as_bytes()).map_err(ApiError::internal)
         })
         .transpose()?;
-    let lease = (query.mode == st3_client::RawTerminalMode::Peek)
+    let lease = (query.mode == fractal_client::RawTerminalMode::Peek)
         .then(|| {
             Lease::register(
                 &state,
@@ -237,7 +237,7 @@ pub async fn stream(
             .await
             .map_err(|error| stale(error.to_string()))?;
     }
-    if query.mode == st3_client::RawTerminalMode::Peek {
+    if query.mode == fractal_client::RawTerminalMode::Peek {
         tracing::info!(
             person = %session.authority_actor,
             session = %session.actor,
@@ -258,7 +258,7 @@ pub async fn stream(
 mod tests {
     use super::*;
     use pty_core::protocol::{encode_attach, encode_data, encode_peek, encode_resize};
-    use st3_client::RawTerminalMode;
+    use fractal_client::RawTerminalMode;
 
     #[tokio::test]
     async fn peek_authority_rejects_writer_frames_before_forwarding_headers() {

@@ -14,7 +14,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use serde_json::Value;
-use st3_client::{Client, ConversationContentRef, TimelineBody};
+use fractal_client::{Client, ConversationContentRef, TimelineBody};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -144,7 +144,7 @@ struct Facts {
 }
 
 enum Presentation {
-    Typed(Vec<st3_conversation_ui::Entry>),
+    Typed(Vec<fractal_conversation_ui::Entry>),
     Raw(String),
 }
 
@@ -158,11 +158,11 @@ fn clipped(value: &Value) -> bool {
 }
 
 fn typed_content(
-    source: &st3_client::TimelineEntry,
-    block: &st3_client::TimelineBlock,
+    source: &fractal_client::TimelineEntry,
+    block: &fractal_client::TimelineBlock,
     value: &Value,
-    call: Option<&st3_client::TimelineEntry>,
-) -> Option<Vec<st3_conversation_ui::Entry>> {
+    call: Option<&fractal_client::TimelineEntry>,
+) -> Option<Vec<fractal_conversation_ui::Entry>> {
     // Opaque references are located by the source's clipped subtree, never by
     // parsing their path. Metadata remains raw; an unambiguous typed view is
     // reattached to the original block and passed through the normal adapter.
@@ -193,7 +193,7 @@ fn typed_content(
         match &source.body {
             TimelineBody::ToolResult(original) => {
                 if let Ok(full) =
-                    serde_json::from_value::<st3_client::TimelineToolResultBody>(value.clone())
+                    serde_json::from_value::<fractal_client::TimelineToolResultBody>(value.clone())
                     && full.call_id == original.call_id
                 {
                     TimelineBody::ToolResult(Box::new(full))
@@ -207,7 +207,7 @@ fn typed_content(
             }
             TimelineBody::ToolCall(original) => {
                 if let Ok(full) =
-                    serde_json::from_value::<st3_client::TimelineToolCallBody>(value.clone())
+                    serde_json::from_value::<fractal_client::TimelineToolCallBody>(value.clone())
                     && full.call_id == original.call_id
                     && full.name == original.name
                 {
@@ -222,7 +222,7 @@ fn typed_content(
             }
             TimelineBody::Content(original) => {
                 if let Ok(full) =
-                    serde_json::from_value::<st3_client::TimelineContentBody>(value.clone())
+                    serde_json::from_value::<fractal_client::TimelineContentBody>(value.clone())
                 {
                     TimelineBody::Content(Box::new(full))
                 } else if payload
@@ -239,7 +239,7 @@ fn typed_content(
             _ => return None,
         }
     };
-    let full = st3_client::TimelineEntry {
+    let full = fractal_client::TimelineEntry {
         id: source.id.clone(),
         sequence: source.sequence,
         revision: source.revision,
@@ -253,11 +253,11 @@ fn typed_content(
         timeline.push(call.clone());
     }
     timeline.push(full);
-    let entries = st3_conversation_ui::adapt::conversation_full(&timeline, &BTreeMap::new());
+    let entries = fractal_conversation_ui::adapt::conversation_full(&timeline, &BTreeMap::new());
     (!entries.is_empty()).then_some(entries)
 }
 
-pub fn has_images(blocks: &[st3_client::TimelineBlock]) -> bool {
+pub fn has_images(blocks: &[fractal_client::TimelineBlock]) -> bool {
     blocks.iter().any(|block| {
         block.kind == "image"
             || block.continuation.as_ref().is_some_and(|reference| {
@@ -274,14 +274,14 @@ pub fn has_images(blocks: &[st3_client::TimelineBlock]) -> bool {
 
 /// The images a message carries, as content a reader loads from st by that message.
 fn mail_refs(
-    message: &st3_client::TimelineMessageBody,
+    message: &fractal_client::TimelineMessageBody,
 ) -> impl Iterator<Item = (Key, ConversationContentRef)> + '_ {
     message
         .attachments
         .iter()
         .filter(|attachment| attachment.media_type.starts_with("image/"))
         .map(move |attachment| {
-            let key = image_key(&st3_conversation_ui::MailImage {
+            let key = image_key(&fractal_conversation_ui::MailImage {
                 sha256: attachment.sha256.clone(),
                 message: message.message_id.clone(),
                 media_type: attachment.media_type.clone(),
@@ -300,7 +300,7 @@ fn mail_refs(
 
 /// An image's name as its line shows it: the last part of the name it was sent with, never a
 /// path, or "image".
-pub fn image_name(image: &st3_conversation_ui::MailImage) -> String {
+pub fn image_name(image: &fractal_conversation_ui::MailImage) -> String {
     let leaf = image
         .name
         .as_deref()
@@ -312,7 +312,7 @@ pub fn image_name(image: &st3_conversation_ui::MailImage) -> String {
 }
 
 /// The key an image a message or an ask carries is read and kept by.
-pub fn image_key(image: &st3_conversation_ui::MailImage) -> Key {
+pub fn image_key(image: &fractal_conversation_ui::MailImage) -> Key {
     Key {
         conversation: image.message.clone(),
         entry: image.message.clone(),
@@ -328,7 +328,7 @@ const BLOB_REASON: &str = "attachment";
 #[derive(Default)]
 pub struct Content {
     groups: BTreeMap<(String, String), Vec<Group>>,
-    sources: BTreeMap<String, BTreeMap<String, st3_client::TimelineEntry>>,
+    sources: BTreeMap<String, BTreeMap<String, fractal_client::TimelineEntry>>,
     loaded: BTreeMap<Key, Loaded>,
     /// Explicit expand-all intent, never restored from saved expansion state.
     pub expanded_all: HashSet<String>,
@@ -340,9 +340,9 @@ pub struct Content {
     wanted: RefCell<BTreeMap<Key, (u16, u16)>>,
     facts: BTreeMap<Key, Facts>,
     /// The images messages carry, for their names and the line that opens them.
-    mail: BTreeMap<Key, st3_conversation_ui::MailImage>,
+    mail: BTreeMap<Key, fractal_conversation_ui::MailImage>,
     /// The images asks carry, read through the ask's step; kept across timeline reindexing.
-    requests: BTreeMap<Key, st3_conversation_ui::MailImage>,
+    requests: BTreeMap<Key, fractal_conversation_ui::MailImage>,
     pub scroll_to: RefCell<BTreeMap<String, String>>,
     pub focused: BTreeMap<String, String>,
 }
@@ -418,7 +418,7 @@ fn image_refs(value: &Value, out: &mut Vec<ConversationContentRef>) {
 }
 
 impl Content {
-    pub fn index(&mut self, timelines: &BTreeMap<String, st3_conversation_ui::Timeline>) {
+    pub fn index(&mut self, timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>) {
         self.groups.clear();
         self.sources.clear();
         for (conversation, timeline) in timelines {
@@ -441,7 +441,7 @@ impl Content {
                         if let Some(attachment) = message.attachments.iter().find(|attachment| {
                             key.reference == format!("blob/{}", attachment.sha256)
                         }) {
-                            self.mail.insert(key.clone(), st3_conversation_ui::MailImage {
+                            self.mail.insert(key.clone(), fractal_conversation_ui::MailImage {
                                 sha256: attachment.sha256.clone(),
                                 message: message.message_id.clone(),
                                 media_type: attachment.media_type.clone(),
@@ -605,7 +605,7 @@ impl Content {
     }
 
     /// The images the open asks carry. Those no ask carries any more leave memory.
-    pub fn index_requests(&mut self, images: Vec<st3_conversation_ui::MailImage>) {
+    pub fn index_requests(&mut self, images: Vec<fractal_conversation_ui::MailImage>) {
         self.requests = images
             .into_iter()
             .map(|image| (image_key(&image), image))
@@ -641,7 +641,7 @@ impl Content {
             .targets
             .iter()
             .filter_map(|target| match &target.hit {
-                Hit::Pane(st3_conversation_ui::PaneIntent::Image(image)) => {
+                Hit::Pane(fractal_conversation_ui::PaneIntent::Image(image)) => {
                     let key = image_key(image);
                     self.requests
                         .contains_key(&key)
@@ -719,7 +719,7 @@ impl Content {
                 line,
                 column: inset + open,
                 width: 4,
-                hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())),
+                hit: Hit::Pane(fractal_conversation_ui::PaneIntent::Image(image.clone())),
             });
             doc.targets.push(Target {
                 line,
@@ -1008,7 +1008,7 @@ impl Content {
                     (entries[index].1..at).contains(&target.line)
                         && matches!(
                             target.hit,
-                            Hit::Pane(st3_conversation_ui::PaneIntent::Image(_))
+                            Hit::Pane(fractal_conversation_ui::PaneIntent::Image(_))
                         )
                 })
                 .map(|target| target.line)
@@ -1074,7 +1074,7 @@ impl Content {
                                 line,
                                 column: open as u16,
                                 width: 4,
-                                hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(mail.clone())),
+                                hit: Hit::Pane(fractal_conversation_ui::PaneIntent::Image(mail.clone())),
                             });
                             extra.targets.push(Target {
                                 line,
@@ -1125,7 +1125,7 @@ impl Content {
                                             width,
                                             &expanded,
                                             "",
-                                            st3_conversation_ui::Density::Full,
+                                            fractal_conversation_ui::Density::Full,
                                         ),
                                         0,
                                     );
@@ -1366,7 +1366,7 @@ fn append_chunk(
     identity: &mut Option<(String, u64)>,
     reference: &str,
     offset: u64,
-    chunk: &st3_client::ConversationContentChunk,
+    chunk: &fractal_client::ConversationContentChunk,
 ) -> Result<(), String> {
     if chunk.kind != "conversation-content-chunk"
         || chunk.reference != reference
@@ -1409,7 +1409,7 @@ mod tests {
         let mut bytes = Vec::new();
         let mut identity = None;
         for (offset, data, next) in [(0, "{\"a\":", Some(5)), (5, "123}", None)] {
-            let chunk = st3_client::ConversationContentChunk {
+            let chunk = fractal_client::ConversationContentChunk {
                 kind: "conversation-content-chunk".into(),
                 reference: "ref".into(),
                 media_type: "application/json".into(),
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn chunks_reject_changed_identity_and_non_progressing_offsets() {
-        let mut chunk = st3_client::ConversationContentChunk {
+        let mut chunk = fractal_client::ConversationContentChunk {
             kind: "conversation-content-chunk".into(),
             reference: "other".into(),
             media_type: "application/json".into(),
@@ -1446,7 +1446,7 @@ mod tests {
         image: bool,
     ) -> (
         Content,
-        BTreeMap<String, st3_conversation_ui::Timeline>,
+        BTreeMap<String, fractal_conversation_ui::Timeline>,
         Vec<super::super::view::Entry>,
     ) {
         let source = if image {
@@ -1466,7 +1466,7 @@ mod tests {
         let entries = super::super::adapt::conversation(&items, &BTreeMap::new());
         let timelines = BTreeMap::from([(
             "agent/example".into(),
-            st3_conversation_ui::Timeline {
+            fractal_conversation_ui::Timeline {
                 items,
                 session_id: Some("session/example".into()),
                 ..Default::default()
@@ -1478,14 +1478,14 @@ mod tests {
     }
 
     fn render(content: &Content, entries: &[super::super::view::Entry], open: bool) -> Doc {
-        render_as(content, entries, open, st3_conversation_ui::Density::Full)
+        render_as(content, entries, open, fractal_conversation_ui::Density::Full)
     }
 
     fn render_as(
         content: &Content,
         entries: &[super::super::view::Entry],
         open: bool,
-        density: st3_conversation_ui::Density,
+        density: fractal_conversation_ui::Density,
     ) -> Doc {
         let expanded = if open {
             entries.iter().map(|entry| entry.id.clone()).collect()
@@ -1554,7 +1554,7 @@ mod tests {
         assert_eq!(entries.len(), 3);
         let timelines = BTreeMap::from([(
             "agent/example".into(),
-            st3_conversation_ui::Timeline {
+            fractal_conversation_ui::Timeline {
                 items,
                 session_id: Some("session/example".into()),
                 ..Default::default()
@@ -1569,10 +1569,10 @@ mod tests {
         let mut expanded = HashSet::new();
         if open {
             expanded.extend(entries.iter().map(|entry| entry.id.clone()));
-            expanded.insert(st3_conversation_ui::bundle_id(&entries[0].id));
+            expanded.insert(fractal_conversation_ui::bundle_id(&entries[0].id));
         }
         let mut doc = super::super::conversation::Cache::default().render(
-            entries, 120, &expanded, "*", st3_conversation_ui::Density::Simple,
+            entries, 120, &expanded, "*", fractal_conversation_ui::Density::Simple,
         );
         content.decorate(&mut doc, "agent/example", &expanded, 120);
         doc
@@ -1650,7 +1650,7 @@ mod tests {
         );
         let mut bash = timeline.items[0].clone();
         bash.id = "bash-call".into();
-        bash.body = TimelineBody::ToolCall(Box::new(st3_client::TimelineToolCallBody {
+        bash.body = TimelineBody::ToolCall(Box::new(fractal_client::TimelineToolCallBody {
             call_id: "bash-call".into(),
             name: "bash".into(),
             arguments: serde_json::json!({"command":"printf E2E-BASH-ROW"}),
@@ -1670,7 +1670,7 @@ mod tests {
                 120,
                 &expanded,
                 "*",
-                st3_conversation_ui::Density::Full,
+                fractal_conversation_ui::Density::Full,
             );
             let shown = words(&render(&content, &entries, open));
             assert_eq!(shown, words(&baseline));
@@ -1709,7 +1709,7 @@ mod tests {
             let timeline = timelines.get_mut("agent/example").unwrap();
             let mut result = timeline.items[0].clone();
             result.id = "result".into();
-            result.body = serde_json::from_value::<st3_client::TimelineBody>(serde_json::json!({
+            result.body = serde_json::from_value::<fractal_client::TimelineBody>(serde_json::json!({
                 "type":"tool_result", "body":{
                     "call_id":"c","status":"success","media_type":"text/plain",
                     "content":"prefix\n[st truncated this native timeline value: size limit; 20000 bytes]",
@@ -2003,7 +2003,7 @@ mod tests {
     fn identical_native_entry_ids_and_refs_are_isolated_by_conversation() {
         let (mut content, mut timelines, _) = fixture(false);
         let first = content.request_tool("agent/example", "call").pop().unwrap();
-        let second = st3_conversation_ui::Timeline {
+        let second = fractal_conversation_ui::Timeline {
             items: timelines["agent/example"].items.clone(),
             session_id: Some("session/second".into()),
             ..Default::default()
@@ -2112,7 +2112,7 @@ mod tests {
             } else {
                 serde_json::json!({"call_id":"view-call","name":kind,"arguments":{},"blocks":[block]})
             };
-            let source: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+            let source: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
                 "id":"view-entry","sequence":1,"revision":1,"timestamp":"2026-10-08T10:00:00Z",
                 "role":"assistant","type":if kind == "compaction" { "content" } else { "tool_call" },
                 "final":true,"body":body
@@ -2122,7 +2122,7 @@ mod tests {
             let mut content = Content::default();
             content.index(&BTreeMap::from([(
                 "agent/example".into(),
-                st3_conversation_ui::Timeline {
+                fractal_conversation_ui::Timeline {
                     items,
                     session_id: Some("session/example".into()),
                     ..Default::default()
@@ -2156,11 +2156,11 @@ mod tests {
 
     #[test]
     fn fetched_result_view_keeps_original_call_opening_rows() {
-        let call: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+        let call: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
             "id":"call","sequence":1,"revision":1,"timestamp":"2026-10-08T10:00:00Z","role":"assistant","type":"tool_call","final":true,
             "body":{"call_id":"paired","name":"eval","arguments":{},"blocks":[{"id":"call-block","kind":"tool_call","source_type":"native","payload":{},"view":{"type":"eval","language":"typescript","code":"synthetic opening code"}}]}
         })).unwrap();
-        let result: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+        let result: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
             "id":"result","sequence":2,"revision":1,"timestamp":"2026-10-08T10:01:00Z","role":"tool","type":"tool_result","final":true,
             "body":{"call_id":"paired","status":"success","media_type":"text/plain","content":"synthetic result","blocks":[{"id":"result-block","kind":"tool_output","source_type":"native","payload":{},"view":{"type":"edit","diff":"[st truncated this native timeline value]"},"continuation":{"ref":"result-view","media_type":"application/json","reason":"size-limit"}}]}
         })).unwrap();
@@ -2169,7 +2169,7 @@ mod tests {
         let mut content = Content::default();
         content.index(&BTreeMap::from([(
             "agent/example".into(),
-            st3_conversation_ui::Timeline {
+            fractal_conversation_ui::Timeline {
                 items,
                 session_id: Some("session/example".into()),
                 ..Default::default()
@@ -2231,7 +2231,7 @@ mod tests {
         encoded.into_inner()
     }
 
-    fn mail_timeline(from: &str, to: &str, size: u64) -> BTreeMap<String, st3_conversation_ui::Timeline> {
+    fn mail_timeline(from: &str, to: &str, size: u64) -> BTreeMap<String, fractal_conversation_ui::Timeline> {
         let items = serde_json::from_value(serde_json::json!([
             {"id":"m","sequence":1,"revision":1,"timestamp":"2026-10-13T10:00:00Z","role":"user","type":"message","final":true,
              "body":{"message_id":"message/sketch","from":from,"to":to,"attachments":[
@@ -2243,11 +2243,11 @@ mod tests {
         .unwrap();
         BTreeMap::from([(
             "agent/example".into(),
-            st3_conversation_ui::Timeline { items, session_id: Some("session/example".into()), ..Default::default() },
+            fractal_conversation_ui::Timeline { items, session_id: Some("session/example".into()), ..Default::default() },
         )])
     }
 
-    fn mail_entries(timelines: &BTreeMap<String, st3_conversation_ui::Timeline>) -> Vec<super::super::view::Entry> {
+    fn mail_entries(timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>) -> Vec<super::super::view::Entry> {
         let names = BTreeMap::from([("person/ada".to_owned(), "you".to_owned())]);
         super::super::adapt::conversation(&timelines["agent/example"].items, &names)
     }
@@ -2273,7 +2273,7 @@ mod tests {
         assert_eq!(key.conversation, "message/sketch");
         assert_eq!(key.reference, format!("blob/{}", "ab".repeat(32)));
         assert!(doc.targets.iter().any(|target| matches!(&target.hit,
-            Hit::Pane(st3_conversation_ui::PaneIntent::Image(image)) if image.message == "message/sketch")));
+            Hit::Pane(fractal_conversation_ui::PaneIntent::Image(image)) if image.message == "message/sketch")));
         // Loading says so; the image then reserves its rows and draws once encoded.
         assert!(content.toggle_image(&key));
         assert!(whole(&render(&content, &entries, false)).contains("open · loading…"));
@@ -2382,7 +2382,7 @@ mod tests {
         .unwrap();
         let timelines = BTreeMap::from([(
             "agent/example".to_owned(),
-            st3_conversation_ui::Timeline { items, session_id: Some("session/example".into()), ..Default::default() },
+            fractal_conversation_ui::Timeline { items, session_id: Some("session/example".into()), ..Default::default() },
         )]);
         let mut content = Content::default();
         content.index(&timelines);
@@ -2396,7 +2396,7 @@ mod tests {
 
     #[test]
     fn an_asks_images_get_lines_that_load_them_on_its_card() {
-        let image = st3_conversation_ui::MailImage {
+        let image = fractal_conversation_ui::MailImage {
             sha256: "cd".repeat(32),
             message: "step-run/ask-1/ask".into(),
             media_type: "image/png".into(),
@@ -2407,7 +2407,7 @@ mod tests {
         content.index_requests(vec![image.clone()]);
         let mut doc = Doc::new();
         doc.line(Line::from("North bed plan"));
-        doc.targets.push(Target { line: 1, column: 0, width: 40, hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())) });
+        doc.targets.push(Target { line: 1, column: 0, width: 40, hit: Hit::Pane(fractal_conversation_ui::PaneIntent::Image(image.clone())) });
         doc.line(Line::from("   ▣ north-bed.png  open"));
         doc.line(Line::from("choose one"));
         content.expand_requests(&mut doc, 80);
@@ -2417,7 +2417,7 @@ mod tests {
         content.complete(key.clone(), Ok((String::new(), drawn_png(64, 40))));
         let mut doc = Doc::new();
         doc.line(Line::from("North bed plan"));
-        doc.targets.push(Target { line: 1, column: 0, width: 40, hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())) });
+        doc.targets.push(Target { line: 1, column: 0, width: 40, hit: Hit::Pane(fractal_conversation_ui::PaneIntent::Image(image.clone())) });
         doc.line(Line::from("   ▣ north-bed.png  open"));
         doc.line(Line::from("choose one"));
         content.expand_requests(&mut doc, 80);
@@ -2445,12 +2445,12 @@ mod tests {
         .unwrap();
         let timelines = BTreeMap::from([(
             "agent/example".to_owned(),
-            st3_conversation_ui::Timeline { items, session_id: Some("session/example".into()), ..Default::default() },
+            fractal_conversation_ui::Timeline { items, session_id: Some("session/example".into()), ..Default::default() },
         )]);
         let mut content = Content::default();
         content.index(&timelines);
         let entries = super::super::adapt::conversation(&timelines["agent/example"].items, &BTreeMap::new());
-        for density in [st3_conversation_ui::Density::Full, st3_conversation_ui::Density::Simple] {
+        for density in [fractal_conversation_ui::Density::Full, fractal_conversation_ui::Density::Simple] {
             for open in [false, true] {
                 let text = whole(&render_as(&content, &entries, open, density));
                 assert_eq!(text.matches("[image image/png, 71 KB]").count(), 1, "{text}");
@@ -2461,7 +2461,7 @@ mod tests {
     #[test]
     fn an_asks_image_on_a_card_keeps_the_cards_frame() {
         use super::super::doc::DocExt as _;
-        let image = st3_conversation_ui::MailImage {
+        let image = fractal_conversation_ui::MailImage {
             sha256: "ef".repeat(32),
             message: "step-run/ask-2/ask".into(),
             media_type: "image/png".into(),
@@ -2475,7 +2475,7 @@ mod tests {
         content.complete(key.clone(), Ok((String::new(), drawn_png(64, 40))));
         let mut inner = Doc::new();
         inner.line(Line::from("Dig the pond here?"));
-        inner.targets.push(Target { line: 1, column: 0, width: 40, hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())) });
+        inner.targets.push(Target { line: 1, column: 0, width: 40, hit: Hit::Pane(fractal_conversation_ui::PaneIntent::Image(image.clone())) });
         inner.line(Line::from("   ▣ pond.png  open"));
         let mut doc = Doc::new();
         doc.card("request", theme::MAUVE, true, inner, 60);

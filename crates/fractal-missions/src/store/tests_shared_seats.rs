@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_store::store::tests_shared_seats::*;
+pub use fractal_store::store::tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::tests_shared::*;
@@ -8,11 +8,11 @@ pub use crate::store::tests_shared::*;
 pub use crate::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 use crate::store::*;
 use crate::graph::parse_test_intent as parse_intent;
-use st3_delivery::store::shared_seats_shared_missions::*;
+use fractal_delivery::store::shared_seats_shared_missions::*;
 use crate::store::shared_seats::*;
 use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicationInventory};
-use st3_delivery::store::shared_seats_shared_missions::*;
-use st3_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+use fractal_delivery::store::shared_seats_shared_missions::*;
+use fractal_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
 
 
 /// A standing root with `count` child runs started from its step, replicated from a

@@ -17,9 +17,9 @@ use sha2::{Digest as _, Sha256};
 pub mod slo;
 pub use slo::run as run_slo;
 
-use st3_kernel::model::{ClaimRecord, local_observation_position};
+use fractal_kernel::model::{ClaimRecord, local_observation_position};
 
-pub use st3_kernel::config::OtlpConfig;
+pub use fractal_kernel::config::OtlpConfig;
 
 /// The local observation log this exporter reads and the cursor it keeps. The store implements
 /// it, so this module names no store code.
@@ -405,7 +405,7 @@ const HOOK_SERVICE: &str = "st-hook";
 fn resource(node: &str, service_name: &str) -> Value {
     json!({"attributes": [
         attribute("service.name", json!({"stringValue": service_name})),
-        attribute("service.version", json!({"stringValue": st_drivers::version::machine_version()})),
+        attribute("service.version", json!({"stringValue": fractal_drivers::version::machine_version()})),
         attribute("service.instance.id", json!({"stringValue": crate::otel::service_instance_id()})),
         attribute("host.name", json!({"stringValue": node})),
         attribute("st3.node", json!({"stringValue": node})),
@@ -425,7 +425,7 @@ fn hook_invocations(observation: &ClaimRecord) -> Vec<&str> {
         .take(16)
         .filter(|invocation| invocation["hook"] == "claude-observe")
         .filter_map(|invocation| invocation["event"].as_str())
-        .map(st_drivers::metrics::normalize_hook_event)
+        .map(fractal_drivers::metrics::normalize_hook_event)
         .collect()
 }
 

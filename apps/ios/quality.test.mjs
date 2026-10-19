@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LocalQuality, QUALITY_HISTORY_KEY, QUALITY_MAX_BYTES, QUALITY_RUN_KEY, readQualityLaunchClock } from './quality.ts';
-import { SLO_COUNTERS, SLO_HISTOGRAMS, isQualityHour } from '../../clients/typescript/st3-views/slo.ts';
+import { SLO_COUNTERS, SLO_HISTOGRAMS, isQualityHour } from '../../clients/typescript/fractal-views/slo.ts';
 import { qualityRows, qualityVisibility } from './qualityView.ts';
 
 function fixture(mark = null, fails = false) {

@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use crate::graph::parse_test_intent;
-use st3_delivery::store::convergence_shared_missions::*;
-use st3_delivery::store::convergence_shared_missions::{Delivery, FLEET, PERSON, Rng, env_number, mission_source};
+use fractal_delivery::store::convergence_shared_missions::*;
+use fractal_delivery::store::convergence_shared_missions::{Delivery, FLEET, PERSON, Rng, env_number, mission_source};
 
 
 struct Node {
@@ -30,7 +30,7 @@ impl Node {
         let path = directory.join("writer.sqlite3");
         let mut bytes = Vec::new();
         flate2::read::GzDecoder::new(
-            &include_bytes!("../../../st3-daemon/tests/fixtures/pre-diet-store.sqlite3.gz")[..],
+            &include_bytes!("../../../fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz")[..],
         )
         .read_to_end(&mut bytes)
         .unwrap();
@@ -493,7 +493,7 @@ impl Simulation {
                     connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
                     for claim in &lost {
                         connection
-                            .execute(/* sqlite-large-value: allow-for-now lv-hb3dadc6e09a3 owner=st3_missions::store::convergence TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [claim])
+                            .execute(/* sqlite-large-value: allow-for-now lv-h335bc3e212f2 owner=fractal_missions::store::convergence TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [claim])
                             .unwrap();
                     }
                     connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
@@ -517,7 +517,7 @@ impl Simulation {
                     for claim in &unknown {
                         connection
                             .execute(
-                                /* sqlite-large-value: allow-for-now lv-he338ec32751d owner=st3_missions::store::convergence TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='unknown',
+                                /* sqlite-large-value: allow-for-now lv-hfa04dd61bde8 owner=fractal_missions::store::convergence TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='unknown',
                                      error_code='unknown-claim-kind',
                                      error_message='this build does not know the claim kind'
                                  WHERE claim_id=?1",
@@ -525,7 +525,7 @@ impl Simulation {
                             )
                             .unwrap();
                         connection
-                            .execute(/* sqlite-large-value: allow-for-now lv-hf394cd629c90 owner=st3_missions::store::convergence TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [claim])
+                            .execute(/* sqlite-large-value: allow-for-now lv-he2ebad361c90 owner=fractal_missions::store::convergence TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [claim])
                             .unwrap();
                     }
                     connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
@@ -539,7 +539,7 @@ impl Simulation {
                 let connection = self.nodes[node].store().connection.write();
                 let changed = connection
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-h3b59b2db45b6 owner=st3_missions::store::convergence TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET attempt=attempt+1 WHERE subject=(
+                        /* sqlite-large-value: allow-for-now lv-hcb8d88ec04fe owner=fractal_missions::store::convergence TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET attempt=attempt+1 WHERE subject=(
                              SELECT subject FROM step_runs ORDER BY subject
                              LIMIT 1 OFFSET ?1 % MAX(1, (SELECT COUNT(*) FROM step_runs)))",
                         [step_offset],
@@ -547,7 +547,7 @@ impl Simulation {
                     .unwrap()
                     + connection
                         .execute(
-                            /* sqlite-large-value: allow-for-now lv-h341e7a0ee731 owner=st3_missions::store::convergence TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='failed', phase='terminal' WHERE id=(
+                            /* sqlite-large-value: allow-for-now lv-hbfc48c9b9cca owner=fractal_missions::store::convergence TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='failed', phase='terminal' WHERE id=(
                                  SELECT id FROM mission_runs ORDER BY id
                                  LIMIT 1 OFFSET ?1 % MAX(1, (SELECT COUNT(*) FROM mission_runs)))",
                             [run_offset],
@@ -568,7 +568,7 @@ impl Simulation {
         let ids = {
             let connection = self.nodes[node].store().readers.get();
             let mut statement = connection
-                .prepare(/* sqlite-large-value: allow-for-now lv-h525312553646 owner=st3_missions::store::convergence TODO=trace-statement-and-value-representation */ &format!(
+                .prepare(/* sqlite-large-value: allow-for-now lv-h354ef712955e owner=fractal_missions::store::convergence TODO=trace-statement-and-value-representation */ &format!(
                     "SELECT DISTINCT claims.id FROM claims
                      JOIN replica_records ON replica_records.claim_id=claims.id
                      WHERE replica_records.{filter}
@@ -629,7 +629,7 @@ fn differing_tables(left: &Node, right: &Node) -> Vec<String> {
     let rows = |node: &Node, table: &str, columns: &[&str], order: &str| {
         let connection = node.store().readers.get();
         let mut statement = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-hb5a9a7d56a14 owner=st3_missions::store::convergence TODO=trace-statement-and-value-representation */ &format!(
+            .prepare(/* sqlite-large-value: allow-for-now lv-hb570953ce150 owner=fractal_missions::store::convergence TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT json_array({}) FROM {table} ORDER BY {order}",
                 columns.join(", ")
             ))

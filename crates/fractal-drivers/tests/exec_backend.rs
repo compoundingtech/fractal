@@ -7,10 +7,10 @@ use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
 
-use st_drivers::exec_backend::ExecBackend;
-use st_drivers::host_lock::process_alive;
-use st_drivers::reconcile::{TaskLaunch, TaskTarget};
-use st_drivers::spec::TaskKind;
+use fractal_drivers::exec_backend::ExecBackend;
+use fractal_drivers::host_lock::process_alive;
+use fractal_drivers::reconcile::{TaskLaunch, TaskTarget};
+use fractal_drivers::spec::TaskKind;
 
 fn exec_target(id: &str, command: &str) -> TaskTarget {
     TaskTarget {

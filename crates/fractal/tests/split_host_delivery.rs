@@ -2,19 +2,19 @@
 //! Raw cross-daemon retries deliberately document known limitation #3104, not fleet dedupe.
 #![cfg(unix)]
 
-use st3::AdhocWorkStore;
-use st3::MissionsStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::AdhocWorkStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use st3::api::AppState;
-use st3::client::{Client, MessageSendUnconfirmed};
-use st3::model::{
+use fractal_daemon::api::AppState;
+use fractal_daemon::client::{Client, MessageSendUnconfirmed};
+use fractal_daemon::model::{
     MessageSendRequest, WorkAcknowledgeRequest, WorkHandoffRequest, WorkRequest, WorkStartRequest,
 };
-use st3::store::Store;
+use fractal_daemon::store::Store;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, watch};
@@ -48,11 +48,11 @@ impl Host {
             configured_peers: Vec::new(),
             client_relay: None,
             native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
         };
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
-            st3::api::serve_unix(&server_socket, st3::api::router(state))
+            fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
                 .await
                 .unwrap();
         });
@@ -151,7 +151,7 @@ async fn split_host_report_and_handoff_documents_known_limitation_3104() {
         let root = tempfile::tempdir().unwrap();
         let alder = Host::new(&root.path().join("alder"), "alder").await;
         let birch = Host::new(&root.path().join("birch"), "birch").await;
-        let intent = st3::parse_intent(
+        let intent = fractal_daemon::parse_intent(
             "version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\" }",
             "alder",
         ).unwrap();

@@ -3,7 +3,7 @@ use std::process::Output;
 use std::time::Duration;
 
 use serde_json::Value;
-use st3::client::Client;
+use fractal_daemon::client::Client;
 
 use super::*;
 
@@ -24,7 +24,7 @@ impl Native {
         // Files avoid pipe-buffer deadlock while the child is polled.
         let mut stdout = tempfile::tempfile()?;
         let mut stderr = tempfile::tempfile()?;
-        let mut child = st3::service::host_command(program).args(arguments)
+        let mut child = fractal_daemon::service::host_command(program).args(arguments)
             .stdout(Stdio::from(stdout.try_clone()?)).stderr(Stdio::from(stderr.try_clone()?))
             .spawn().with_context(|| format!("run {program} {}", arguments.join(" ")))?;
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -226,7 +226,7 @@ impl Manager for Native {
     async fn idle(&mut self) -> Result<()> {
         let checkpoint: Value = self.client.get("/v1/checkpoint/status").await.context("cannot establish checkpoint quiescence")?;
         ensure!(checkpoint.get("pending").is_some_and(Value::is_null), "checkpoint is pending or its status is unknown; do not cut over during a checkpoint");
-        let replication: st3::model::ReplicationStatus = self.client.get("/v1/replication/status").await.context("cannot establish sync quiescence")?;
+        let replication: fractal_daemon::model::ReplicationStatus = self.client.get("/v1/replication/status").await.context("cannot establish sync quiescence")?;
         ensure!(replication.pending_records == 0, "replication has pending records; wait until sync is idle");
         if let Some(first) = replication.first_sync {
             ensure!(first.state == "verified", "first sync is not complete");

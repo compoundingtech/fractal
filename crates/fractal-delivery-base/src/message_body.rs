@@ -499,7 +499,7 @@ mod tests {
     fn the_clients_cut_the_preview_the_way_the_daemon_does() {
         // A device signs the preview it computes itself, so the two must agree to the byte,
         // including at a character boundary and on trailing whitespace.
-        assert_eq!(INLINE_MAX_BYTES, st3_client::device::INLINE_MAX_BYTES);
+        assert_eq!(INLINE_MAX_BYTES, fractal_client::device::INLINE_MAX_BYTES);
         let texts = [
             "short".to_owned(),
             "é".repeat(2000),
@@ -511,7 +511,7 @@ mod tests {
         for text in texts {
             assert_eq!(
                 preview(&text),
-                st3_client::device::long_message_preview(&text)
+                fractal_client::device::long_message_preview(&text)
             );
         }
     }

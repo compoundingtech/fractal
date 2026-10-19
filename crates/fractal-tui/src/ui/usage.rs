@@ -12,7 +12,7 @@ use super::theme;
 use super::view::{Load, World};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use st3_client::{UsageLimit, UsageRow};
+use fractal_client::{UsageLimit, UsageRow};
 use std::collections::BTreeMap;
 
 /// What the Usage list groups by; `b` steps through them.
@@ -423,7 +423,7 @@ pub fn list(world: &World, by: By, hours: u64) -> Listing {
     }
 }
 
-fn estimate_lines(estimate: &st3_client::AgentMessageEstimate) -> Vec<Line<'static>> {
+fn estimate_lines(estimate: &fractal_client::AgentMessageEstimate) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(span(
             " Messages × each recipient's allowance, as a share of priced usage; includes useful work.",

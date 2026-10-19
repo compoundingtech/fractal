@@ -38,7 +38,7 @@ pub fn path() -> Option<PathBuf> {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
         })?;
     base.is_absolute()
-        .then(|| st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
+        .then(|| fractal_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
             .join("stui").join("prefs.json"))
 }
 

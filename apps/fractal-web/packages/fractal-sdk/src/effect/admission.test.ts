@@ -2,9 +2,9 @@
  * Follow admission through the real SDK against a scripted collections socket: which follows
  * keep their slot, which one is evicted, and what each consumer's stream sees.
  */
-import type { Capability, CollectionFrame, CollectionSocket } from '@smalltalk/st3-client'
-import type { CollectionName, Mission, Snapshot } from '@smalltalk/st3-client'
-import { decodeUnknownSync, Mission as MissionCodec } from '@smalltalk/st3-client/schema'
+import type { Capability, CollectionFrame, CollectionSocket } from '@fractal/client'
+import type { CollectionName, Mission, Snapshot } from '@fractal/client'
+import { decodeUnknownSync, Mission as MissionCodec } from '@fractal/client/schema'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
 import * as Stream from 'effect/Stream'

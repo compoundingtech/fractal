@@ -2606,7 +2606,7 @@ use super::*;
     fn omp_parity_fixture_projects_all_views_without_losing_native_payloads() {
         for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
             let mut items = Vec::new();
-            for (index, line) in include_str!("../../st3-daemon/fixtures/native-records/omp-parity.jsonl")
+            for (index, line) in include_str!("../../fractal-daemon/fixtures/native-records/omp-parity.jsonl")
                 .lines()
                 .enumerate()
             {
@@ -2855,7 +2855,7 @@ use super::*;
 
     // Native OMP call/result pairs captured on 2026-10-02, with tool input/output redacted.
     fn omp_tool_result_fixture() -> Vec<Value> {
-        include_str!("../../st3-daemon/fixtures/omp-tool-results.jsonl")
+        include_str!("../../fractal-daemon/fixtures/omp-tool-results.jsonl")
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
@@ -2884,7 +2884,7 @@ use super::*;
     fn omp_managed_stop_fixture_preserves_the_complete_checkpoint() {
         let mut items = Vec::new();
         let mut checkpoint = Value::Null;
-        for (offset, line) in include_str!("../../st3-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl")
+        for (offset, line) in include_str!("../../fractal-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl")
             .lines()
             .enumerate()
         {
@@ -3542,7 +3542,7 @@ use super::*;
     #[test]
     fn omp_native_capture_pairs_authoritative_result_and_preserves_irc_sender() {
         // Captured 2026-10-01; input, output and sender text redacted, native IDs retained.
-        let fixture = include_str!("../../st3-daemon/fixtures/omp-native-events.jsonl")
+        let fixture = include_str!("../../fractal-daemon/fixtures/omp-native-events.jsonl")
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
@@ -3705,7 +3705,7 @@ use super::*;
     #[test]
     fn omp_observed_admin_records_are_typed_events_with_native_timestamps() {
         // Native 2026-10-04 shapes; all payload strings and numeric usage are redacted.
-        for line in include_str!("../../st3-daemon/fixtures/omp-admin-events.jsonl").lines() {
+        for line in include_str!("../../fractal-daemon/fixtures/omp-admin-events.jsonl").lines() {
             let entry: Value = serde_json::from_str(line).unwrap();
             let mut items = Vec::new();
             normalize_native_line(ExternalDriver::Omp, &entry, 16, "fallback", &mut items);
@@ -4074,8 +4074,8 @@ use super::*;
         let metadata =
             json!({"wallTimeMs":12.75,"timeoutSeconds":0,"future":{"value":"untouched"}});
         entry["body"]["blocks"][0]["metadata"] = metadata.clone();
-        let decoded: st3_client::TimelineEntry = serde_json::from_value(entry).unwrap();
-        let st3_client::TimelineBody::Error(body) = decoded.body else {
+        let decoded: fractal_client::TimelineEntry = serde_json::from_value(entry).unwrap();
+        let fractal_client::TimelineBody::Error(body) = decoded.body else {
             panic!("known error envelope")
         };
         assert_eq!(body.blocks[0].metadata.as_ref(), Some(&metadata));

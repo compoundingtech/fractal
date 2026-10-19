@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use st3_client::{
+use fractal_client::{
     Agent, Attention, Client, ClientError, Device, Envelope, ErrorCode, EventPage, EventType,
     Fence, Launch, Machine, Message, Mission, Page, Resource, Runtime, Session, Snapshot,
     SyncNotice, TimelineBody, TimelineEntry, Work,
@@ -15,11 +15,11 @@ const PAGE_SIZE: usize = 50;
 pub const MAX_PAGES: usize = 4;
 
 /// Streamed presence rows carry the existing HTTP fields; keep their window order.
-pub fn inventory_clients(items: Vec<Resource>, member: String) -> st3_client::ClientConnections {
-    st3_client::ClientConnections {
+pub fn inventory_clients(items: Vec<Resource>, member: String) -> fractal_client::ClientConnections {
+    fractal_client::ClientConnections {
         kind: "client-connections".into(), member,
         items: items.into_iter().filter_map(|item| match item {
-            Resource::ConnectedClient(row) => Some(st3_client::ClientConnection {
+            Resource::ConnectedClient(row) => Some(fractal_client::ClientConnection {
                 actor: row.actor, person: row.person, client: row.client, device_id: row.device_id,
                 device_name: row.device_name, member: row.member, via: row.via,
                 connected: row.connected, streams: row.streams, since: row.since,
@@ -30,7 +30,7 @@ pub fn inventory_clients(items: Vec<Resource>, member: String) -> st3_client::Cl
     }
 }
 
-pub fn inventory_usage(items: Vec<Resource>) -> std::result::Result<st3_client::UsagePeriod, String> {
+pub fn inventory_usage(items: Vec<Resource>) -> std::result::Result<fractal_client::UsagePeriod, String> {
     items.into_iter().find_map(|item| match item { Resource::Usage(row) => Some(row.value), _ => None })
         .ok_or_else(|| "The usage inventory did not carry its period.".into())
 }
@@ -99,11 +99,11 @@ pub struct Model {
     last_work_history_refresh: Option<std::time::Instant>,
     /// Token spend over the Usage tab's period, read while something shows it, or why not.
     #[serde(skip)]
-    pub usage: Option<std::result::Result<st3_client::UsagePeriod, String>>,
+    pub usage: Option<std::result::Result<fractal_client::UsagePeriod, String>>,
     /// The clients connected to this member now and those seen lately, read while the fleet
     /// shows, or why not.
     #[serde(skip)]
-    pub clients: Option<std::result::Result<st3_client::ClientConnections, String>>,
+    pub clients: Option<std::result::Result<fractal_client::ClientConnections, String>>,
     /// The build this member's daemon reports, read with its clients.
     #[serde(skip)]
     pub member_build: Option<String>,
@@ -827,7 +827,7 @@ pub fn conversation_needs_older_page(entries: &[TimelineEntry], has_more: bool) 
             < 12
 }
 
-pub use st3_conversation_ui::clean_message_text;
+pub use fractal_conversation_ui::clean_message_text;
 
 #[cfg(test)]
 mod tests {
@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn mission_and_queue_events_invalidate_tree_without_a_timer() {
         let mut model = Model::default();
-        let event = |id: &str, subject: &str, change: &str| st3_client::ProjectionEvent {
+        let event = |id: &str, subject: &str, change: &str| fractal_client::ProjectionEvent {
             id: id.into(),
             epoch: "epoch/one".into(),
             sequence: 1,
@@ -1030,7 +1030,7 @@ mod tests {
     #[ignore = "requires a live local st3 daemon"]
     async fn live_full_snapshot_latency() {
         let path =
-            st3_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(Into::into))
+            fractal_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(Into::into))
                 .unwrap();
         let actor =
             std::env::var("ST3_PERSON").expect("ST3_PERSON selects the person for this live test");
@@ -1053,7 +1053,7 @@ mod tests {
     #[ignore = "requires a live local st3 daemon"]
     async fn live_bootstrap_latency() {
         let path =
-            st3_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(Into::into))
+            fractal_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(Into::into))
                 .unwrap();
         let actor =
             std::env::var("ST3_PERSON").expect("ST3_PERSON selects the person for this live test");

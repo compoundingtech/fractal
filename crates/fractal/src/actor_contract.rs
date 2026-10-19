@@ -31,10 +31,10 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 // small semantic supplement next to the generated syntax, not in an operator wrapper.
 // Call-site map (review these handlers when their identity handling changes):
 // - st setup: setup::run reads config.person to select default_person, then records
-//   the selected person in config.person (crates/st3/src/setup.rs).
-// - st ui: main::run_terminal_ui calls stui::run, which falls back to
-//   configured_person() and passes that actor to Client::unix_as (crates/stui/src/lib.rs).
-// - st ui open: stui::open_in_terminal_ui resolves configured_person() before
+//   the selected person in config.person (crates/fractal/src/setup.rs).
+// - st ui: main::run_terminal_ui calls fractal_tui::run, which falls back to
+//   configured_person() and passes that actor to Client::unix_as (crates/fractal-tui/src/lib.rs).
+// - st ui open: fractal_tui::open_in_terminal_ui resolves configured_person() before
 //   queueing a request in that person's terminal UI request directory.
 // - st note and its subcommands: main's Command::Note passes config.person to
 //   directive_note::run, which resolves it with configured_actor before dispatch.
@@ -124,10 +124,10 @@ pub(super) fn generate(mut command: clap::Command) -> Value {
 pub(super) fn print(effective: bool) -> anyhow::Result<()> {
     let mut value = generate(super::Cli::command());
     if effective {
-        let (config, _) = st3::config::Config::load_client_unvalidated(None)?;
+        let (config, _) = fractal_daemon::config::Config::load_client_unvalidated(None)?;
         value["effective"] = json!({
-            "instance": st3::instance::current().map(|instance| instance.name().to_owned()),
-            "config_path": st3::config::Config::default_path(),
+            "instance": fractal_daemon::instance::current().map(|instance| instance.name().to_owned()),
+            "config_path": fractal_daemon::config::Config::default_path(),
             "state_dir": config.state_dir,
         });
     }
@@ -172,7 +172,7 @@ mod tests {
         ] {
             assert_eq!(commands[path]["can_carry_person"], false, "{path}");
         }
-        assert!(st3::handoff::document_name("person/probe").is_none());
+        assert!(fractal_daemon::handoff::document_name("person/probe").is_none());
         assert!(super::super::configured_human(Some("person/probe"), None, "contract").is_ok());
         assert!(super::super::configured_actor(Some("person/probe"), None, "contract").is_ok());
     }

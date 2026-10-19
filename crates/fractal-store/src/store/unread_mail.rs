@@ -4,7 +4,7 @@
 
 use super::*;
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h57a259762a57 owner=st3_store::store::unread_mail TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9ba868b7fa5 owner=fractal_store::store::unread_mail TODO=chunk-or-reference-variable-columns */ r#"
 BEGIN IMMEDIATE;
 DROP INDEX IF EXISTS claims_message_sent_time_index;
 CREATE TABLE IF NOT EXISTS unread_mail (
@@ -62,7 +62,7 @@ COMMIT;
 "#;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbb6a2c7f8ab2 owner=st3_store::store::unread_mail TODO=trace-statement-and-value-representation */ SCHEMA)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h38deff9f35b4 owner=fractal_store::store::unread_mail TODO=trace-statement-and-value-representation */ SCHEMA)?;
     let filled: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_prefixes')",
         [],
@@ -70,7 +70,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     )?;
     if !filled {
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h701bc85d0248 owner=st3_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
+            /* sqlite-large-value: allow-for-now lv-h0c4b774d59d8 owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
              DELETE FROM unread_mail;
              DELETE FROM unread_mail_prefixes;
              INSERT INTO unread_mail(subject,sent_time)

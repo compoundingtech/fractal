@@ -37,9 +37,9 @@ pub fn launched_member(
            AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} ORDER BY facts.sort_key DESC LIMIT 1"
     );
     let shared: Option<(u64, String)> = connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4ff7aca2196e owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ &query)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hdd1697922ff7 owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ &query)?
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-hdcc1bda2b61b owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![subject, origin, incarnation, at.min(i64::MAX as u64)],
+            /* sqlite-large-value: allow-for-now lv-h176268083051 owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ params![subject, origin, incarnation, at.min(i64::MAX as u64)],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -56,7 +56,7 @@ pub fn launched_member(
                  ORDER BY facts.observation_id DESC LIMIT 1",
             )?
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-h0bab41f6da05 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![subject, incarnation, at.min(i64::MAX as u64)],
+                /* sqlite-large-value: allow-for-now lv-he71c6d4b5146 owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ params![subject, incarnation, at.min(i64::MAX as u64)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
@@ -78,9 +78,9 @@ pub fn launched_member(
     else {
         return Ok(None);
     };
-    let body: Option<String> = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9216952901e2 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ &format!(
+    let body: Option<String> = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h98979ff8bdcc owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ &format!(
         "SELECT body FROM claims WHERE id=?1 AND subject=?2 AND kind='intent.desired' AND {UNREPAIRED_CLAIM}"
-    ))?.query_row(/* sqlite-large-value: allow-for-now lv-he8f2102e6081 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![token,subject], |row| row.get(0)).optional()?;
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h70afe4d4f91d owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ params![token,subject], |row| row.get(0)).optional()?;
     Ok(body
         .and_then(|body| serde_json::from_str::<DesiredSubject>(&body).ok())
         .and_then(|desired| desired.member))
@@ -104,7 +104,7 @@ pub fn check(
     // Seek the next origin prefix instead of DISTINCT's walk over every historical row.
     // One runtime per origin prevents a stopped peer from hiding a running incarnation.
     let mut origins = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-h8b6d1cbccbd1 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ "WITH RECURSIVE origins(origin) AS (
+        /* sqlite-large-value: allow-for-now lv-h7ee321bcff24 owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ "WITH RECURSIVE origins(origin) AS (
             SELECT MIN(origin) FROM local_publication_claims
                 INDEXED BY local_publication_runtime_lookup
                 WHERE subject=?1 AND kind='runtime.observed'
@@ -132,9 +132,9 @@ pub fn check(
     };
     for origin in origins {
         let body: Option<String> = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6420933834b6 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ &query)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4a17852ca35 owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ &query)?
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-h4d01c55c44c5 owner=st3_store::store::publication TODO=trace-statement-and-value-representation */ params![proposed.subject, origin, at.min(i64::MAX as u64)],
+                /* sqlite-large-value: allow-for-now lv-hffd9a012f0b4 owner=fractal_store::store::publication TODO=trace-statement-and-value-representation */ params![proposed.subject, origin, at.min(i64::MAX as u64)],
                 |row| row.get(0),
             )
             .optional()?;

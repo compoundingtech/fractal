@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use crate::model::ReplicationInventory;
-use st3_seats::store::tests_shared::{exchange_from, receive_and_project};
-use st3_seats::store::owner_lists::tests_shared_attention_tests::{ADA_LAYOUT, PEOPLE, ROBIN_LAYOUT, arrangement, glass, sync};
+use fractal_seats::store::tests_shared::{exchange_from, receive_and_project};
+use fractal_seats::store::owner_lists::tests_shared_attention_tests::{ADA_LAYOUT, PEOPLE, ROBIN_LAYOUT, arrangement, glass, sync};
 
 
 fn newest(store: &Store, view: OwnerView) -> Arc<OwnerListPublication> {
@@ -34,7 +34,7 @@ fn refresh_and_check(store: &Store, view: OwnerView) -> Arc<OwnerListPublication
                     // A window following one arrangement keeps that row of its owner's.
                     for subject in [ADA_LAYOUT, ROBIN_LAYOUT]
                         .into_iter()
-                        .filter(|subject| st3_schema::arrangements::owner(subject).ok() == Some(*person))
+                        .filter(|subject| fractal_schema::arrangements::owner(subject).ok() == Some(*person))
                     {
                         let selected = published.iter().filter(|row| row["id"] == subject).cloned();
                         assert_eq!(

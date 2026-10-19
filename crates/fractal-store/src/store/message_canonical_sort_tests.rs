@@ -11,9 +11,9 @@ fn old_first_query() -> &'static str {
 // Exact pre-fusion sorter: keep both lookups as the independent oracle.
 fn old_sort(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
     let mut keys = BTreeMap::new();
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h537705907106 owner=st3_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ old_first_query())?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6f1771bf76b9 owner=fractal_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ old_first_query())?;
     for message in messages.iter() {
-        let id: String = statement.query_row(/* sqlite-large-value: allow-for-now lv-h93031058676a owner=st3_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ [&message.subject], |row| row.get(0))?;
+        let id: String = statement.query_row(/* sqlite-large-value: allow-for-now lv-h4346117000b1 owner=fractal_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ [&message.subject], |row| row.get(0))?;
         keys.insert(
             message.subject.clone(),
             canonical::claim_key(connection, &id)?,
@@ -36,7 +36,7 @@ fn single_key_sort(connection: &Connection, messages: &mut [MessageView]) -> Res
 fn schema(connection: &mut Connection) {
     smallclaims::sqlite::observe(connection);
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hf7172e90ac47 owner=st3_store::store::message_canonical_sort_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-h9c61de9daf69 owner=fractal_store::store::message_canonical_sort_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
          CREATE TABLE claims(store_index INTEGER PRIMARY KEY, id TEXT UNIQUE,
             batch_id TEXT, subject TEXT, kind TEXT, accepted_at_unix_ms TEXT);
          CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
@@ -49,16 +49,16 @@ fn schema(connection: &mut Connection) {
 }
 
 fn batch(connection: &Connection, id: &str, writer: &str, sequence: u64) {
-    connection.execute(/* sqlite-large-value: allow-for-now lv-haac17a670a75 owner=st3_store::store::message_canonical_sort_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES(?1,?2,?3)", params![id, writer, sequence]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hbe4aa85f8060 owner=fractal_store::store::message_canonical_sort_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES(?1,?2,?3)", params![id, writer, sequence]).unwrap();
 }
 
 pub fn claim(connection: &Connection, index: u64, id: &str, batch: &str, subject: &str, kind: &str, time: &str) {
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h0acc9a4b57c3 owner=st3_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES(?1,?2,?3,?4,?5,?6)",
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hc8589cb9e4fb owner=fractal_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES(?1,?2,?3,?4,?5,?6)",
         params![index, id, batch, subject, kind, time]).unwrap();
 }
 
 fn position(connection: &Connection, id: &str, value: u64) {
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h3f25dbab73f1 owner=st3_store::store::message_canonical_sort_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records VALUES(?1,?2)", params![id, value]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h38e8310f56ed owner=fractal_store::store::message_canonical_sort_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records VALUES(?1,?2)", params![id, value]).unwrap();
 }
 
 fn message(subject: &str, index: usize) -> MessageView {
@@ -113,7 +113,7 @@ pub fn fixture(connection: &Connection) -> Vec<MessageView> {
 fn assert_keys(connection: &Connection, messages: &[MessageView]) {
     let query = canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind IN ('message.sent','intent.desired') ORDER BY CANONICAL_ASC(claims) LIMIT 1");
     for message in messages {
-        let id: String = connection.query_row(/* sqlite-large-value: allow-for-now lv-h45fd3bd56926 owner=st3_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ &query, [&message.subject], |row| row.get(0)).unwrap();
+        let id: String = connection.query_row(/* sqlite-large-value: allow-for-now lv-hac42e9bbbb24 owner=fractal_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ &query, [&message.subject], |row| row.get(0)).unwrap();
         assert_eq!(message_canonical_key_tx(connection, &message.subject).unwrap(),
             canonical::claim_key(connection, &id).unwrap(), "{}", message.subject);
     }
@@ -217,9 +217,9 @@ fn batched_message_sort_refuses_coexisting_faults_without_reordering() {
     }
     // The earliest claim on the third input has no batch, even though a younger
     // valid candidate exists. The fifth input independently has a decode fault.
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h950b9dc25e58 owner=st3_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET batch_id='absent' WHERE id='claim-2'", []).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hba991f76526b owner=fractal_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET batch_id='absent' WHERE id='claim-2'", []).unwrap();
     claim(&connection, 7, "younger", "batch", "message/2", "message.sent", "20");
-    connection.execute(/* sqlite-large-value: allow-for-now lv-ha7513a7165a8 owner=st3_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=x'00' WHERE id='claim-4'", []).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h1ff8d4bcbbe8 owner=fractal_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=x'00' WHERE id='claim-4'", []).unwrap();
     let mut messages = (0..6).map(|index| message(&format!("message/{index}"), index)).collect::<Vec<_>>();
     let before = serde_json::to_value(&messages).unwrap();
     let error = sort_messages_canonically(&connection, &mut messages).unwrap_err();
@@ -326,7 +326,7 @@ fn earliest_missing_batch_missing_subject_and_bad_times_are_errors_without_parti
         claim(&connection, index, &subject, "batch", &subject, "message.sent", time);
         same_error_without_reordering(&connection, vec![message("message/healthy", 0), message(&subject, 1)]);
     }
-    connection.execute(/* sqlite-large-value: allow-for-now lv-hbae3c9065224 owner=st3_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=x'00' WHERE id='healthy'", []).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h2ed47d41170d owner=fractal_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=x'00' WHERE id='healthy'", []).unwrap();
     same_error_without_reordering(&connection, vec![message("message/healthy", 0)]);
 }
 
@@ -364,7 +364,7 @@ struct PlanStep {
 }
 
 fn explain(connection: &Connection, sql: &str, subject: &str) -> rusqlite::Result<Vec<PlanStep>> {
-    connection.prepare(/* sqlite-large-value: allow-for-now lv-hd3b73aeb0269 owner=st3_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))?
+    connection.prepare(/* sqlite-large-value: allow-for-now lv-ha721e4f7960a owner=fractal_store::store::message_canonical_sort_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))?
         .query_map([subject], |row| {
             Ok(PlanStep { id: row.get(0)?, parent: row.get(1)?, detail: row.get(3)? })
         })?

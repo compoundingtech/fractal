@@ -60,7 +60,7 @@ for view in [PERSON_VIEW, CUSTOM_VIEW] {
     }
 }
 while !backfill_page(&tx, 0, 2).unwrap() {}
-tx.execute(/* sqlite-large-value: allow-for-now lv-hfd69a831f669 owner=st3_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_views SET ready=1", []).unwrap();
+tx.execute(/* sqlite-large-value: allow-for-now lv-hc343da8e1dd6 owner=fractal_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_views SET ready=1", []).unwrap();
 tx.commit().unwrap();
 }
 
@@ -140,7 +140,7 @@ ClaimInput {
 }
 
 fn custom(store: &Store, subject: &str, person: &str) {
-let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h36bf57f65aa7 owner=st3_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
+let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hab6b9af2a047 owner=fractal_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
     "../../../../examples/st3/custom-review.json"
 ))
 .unwrap();
@@ -318,7 +318,7 @@ assert_eq!(boundary.keys, next.keys);
 let mut writer = store.connection.write();
 let tx = writer.transaction().unwrap();
 tx.execute(
-    /* sqlite-large-value: allow-for-now lv-h1a8ff5bfbf97 owner=st3_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled' WHERE subject=?1",
+    /* sqlite-large-value: allow-for-now lv-h829078631aef owner=fractal_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled' WHERE subject=?1",
     [&ask.subject],
 )
 .unwrap();
@@ -368,7 +368,7 @@ for status in ["cancelled", "running"] {
         .connection
         .batched(|tx| -> Result<()> {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h2c71e35efb11 owner=st3_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hb17751306672 owner=fractal_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?1 WHERE id=?2",
                 params![status, origin.run.trim_start_matches("mission-run/")],
             )?;
             Ok(())
@@ -439,7 +439,7 @@ store
     .connection
     .batched(|tx| -> Result<()> {
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-hf12ef8d1d71a owner=st3_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='person/robin' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-hd75c03a93ef3 owner=fractal_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='person/robin' WHERE subject=?1",
             [&ask.subject],
         )?;
         Ok(())
@@ -477,7 +477,7 @@ assert!(
 fn missing_document_dependency_and_recovery_match_full_reader() {
 let store = Store::open_memory("alder").unwrap();
 let views = views(&store);
-let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h7584ef1cddad owner=st3_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
+let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h2e8c25e17330 owner=fractal_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
     "../../../../examples/st3/custom-review.json"
 ))
 .unwrap();
@@ -726,7 +726,7 @@ store
     .connection
     .write()
     .execute(
-        /* sqlite-large-value: allow-for-now lv-hf46424242f4d owner=st3_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='ready' WHERE assignee='person/avery'",
+        /* sqlite-large-value: allow-for-now lv-h1a592490a5fb owner=fractal_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='ready' WHERE assignee='person/avery'",
         [],
     )
     .unwrap();
@@ -736,7 +736,7 @@ store
     .connection
     .write()
     .execute(
-        /* sqlite-large-value: allow-for-now lv-h3da06f3a9046 owner=st3_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='PERSON/avery',status='ready' WHERE assignee='person/avery'",
+        /* sqlite-large-value: allow-for-now lv-h19eacf3fa671 owner=fractal_daemon::store_tests::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='PERSON/avery',status='ready' WHERE assignee='person/avery'",
         [],
     )
     .unwrap();

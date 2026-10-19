@@ -5,7 +5,7 @@ import {
   Revision,
   decodeUnknownSync,
   type AgentEncoded,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'

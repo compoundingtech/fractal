@@ -1,6 +1,6 @@
 //! stui's mission semantics, independent of its collection model and terminal UI.
 
-use st3_client::MissionStep;
+use fractal_client::MissionStep;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One word naming who has to move, shared by every mission surface.
@@ -161,8 +161,8 @@ impl Mission {
 
 /// Caller-owned display policies; none reads a clock or requires a renderer.
 pub struct Display<'a> {
-    pub mission_label: &'a dyn Fn(&st3_client::Mission) -> String,
-    pub agent_label: &'a dyn Fn(&st3_client::Agent) -> String,
+    pub mission_label: &'a dyn Fn(&fractal_client::Mission) -> String,
+    pub agent_label: &'a dyn Fn(&fractal_client::Agent) -> String,
     /// Format an RFC3339 timestamp relative to the explicitly supplied RFC3339 `now`.
     pub age_label: &'a dyn Fn(&str, &str) -> String,
     /// Normalize goals, constraints and outcome reasons for display.
@@ -178,8 +178,8 @@ impl Display<'_> {
 }
 
 fn label_text<'a>(
-    mut missions: impl Iterator<Item = &'a st3_client::Mission>,
-    label: &st3_client::WorkLabel,
+    mut missions: impl Iterator<Item = &'a fractal_client::Mission>,
+    label: &fractal_client::WorkLabel,
     display: &Display<'_>,
 ) -> String {
     let mission = missions
@@ -196,7 +196,7 @@ fn label_text<'a>(
 }
 
 /// The steps st sent with a mission: its open runs' steps, or its latest run's when none is open.
-fn mission_steps(mission: &st3_client::Mission) -> Vec<&MissionStep> {
+fn mission_steps(mission: &fractal_client::Mission) -> Vec<&MissionStep> {
     let finished = |status: &str| matches!(status, "completed" | "failed" | "cancelled");
     let has_open = mission.run_details.iter().any(|run| !finished(&run.status));
     mission
@@ -216,7 +216,7 @@ fn mission_steps(mission: &st3_client::Mission) -> Vec<&MissionStep> {
 }
 
 /// Who set the outcome of the mission's finished latest run, from what, and why.
-fn run_outcome(mission: &st3_client::Mission, now: &str, display: &Display<'_>) -> Option<String> {
+fn run_outcome(mission: &fractal_client::Mission, now: &str, display: &Display<'_>) -> Option<String> {
     let outcome = mission.run_details.last()?.outcome.as_ref()?;
     let was = outcome
         .previous_status
@@ -245,7 +245,7 @@ pub(crate) struct QueueOwner {
 /// unclaimed otherwise; a waiting or pending step (held); standing, running, ready or draft (idle);
 /// otherwise done.
 pub(crate) fn word(
-    mission: &st3_client::Mission,
+    mission: &fractal_client::Mission,
     work: &[&MissionStep],
     decision: bool,
     queue_owner: impl Fn(&str) -> Option<QueueOwner>,
@@ -306,9 +306,9 @@ pub(crate) fn in_hand(state: &str) -> bool {
 
 /// The agent whose queue holds this work, if st says.
 fn queued_for<'a>(
-    mut agents: impl Iterator<Item = &'a st3_client::Agent>,
+    mut agents: impl Iterator<Item = &'a fractal_client::Agent>,
     work: &str,
-) -> Option<&'a st3_client::Agent> {
+) -> Option<&'a fractal_client::Agent> {
     agents.find(|agent| {
         agent.next_work_id.as_deref() == Some(work)
             || agent.upcoming_work_ids.iter().any(|id| id == work)
@@ -317,7 +317,7 @@ fn queued_for<'a>(
 
 /// Who holds or will take a step: its claimant, else its assignee, named.
 fn step_owner<'a>(
-    mut agents: impl Iterator<Item = &'a st3_client::Agent>,
+    mut agents: impl Iterator<Item = &'a fractal_client::Agent>,
     step: &MissionStep,
     display: &Display<'_>,
 ) -> Option<String> {
@@ -338,9 +338,9 @@ fn step_owner<'a>(
 /// `attention` must already be unresolved and filtered to the caller's actor. Collection loading,
 /// clocks, naming policy and text normalization remain owned by the application.
 pub fn adapt<'a>(
-    missions: impl Iterator<Item = &'a st3_client::Mission> + Clone,
-    agents: impl Iterator<Item = &'a st3_client::Agent> + Clone,
-    attention: impl Iterator<Item = &'a st3_client::Attention> + Clone,
+    missions: impl Iterator<Item = &'a fractal_client::Mission> + Clone,
+    agents: impl Iterator<Item = &'a fractal_client::Agent> + Clone,
+    attention: impl Iterator<Item = &'a fractal_client::Attention> + Clone,
     now: &str,
     display: &Display<'_>,
 ) -> Vec<Mission> {

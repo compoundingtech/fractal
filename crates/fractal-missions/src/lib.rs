@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_delivery::*;
+pub use fractal_delivery::*;
 
 pub mod graph;
 pub mod references;

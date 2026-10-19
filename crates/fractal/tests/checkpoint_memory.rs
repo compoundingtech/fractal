@@ -73,7 +73,7 @@ const LARGE: usize = 4 * SMALL;
 /// `claims` diagnostics from one writer, one envelope each, sixteen to a subject and four to a
 /// slot (subject and code), so the rule drops three of every four. Bulk statements: one per
 /// table, as `production_history` in the trim tests explains.
-fn history(store: &st3::store::Store, claims: usize) {
+fn history(store: &fractal_daemon::store::Store, claims: usize) {
     let mut connection = store.connection.lock().unwrap();
     let transaction = connection.transaction().unwrap();
     for sql in [
@@ -122,7 +122,7 @@ struct Pass {
 
 fn pass(claims: usize) -> Pass {
     let directory = tempfile::tempdir().unwrap();
-    let store = st3::store::Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap();
+    let store = fractal_daemon::store::Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap();
     history(&store, claims);
     let scratch = directory.path().join("checkpoint");
     let cut = 10 * 86_400_000;

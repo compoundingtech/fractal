@@ -11,12 +11,12 @@ async fn wait_file(path: &std::path::Path) {
     .unwrap_or_else(|_| panic!("missing control barrier {}", path.display()));
 }
 
-fn title_owner(root: &std::path::Path) -> st3::mailbox::Fence {
+fn title_owner(root: &std::path::Path) -> fractal_daemon::mailbox::Fence {
     let db = rusqlite::Connection::open(root.join("graph.db")).unwrap();
     db.query_row("SELECT b.incarnation,b.epoch,b.token FROM local_mailbox_owners o
         JOIN local_mailbox_bindings b ON b.subject=o.subject AND b.component=o.component
         AND b.incarnation=o.incarnation AND b.epoch=o.epoch WHERE o.subject=?1 AND o.component='title'",
-        [SEAT], |row| Ok(st3::mailbox::Fence {
+        [SEAT], |row| Ok(fractal_daemon::mailbox::Fence {
             subject: SEAT.into(), component: "title".into(), incarnation: row.get(0)?, epoch: row.get(1)?, token: row.get(2)?,
         })).unwrap()
 }
@@ -70,14 +70,14 @@ fn reject_binding(
     physical: &str,
     incarnation: &str,
     rejection: &str,
-) -> st3::mailbox::Fence {
+) -> fractal_daemon::mailbox::Fence {
     let owner = title_owner(root);
-    assert!(st3::test_support::check_fixture_mailbox(store, &owner).is_ok());
+    assert!(fractal_daemon::test_support::check_fixture_mailbox(store, &owner).is_ok());
     if rejection == "token" {
-        let request = st3::mailbox::Fence::new(SEAT, incarnation, "title");
-        let successor = st3::test_support::bind_fixture_mailbox(store, &request).unwrap();
+        let request = fractal_daemon::mailbox::Fence::new(SEAT, incarnation, "title");
+        let successor = fractal_daemon::test_support::bind_fixture_mailbox(store, &request).unwrap();
         assert_eq!(
-            st3::test_support::check_fixture_mailbox(store, &owner)
+            fractal_daemon::test_support::check_fixture_mailbox(store, &owner)
                 .unwrap_err()
                 .code,
             "stale-mailbox-session"
@@ -85,9 +85,9 @@ fn reject_binding(
         // Forced raw owner displacement is foreign to the durable native lease.
         // Linux custody fences this unqualified token. Other platforms retain legacy admission.
         if cfg!(target_os = "linux") {
-            assert_eq!(st3::test_support::check_fixture_mailbox(store, &successor).unwrap_err().code, "stale-mailbox-session");
+            assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(store, &successor).unwrap_err().code, "stale-mailbox-session");
         } else {
-            st3::test_support::check_fixture_mailbox(store, &successor).unwrap();
+            fractal_daemon::test_support::check_fixture_mailbox(store, &successor).unwrap();
         }
         successor
     } else {
@@ -108,7 +108,7 @@ fn reject_binding(
             reconcile(store, runtime);
         }
         assert_eq!(
-            st3::test_support::check_fixture_mailbox(store, &owner)
+            fractal_daemon::test_support::check_fixture_mailbox(store, &owner)
                 .unwrap_err()
                 .code,
             "stale-mailbox-session"
@@ -118,7 +118,7 @@ fn reject_binding(
 }
 
 async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&str>) {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -126,7 +126,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = st3::api::AppState {
+    let state = fractal_daemon::api::AppState {
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -143,7 +143,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix_bound(&server_socket, &server_socket, st3::api::router(state))
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_socket, fractal_daemon::api::router(state))
             .await
             .unwrap();
     });
@@ -153,7 +153,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let client = st3::client::Client::new(st3::client::Endpoint::Unix(socket));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket));
     // The real native wrapper launches a model-free provider, which consumes one real
     // Claude channel notification and exits. All files live under this fixture's HOME.
     let provider = root.path().join("fake-claude.py");
@@ -198,7 +198,7 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .map(|directory| directory.join("python3"))
         .find(|candidate| candidate.is_file())
         .expect("terminal provider fixture needs python3 on the executing runner");
-    let mut command = st3::test_support::async_command(env!("ST3_FIXTURE_BASH"));
+    let mut command = fractal_daemon::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
         .env("PATH", env!("ST3_FIXTURE_PATH"))
@@ -379,10 +379,10 @@ read -r _
         let deferred =
             std::fs::read_to_string(barrier.join("observation-drained")).unwrap() == "deferred";
         if deferred {
-            assert!(st3::test_support::check_fixture_mailbox(&store, &fence).is_ok());
+            assert!(fractal_daemon::test_support::check_fixture_mailbox(&store, &fence).is_ok());
         } else {
             assert_eq!(
-                st3::test_support::check_fixture_mailbox(&store, &fence)
+                fractal_daemon::test_support::check_fixture_mailbox(&store, &fence)
                     .unwrap_err()
                     .code,
                 "stale-mailbox-session"
@@ -430,9 +430,9 @@ read -r _
         );
         if rejection == Some("token") {
             if cfg!(target_os = "linux") {
-            assert_eq!(st3::test_support::check_fixture_mailbox(&store, owner).unwrap_err().code, "stale-mailbox-session");
+            assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(&store, owner).unwrap_err().code, "stale-mailbox-session");
         } else {
-            st3::test_support::check_fixture_mailbox(&store, owner).unwrap();
+            fractal_daemon::test_support::check_fixture_mailbox(&store, owner).unwrap();
         }
         }
         assert!(!barrier.join("provider-return.json").exists());
@@ -468,7 +468,7 @@ read -r _
     assert_eq!(notification["params"]["meta"]["messageId"], sent.subject);
     if let Some(fence) = completion_fence {
         assert_eq!(
-            st3::test_support::check_fixture_mailbox(&store, &fence)
+            fractal_daemon::test_support::check_fixture_mailbox(&store, &fence)
                 .unwrap_err()
                 .code,
             "stale-mailbox-session"
@@ -478,13 +478,13 @@ read -r _
         assert!(shell.try_wait().unwrap().is_none());
         if rejection == Some("token") {
             if cfg!(target_os = "linux") {
-            assert_eq!(st3::test_support::check_fixture_mailbox(&store, &owner).unwrap_err().code, "stale-mailbox-session");
+            assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(&store, &owner).unwrap_err().code, "stale-mailbox-session");
         } else {
-            st3::test_support::check_fixture_mailbox(&store, &owner).unwrap();
+            fractal_daemon::test_support::check_fixture_mailbox(&store, &owner).unwrap();
         }
         } else {
             assert_eq!(
-                st3::test_support::check_fixture_mailbox(&store, &owner)
+                fractal_daemon::test_support::check_fixture_mailbox(&store, &owner)
                     .unwrap_err()
                     .code,
                 "stale-mailbox-session"

@@ -9,7 +9,7 @@ use super::glass_store::{self, Stored, StoredGlass, StoredView};
 use super::layout::{Group, Layout, Side, Tab};
 use super::*;
 use ratatui::style::Color;
-use st3_client::{GlassBody, GlassLayout, GlassSplit, GlassTab};
+use fractal_client::{GlassBody, GlassLayout, GlassSplit, GlassTab};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -827,7 +827,7 @@ impl Ui {
             Action::SidebarMode(mode) => self.open_sidebar_palette(mode.clone()),
             Action::SidebarNew { name, subject: Some(subject) } => self.open_sidebar_palette(resource_sidebar::PaletteMode::ConfirmCreate { subject: subject.clone(), name: name.clone() }),
             Action::SidebarNew { name, subject: None } => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_create_folder(name, None); }
-            Action::SidebarRename { id, name } => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![st3_client::ArrangementOperation::FolderRename { id: id.clone(), name: name.trim().to_string() }]); }
+            Action::SidebarRename { id, name } => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![fractal_client::ArrangementOperation::FolderRename { id: id.clone(), name: name.trim().to_string() }]); }
             Action::SidebarPreview => {},
             _ => return false,
         }
@@ -2642,7 +2642,7 @@ impl Ui {
             match mode {
                 Mode::ConfirmPlace { subject, folder } if explicit && key.code == KeyCode::Char('m') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_place(&subject, folder.as_deref(), None); return true; }
                 Mode::ConfirmCreate { subject, name } if explicit && key.code == KeyCode::Char('m') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_create_folder(&name, Some(&subject)); return true; }
-                Mode::Delete { id } if explicit && key.code == KeyCode::Char('y') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![st3_client::ArrangementOperation::FolderDelete { id }]); return true; }
+                Mode::Delete { id } if explicit && key.code == KeyCode::Char('y') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![fractal_client::ArrangementOperation::FolderDelete { id }]); return true; }
                 Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. } if key.code != KeyCode::Esc => return true,
                 _ => {}
             }
@@ -3302,7 +3302,7 @@ impl Ui {
     /// The person's glasses as st has them now. A glass st changed takes st's structure, a
     /// glass made elsewhere appears, and one deleted elsewhere goes, except while a change of
     /// ours is on its way. The first time, glasses kept only on this device move into st.
-    pub(crate) fn glasses_from_graph(&mut self, remote: Vec<st3_client::Glass>) {
+    pub(crate) fn glasses_from_graph(&mut self, remote: Vec<fractal_client::Glass>) {
         let Some(glasses) = self.glasses.as_mut() else {
             return;
         };
@@ -4284,7 +4284,7 @@ mod tests {
         ui.open_choice(Some(0), Open::Tab);
         assert!(ui.effects.is_empty());
         press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
-        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|operation| matches!(operation, st3_client::ArrangementOperation::SubjectPlace { subject, folder: None, .. } if subject == &agent))));
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|operation| matches!(operation, fractal_client::ArrangementOperation::SubjectPlace { subject, folder: None, .. } if subject == &agent))));
         ui.effects.clear(); ui.resource_sidebar.writing = false;
         ui.open_sidebar_palette(Mode::Delete { id: "folder-demo".into() });
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
@@ -4294,7 +4294,7 @@ mod tests {
         assert!(ui.effects.is_empty());
         ui.open_sidebar_palette(Mode::Delete { id: "folder-demo".into() });
         press(&mut ui, KeyCode::Char('y'), KeyModifiers::NONE);
-        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::FolderDelete { id } if id == "folder-demo"))));
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, fractal_client::ArrangementOperation::FolderDelete { id } if id == "folder-demo"))));
     }
 
     #[test]
@@ -4327,7 +4327,7 @@ mod tests {
         mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
         mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
         let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).expect("drag files the tab's subject");
-        assert!(matches!(&write.operations[..], [st3_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &first));
+        assert!(matches!(&write.operations[..], [fractal_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &first));
         assert_eq!(tabs(&ui), tabs_before, "filing does not close a space tab");
         assert!(ui.resource_sidebar.arrangement().unwrap().body.placements.is_empty(), "only the stream updates the arrangement projection");
         ui.resource_sidebar.saved(&write, true); ui.effects.clear(); screen(&ui);
@@ -4339,13 +4339,13 @@ mod tests {
         mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
         mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
         let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).unwrap();
-        assert!(matches!(&write.operations[..], [st3_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &second));
+        assert!(matches!(&write.operations[..], [fractal_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &second));
         ui.resource_sidebar.saved(&write, true); ui.effects.clear(); screen(&ui);
         let grip = find(&ui, &Hit::ResourceFolderDrag(second.clone())); let to = folder_at(&ui, &first);
         mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), grip.0, grip.1);
         mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
         mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
-        assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(write) if matches!(&write.operations[..], [st3_client::ArrangementOperation::FolderMove { id, key, .. }] if id == &second && key.as_str() < "a0"))));
+        assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(write) if matches!(&write.operations[..], [fractal_client::ArrangementOperation::FolderMove { id, key, .. }] if id == &second && key.as_str() < "a0"))));
     }
 
     #[test]
@@ -4370,12 +4370,12 @@ mod tests {
         ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, "Builds");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).unwrap();
-        let folder = write.operations.iter().find_map(|operation| if let st3_client::ArrangementOperation::FolderCreate { id, name, .. } = operation { assert_eq!(name, "Builds"); Some(id.clone()) } else { None }).unwrap();
+        let folder = write.operations.iter().find_map(|operation| if let fractal_client::ArrangementOperation::FolderCreate { id, name, .. } = operation { assert_eq!(name, "Builds"); Some(id.clone()) } else { None }).unwrap();
         assert!(write.creating && write.subject.starts_with(&format!("arrangement/{}/", ui.world.person)));
         ui.resource_sidebar.saved(&write, true); ui.effects.clear();
         ui.open_sidebar_palette(Mode::Rename { id: folder.clone() }); typed(&mut ui, "Renamed");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if !write.creating && matches!(&write.operations[..], [st3_client::ArrangementOperation::FolderRename { id, name }] if id == &folder && name == "Renamed")));
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if !write.creating && matches!(&write.operations[..], [fractal_client::ArrangementOperation::FolderRename { id, name }] if id == &folder && name == "Renamed")));
         ui.resource_sidebar.writing = false; ui.effects.clear();
         ui.open_sidebar_palette(Mode::Add { folder: folder.clone() });
         let choices = ui.matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap());
@@ -4408,13 +4408,13 @@ mod tests {
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert!(ui.effects.is_empty(), "Enter cannot commit filing");
         press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
-        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject: id, .. } if id == subject))));
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, fractal_client::ArrangementOperation::SubjectPlace { subject: id, .. } if id == subject))));
         ui.effects.clear(); ui.resource_sidebar.writing = false;
         ui.open_sidebar_palette(Mode::Add { folder: "folder-demo".into() }); typed(&mut ui, "doc/garden-notes");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert!(ui.effects.is_empty());
         press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
-        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject, .. } if subject == "doc/garden-notes"))));
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, fractal_client::ArrangementOperation::SubjectPlace { subject, .. } if subject == "doc/garden-notes"))));
     }
 
     fn glass() -> Ui {
@@ -6753,7 +6753,7 @@ mod tests {
     #[test]
     fn a_child_open_intent_opens_its_own_live_conversation() {
         let mut ui = glass();
-        ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open("session/child".into())));
+        ui.click(Hit::Pane(fractal_conversation_ui::PaneIntent::Open("session/child".into())));
         assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some("session/child".into()))));
         assert!(ui.live_conversations().contains(&"session/child".to_owned()));
     }
@@ -6790,9 +6790,9 @@ mod tests {
         // st answers: one hit in the agent's conversation, while its index still refreshes.
         ui.said = Some((
             "harbor keys".into(),
-            Ok(st3_client::ConversationSearch {
+            Ok(fractal_client::ConversationSearch {
                 kind: "conversation-search".into(),
-                items: vec![st3_client::ConversationSearchHit {
+                items: vec![fractal_client::ConversationSearchHit {
                     conversation_id: "session/one".into(),
                     entry_id: "entry/7".into(),
                     agent_id: Some(agent.id.clone()),
@@ -6800,7 +6800,7 @@ mod tests {
                     entry_type: "content".into(),
                     excerpt: "the harbor keys\nrotated at noon".into(),
                 }],
-                page: st3_client::PageInfo {
+                page: fractal_client::PageInfo {
                     limit: 20,
                     has_more: false,
                     next_cursor: None,
@@ -7487,7 +7487,7 @@ mod tests {
     }
 
     /// A glass as st sends it.
-    fn graph_glass(id: &str, revision: &str, name: &str, panes: &[&str]) -> st3_client::Glass {
+    fn graph_glass(id: &str, revision: &str, name: &str, panes: &[&str]) -> fractal_client::Glass {
         serde_json::from_value(serde_json::json!({
             "kind": "glass", "id": format!("glass/person/avery/{id}"), "revision": revision,
             "updated_at": "2026-10-01T09:00:00Z", "deleted": false,

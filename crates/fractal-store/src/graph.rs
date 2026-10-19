@@ -186,7 +186,7 @@ pub fn parse_intent_with_owner(
     let mut document: KdlDocument = source
         .parse::<KdlDocument>()
         .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
-    st_drivers::kdl_version::ensure_st3_version(&document)
+    fractal_drivers::kdl_version::ensure_st3_version(&document)
         .map_err(|error| St3Error::new("unsupported-kdl-version", error.to_string()))?;
     let mut deprecated_syntax = BTreeSet::new();
     canonicalize_terminal_declarations(&mut document, &mut deprecated_syntax);
@@ -312,7 +312,7 @@ fn parse_desired_node(
     }
     let owned_terminal = kind == "pty"
         && context.owner_run.is_none()
-        && st3_schema::owned_terminals::owner(&format!("pty/{}", one_string_with_children(node)?))
+        && fractal_schema::owned_terminals::owner(&format!("pty/{}", one_string_with_children(node)?))
             .map_err(|e| St3Error::new(e.code, e.message))?
             .is_some();
     if !context.allow_execution_root
@@ -1305,7 +1305,7 @@ fn parse_agent(
         }
         ensure_only_properties(binding, &["incarnation", "id", "runtime-id"])?;
         let terminal = one_string(binding)?;
-        if st3_schema::owned_terminals::owner(&terminal)
+        if fractal_schema::owned_terminals::owner(&terminal)
             .map_err(|e| St3Error::new(e.code, e.message))?
             .is_none_or(|owner| !owner.starts_with("person/"))
         {
@@ -1355,7 +1355,7 @@ fn parse_agent(
 
     let mut desired = canonical_node(node)?;
     normalize_agent_under(&mut desired, &host, context.owner_run.as_deref());
-    let accountable = st3_schema::accountable::from_desired(&desired)
+    let accountable = fractal_schema::accountable::from_desired(&desired)
         .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
     if accountable.is_some() && context.owner_run.is_some() {
         return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
@@ -1879,7 +1879,7 @@ fn driver_member(
         // native channel. `dev-channels #true` is retained only so declarations written before
         // the channel became intrinsic continue to parse; opting out would create an agent that
         // cannot receive graph messages, so false is rejected below.
-        provider.extend(["--channels".into(), st_drivers::claude_channel::ST3_CHANNEL.into()]);
+        provider.extend(["--channels".into(), fractal_drivers::claude_channel::ST3_CHANNEL.into()]);
         // The channel wakes the real TUI, while Claude's own lifecycle hooks externalize the
         // resulting turn. Supplying the canonical registration as an additional native settings
         // source keeps arbitrary user workspaces untouched and gives every typed st seat the
@@ -2219,7 +2219,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         ensure_no_properties(accountable)?;
         ensure_no_children(accountable)?;
         let person = one_string(accountable)?;
-        if !st3_schema::accountable::person(&person) {
+        if !fractal_schema::accountable::person(&person) {
             return Err(St3Error::new("invalid-accountable-root", "accountable must name one concrete person/NAME"));
         }
     }
@@ -2791,7 +2791,7 @@ fn validate_resource(node: &KdlNode) -> Result<(), St3Error> {
         .ok_or_else(|| St3Error::new("missing-resource-body", "a resource needs a kind"))?;
     reject_unknown_children(body, &["kind"], "resource", "resource")?;
     let kind = required_child_string(body, "kind", "resource")?;
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_resource_kind(&kind)
         .map_err(|error| St3Error::new(error.code, error.message))?;
     Ok(())
@@ -4874,7 +4874,7 @@ version 2
         assert!(argv.iter().any(|arg| arg == "claude"));
         assert!(
             argv.windows(2)
-                .any(|pair| pair == ["--channels", st_drivers::claude_channel::ST3_CHANNEL])
+                .any(|pair| pair == ["--channels", fractal_drivers::claude_channel::ST3_CHANNEL])
         );
         let settings = argv
             .windows(2)

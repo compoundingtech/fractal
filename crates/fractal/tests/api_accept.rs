@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use st3::api::AppState;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 fn open_descriptors() -> u64 {
@@ -34,7 +34,7 @@ fn set_descriptor_limit(soft: u64) -> u64 {
 
 #[test]
 fn the_api_keeps_serving_after_an_accept_runs_out_of_descriptors() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -75,12 +75,12 @@ async fn descriptor_exhaustion_child() {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
-            async move { st3::api::serve_unix(&server_socket, st3::api::router(state)).await },
+            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
         );
     while UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -104,7 +104,7 @@ async fn descriptor_exhaustion_child() {
 
     let health = tokio::time::timeout(
         Duration::from_secs(10),
-        st3::client::Client::new(st3::client::Endpoint::Unix(socket.clone()))
+        fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket.clone()))
             .get::<serde_json::Value>("/v1/health"),
     )
     .await

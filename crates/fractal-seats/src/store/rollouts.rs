@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::rollout::{Operation, Policy, Selection};
-pub use st3_missions::store::rollouts::*;
-pub use st3_missions::store::rollouts::{intake_held, message_allowed, retiring_ask_live};
+pub use fractal_missions::store::rollouts::*;
+pub use fractal_missions::store::rollouts::{intake_held, message_allowed, retiring_ask_live};
 
 pub trait RolloutsStore {
     /// The seat's current intake hold, if a rollout holds its independent mail.
@@ -94,7 +94,7 @@ impl RolloutsStore for Store {
             // native binding in this transaction; an explicit request still requires positive
             // runtime exit before replacement and never falls back to a fresh conversation.
             let ended_binding = if selected.manual && ended && carry.is_none() {
-                tx.query_row(/* sqlite-large-value: allow-for-now lv-hc5b7020e20a0 owner=st3_seats::store::rollouts TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT body FROM claims WHERE subject=?1 AND kind='harness.session-file'
+                tx.query_row(/* sqlite-large-value: allow-for-now lv-h00f591bcc6ae owner=fractal_seats::store::rollouts TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT body FROM claims WHERE subject=?1 AND kind='harness.session-file'
                     AND json_extract(body,'$.fields.incarnation_id')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                     params![subject,incarnation], |row| row.get::<_,String>(0)).optional().map_err(internal)?
                     .map(|body| serde_json::from_str::<Value>(&body)).transpose().map_err(internal)?

@@ -2,8 +2,8 @@
 import Foundation
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-public let st3ClientAPIVersion = "st3.client.v0"
-public let st3ClientTerminalSubprotocol = "st3.client.terminal.v0"
+public let fractalClientAPIVersion = "st3.client.v0"
+public let fractalClientTerminalSubprotocol = "st3.client.terminal.v0"
 
 /// Current advisory text; never authority, approval, assignment or an answer to an ask.
 public struct DirectiveNote: Codable, Sendable, Equatable {
@@ -646,7 +646,7 @@ public struct Fence: Codable, Sendable {
 }
 public struct ActionRequest: Codable, Sendable {
     public let apiVersion: String; public let id: String; public let type: ActionType; public let idempotencyKey: String; public let fence: Fence; public let parameters: [String: JSONValue]
-    private init(id: String, type: ActionType, idempotencyKey: String, fence: Fence, parameters: [String: JSONValue]) { self.apiVersion = st3ClientAPIVersion; self.id = id; self.type = type; self.idempotencyKey = idempotencyKey; self.fence = fence; self.parameters = parameters }
+    private init(id: String, type: ActionType, idempotencyKey: String, fence: Fence, parameters: [String: JSONValue]) { self.apiVersion = fractalClientAPIVersion; self.id = id; self.type = type; self.idempotencyKey = idempotencyKey; self.fence = fence; self.parameters = parameters }
     private init<Parameters: Encodable>(id: String, type: ActionType, idempotencyKey: String, fence: Fence, typedParameters: Parameters) throws {
         let encoded = try JSONEncoder().encode(typedParameters)
         guard case .object(let parameters) = try JSONDecoder().decode(JSONValue.self, from: encoded) else { throw EncodingError.invalidValue(typedParameters, .init(codingPath: [], debugDescription: "Action parameters must encode as an object")) }

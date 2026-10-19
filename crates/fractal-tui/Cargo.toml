@@ -1,11 +1,11 @@
 [package]
-name = "stui"
+name = "fractal-tui"
 version = "0.1.0"
 edition = "2024"
 description = "Smalltalk terminal UI library"
 license = "MIT"
-# The workspace's build identity stamp, shared with st2 and st-drivers (see src/version.rs).
-build = "../st-drivers/build.rs"
+# The workspace's build identity stamp, shared with fractal-legacy-runner and fractal-drivers (see src/version.rs).
+build = "../fractal-drivers/build.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -13,11 +13,11 @@ anyhow = "1"
 crossterm = "0.29"
 ratatui = { workspace = true }
 smallclaims = { path = "../smallclaims" }
-st3-client = { path = "../st3-client" }
-st3-terminal-direct = { path = "../st3-terminal-direct" }
-st3-feed = { path = "../st3-feed" }
-st3-conversation-ui = { path = "../st3-conversation-ui", features = ["ratatui"] }
-st3-ui-model = { path = "../st3-ui-model" }
+fractal-client = { path = "../fractal-client" }
+fractal-terminal-direct = { path = "../fractal-terminal-direct" }
+fractal-feed = { path = "../fractal-feed" }
+fractal-conversation-ui = { path = "../fractal-conversation-ui", features = ["ratatui"] }
+fractal-ui-model = { path = "../fractal-ui-model" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 uuid = { version = "1", features = ["v7"] }
 signal-hook = "0.3"
@@ -46,8 +46,8 @@ name = "phone_client"
 test = true
 
 [dev-dependencies]
-st3-schema = { path = "../st3-schema" }
-st3 = { package = "st3-daemon", path = "../st3-daemon" }
+fractal-schema = { path = "../fractal-schema" }
+fractal-daemon = { path = "../fractal-daemon" }
 tempfile = "3"
 axum = { version = "0.8", features = ["ws"] }
 portable-pty = "0.9"

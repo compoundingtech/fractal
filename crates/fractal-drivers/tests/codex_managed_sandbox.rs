@@ -13,7 +13,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use st_drivers::access::{CODEX_PROFILE, codex_profile};
+use fractal_drivers::access::{CODEX_PROFILE, codex_profile};
 
 fn available() -> bool {
     let ok = |program: &str| {

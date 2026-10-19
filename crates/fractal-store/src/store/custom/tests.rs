@@ -118,7 +118,7 @@ fn custom_offline_registration_conflicts_and_indexed_reads() {
         let plan = a
             .readers
             .get()
-            .prepare(/* sqlite-large-value: allow-for-now lv-h249a304d552a owner=st3_store::store::custom::tests TODO=trace-statement-and-value-representation */ sql)
+            .prepare(/* sqlite-large-value: allow-for-now lv-h842c39f15807 owner=fractal_store::store::custom::tests TODO=trace-statement-and-value-representation */ sql)
             .unwrap()
             .query_map([], |r| r.get::<_, String>(3))
             .unwrap()

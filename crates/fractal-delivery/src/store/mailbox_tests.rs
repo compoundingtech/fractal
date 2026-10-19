@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_store::store::mailbox_tests::*;
+pub use fractal_store::store::mailbox_tests::*;
 use crate::DeliveryStore;
 use crate::mailbox::*;
 use crate::store::Store;

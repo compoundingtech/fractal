@@ -27,7 +27,7 @@ use std::process::Command;
 #[test]
 #[ignore = "subprocess fixture for the cleanup regression"]
 fn cleanup_fixture() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let evidence = std::env::var_os("ST3_CLEANUP_FIXTURE").expect("regression fixture directory");
@@ -59,7 +59,7 @@ fn cleanup_fixture() {
 
 #[test]
 fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -80,7 +80,7 @@ fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
 
 #[test]
 fn interrupted_tests_keep_logs_and_pending_observations() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -212,7 +212,7 @@ fn canary(harness: &str, scenario: &str) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn first_claim_socket_denial_names_cause_and_recovers_on_an_isolated_daemon() {
-    if st3::test_support::supervise_test() { return; }
+    if fractal_daemon::test_support::supervise_test() { return; }
     canary("codex", "claim-socket-denied");
 }
 
@@ -220,7 +220,7 @@ fn first_claim_socket_denial_names_cause_and_recovers_on_an_isolated_daemon() {
 /// rejects any launch path that mentions it, and a random name holds those letters by chance.
 #[test]
 fn the_canary_never_names_its_root_after_st2() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -249,42 +249,42 @@ macro_rules! harness {
         mod $module {
             #[test]
             fn a_fresh_seat_boots() {
-                if st3::test_support::supervise_test() {
+                if fractal_daemon::test_support::supervise_test() {
                 return;
             }
                 super::canary($harness, "fresh");
             }
             #[test]
             fn a_restarted_seat_boots() {
-                if st3::test_support::supervise_test() {
+                if fractal_daemon::test_support::supervise_test() {
                 return;
             }
                 super::canary($harness, "restart");
             }
             #[test]
             fn a_seat_boots_after_the_daemon_restarts_with_its_predecessor_still_observed() {
-                if st3::test_support::supervise_test() {
+                if fractal_daemon::test_support::supervise_test() {
                 return;
             }
                 super::canary($harness, "daemon-restart");
             }
             #[test]
             fn a_driver_re_execs_into_a_new_binary_and_still_takes_a_message() {
-                if st3::test_support::supervise_test() {
+                if fractal_daemon::test_support::supervise_test() {
                 return;
             }
                 super::canary($harness, "reexec");
             }
             #[test]
             fn five_seats_launching_at_once_all_boot() {
-                if st3::test_support::supervise_test() {
+                if fractal_daemon::test_support::supervise_test() {
                 return;
             }
                 super::canary($harness, "concurrent");
             }
             #[test]
             fn a_suspended_seat_resumes_its_own_native_session() {
-                if st3::test_support::supervise_test() {
+                if fractal_daemon::test_support::supervise_test() {
                 return;
             }
                 super::canary($harness, "suspend");
@@ -316,7 +316,7 @@ fn claude_permanent_channel_failure_parks_after_three_attempts_without_a_restart
 
 #[test]
 fn omp_when_idle_replacement_binds_its_original_native_session() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     canary("omp", "when-idle");
@@ -324,7 +324,7 @@ fn omp_when_idle_replacement_binds_its_original_native_session() {
 
 #[test]
 fn codex_transcript_utf8_and_discovery_failures_preserve_delivery_and_private_warnings() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     canary("codex", "utf8");
@@ -332,7 +332,7 @@ fn codex_transcript_utf8_and_discovery_failures_preserve_delivery_and_private_wa
 
 #[test]
 fn an_imported_codex_session_binds_exactly_on_first_launch_and_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     canary("codex", "import");
@@ -340,7 +340,7 @@ fn an_imported_codex_session_binds_exactly_on_first_launch_and_restart() {
 
 #[test]
 fn codex_idle_minute_makes_no_hold_calls_then_delivers_with_hold_release_and_expiry() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     canary("codex", "idle-hold");
@@ -348,7 +348,7 @@ fn codex_idle_minute_makes_no_hold_calls_then_delivers_with_hold_release_and_exp
 
 #[test]
 fn opencode_idle_minute_makes_no_hold_calls_then_delivers_with_hold_release_and_expiry() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     canary("opencode", "idle-hold");

@@ -1555,7 +1555,7 @@ fn mission_publication_pages_keep_the_existing_byte_budget_and_resume_after_retu
 /// refolds exactly the missions that read it.
 #[test]
 fn gate_and_agent_changes_refold_the_missions_that_read_them() {
-    use st3_ui_model::missions::Gate;
+    use fractal_ui_model::missions::Gate;
     let gate = |mission: &str| Gate { mission: mission.into(), step: None, person: "person/avery".into() };
     assert_eq!(
         missions_of_changed_gates(&[gate("mission/a"), gate("mission/b")], &[gate("mission/b"), gate("mission/c")]),

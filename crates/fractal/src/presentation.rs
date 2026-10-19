@@ -6,8 +6,8 @@ use std::io::IsTerminal as _;
 
 use serde_json::Value;
 #[cfg(test)]
-use st3::model::SubjectStatus;
-use st3::model::{
+use fractal_daemon::model::SubjectStatus;
+use fractal_daemon::model::{
     AttentionItemView, MissionInputKind, MissionRunView, RevisionCutover, RevisionProposalView,
     RunGenerationView, StepRunView,
 };
@@ -136,7 +136,7 @@ pub(crate) fn render_mission_run(
     }
     let _ = writeln!(output, "REVISION  {}", selected.revision);
     if let Some(provenance) = &selected.provenance {
-        output.push_str(&st3::provenance::render(provenance));
+        output.push_str(&fractal_daemon::provenance::render(provenance));
     }
     let _ = writeln!(output, "GENERATION {}", selected.generation);
     let _ = writeln!(output, "WORKSPACE {}", selected.workspace);
@@ -145,7 +145,7 @@ pub(crate) fn render_mission_run(
         let wait = selected
             .steps
             .iter()
-            .find(|step| step.step == st3::mission::AFTER_RUN_STEP)
+            .find(|step| step.step == fractal_daemon::mission::AFTER_RUN_STEP)
             .map_or("waiting", |step| match step.status.as_str() {
                 "completed" | "failed" | "cancelled" => step.status.as_str(),
                 _ => "waiting",
@@ -855,13 +855,13 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
         );
     }
     if step.execution_waited_ms > 0 || step.execution_paused_until_unix_ms.is_some() {
-        let budget = u128::from(st3::store::MAX_STEP_WAIT_MS);
+        let budget = u128::from(fractal_daemon::store::MAX_STEP_WAIT_MS);
         let _ = writeln!(
             output,
             "  Wait budget  {} used of {} · {} left",
-            st3::store::format_wait_span(step.execution_waited_ms),
-            st3::store::format_wait_span(budget),
-            st3::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
+            fractal_daemon::store::format_wait_span(step.execution_waited_ms),
+            fractal_daemon::store::format_wait_span(budget),
+            fractal_daemon::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
         );
     }
     if let Some(wake) = &step.wake {
@@ -1472,7 +1472,7 @@ pub(crate) fn relative_time(value: u128, now: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3::model::{LoopRunView, MissionRunInput, UnderSpec};
+    use fractal_daemon::model::{LoopRunView, MissionRunInput, UnderSpec};
 
     fn step(subject: &str, path: &str, status: &str) -> StepRunView {
         StepRunView {
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn work_detail_displays_assistant_answer_attribution() {
         let mut work = step("step-run/demo/build", "build", "ready");
-        work.person_answers.push(st3::model::PersonAnswerView {
+        work.person_answers.push(fractal_daemon::model::PersonAnswerView {
             acted_for: None,
             sender_class: Some("external-assistant".into()),
             assistant_grant_id: Some("assistant-grant/test".into()),
@@ -1707,7 +1707,7 @@ mod tests {
             step: None,
             targets: vec!["doc/fabric/report@abc".into()],
             requested_at_unix_ms: 60_000,
-            actions: vec![st3::model::AttentionActionView {
+            actions: vec![fractal_daemon::model::AttentionActionView {
                 label: "resolve".into(),
                 argv: vec![
                     "st3".into(),
@@ -1921,7 +1921,7 @@ mod tests {
         let mut shipped = run("mission-run/demo/run", None, Vec::new());
         shipped.status = "completed".into();
         shipped.phase = "terminal".into();
-        shipped.outcome = Some(st3::model::MissionRunOutcomeView {
+        shipped.outcome = Some(fractal_daemon::model::MissionRunOutcomeView {
             status: "completed".into(),
             previous_status: Some("failed".into()),
             reason: "the change shipped after its gate was fixed".into(),

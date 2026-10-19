@@ -5,7 +5,7 @@ import { SloCounters, SLO_BUCKET_UPPER_MS, SLO_COUNTERS, SLO_HISTOGRAMS, SLO_TAR
 const empty = window => new SloCounters().line(window, 'host-test', 'build-test');
 
 test('phone summary and targets match the Rust reference exactly', () => {
-  const rust = JSON.parse(readFileSync(new URL('../../../../crates/stui/tests/fixtures/quality-hour.json', import.meta.url), 'utf8'));
+  const rust = JSON.parse(readFileSync(new URL('../../../../crates/fractal-tui/tests/fixtures/quality-hour.json', import.meta.url), 'utf8'));
   assert.deepEqual(empty(0), rust);
   assert.equal(isQualityHour(rust), true);
   assert.deepEqual(Object.keys(rust.counters).sort(), [...SLO_COUNTERS].sort());

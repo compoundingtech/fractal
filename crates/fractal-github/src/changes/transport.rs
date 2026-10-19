@@ -612,7 +612,7 @@ impl Repository {
             expected_tree: record.source_tree.clone(),
             acquired_at: record.updated_at.clone(),
         });
-        let candidate = self.prepare(/* sqlite-large-value: allow-for-now lv-h576f1864e881 owner=st3_github::changes::transport TODO=trace-statement-and-value-representation */ record)?;
+        let candidate = self.prepare(/* sqlite-large-value: allow-for-now lv-h134b879d33f1 owner=fractal_github::changes::transport TODO=trace-statement-and-value-representation */ record)?;
         transition(Some(current), &candidate)?;
         Ok(candidate)
     }
@@ -636,7 +636,7 @@ impl Repository {
         let mut record = successor(current, worker)?;
         record.claim = None;
         record.next = next;
-        let candidate = self.prepare(/* sqlite-large-value: allow-for-now lv-h614981cfad64 owner=st3_github::changes::transport TODO=trace-statement-and-value-representation */ record)?;
+        let candidate = self.prepare(/* sqlite-large-value: allow-for-now lv-h4a8539ae91ab owner=fractal_github::changes::transport TODO=trace-statement-and-value-representation */ record)?;
         transition(Some(current), &candidate)?;
         Ok(candidate)
     }
@@ -663,7 +663,7 @@ impl Repository {
         let mut record = successor(current, actor)?;
         record.state = state;
         record.next = next;
-        let candidate = self.prepare(/* sqlite-large-value: allow-for-now lv-h09cb6ab9a824 owner=st3_github::changes::transport TODO=trace-statement-and-value-representation */ record)?;
+        let candidate = self.prepare(/* sqlite-large-value: allow-for-now lv-hc645e3688606 owner=fractal_github::changes::transport TODO=trace-statement-and-value-representation */ record)?;
         transition(Some(current), &candidate)?;
         Ok(candidate)
     }

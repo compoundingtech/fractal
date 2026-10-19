@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_store::store::mailbox_lease_tests_shared_seats::*;
+pub use fractal_store::store::mailbox_lease_tests_shared_seats::*;
 use crate::store::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};

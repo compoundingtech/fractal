@@ -4,10 +4,10 @@ use super::*;
 use crate::model::MemberSpec;
 use serde::Deserialize;
 use std::cell::RefCell;
-pub use st3_attention::store::owned_sets::*;
-pub use st3_attention::store::owned_sets::{Member, Options, Plan, Preview, Request, Revision, Source, View, claim, commit_tx, conflicts_at, desired_at};
-pub use st3_attention::store::owned_sets::{effective_members, guard_member, guard_mission_start, manual_member, manual_member_at, one_shot_retirement_owner, owner, owners_at, plan_tx, project_tx, refuse_unmanaged, selected};
-pub use st3_attention::store::owned_sets::{subject, validate_apply, validate_receipt};
+pub use fractal_attention::store::owned_sets::*;
+pub use fractal_attention::store::owned_sets::{Member, Options, Plan, Preview, Request, Revision, Source, View, claim, commit_tx, conflicts_at, desired_at};
+pub use fractal_attention::store::owned_sets::{effective_members, guard_member, guard_mission_start, manual_member, manual_member_at, one_shot_retirement_owner, owner, owners_at, plan_tx, project_tx, refuse_unmanaged, selected};
+pub use fractal_attention::store::owned_sets::{subject, validate_apply, validate_receipt};
 
 pub const STAGED_SUBJECTS_QUERY: &str =
     "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.owned_set') IS NOT NULL";
@@ -157,7 +157,7 @@ impl OwnedSetsStore for Store {
                 // Empty ownership uses one receipt and one staged-subject query for any roster;
                 // statement count alone does not bound rows or CPU for nonempty history.
                 let staged = connection
-                    .prepare(/* sqlite-large-value: allow-for-now lv-h09f989cb04f2 owner=st3_evidence::store::owned_sets TODO=trace-statement-and-value-representation */ STAGED_SUBJECTS_QUERY)
+                    .prepare(/* sqlite-large-value: allow-for-now lv-h99958058d413 owner=fractal_evidence::store::owned_sets TODO=trace-statement-and-value-representation */ STAGED_SUBJECTS_QUERY)
                     .map_err(internal)?
                     .query_map([], |row| row.get::<_, String>(0))
                     .map_err(internal)?

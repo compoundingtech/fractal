@@ -50,7 +50,7 @@ pub async fn logs_session(
         )));
     }
     let runtime =
-        st_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+        fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let mut generation = if query.previous {
@@ -62,9 +62,9 @@ pub async fn logs_session(
                 .observe(&session.runtime_id)
                 .map_err(ApiError::internal)?
             {
-                Some(st_runtime::ExecObservation::Running(generation))
-                | Some(st_runtime::ExecObservation::Exited(generation)) => Some(generation),
-                Some(st_runtime::ExecObservation::Indeterminate(reason)) => {
+                Some(fractal_runtime::ExecObservation::Running(generation))
+                | Some(fractal_runtime::ExecObservation::Exited(generation)) => Some(generation),
+                Some(fractal_runtime::ExecObservation::Indeterminate(reason)) => {
                     return Err(ApiError::internal(reason));
                 }
                 None => None,
@@ -97,15 +97,15 @@ pub async fn logs_session(
                 .observe(&session.runtime_id)
                 .map_err(ApiError::internal)?
             {
-                Some(st_runtime::ExecObservation::Running(latest)) => {
+                Some(fractal_runtime::ExecObservation::Running(latest)) => {
                     generation = latest;
                     true
                 }
-                Some(st_runtime::ExecObservation::Exited(latest)) => {
+                Some(fractal_runtime::ExecObservation::Exited(latest)) => {
                     generation = latest;
                     false
                 }
-                Some(st_runtime::ExecObservation::Indeterminate(reason)) => {
+                Some(fractal_runtime::ExecObservation::Indeterminate(reason)) => {
                     return Err(ApiError::internal(reason));
                 }
                 None => false,

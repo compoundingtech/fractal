@@ -25,10 +25,10 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
     });
     let pty_root = state.pty_root.clone();
     let priority = crate::api::read_deadline::spawn_blocking(move || {
-        let observations = st_runtime::PtyRuntime::new(pty_root)
+        let observations = fractal_runtime::PtyRuntime::new(pty_root)
             .snapshot()
             .unwrap_or_default();
-        st_runtime::priority_report(&observations)
+        fractal_runtime::priority_report(&observations)
     });
     let token = crate::resource::github_auth().await;
     let writer_wait = smallclaims::sqlite::telemetry::current_request();

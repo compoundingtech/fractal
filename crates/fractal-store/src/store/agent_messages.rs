@@ -4,7 +4,7 @@ use super::*;
 
 
 pub const DAY_MS: u64 = 86_400_000;
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6d2b3ebed355 owner=st3_store::store::agent_messages TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h034abd9b21c6 owner=fractal_store::store::agent_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS agent_message_sends (
     subject TEXT PRIMARY KEY,
     sent_ms INTEGER NOT NULL,
@@ -45,7 +45,7 @@ END;
 "#;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h07fcf2b8b85c owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ SCHEMA)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1f8cdce4d41f owner=fractal_store::store::agent_messages TODO=trace-statement-and-value-representation */ SCHEMA)?;
     Ok(())
 }
 
@@ -66,12 +66,12 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     coordination::initialize(transaction)?;
     // A corrupt historical body must leave counts incomplete without preventing startup.
     // Roll back this entire bounded page, including any counts preceding the bad body.
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-ha567eaf1f68b owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ "SAVEPOINT coordination_startup")?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-he4fdf3cc8fea owner=fractal_store::store::agent_messages TODO=trace-statement-and-value-representation */ "SAVEPOINT coordination_startup")?;
     if let Err(error) = coordination::backfill(transaction) {
-        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ab404618ea0 owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ "ROLLBACK TO coordination_startup")?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4aa5d548696d owner=fractal_store::store::agent_messages TODO=trace-statement-and-value-representation */ "ROLLBACK TO coordination_startup")?;
         eprintln!("st3: WARN coordination bootstrap remains incomplete: {error}");
     }
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf3a17772f919 owner=st3_store::store::agent_messages TODO=trace-statement-and-value-representation */ "RELEASE coordination_startup")?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h09bafe715dba owner=fractal_store::store::agent_messages TODO=trace-statement-and-value-representation */ "RELEASE coordination_startup")?;
     Ok(())
 }
 
@@ -183,18 +183,18 @@ pub fn flush_with_coordination(
             .optional()?;
         if count_sends && current != desired {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hf5d965fad59a owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM agent_message_sends WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h35d0067b8c2e owner=fractal_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM agent_message_sends WHERE subject=?1",
                 [&subject],
             )?;
             if let Some((at, recipient)) = desired {
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hc00cfd430db8 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO agent_message_sends VALUES(?1,?2,?3)",
+                    /* sqlite-large-value: allow-for-now lv-h7489e0a93949 owner=fractal_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO agent_message_sends VALUES(?1,?2,?3)",
                     params![subject, at, recipient],
                 )?;
             }
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h7dc294f64b3e owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_agent_message_pending WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h3dd023594255 owner=fractal_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_agent_message_pending WHERE subject=?1",
             [&subject],
         )?;
     }

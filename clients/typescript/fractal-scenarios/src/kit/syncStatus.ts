@@ -1,5 +1,5 @@
 /**
- * The portable Amendment v2 `SyncStatus` of `@st3/sdk/effect` (`sync-status.ts`). The SDK keeps a
+ * The portable Amendment v2 `SyncStatus` of `@fractal/sdk/effect` (`sync-status.ts`). The SDK keeps a
  * type-level assertion that this copy equals its own; instants are epoch ms.
  */
 export type SyncStage = 'queued' | 'resolving' | 'routing' | 'reading'

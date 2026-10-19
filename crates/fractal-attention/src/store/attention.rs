@@ -1,7 +1,7 @@
 //! The part of `store::attention` that moved up from st3-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_seats::store::attention::*;
+pub use fractal_seats::store::attention::*;
 
 /// Why `owner` has no human review waiting, in words for the person who tried to answer it:
 /// its newest request was answered (how, and by whom), no longer matches the owner, or st never
@@ -9,7 +9,7 @@ pub use st3_seats::store::attention::*;
 fn human_review_refusal_tx(connection: &Connection, owner: &str) -> Result<String> {
     let request = connection
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-hf97b8354cf37 owner=st3_attention::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-h0c96917a1e85 owner=fractal_attention::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT request.id, request.store_index, request.batch_id, request.subject,
                         request.kind, request.origin, request.actor, request.body,
                         request.predecessors, request.accepted_at_unix_ms
@@ -133,7 +133,7 @@ impl AttentionStore for Store {
             &format!("WHERE mission_runs.mission_id IN ({placeholders}) ORDER BY mission_runs.created_at_unix_ms, mission_runs.id"),
         )).unwrap_or_else(|| MISSION_RUN_HEADER_SELECT.to_owned());
         let mut headers = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-h66a0bce27842 owner=st3_attention::store::attention TODO=trace-statement-and-value-representation */ &sql)?
+            .prepare(/* sqlite-large-value: allow-for-now lv-h6705446fb886 owner=fractal_attention::store::attention TODO=trace-statement-and-value-representation */ &sql)?
             .query_map(
                 rusqlite::params_from_iter(
                     ids.into_iter()
@@ -155,7 +155,7 @@ impl AttentionStore for Store {
              FROM step_runs {} ORDER BY created_at_unix_ms, step_path",
             placeholders.as_ref().map(|p| format!("WHERE generation_id IN (SELECT current_generation_id FROM mission_runs WHERE mission_id IN ({p}))")).unwrap_or_default(),
         );
-        let mut steps = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8a8538a99cae owner=st3_attention::store::attention TODO=trace-statement-and-value-representation */ &steps_sql)?;
+        let mut steps = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc115c803cd3a owner=fractal_attention::store::attention TODO=trace-statement-and-value-representation */ &steps_sql)?;
         for row in steps.query_map(
             rusqlite::params_from_iter(
                 ids.into_iter()
@@ -179,7 +179,7 @@ impl AttentionStore for Store {
     fn discard_desired_owned_by(&self, owner_run: &str) -> Result<usize> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h201b3810ef97 owner=st3_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1", [owner_run])?;
+        let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h3507293382fe owner=fractal_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1", [owner_run])?;
         transaction.commit()?;
         Ok(removed)
     }
@@ -233,7 +233,7 @@ impl AttentionStore for Store {
             include_resolved: bool,
         ) -> Result<Vec<AttentionRequestView>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb13c5fa65f54 owner=st3_attention::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0ea1cc60275f owner=fractal_attention::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT DISTINCT subject FROM claims
              WHERE kind='attention.requested'
                AND (?1 IS NULL OR json_extract(body, '$.fields.reviewer')=?1)
@@ -258,7 +258,7 @@ impl AttentionStore for Store {
             origin: &str,
         ) -> Result<Vec<AttentionRequestView>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf9332f2649e7 owner=st3_attention::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hdb4d4a981edf owner=fractal_attention::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT request.subject FROM claims request
              WHERE request.kind='attention.requested'
                AND request.actor=?1

@@ -1,7 +1,7 @@
 use crate::ProjectionDivergenceStore;
 use crate::store::projection_divergence::{DivergenceCheck, projection_divergence_subject};
-use st3_store::store::message_point_qualification_tests_shared_delivery::*;
-use st3_store::store::message_point_qualification_tests_shared_delivery::{batch, claim, compare_core_with_real_oracles, fixture, replica, sent};
+use fractal_store::store::message_point_qualification_tests_shared_delivery::*;
+use fractal_store::store::message_point_qualification_tests_shared_delivery::{batch, claim, compare_core_with_real_oracles, fixture, replica, sent};
 
 
 /// Two members that hold the same envelopes and agree on every projection.
@@ -49,7 +49,7 @@ fn project_wrongly(store: &Store) {
         .lock()
         .unwrap()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h081dcafc1546 owner=st3_delivery::store::projection_divergence_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE wrong_desired AS SELECT * FROM desired WHERE subject='exec/work';
+            /* sqlite-large-value: allow-for-now lv-hc981b0645ac6 owner=fractal_delivery::store::projection_divergence_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE wrong_desired AS SELECT * FROM desired WHERE subject='exec/work';
              PRAGMA foreign_keys=OFF;
              DELETE FROM desired WHERE subject='exec/work';
              PRAGMA foreign_keys=ON;",
@@ -63,7 +63,7 @@ fn project_rightly(store: &Store) {
         .lock()
         .unwrap()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hec149eda5d50 owner=st3_delivery::store::projection_divergence_tests TODO=bound-or-reference-values-and-reclamation */ "PRAGMA foreign_keys=OFF;
+            /* sqlite-large-value: allow-for-now lv-h213ce5834efa owner=fractal_delivery::store::projection_divergence_tests TODO=bound-or-reference-values-and-reclamation */ "PRAGMA foreign_keys=OFF;
              INSERT INTO desired SELECT * FROM wrong_desired;
              PRAGMA foreign_keys=ON;
              DROP TABLE wrong_desired;",

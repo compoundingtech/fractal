@@ -2,9 +2,9 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use smallclaims::store::canonical;
-use st3_schema::directive_notes::KIND;
-pub use st3_missions::store::directive_notes::*;
-pub use st3_missions::store::directive_notes::{DirectiveNote, create_schema, current, flush, rebuild, validate_publication};
+use fractal_schema::directive_notes::KIND;
+pub use fractal_missions::store::directive_notes::*;
+pub use fractal_missions::store::directive_notes::{DirectiveNote, create_schema, current, flush, rebuild, validate_publication};
 #[cfg(test)]
 mod tests;
 

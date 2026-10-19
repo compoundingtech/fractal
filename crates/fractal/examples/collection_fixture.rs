@@ -1,7 +1,7 @@
 //! Generate invented benchmark data for the ignored cold-open snapshot harness.
 //! This starts no reconciler or agent runtime, and reads no production store.
 #![allow(dead_code, unused_imports)]
-use st3::PersonWorkStore;
+use fractal_daemon::PersonWorkStore;
 #[path = "../tests/daemon_bench.rs"]
 mod daemon_bench;
 
@@ -13,13 +13,13 @@ fn main() {
     // replication setup is not part of an uncontended collection snapshot.
     let path = keep.join(format!("generated-{scale}.sqlite3"));
     assert!(!path.exists(), "use a fresh synthetic fixture directory");
-    let store = st3::store::Store::open(&path, daemon_bench::NODE).unwrap();
+    let store = fractal_daemon::store::Store::open(&path, daemon_bench::NODE).unwrap();
     store.bind_fleet(daemon_bench::FLEET).unwrap();
     daemon_bench::generate(&store, "host", scale);
     // The historical sampler closes almost every person request. Keep enough
     // current requests to exercise an attention frame, not just its empty overhead.
     for request in 0..(28.0 * scale).round() as usize {
-        store.ask_person(&st3::model::PersonAskRequest {
+        store.ask_person(&fractal_daemon::model::PersonAskRequest {
             legacy_request: None,
             person: "person/bench-operator".into(),
             title: format!("Invented open decision {request}"),

@@ -5,8 +5,8 @@ use crate::MissionsStore;
 use crate::EvidenceSeatsStore;
 use crate::RosterAdmissionStore;
 use super::*;
-pub use st3_missions::store::seats::*;
-pub use st3_missions::store::seats::{EndedDeclaration};
+pub use fractal_missions::store::seats::*;
+pub use fractal_missions::store::seats::{EndedDeclaration};
 
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
@@ -551,7 +551,7 @@ impl SeatsStore for Store {
         // every agent, run and generation claim the store holds and sorts them.
         let connection = self.readers.get();
         Ok(connection
-            .query_row(/* sqlite-large-value: allow-for-now lv-h1c7a9ba5052d owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ AGENT_STATUS_INDEX_QUERY, [snapshot_index], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h14d557b5c002 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ AGENT_STATUS_INDEX_QUERY, [snapshot_index], |row| row.get(0))
             .optional()?
             .unwrap_or_default())
     }
@@ -670,7 +670,7 @@ impl SeatsStore for Store {
             return Ok((changed > bound).then(|| "cards changed".to_owned()));
         }
         let connection = self.readers.get();
-        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfd9f922e8a23 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0a36171e464 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         let names = if history { names } else {
@@ -1005,7 +1005,7 @@ impl SeatsStore for Store {
                 if delta.membership {
                     crate::otel::roster_phase("membership", || -> Result<()> {
                     let connection = self.readers.get();
-                    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfb272dd67ce4 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+                    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h19fe7faeaaf7 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                         .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
@@ -1045,7 +1045,7 @@ impl SeatsStore for Store {
                     }
                     (Some(covered), None) => {
                         let connection = self.readers.get();
-                        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h138767b6ea73 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+                        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc5cb621b4eae owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                         let names = if history { names } else {
@@ -1483,7 +1483,7 @@ impl SeatsStore for Store {
         loop {
             let connection = self.connection.write_background();
             let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hb6f808101d0e owner=st3_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_usage_responses WHERE rowid IN (
+                /* sqlite-large-value: allow-for-now lv-h2d7bbab54fbd owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_usage_responses WHERE rowid IN (
                     SELECT rowid FROM local_usage_responses WHERE observed_at_unix_ms < ?1 LIMIT ?2
                  )",
                 params![older_than_unix_ms.min(i64::MAX as u128) as i64, chunk],
@@ -1538,7 +1538,7 @@ impl SeatsStore for Store {
         let mut names = match owner {
             Some(owner) => BTreeSet::from([owner.to_owned()]),
             None => connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf9e63598443d owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6172141892ca owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RUNTIME_SUBJECTS)?
                 .query_map([index], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
@@ -1575,7 +1575,7 @@ impl SeatsStore for Store {
 
     fn agent_declaration_revisions(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h21f0cb70fa1b owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he9f0b095e150 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.id FROM claims WHERE claims.subject=?1 AND claims.kind='intent.desired'
              ORDER BY {CANONICAL_ORDER_DESC}"
         ))?;
@@ -1649,7 +1649,7 @@ impl SeatsStore for Store {
 
     fn retired_owned_intake_subjects(&self) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hccafb3cead70 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ RETIRED_OWNED_INTAKE_SUBJECTS)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h18348778d982 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RETIRED_OWNED_INTAKE_SUBJECTS)?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<BTreeSet<_>, _>>()
@@ -1701,7 +1701,7 @@ impl SeatsStore for Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h119ee9ffb14d owner=st3_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
+            /* sqlite-large-value: allow-for-now lv-h67815d20ea1f owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
              WHERE owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
@@ -1733,7 +1733,7 @@ impl SeatsStore for Store {
             return Ok(BTreeMap::new());
         }
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7eab0712ab85 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h159388505aca owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM json_each(?1) subjects
              CROSS JOIN (
                  SELECT 'harness.todo.observed' AS kind
@@ -1786,7 +1786,7 @@ impl SeatsStore for Store {
             }
             if current.claim_id != expected { return Err(St3Error::new("stale-fence", "seat declaration changed during transfer")); }
             let latest: String = transaction.query_row(
-                /* sqlite-large-value: allow-for-now lv-hd73d2e95ec85 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                /* sqlite-large-value: allow-for-now lv-hfb124d1f718d owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                 [subject], |row| row.get(0)).map_err(internal)?;
             if latest != operation { return Err(St3Error::new("stale-fence", "another suspension request replaced this move")); }
             let mut desired: DesiredSubject = serde_json::from_value(current_claim.body.clone()).map_err(internal)?;
@@ -2093,8 +2093,8 @@ impl SeatsStore for Store {
         });
         let connection = self.readers.get();
         Ok(connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h858ff9cdbb49 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h468749e75d70 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6d7b507123e6 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h03924d7d5055 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
             .optional()?)
     }
 
@@ -2125,14 +2125,14 @@ impl SeatsStore for Store {
         };
         self.readers
             .get()
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd99655b80d0d owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h538cc3e99f52 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
                 "SELECT accepted_at_unix_ms, store_index
              FROM claims INDEXED BY claims_incarnation_accepted_index
              WHERE subject=?1 AND {INCARNATION_OF_CLAIM}=?2
              ORDER BY CANONICAL_ASC(claims)
              LIMIT 1"
             )))?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h3b11e27821d5 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ params![subject, incarnation], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h2f8f0ac99841 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ params![subject, incarnation], |row| {
                 let time: String = row.get(0)?;
                 Ok((time.parse::<u128>().unwrap_or(u128::MAX), row.get(1)?))
             })

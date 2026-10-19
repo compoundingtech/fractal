@@ -4,8 +4,8 @@ use crate::PublicationFactsStore;
 use super::*;
 use crate::model::MemberSpec;
 use crate::publication::{Interruption, interruption};
-pub use st3_attention::store::publication::*;
-pub use st3_attention::store::publication::{Check, CommitChecks, Guard, check, launched_member};
+pub use fractal_attention::store::publication::*;
+pub use fractal_attention::store::publication::{Check, CommitChecks, Guard, check, launched_member};
 
 pub trait PublicationStore {
     fn publication_cache_epoch(&self) -> Option<(i64, bool)>;
@@ -38,7 +38,7 @@ impl PublicationStore for Store {
                     (SELECT phase=3 FROM local_publication_bootstrap WHERE singleton=1)
                         AND NOT EXISTS(SELECT 1 FROM local_publication_pending)",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hdd8d89a26b06 owner=st3_evidence::store::publication TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-h2865f1f7e276 owner=fractal_evidence::store::publication TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?)
     }
 
     fn publication_launch(
@@ -62,9 +62,9 @@ impl PublicationStore for Store {
 mod tests {
     use super::*;
     use crate::graph::parse_intent;
-    use st3_attention::store::shared::*;
-    use st3_attention::store::publication_tests_shared::*;
-    use st3_attention::store::publication_tests_shared::{declaration, observe, publish};
+    use fractal_attention::store::shared::*;
+    use fractal_attention::store::publication_tests_shared::*;
+    use fractal_attention::store::publication_tests_shared::{declaration, observe, publish};
 
     #[test]
     fn publication_check_stopped_origin_cannot_hide_another_origins_running_seat() {

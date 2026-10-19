@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
-use st_drivers::eval_spec::{Check, JsonScalar, JudgeKind, Spec as EvalSpec};
+use fractal_drivers::eval_spec::{Check, JsonScalar, JudgeKind, Spec as EvalSpec};
 use walkdir::WalkDir;
 
 const WAIT_TEAM_DONE: &[u8] = include_bytes!("../assets/wait-team-done.sh");
@@ -120,8 +120,8 @@ fn migrate_file(args: FileArgs) -> Result<()> {
     warnings.extend(legacy_resource_warnings(&source, &args.input)?);
     let transformed = transform_declaration(&source, None)?;
     let host = "local";
-    let normalized = st3::parse_intent(&transformed, host)?;
-    let runtime_subjects = st3::validate_mission_runtimes(&normalized, host)?;
+    let normalized = fractal_daemon::parse_intent(&transformed, host)?;
+    let runtime_subjects = fractal_daemon::validate_mission_runtimes(&normalized, host)?;
     write_file(&args.output, transformed.as_bytes())?;
     let report = Report {
         schema: "st3-migrate-report.v1",
@@ -192,9 +192,9 @@ fn migrate_catalog(args: TreeArgs) -> Result<()> {
         let documents =
             rewrite_render_documents(&mut transformed, &args.input, &args.output, relative)?;
         report.documents.extend(documents);
-        let normalized = st3::parse_intent(&transformed, &args.host)
+        let normalized = fractal_daemon::parse_intent(&transformed, &args.host)
             .with_context(|| format!("validate transformed {}", input.display()))?;
-        let runtime_subjects = st3::validate_mission_runtimes(&normalized, &args.host)
+        let runtime_subjects = fractal_daemon::validate_mission_runtimes(&normalized, &args.host)
             .with_context(|| format!("validate deferred runtimes in {}", input.display()))?;
         write_file(&output, transformed.as_bytes())?;
         report.files.push(FileReport {
@@ -218,7 +218,7 @@ fn migrate_evals(args: TreeArgs) -> Result<()> {
     let mut report = new_report("evals", &args);
     for input in eval_definition_files(&args.input)? {
         let source = fs::read_to_string(&input)?;
-        let spec = match st_drivers::eval_spec::parse_spec(&source) {
+        let spec = match fractal_drivers::eval_spec::parse_spec(&source) {
             Ok(spec) if spec.eval.is_some() => spec,
             Ok(_) => continue,
             Err(error) => {
@@ -241,9 +241,9 @@ fn migrate_evals(args: TreeArgs) -> Result<()> {
         )?;
         let (transformed, documents) = transform_eval(&spec, cell, &output_cell, &args.host)?;
         report.documents.extend(documents);
-        let normalized = st3::parse_intent(&transformed, &args.host)
+        let normalized = fractal_daemon::parse_intent(&transformed, &args.host)
             .with_context(|| format!("validate transformed {}", input.display()))?;
-        let runtime_subjects = st3::validate_mission_runtimes(&normalized, &args.host)
+        let runtime_subjects = fractal_daemon::validate_mission_runtimes(&normalized, &args.host)
             .with_context(|| format!("validate deferred runtimes in {}", input.display()))?;
         let output = output_cell.join("eval.kdl");
         write_file(&output, transformed.as_bytes())?;
@@ -272,7 +272,7 @@ fn transform_declaration(source: &str, running: Option<bool>) -> Result<String> 
         .iter()
         .filter(|node| node.name().value() != "version")
         .collect::<Vec<_>>();
-    if version == 2 && st3::parse_intent(source, "local").is_ok() {
+    if version == 2 && fractal_daemon::parse_intent(source, "local").is_ok() {
         return Ok(source.to_owned());
     }
     anyhow::ensure!(
@@ -1067,7 +1067,7 @@ fn slug(value: &str) -> String {
 /// sends as a message because an st harness takes no startup prompt.
 fn write_eval_agent(
     output: &mut String,
-    agent: &st_drivers::eval_spec::SpecAgent,
+    agent: &fractal_drivers::eval_spec::SpecAgent,
     restart: &str,
     host: &str,
 ) -> Option<String> {
@@ -1285,7 +1285,7 @@ fn infer_model(command: &str) -> Option<String> {
         .map(|pair| pair[1].trim_matches(['\'', '"']).to_owned())
 }
 
-fn infer_agent_model(agent: &st_drivers::eval_spec::SpecAgent) -> Option<String> {
+fn infer_agent_model(agent: &fractal_drivers::eval_spec::SpecAgent) -> Option<String> {
     match agent.driver.as_ref() {
         Some(Driver::Claude(driver)) => driver.model.clone(),
         Some(Driver::Codex(driver)) => driver.model.clone(),
@@ -1573,9 +1573,9 @@ agent "worker" {
         )
         .unwrap();
         assert!(translated.starts_with("version 2\n"));
-        let intent = st3::parse_intent(&translated, "local").unwrap();
+        let intent = fractal_daemon::parse_intent(&translated, "local").unwrap();
         let mission = &intent.missions["catalog/host-a.worker"];
-        assert_eq!(mission.state, st3::model::MissionState::Ready);
+        assert_eq!(mission.state, fractal_daemon::model::MissionState::Ready);
         let graph = mission.declarations_kdl.as_deref().unwrap();
         assert!(graph.contains("agent worker"));
         assert!(graph.contains("restart always"));
@@ -1613,8 +1613,8 @@ agent "worker" {
         assert!(!translated.contains("prompt"));
         assert!(translated.contains("exec ding"));
         assert!(translated.contains("argv st3 driver ding"));
-        let intent = st3::parse_intent(&translated, "local").unwrap();
-        let runtimes = st3::validate_mission_runtimes(&intent, "local").unwrap();
+        let intent = fractal_daemon::parse_intent(&translated, "local").unwrap();
+        let runtimes = fractal_daemon::validate_mission_runtimes(&intent, "local").unwrap();
         assert!(runtimes.contains("agent/migration-proof/host-a.worker"));
         assert!(runtimes.contains("exec/migration-proof/host-a.worker/ding"));
     }
@@ -1698,10 +1698,10 @@ agent "worker" {
             Some(true),
         )
         .unwrap();
-        let intent = st3::parse_intent(&translated, "local").unwrap();
+        let intent = fractal_daemon::parse_intent(&translated, "local").unwrap();
         assert_eq!(
             intent.missions["catalog/host-a.worker"].state,
-            st3::model::MissionState::Ready
+            fractal_daemon::model::MissionState::Ready
         );
         assert!(translated.contains("harness codex"));
         assert!(!translated.contains("harness claude"));
@@ -1715,9 +1715,9 @@ agent "worker" {
             Some(false),
         )
         .unwrap();
-        let intent = st3::parse_intent(&translated, "local").unwrap();
+        let intent = fractal_daemon::parse_intent(&translated, "local").unwrap();
         let mission = &intent.missions["catalog/host-a.worker"];
-        assert_eq!(mission.state, st3::model::MissionState::Retired);
+        assert_eq!(mission.state, fractal_daemon::model::MissionState::Retired);
         assert!(mission.declarations_kdl.is_none());
     }
 
@@ -1804,13 +1804,13 @@ agent "worker" {
               }
             }
         "#;
-        let spec = st_drivers::eval_spec::parse_spec(source).unwrap();
+        let spec = fractal_drivers::eval_spec::parse_spec(source).unwrap();
         let cell = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 
         let (translated, documents) =
             transform_eval(&spec, cell.path(), output.path(), "local").unwrap();
-        let intent = st3::parse_intent(&translated, "local").unwrap();
+        let intent = fractal_daemon::parse_intent(&translated, "local").unwrap();
 
         assert!(documents.is_empty());
         assert!(translated.starts_with("version 2\n"));
@@ -1837,7 +1837,7 @@ agent "worker" {
         assert!(team.gates.iter().any(|gate| {
             matches!(
                 gate,
-                st3::model::GateSpec::Exists { subject, .. }
+                fractal_daemon::model::GateSpec::Exists { subject, .. }
                     if subject == "agent/${ST_MISSION_RUN}/mix.sup"
             )
         }));
@@ -1869,12 +1869,12 @@ agent "worker" {
               judges { judge "result" { exec "true" } }
             }
         "#;
-        let spec = st_drivers::eval_spec::parse_spec(source).unwrap();
+        let spec = fractal_drivers::eval_spec::parse_spec(source).unwrap();
         let cell = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 
         let (translated, _) = transform_eval(&spec, cell.path(), output.path(), "local").unwrap();
-        st3::parse_intent(&translated, "local").unwrap();
+        fractal_daemon::parse_intent(&translated, "local").unwrap();
 
         let run = translated
             .find("title \"Run step setup finishes\"")
@@ -1900,12 +1900,12 @@ agent "worker" {
               judges { judge "result" { exec "true" } }
             }
         "#;
-        let spec = st_drivers::eval_spec::parse_spec(source).unwrap();
+        let spec = fractal_drivers::eval_spec::parse_spec(source).unwrap();
         let cell = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 
         let (translated, _) = transform_eval(&spec, cell.path(), output.path(), "local").unwrap();
-        st3::parse_intent(&translated, "local").unwrap();
+        fractal_daemon::parse_intent(&translated, "local").unwrap();
 
         assert!(!translated.contains("The eval team is running"));
         assert!(translated.contains("Run step setup finishes"));
@@ -1943,10 +1943,10 @@ agent "worker" {
     #[test]
     fn eval_prompt_rewrite_removes_st2_channel_language() {
         let translated = rewrite_eval_prompt(
-            "In a hermetic st2 eval, use st2 message and wait for an st2 channel message.",
+            "In a hermetic st2 eval, use fractal_legacy_runner message and wait for an st2 channel message.",
         );
         assert!(translated.starts_with(
-            "In a hermetic st3 eval, use st3 conversations and end the turn and stay idle."
+            "In a hermetic st3 eval, use fractal_daemon conversations and end the turn and stay idle."
         ));
         assert!(translated.contains("Do not run a blocking wait, trace, poll, or sleep command."));
         assert!(!translated.contains("st2"));

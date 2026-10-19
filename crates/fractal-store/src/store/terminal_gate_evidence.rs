@@ -261,7 +261,7 @@ impl Operator for TerminalGates {
         SOURCE
     }
     fn create_schema(&self, c: &Connection) -> Result<()> {
-        c.execute_batch(/* sqlite-large-value: allow-for-now lv-h9a2e7a2235ad owner=st3_store::store::terminal_gate_evidence TODO=chunk-or-reference-variable-columns */ "CREATE TABLE test_terminal_meta(namespace TEXT PRIMARY KEY, members INTEGER NOT NULL CHECK(members BETWEEN 0 AND 64)) WITHOUT ROWID;
+        c.execute_batch(/* sqlite-large-value: allow-for-now lv-ha0258d7cfb62 owner=fractal_store::store::terminal_gate_evidence TODO=chunk-or-reference-variable-columns */ "CREATE TABLE test_terminal_meta(namespace TEXT PRIMARY KEY, members INTEGER NOT NULL CHECK(members BETWEEN 0 AND 64)) WITHOUT ROWID;
             CREATE TABLE test_terminal_members(namespace TEXT NOT NULL,key TEXT NOT NULL,body TEXT NOT NULL CHECK(length(CAST(body AS BLOB))<=1024),PRIMARY KEY(namespace,key)) WITHOUT ROWID;")?;
         Ok(())
     }
@@ -276,7 +276,7 @@ impl Operator for TerminalGates {
             .optional()?;
         if members.is_none() {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h01fd752aa16e owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_meta(namespace,members) VALUES(?1,0)",
+                /* sqlite-large-value: allow-for-now lv-h602ae8440172 owner=fractal_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_meta(namespace,members) VALUES(?1,0)",
                 [ns.as_str()],
             )?;
             members = Some(0);
@@ -313,10 +313,10 @@ impl Operator for TerminalGates {
                     .context("terminal membership underflow")?;
             }
             if let Some(body) = next {
-                tx.execute(/* sqlite-large-value: allow-for-now lv-h8a8f3dbdefde owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_members VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET body=excluded.body", params![ns.as_str(), row.key, body])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h39dae26dc760 owner=fractal_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_members VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET body=excluded.body", params![ns.as_str(), row.key, body])?;
             } else {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h4c20fd52d95e owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_members WHERE namespace=?1 AND key=?2",
+                    /* sqlite-large-value: allow-for-now lv-h819ecf88387c owner=fractal_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_members WHERE namespace=?1 AND key=?2",
                     params![ns.as_str(), row.key],
                 )?;
             }
@@ -324,7 +324,7 @@ impl Operator for TerminalGates {
         }
         if changed {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h46c4f32a2ee4 owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_terminal_meta SET members=?2 WHERE namespace=?1",
+                /* sqlite-large-value: allow-for-now lv-hf6ff4e4e5676 owner=fractal_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_terminal_meta SET members=?2 WHERE namespace=?1",
                 params![ns.as_str(), count],
             )?;
         }
@@ -341,12 +341,12 @@ impl Operator for TerminalGates {
     }
     fn reclaim(&self, tx: &Transaction<'_>, ns: &Namespace, rows: usize) -> Result<bool> {
         ensure!(rows > 0 && rows <= MEMBERS, "terminal reclaim bound");
-        let removed = tx.execute(/* sqlite-large-value: allow-for-now lv-h1ba9e89b5caa owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_members WHERE namespace=?1 AND key IN (SELECT key FROM test_terminal_members WHERE namespace=?1 ORDER BY key LIMIT ?2)", params![ns.as_str(), rows])?;
+        let removed = tx.execute(/* sqlite-large-value: allow-for-now lv-he098c0dd771a owner=fractal_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_members WHERE namespace=?1 AND key IN (SELECT key FROM test_terminal_members WHERE namespace=?1 ORDER BY key LIMIT ?2)", params![ns.as_str(), rows])?;
         if removed == rows {
             return Ok(false);
         }
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-he891a6f2eced owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_meta WHERE namespace=?1",
+            /* sqlite-large-value: allow-for-now lv-hac01b510f6aa owner=fractal_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_meta WHERE namespace=?1",
             [ns.as_str()],
         )?;
         Ok(true)

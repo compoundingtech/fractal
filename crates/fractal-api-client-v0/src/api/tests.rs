@@ -6,7 +6,7 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 use crate::api::tests_shared::{probe_claim, state};
-use st3_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, get_request, json_request, materialize_run_agents};
+use fractal_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, get_request, json_request, materialize_run_agents};
 
 
 #[cfg(target_os = "linux")]
@@ -31,13 +31,13 @@ async fn bound_actor_refusals_decode_as_client_api_errors() {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let error = st3_client::Client::unix_as(&socket, "person/alex")
+    let error = fractal_client::Client::unix_as(&socket, "person/alex")
         .put_glass(
             "0194b2e0-1234-7000-8000-000000000001",
-            &st3_client::GlassPut {
-                body: st3_client::GlassBody {
+            &fractal_client::GlassPut {
+                body: fractal_client::GlassBody {
                     name: "Main".into(),
-                    layout: st3_client::GlassLayout::Group { tabs: vec![] },
+                    layout: fractal_client::GlassLayout::Group { tabs: vec![] },
                 },
                 base_revision: None,
             },
@@ -46,10 +46,10 @@ async fn bound_actor_refusals_decode_as_client_api_errors() {
         .await
         .unwrap_err();
     server.abort();
-    let st3_client::ClientError::Api(code, message, envelope) = error else {
+    let fractal_client::ClientError::Api(code, message, envelope) = error else {
         panic!("an actor refusal must be a typed client API error: {error}");
     };
-    assert_eq!(code, st3_client::ErrorCode::Forbidden);
+    assert_eq!(code, fractal_client::ErrorCode::Forbidden);
     assert!(message.contains("cannot act as"));
     let value = serde_json::to_value(envelope).unwrap();
     assert_eq!(value["api_version"], CLIENT_API_VERSION);
@@ -178,7 +178,7 @@ async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history()
     let (status, client_list) = get_request(app.clone(), "/v1/client/slo").await;
     assert_eq!(status, StatusCode::OK, "{client_list}");
     // get_request unwraps the client envelope, asserting its version, snapshot and request id.
-    let typed: st3_client::SloList = serde_json::from_value(client_list.clone()).unwrap();
+    let typed: fractal_client::SloList = serde_json::from_value(client_list.clone()).unwrap();
     let weekly = typed.rows.iter().find(|row| row.id == "ada/claude-1/weekly").unwrap();
     assert_eq!((weekly.kind.as_str(), weekly.remaining_percent), ("budget", Some(70.0)));
     assert!(weekly.resets_at_unix_ms.is_none() && weekly.measured_at_unix_ms.is_some());
@@ -189,7 +189,7 @@ async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history()
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{client_history}");
-    let typed: st3_client::SloHistory = serde_json::from_value(client_history.clone()).unwrap();
+    let typed: fractal_client::SloHistory = serde_json::from_value(client_history.clone()).unwrap();
     assert_eq!((typed.id.as_str(), typed.samples, typed.steps), ("cpu", 2, vec![Some(80.0), Some(60.0)]));
     for query in [
         format!("id=cpu&since_ms={now}&until_ms={now}"),
@@ -300,7 +300,7 @@ async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
         row.get("mission_run").is_none() && row.get("step").is_none(),
         "{row}"
     );
-    let typed: st3_client::UsagePeriod = serde_json::from_value(period.clone()).unwrap();
+    let typed: fractal_client::UsagePeriod = serde_json::from_value(period.clone()).unwrap();
     assert_eq!(typed.rows[0].model.as_deref(), Some("claude-example"));
     assert!(
         typed.limits.is_empty(),

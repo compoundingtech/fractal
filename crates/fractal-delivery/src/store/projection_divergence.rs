@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use smallclaims::replication::ProjectionDivergence;
-pub use st3_store::store::projection_divergence::*;
+pub use fractal_store::store::projection_divergence::*;
 
 pub const PROJECTION_DIVERGENCE_CONDITION: &str = "projection-divergence";
 

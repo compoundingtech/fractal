@@ -526,12 +526,12 @@ fn missions_from_nothing(store: &Store) -> anyhow::Result<Publication<MissionRow
 /// queued or unstaffed) goes without one rather than claim it; an empty published roster is not
 /// that, since then no agent queues anything. A card it cannot read goes without one too; it
 /// never fails the fold.
-pub fn present(card: &mut Value, gates: &[st3_ui_model::missions::Gate], fleet: Option<&RosterFleet>) {
-    use st3_ui_model::missions::Word;
+pub fn present(card: &mut Value, gates: &[fractal_ui_model::missions::Gate], fleet: Option<&RosterFleet>) {
+    use fractal_ui_model::missions::Word;
     let none = RosterFleet::default();
-    let presentation = <st3_client::Mission as serde::Deserialize>::deserialize(&*card)
+    let presentation = <fractal_client::Mission as serde::Deserialize>::deserialize(&*card)
         .map_err(anyhow::Error::from)
-        .map(|mission| st3_ui_model::missions::present(&mission, gates, fleet.unwrap_or(&none)));
+        .map(|mission| fractal_ui_model::missions::present(&mission, gates, fleet.unwrap_or(&none)));
     match presentation {
         Ok(presentation)
             if fleet.is_none()
@@ -588,7 +588,7 @@ fn missions_of_changed_agents(rows: &MissionRows, before: Option<&RosterFleet>, 
 }
 
 /// The missions whose open gates differ between two reads.
-fn missions_of_changed_gates(before: &[st3_ui_model::missions::Gate], after: &[st3_ui_model::missions::Gate]) -> BTreeSet<String> {
+fn missions_of_changed_gates(before: &[fractal_ui_model::missions::Gate], after: &[fractal_ui_model::missions::Gate]) -> BTreeSet<String> {
     before
         .iter()
         .filter(|gate| !after.contains(gate))

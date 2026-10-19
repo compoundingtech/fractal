@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { clientName } from '@smalltalk/st3-views/clientName';
+import { clientName } from '@fractal/views/clientName';
 
 assert.equal(clientName('smalltalk-ios', '1.2.0', undefined), 'smalltalk-ios 1.2.0');
 assert.equal(clientName('smalltalk-ios', '1.2.0', 'a0c135e3'), 'smalltalk-ios 1.2.0 (a0c135e3)');

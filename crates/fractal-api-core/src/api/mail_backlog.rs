@@ -60,17 +60,17 @@ fn unfinished_archive(store: &Store, message: &MessageView) -> anyhow::Result<bo
                 .is_some())
 }
 
-pub fn report(store: &Store, now: u128) -> anyhow::Result<st3_client::MailBacklog> {
+pub fn report(store: &Store, now: u128) -> anyhow::Result<fractal_client::MailBacklog> {
     // Historical held flags are incomplete during bounded bootstrap. Suppress the cleanup
     // banner until its exclusion count is authoritative; cleanup itself always checks tags.
     if !store.coordination_backfill_status()?.2 {
-        return Ok(st3_client::MailBacklog {
+        return Ok(fractal_client::MailBacklog {
             count: 0,
             threshold_ms: THRESHOLD_MS,
             cleanup_command: CLEANUP_COMMAND.into(),
         });
     }
-    Ok(st3_client::MailBacklog {
+    Ok(fractal_client::MailBacklog {
         count: store
             .unread_mail_count_before(now.saturating_sub(u128::from(THRESHOLD_MS)))?
             .saturating_sub(
@@ -84,7 +84,7 @@ pub fn report(store: &Store, now: u128) -> anyhow::Result<st3_client::MailBacklo
 pub async fn get(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
-) -> Result<Json<st3_client::MailBacklog>, ApiError> {
+) -> Result<Json<fractal_client::MailBacklog>, ApiError> {
     client_v0::require_scope(&session, "read.projections")?;
     blocking_store(move || report(&state.store, client_now_ms()))
         .await

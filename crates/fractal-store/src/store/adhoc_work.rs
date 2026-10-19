@@ -8,7 +8,7 @@ pub fn latest_handoff(
     view: &StepRunView,
     at: u128,
 ) -> Result<Option<ClaimRecord>, St3Error> {
-    connection.query_row(/* sqlite-large-value: allow-for-now lv-hec57b03b4f2f owner=st3_store::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.released' AND json_extract(body,'$.fields.handoff_message') IS NOT NULL AND json_extract(body,'$.fields.attempt')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+    connection.query_row(/* sqlite-large-value: allow-for-now lv-hdf17be72f35e owner=fractal_store::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.released' AND json_extract(body,'$.fields.handoff_message') IS NOT NULL AND json_extract(body,'$.fields.attempt')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
         params![view.subject, view.attempt, at as i64], claim_from_row).optional().map_err(internal)
 }
 
@@ -84,7 +84,7 @@ pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), St
             "a minimal work run needs its work step",
         )
     })?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h973335df7ab3 owner=st3_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints) VALUES(?1,?2,?3,'work',?4,'ready',1,?5,'[]',0,?6,?7,?8,?8,'[]')",
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h652937426473 owner=fractal_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints) VALUES(?1,?2,?3,'work',?4,'ready',1,?5,'[]',0,?6,?7,?8,?8,'[]')",
         params![subject, run, generation, step.definition_hash, claim.actor, fields["ad_hoc_title"].as_str(), serde_json::to_string(&vec![fields["ad_hoc_title"].as_str().unwrap_or_default()]).map_err(internal)?, claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
     Ok(())
 }

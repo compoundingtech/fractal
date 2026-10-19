@@ -1,4 +1,4 @@
-import type { TimelineEntry } from '@smalltalk/st3-client'
+import type { TimelineEntry } from '@fractal/client'
 import ciRows from '../../recordings/ci-failing-fix.normalized.json' with { type: 'json' }
 import ciScript from '../../recordings/ci-failing-fix.script.json' with { type: 'json' }
 import firstRows from '../../recordings/first-run-onboarding.normalized.json' with { type: 'json' }

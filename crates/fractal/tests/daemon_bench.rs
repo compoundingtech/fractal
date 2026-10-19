@@ -3,7 +3,7 @@
 //! host.
 //!
 //! ```sh
-//! ST_BENCH=1 TMPDIR=/var/tmp cargo test --release -p st3 --test integration daemon_bench:: -- --nocapture
+//! ST_BENCH=1 TMPDIR=/var/tmp cargo test --release -p fractal --test integration daemon_bench:: -- --nocapture
 //! ```
 //!
 //! A generated store has the mix of a busy host's store on 2026-09-29, by count only: 270,000
@@ -30,9 +30,9 @@
 //! It fails when a person-facing read's p99 passes the budget, and when a read's median grows by
 //! more than twice from one scale to the next, which means it does work that grows with the store.
 
-use st3::MissionsStore;
-use st3::PersonWorkStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::PersonWorkStore;
+use fractal_daemon::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -42,13 +42,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
-use st3::api::AppState;
-use st3::client::Client;
-use st3::model::{
+use fractal_daemon::api::AppState;
+use fractal_daemon::client::Client;
+use fractal_daemon::model::{
     ClaimInput, IntentInput, MissionRunRequest, PersonAskRequest, PersonStepResponse, WorkRequest,
 };
-use st3::store::Store;
-use st3_schema::ValueType;
+use fractal_daemon::store::Store;
+use fractal_schema::ValueType;
 use tokio::sync::{Notify, watch};
 
 pub(crate) const FLEET: &str = "7c1e2d3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
@@ -105,12 +105,12 @@ async fn person_facing_reads_answer_within_their_budget() {
         println!("skipped: set ST_BENCH=1 to run the daemon benchmark");
         return;
     }
-    if !st3::test_support::optimized_build() {
+    if !fractal_daemon::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
     // `ST3_PROFILE_DIR` profiles the daemon here as it does under `st up`.
-    st3::profile::init_from_env();
+    fractal_daemon::profile::init_from_env();
     let scales = std::env::var("ST_BENCH_SCALES")
         .unwrap_or_else(|_| "0.1,1".into())
         .split(',')
@@ -263,7 +263,7 @@ fn write_bursts_share_their_commits() {
         println!("skipped: set ST_BENCH=1 to run the daemon benchmark");
         return;
     }
-    if !st3::test_support::optimized_build() {
+    if !fractal_daemon::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -440,15 +440,15 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
         configured_peers: vec![PEER.into()],
         client_relay: None,
         native_session_home: Some(root.join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     // As the daemon does when it starts.
-    st3::api::start_operation_report(&state);
-    st3::api::start_published_lists(&state);
+    fractal_daemon::api::start_operation_report(&state);
+    fractal_daemon::api::start_published_lists(&state);
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
-            async move { st3::api::serve_unix(&server_socket, st3::api::router(state)).await },
+            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
         );
     while UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -462,13 +462,13 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
     };
     let seeded_cut = store.index().unwrap();
     tokio::time::timeout(Duration::from_secs(120),
-        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        fractal_daemon::api::wait_published_lists_at_least(&store, seeded_cut))
         .await.expect("benchmark lists publish the seeded fleet cut").unwrap();
     // The fleet takes its steps before the reconciler starts, which could otherwise block a step
     // between its turning ready and its claim.
     let reconciler = settings.reconciler.then(|| {
         let reconciler = Arc::new(
-            st3::reconcile::Reconciler::native(
+            fractal_daemon::reconcile::Reconciler::native(
                 store.clone(),
                 &root.join("state"),
                 Some(&root.join("pty")),
@@ -695,7 +695,7 @@ pub(crate) fn fleet_subjects(store: &Store, seats: usize) -> Subjects {
         ));
     }
     source.push_str("}\n");
-    let intent = st3::parse_intent(&source, NODE).unwrap();
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
     let planned = store
         .mission(
             &intent,
@@ -792,7 +792,7 @@ async fn held_seats_can_reclaim_after_orphan_repair() {
     let state = root.path().join("state");
     let pty = stub_pty(root.path());
     let (events, _) = watch::channel(0_u64);
-    let reconciler = st3::reconcile::Reconciler::native(
+    let reconciler = fractal_daemon::reconcile::Reconciler::native(
         store.clone(),
         &state,
         Some(&root.path().join("pty")),
@@ -1117,7 +1117,7 @@ async fn peer_loop(
         let started = Instant::now();
         let received = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             // The profiler counts the peer's own writes and the daemon's receipt apart.
-            st3::profile::task("bench peer writes", || -> anyhow::Result<()> {
+            fractal_daemon::profile::task("bench peer writes", || -> anyhow::Result<()> {
                 if tick.is_multiple_of(6) {
                     let run = peer_for_write.create_mission_run(&MissionRunRequest {
                         mission: "bench/peer-work".into(),
@@ -1142,7 +1142,7 @@ async fn peer_loop(
             })?;
             let exchange = peer_for_write
                 .export_replication_exchange(FLEET, &store_for_receive.replication_inventory()?)?;
-            st3::profile::task("bench replication receive", || -> anyhow::Result<()> {
+            fractal_daemon::profile::task("bench replication receive", || -> anyhow::Result<()> {
                 store_for_receive
                     .receive_replication_exchange(PEER, FLEET, &exchange)
                     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -1364,7 +1364,7 @@ pub(crate) fn publish_mission(store: &Store, name: &str, steps: usize, revision:
         ));
     }
     source.push_str("}\n");
-    let intent = st3::parse_intent(&source, store_origin(store)).unwrap();
+    let intent = fractal_daemon::parse_intent(&source, store_origin(store)).unwrap();
     let planned = store
         .mission(
             &intent,
@@ -1510,7 +1510,7 @@ pub(crate) fn generate(store: &Store, prefix: &str, scale: f64) {
             );
         }
     }
-    let registry = st3_schema::registry();
+    let registry = fractal_schema::registry();
     let mut refused = BTreeMap::<&str, usize>::new();
     let total = EVENT_KINDS.iter().map(|(_, count, _)| count).sum::<usize>();
     let mut remaining = EVENT_KINDS
@@ -1619,7 +1619,7 @@ fn standing_agents(store: &Store, prefix: &str, count: usize) {
                 "agent \"bench/{prefix}/standing-{agent}\" {{\n  host \"bench-elsewhere\"\n  workspace \"/srv/bench/{prefix}/standing-{agent}\"\n  harness \"claude\" {{ }}\n}}\n"
             ));
         }
-        let Ok(intent) = st3::parse_intent(&source, store.origin()) else {
+        let Ok(intent) = fractal_daemon::parse_intent(&source, store.origin()) else {
             return;
         };
         let Ok(planned) = store.mission(
@@ -1639,7 +1639,7 @@ fn standing_agents(store: &Store, prefix: &str, count: usize) {
 
 /// Fields for one claim of `spec`: every required field, and the optional ones every third
 /// claim, with invented values of the declared types.
-fn synthetic_fields(spec: &st3_schema::ClaimSpec, index: usize) -> BTreeMap<String, Value> {
+fn synthetic_fields(spec: &fractal_schema::ClaimSpec, index: usize) -> BTreeMap<String, Value> {
     let mut fields = BTreeMap::new();
     for (name, field) in &spec.fields {
         // Delegation is opt-in and needs a real policy and instruction. These background
@@ -1677,7 +1677,7 @@ fn synthetic_fields(spec: &st3_schema::ClaimSpec, index: usize) -> BTreeMap<Stri
         // Preserve the original every-third reviewer density: reviews and attention must
         // traverse real candidates without adding unrelated work to mission-detail probes.
         // Alternate legacy and structured review requests within that population.
-        for name in st3_schema::review::REQUEST_FIELDS {
+        for name in fractal_schema::review::REQUEST_FIELDS {
             fields.remove(name);
         }
         if index.is_multiple_of(3) {
@@ -1703,7 +1703,7 @@ fn synthetic_fields(spec: &st3_schema::ClaimSpec, index: usize) -> BTreeMap<Stri
 #[test]
 fn synthetic_review_requests_admit_legacy_and_structured_fields() {
     let store = Store::open_memory("ada").unwrap();
-    let registry = st3_schema::registry();
+    let registry = fractal_schema::registry();
     let spec = &registry.claims["gate.requested"];
     for index in 0..6 {
         let fields = synthetic_fields(spec, index);
@@ -1711,7 +1711,7 @@ fn synthetic_review_requests_admit_legacy_and_structured_fields() {
         if index.is_multiple_of(3) {
             assert_eq!(fields["reviewer"], json!("person/reviewer"));
         }
-        for name in st3_schema::review::REQUEST_FIELDS {
+        for name in fractal_schema::review::REQUEST_FIELDS {
             assert_eq!(fields.contains_key(name), index.is_multiple_of(6), "{name}");
         }
         store
@@ -1729,7 +1729,7 @@ fn synthetic_review_requests_admit_legacy_and_structured_fields() {
 }
 
 pub(crate) fn claim_input(kind: &str, key: &str, index: usize, run: &str) -> ClaimInput {
-    let registry = st3_schema::registry();
+    let registry = fractal_schema::registry();
     let spec = &registry.claims[kind];
     let family = spec.subjects.first().map(String::as_str).unwrap_or("agent");
     let subject = format!("{family}/bench/live-{}", index % 7);
@@ -1765,12 +1765,12 @@ async fn send_messages(scratch: &Path, main: &Path, count: usize) {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
-            async move { st3::api::serve_unix(&server_socket, st3::api::router(state)).await },
+            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
         );
     while UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(Duration::from_millis(10)).await;

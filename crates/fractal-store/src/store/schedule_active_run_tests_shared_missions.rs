@@ -13,7 +13,7 @@ pub const LEGACY_QUERY: &str = "SELECT EXISTS(
 pub fn insert_run(connection: &Connection, id: &str, status: &str, phase: &str) {
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h614b7584e4ca owner=st3_store::store::schedule_active_run_tests_shared_missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id,mission_id,initial_revision,current_generation_id,
+            /* sqlite-large-value: allow-for-now lv-hb9798ce91a50 owner=fractal_store::store::schedule_active_run_tests_shared_missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id,mission_id,initial_revision,current_generation_id,
              root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,
              created_at_unix_ms,updated_at_unix_ms)
          VALUES(?1,'mission/test','revision','generation','revision',?1,'/tmp/test',
@@ -27,13 +27,13 @@ pub fn insert_claim(connection: &Connection, id: &str, subject: &str, kind: &str
     // Deliberately foreign origin: the existing historical-start query has no origin filter.
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h67ad7821a180 owner=st3_store::store::schedule_active_run_tests_shared_missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h66ffdf86df27 owner=fractal_store::store::schedule_active_run_tests_shared_missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
          VALUES(?1,'foreign',1,?1,'1')",
             [id],
         )
         .unwrap();
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h782b583fb5c9 owner=st3_store::store::schedule_active_run_tests_shared_missions TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-he2042def0eb2 owner=fractal_store::store::schedule_active_run_tests_shared_missions TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
          VALUES(?1,?1,?2,?3,'foreign',?4,'[]','1')",
         params![id, subject, kind, body.to_string()],
     ).unwrap();

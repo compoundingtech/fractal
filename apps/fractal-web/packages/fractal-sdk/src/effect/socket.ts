@@ -9,14 +9,14 @@
  */
 import {
   ClientError,
-  type St3Client,
+  type FractalClient,
   type Capabilities,
   type EnvelopeOf,
   type CollectionFrame,
   type CollectionName,
   type CollectionSocketFactory,
   type CollectionStream,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 import * as Cause from 'effect/Cause'
 import * as Data from 'effect/Data'
 import * as Deferred from 'effect/Deferred'
@@ -125,7 +125,7 @@ export const makeChannel = ({
   onCapabilities,
   onProbeFailure,
 }: {
-  readonly client: St3Client
+  readonly client: FractalClient
   readonly socket?: CollectionSocketFactory
   readonly parentSpan?: () => Tracer.Span | undefined
   readonly commandTraceContext?: () => TraceContext | undefined

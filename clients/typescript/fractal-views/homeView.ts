@@ -1,7 +1,7 @@
-import type { Attention, TimelineEntry } from '@smalltalk/st3-client';
+import type { Attention, TimelineEntry } from '@fractal/client';
 import { ago } from './time.ts';
 
-// Home, drawn the way stui draws it (crates/stui/src/ui/screens.rs home_list, adapt.rs
+// Home, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs home_list, adapt.rs
 // attention): the requests and reviews st holds for the person that are not resolved, grouped by
 // how urgently someone is waiting. Messages stay in conversations, and st sends a fault to the
 // agent that owns it, so neither is ever on Home.

@@ -112,7 +112,7 @@ pub(super) fn root_help(all: bool) -> String {
             let _ = writeln!(output, "  {name:14} {about}");
         }
     }
-    let _ = writeln!(output, "\n{}", st3::skill::message_sender_guidance());
+    let _ = writeln!(output, "\n{}", fractal_daemon::skill::message_sender_guidance());
     // Let clap keep the options, defaults and environment variables accurate.
     let mut options = command.clone().help_template("\nOptions:\n{options}");
     output.push('\n');
@@ -337,7 +337,7 @@ mod tests {
         assert!(GROUPS.iter().any(|(title, names)| {
             *title == "Running st on a machine or fleet" && names.contains(&"migrate")
         }));
-        let sender_guidance = st3::skill::message_sender_guidance();
+        let sender_guidance = fractal_daemon::skill::message_sender_guidance();
         assert_eq!(default.matches(sender_guidance).count(), 1);
         assert_eq!(all.matches(sender_guidance).count(), 1);
         for command in Cli::command()

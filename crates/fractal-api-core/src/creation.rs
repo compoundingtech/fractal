@@ -1,9 +1,9 @@
 //! Declaration builders shared by client actions and CLI creation.
 use kdl::{KdlDocument, KdlEntry, KdlNode};
 
-pub use st3_client::agent_branch;
+pub use fractal_client::agent_branch;
 
-pub fn validate_agent_checkout(args: &st3_client::AgentCreateParameters) -> anyhow::Result<()> {
+pub fn validate_agent_checkout(args: &fractal_client::AgentCreateParameters) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.repo.is_some()
             || (args.base.is_none() && args.branch.is_none() && args.remove_at_run_end.is_none()),
@@ -25,7 +25,7 @@ pub const CLAUDE_SEAT_SETTINGS: &str = r#"{"enabledPlugins":{"st2-channel@st2":f
 /// The declaration `st agents new` publishes: what a person writes by hand for a fleet seat.
 /// Claude and Codex seats get the harness defaults the fleet's existing seats run with.
 pub fn agent_document(
-    args: &st3_client::AgentCreateParameters,
+    args: &fractal_client::AgentCreateParameters,
     workspace: &str,
     create_workspace: bool,
     creation_key: Option<&str>,
@@ -143,7 +143,7 @@ fn creation_tags(key: &str) -> KdlNode {
 pub fn terminal_document(
     person: &str,
     id: &str,
-    args: &st3_client::TerminalCreateParameters,
+    args: &fractal_client::TerminalCreateParameters,
     host: &str,
     cwd: &str,
     creation_key: &str,
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn a_shell_with_no_directory_starts_in_home_and_one_with_a_directory_keeps_it() {
-        let args = st3_client::TerminalCreateParameters {
+        let args = fractal_client::TerminalCreateParameters {
             name: "scratch".into(),
             ..Default::default()
         };
@@ -283,7 +283,7 @@ mod tests {
         use crate::checkout::test_support::{git, repository};
         let root = tempfile::tempdir().unwrap();
         let repository = repository(root.path());
-        let parameters = st3_client::AgentCreateParameters {
+        let parameters = fractal_client::AgentCreateParameters {
             name: "agent/example.parser".into(),
             harness: "codex".into(),
             repo: Some(repository.display().to_string()),
@@ -313,7 +313,7 @@ mod tests {
             "agent work\n"
         );
         checkout.remove(&workspace).unwrap();
-        let missing = st3_client::AgentCreateParameters {
+        let missing = fractal_client::AgentCreateParameters {
             repo: Some(root.path().join("missing").display().to_string()),
             ..parameters.clone()
         };
@@ -329,7 +329,7 @@ mod tests {
                 .contains("failed")
         );
         assert!(!workspace.exists());
-        let plain = st3_client::AgentCreateParameters {
+        let plain = fractal_client::AgentCreateParameters {
             repo: None,
             remove_at_run_end: None,
             ..parameters
@@ -361,7 +361,7 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let args = st3_client::AgentCreateParameters {
+        let args = fractal_client::AgentCreateParameters {
             branch: Some("parser".into()),
             ..Default::default()
         };
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn first_messages_use_native_arguments_and_leave_defaults_idle() {
         for harness in ["claude", "codex", "pi", "omp", "opencode"] {
-            let parameters = st3_client::AgentCreateParameters {
+            let parameters = fractal_client::AgentCreateParameters {
                 name: "worker".into(),
                 harness: harness.into(),
                 model: Some("model".into()),
@@ -396,7 +396,7 @@ mod tests {
                 panic!()
             };
             assert!(!argv.iter().any(|arg| arg == "--initial-message"));
-            let parameters = st3_client::AgentCreateParameters {
+            let parameters = fractal_client::AgentCreateParameters {
                 message: Some("--literal\ntext".into()),
                 ..parameters
             };

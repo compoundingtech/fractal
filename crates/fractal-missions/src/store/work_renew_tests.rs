@@ -1,9 +1,9 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_delivery::store::shared_missions::*;
-use st3_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
-use st3_store::store::work_renew_tests_shared_missions::*;
-use st3_store::store::work_renew_tests_shared_missions::{Renewal, request, timeless, view_enriched_in_writer, writer_work};
+use fractal_delivery::store::shared_missions::*;
+use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
+use fractal_store::store::work_renew_tests_shared_missions::*;
+use fractal_store::store::work_renew_tests_shared_missions::{Renewal, request, timeless, view_enriched_in_writer, writer_work};
 
 
 /// One claimed step whose claim history holds `history` progress reports.
@@ -90,7 +90,7 @@ fn renewal_poll_excludes_expired_or_ended_claims() {
     {
         let connection = renewal.store.connection.write();
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h3a7340e08761 owner=st3_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h4d5ea12d429d owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
             [&renewal.subject],
         ).unwrap();
     }
@@ -98,11 +98,11 @@ fn renewal_poll_excludes_expired_or_ended_claims() {
     {
         let connection = renewal.store.connection.write();
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-hbd3b2bf5a0f3 owner=st3_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-hc363ee66ca25 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
             params![renewal.subject, (now_ms() + 60_000).to_string()],
         ).unwrap();
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h728e5ef7f423 owner=st3_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='cancelled',phase='terminal' WHERE id=(
+            /* sqlite-large-value: allow-for-now lv-hece51d8edfe6 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='cancelled',phase='terminal' WHERE id=(
                 SELECT run_id FROM step_runs WHERE subject=?1)",
             [&renewal.subject],
         ).unwrap();
@@ -264,7 +264,7 @@ fn the_last_replicated_lease_is_what_sorting_every_lease_claim_found() {
         store
             .readers
             .get()
-            .query_row(/* sqlite-large-value: allow-for-now lv-h842361246ac6 owner=st3_missions::store::work_renew_tests TODO=trace-statement-and-value-representation */ query, [subject], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h5c4c48063d7f owner=fractal_missions::store::work_renew_tests TODO=trace-statement-and-value-representation */ query, [subject], |row| row.get(0))
             .unwrap()
     };
     // Reports and published renewals interleave, many in the same millisecond, some apart.
@@ -299,7 +299,7 @@ fn the_last_replicated_lease_seeks_each_kinds_newest_millisecond() {
     let renewal = claimed_step(0);
     let connection = renewal.store.readers.get();
     let mut statement = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-h4b6f1bf246bc owner=st3_missions::store::work_renew_tests TODO=trace-statement-and-value-representation */ &format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-haa4a50f8ccd9 owner=fractal_missions::store::work_renew_tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             last_replicated_lease_query()
         ))
@@ -327,7 +327,7 @@ fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying
     for status in ["claimed", "working", "verifying", "blocked"] {
         let before = now_ms() + 10_000;
         renewal.store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h21cff54603d2 owner=st3_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,lease_expires_at_unix_ms=?3 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h70d2d054ccd8 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,lease_expires_at_unix_ms=?3 WHERE subject=?1",
             params![renewal.subject, status, before.to_string()],
         ).unwrap();
         STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(0));
@@ -344,7 +344,7 @@ fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying
     }
     for status in ["ready", "pending", "completed", "cancelled", "failed"] {
         renewal.store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h961f3399cfc5 owner=st3_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h72871ed13568 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2 WHERE subject=?1",
             params![renewal.subject, status],
         ).unwrap();
         assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty(), "{status}");

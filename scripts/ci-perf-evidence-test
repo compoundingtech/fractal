@@ -67,6 +67,6 @@ workflow = (ROOT / '.github/workflows/fleet.yml').read_text().split('  perf-cost
 upload = workflow.split('name: perf-cost-logs', 1)[0].rsplit('uses: actions/upload-artifact@v4', 1)[1]
 assert 'if: always()' in upload
 assert '${{ runner.temp }}/perf/' in workflow.split('name: perf-cost-logs', 1)[1].split('- name:', 1)[0]
-fixture = (ROOT / 'crates/st3/tests/messaging_faults.rs').read_text()
+fixture = (ROOT / 'crates/fractal/tests/messaging_faults.rs').read_text()
 assert 'ST3_MESSAGING_FAULTS_EVIDENCE' in fixture and 'output_root.take().unwrap().keep()' in fixture
 print('Perf evidence controls passed: explicit parent, absent CI_RUN_ID, failure retained, no retry, status preserved')

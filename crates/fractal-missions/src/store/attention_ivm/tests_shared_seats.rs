@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_store::store::attention_ivm::tests_shared_seats::*;
+pub use fractal_store::store::attention_ivm::tests_shared_seats::*;
 use crate::store::attention_ivm::*;
 use crate::store::custom::RegistrationRequest;
 use smallclaims::ivm::{Readiness, SourceCut, events};

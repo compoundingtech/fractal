@@ -153,12 +153,12 @@ mod tests {
         ] {
             let key = between(a, b).unwrap();
             assert!(a.is_none_or(|a| a < key.as_str()) && b.is_none_or(|b| key.as_str() < b));
-            assert!(st3_schema::arrangements::valid_key(&key));
+            assert!(fractal_schema::arrangements::valid_key(&key));
         }
         let mut high = "a1".to_owned();
         for _ in 0..600 {
             let key = between(Some("a0"), Some(&high)).unwrap();
-            assert!("a0" < key.as_str() && key < high && st3_schema::arrangements::valid_key(&key));
+            assert!("a0" < key.as_str() && key < high && fractal_schema::arrangements::valid_key(&key));
             high = key;
         }
     }

@@ -76,7 +76,7 @@ impl Store {
             "SELECT (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1),
                     (SELECT claim_id FROM desired WHERE subject=?1)",
         )?;
-        let (latest_claim_index, desired_claim_id) = statement.query_row(/* sqlite-large-value: allow-for-now lv-he1f4b6f6122b owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
+        let (latest_claim_index, desired_claim_id) = statement.query_row(/* sqlite-large-value: allow-for-now lv-hc58709d7ae65 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [subject], |row| {
             Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?))
         })?;
         drop(statement);
@@ -132,7 +132,7 @@ impl Store {
         let fast_recipient = recipient.as_deref();
         let bare_recipient = fast_recipient.map(message_bare_recipient);
         if let (Some(recipient), Some(bare_recipient)) = (fast_recipient, bare_recipient) {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hdce6aad989b2 owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h06b5186b1e2e owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
                 concat!("WITH candidates(subject) AS (
                      SELECT subject FROM claims INDEXED BY claims_message_to_index
                      WHERE kind='message.sent'
@@ -270,7 +270,7 @@ impl Store {
         {
             let connection = self.readers.get();
             let mut statement = connection.prepare(
-                /* sqlite-large-value: allow-for-now lv-h18007103ca88 owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
+                /* sqlite-large-value: allow-for-now lv-haaba804a60b4 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
                         predecessors, accepted_at_unix_ms
                  FROM claims WHERE kind='subscription.mission-failed' ORDER BY CANONICAL_ASC(claims)"),
             )?;

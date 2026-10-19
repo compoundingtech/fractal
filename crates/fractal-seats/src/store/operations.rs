@@ -3,13 +3,13 @@
 use crate::MissionsStore;
 use crate::PersonWorkStore;
 use super::*;
-pub use st3_missions::store::operations::*;
+pub use fractal_missions::store::operations::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::operations_tests_shared_seats::*;
-    use st3_missions::store::operations_tests_shared_seats::{clock_run};
+    use fractal_missions::store::operations_tests_shared_seats::*;
+    use fractal_missions::store::operations_tests_shared_seats::{clock_run};
 
     fn publish_overview_mission(store: &Store) {
         let source = "version 2\nmission \"example/overview\" state=\"ready\" { goal \"Build.\"; step \"build\" { goal \"Build.\"; }; }\n";

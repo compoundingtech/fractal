@@ -248,7 +248,7 @@ pub fn enable(agent_dir: &Path, runtime_incarnation: &str) -> Result<()> {
         "unsupported harness event spool version {version}"
     );
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h2b2eb580b691 owner=st_drivers::harness_events TODO=chunk-or-reference-variable-columns */ "PRAGMA journal_mode=WAL; PRAGMA user_version=1;
+        /* sqlite-large-value: allow-for-now lv-hdf5b939bc814 owner=fractal_drivers::harness_events TODO=chunk-or-reference-variable-columns */ "PRAGMA journal_mode=WAL; PRAGMA user_version=1;
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS snapshots (kind TEXT PRIMARY KEY, body BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS events (
@@ -264,12 +264,12 @@ pub fn enable(agent_dir: &Path, runtime_incarnation: &str) -> Result<()> {
     )?;
     let tx = connection.transaction()?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h2db625eed9ca owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO metadata(key,value)
+        /* sqlite-large-value: allow-for-now lv-h3d3c77531186 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO metadata(key,value)
         SELECT 'pending-bytes', COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM events",
         [],
     )?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h472fa3046f75 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES ('runtime',?1)
+        /* sqlite-large-value: allow-for-now lv-hec41a4e102c4 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES ('runtime',?1)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [runtime_incarnation],
     )?;
@@ -308,11 +308,11 @@ fn append_event(tx: &Connection, kind: &str, body: &Value) -> Result<()> {
         "harness event spool is full; observation was not committed"
     );
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h3ab6749422e8 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO events(runtime_incarnation,queued_at_ms,kind,body) VALUES (?1,?2,?3,?4)",
+        /* sqlite-large-value: allow-for-now lv-habfb2b0c05da owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO events(runtime_incarnation,queued_at_ms,kind,body) VALUES (?1,?2,?3,?4)",
         params![runtime, crate::message::now_ms(), kind, body],
     )?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-ha41140108038 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "UPDATE metadata SET value=?1 WHERE key='pending-bytes'",
+        /* sqlite-large-value: allow-for-now lv-h557fd2adb2ea owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "UPDATE metadata SET value=?1 WHERE key='pending-bytes'",
         [bytes + body.len() as u64],
     )?;
     Ok(())
@@ -414,9 +414,9 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
     if kind == "harness-state" {
         let token = value["incarnation"].as_str().unwrap();
         if current_token(&tx)?.as_deref() != Some(token) {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hebe0839d344b owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM metadata WHERE key LIKE 'provider-runtime:%' OR key LIKE 'timeline-next:%'", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hb318b98ee6cc owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM metadata WHERE key LIKE 'provider-runtime:%' OR key LIKE 'timeline-next:%'", [])?;
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h9ff38343dcd5 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata(key,value) SELECT ?1,value FROM metadata WHERE key='runtime'",
+                /* sqlite-large-value: allow-for-now lv-h0638beca3183 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata(key,value) SELECT ?1,value FROM metadata WHERE key='runtime'",
                 [format!("provider-runtime:{token}")],
             )?;
         }
@@ -430,7 +430,7 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
         );
     }
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h5aa808b01da4 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES (?1,?2)
+        /* sqlite-large-value: allow-for-now lv-hcba2dce1061b owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES (?1,?2)
         ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
         params![kind, body],
     )?;
@@ -452,12 +452,12 @@ pub fn write_channel_todo(agent_dir: &Path, runtime: &str, fields: &Value) -> Re
     )?;
     anyhow::ensure!(bound == runtime, "channel todo runtime was superseded");
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h8d7ebed4003f owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO metadata(key,value) VALUES (?1,?2)",
+        /* sqlite-large-value: allow-for-now lv-hd3ac74197c28 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO metadata(key,value) VALUES (?1,?2)",
         params![format!("provider-runtime:{runtime}"), runtime],
     )?;
     append_event(&tx, "harness-todo", &value)?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h37ce9c369677 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES ('harness-todo',?1)
+        /* sqlite-large-value: allow-for-now lv-hdc84af4ccd99 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES ('harness-todo',?1)
         ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
         [serde_json::to_vec(&value)?],
     )?;
@@ -496,7 +496,7 @@ pub fn expire_state(agent_dir: &Path, expected: &Value) -> Result<()> {
     if expired.as_deref() != Some(&identity) {
         append_event(&tx, "harness-state-expired", expected)?;
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h99dd304e01ac owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES ('expired-state',?1)
+            /* sqlite-large-value: allow-for-now lv-hef35bc5b6b76 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES ('expired-state',?1)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [&identity],
         )?;
@@ -507,7 +507,7 @@ pub fn expire_state(agent_dir: &Path, expected: &Value) -> Result<()> {
 }
 
 pub fn remove_snapshot(agent_dir: &Path, kind: &str) -> Result<()> {
-    open(agent_dir)?.execute(/* sqlite-large-value: allow-for-now lv-heba9a216dc9b owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM snapshots WHERE kind=?1", [kind])?;
+    open(agent_dir)?.execute(/* sqlite-large-value: allow-for-now lv-h7187f16fe898 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM snapshots WHERE kind=?1", [kind])?;
     Ok(())
 }
 
@@ -571,14 +571,14 @@ pub fn prepare_publication(
     )?;
     anyhow::ensure!(pending, "event has already been acknowledged");
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-he5774f38b4af owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO prepared VALUES (?1,?2,?3)",
+        /* sqlite-large-value: allow-for-now lv-h17afeeb3af90 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO prepared VALUES (?1,?2,?3)",
         params![sequence, slot, serde_json::to_string(claim)?],
     )?;
     // Rebuild rejected todo claims from their retained event without keeping the malformed
     // pre-normalization slot as a retry target. Preparation and retirement commit together.
     if slot == "harness.todo.observed:normalized" {
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h3b08ca3937e7 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM prepared WHERE sequence=?1 AND slot='harness.todo.observed:'",
+            /* sqlite-large-value: allow-for-now lv-h0ddbcc972f89 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM prepared WHERE sequence=?1 AND slot='harness.todo.observed:'",
             [sequence],
         )?;
     }
@@ -599,10 +599,10 @@ pub fn acknowledge(agent_dir: &Path, sequence: u64) -> Result<()> {
         [sequence],
         |r| r.get(0),
     )?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hee598eb7d3be owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM prepared WHERE sequence<=?1", [sequence])?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h3edf96b2d331 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM events WHERE sequence<=?1", [sequence])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-haea83a1478e4 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM prepared WHERE sequence<=?1", [sequence])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h036e5eb6d635 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM events WHERE sequence<=?1", [sequence])?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-hc0c3fec2c924 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "UPDATE metadata SET value=CAST(value AS INTEGER)-?1 WHERE key='pending-bytes'",
+        /* sqlite-large-value: allow-for-now lv-h7f3d89ba7042 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "UPDATE metadata SET value=CAST(value AS INTEGER)-?1 WHERE key='pending-bytes'",
         [removed],
     )?;
     tx.commit()?;
@@ -682,7 +682,7 @@ fn append_timeline_operations(
     new_operations: &[Operation],
 ) -> Result<()> {
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h0bbbe757fb5f owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-h3de51be27521 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![
             format!("timeline-next:{}", record.incarnation_id),
             record.next_sequence.to_string()
@@ -690,7 +690,7 @@ fn append_timeline_operations(
     )?;
     for operation in new_operations {
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-ha5aedd1abf43 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO timeline(incarnation,source,body) VALUES (?1,?2,?3)",
+            /* sqlite-large-value: allow-for-now lv-h99cdb0609387 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO timeline(incarnation,source,body) VALUES (?1,?2,?3)",
             params![
                 record.incarnation_id,
                 operation.source_id.as_deref().unwrap_or(""),
@@ -699,8 +699,8 @@ fn append_timeline_operations(
         )?;
         append_event(tx, "harness-timeline", &serde_json::to_value(operation)?)?;
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-ha6225173a889 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h33aca7319211 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id IN (
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hcf367178b2a9 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hbc223dd1ddcc owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id IN (
         SELECT id FROM (SELECT id, SUM(length(CAST(body AS BLOB))) OVER (ORDER BY id DESC) AS retained FROM timeline)
         WHERE retained > 2097152)", [])?;
     Ok(())

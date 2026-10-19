@@ -1,8 +1,8 @@
 //! A person answers a mission's human gate from every surface: client-v0 actions (stui, iOS),
 //! the CLI, and the HTTP API. Each test drives a real reconciler and an in-process API.
 
-use st3::MissionsStore;
-use st3::EvidenceStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -11,10 +11,10 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::model::{ClaimInput, IntentInput, MissionRunRequest};
-use st3::reconcile::Reconciler;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest};
+use fractal_daemon::reconcile::Reconciler;
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
@@ -34,21 +34,21 @@ fn test_state(root: &Path) -> AppState {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     }
 }
 
 /// A runtime that starts nothing: gates here wait only on people.
 struct NoRuntime;
 
-impl st3::reconcile::RuntimeControl for NoRuntime {
-    fn snapshot_ptys(&self) -> anyhow::Result<Vec<st3::reconcile::RuntimeObservation>> {
+impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
+    fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<st3::reconcile::RuntimeObservation>> {
+    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
-    fn start(&self, _: &st3::model::MemberSpec) -> anyhow::Result<()> {
+    fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
         Ok(())
     }
     fn stop(&self, _: &str, _: bool, _: Option<&str>) -> anyhow::Result<()> {
@@ -106,7 +106,7 @@ mission "release" state="ready" {
 "#;
 
 fn apply(store: &Store, source: &str, key: &str) {
-    let intent = st3::parse_intent(source, NODE).unwrap();
+    let intent = fractal_daemon::parse_intent(source, NODE).unwrap();
     let plan = store
         .mission(
             &intent,
@@ -120,7 +120,7 @@ fn apply(store: &Store, source: &str, key: &str) {
     store.apply(&intent, &plan.subject_tokens, key).unwrap();
 }
 
-fn start(store: &Store, mission: &str, key: &str) -> st3::model::MissionRunView {
+fn start(store: &Store, mission: &str, key: &str) -> fractal_daemon::model::MissionRunView {
     store
         .create_mission_run(&MissionRunRequest {
             mission: mission.into(),
@@ -246,7 +246,7 @@ async fn a_person_approves_a_human_gate_through_client_actions_with_its_attentio
     reconcile_until(&reconciler, "the gate asked", || {
         store.gate_request_for_owner(&step).unwrap().is_some()
     });
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
 
     let seen = card(&app, "person/avery", &step).await.expect("no card");
     assert_eq!(seen.0["attention_kind"], "human-gate");
@@ -304,7 +304,7 @@ async fn a_gate_asked_again_refuses_the_old_card_and_takes_the_current_one() {
     reconcile_until(&reconciler, "the gate asked", || {
         store.gate_request_for_owner(&step).unwrap().is_some()
     });
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (socket, server) = serve(state, root.path()).await;
     let seen = card(&app, "person/avery", &step).await.expect("no card");
 
@@ -401,7 +401,7 @@ async fn run_cli(socket: &Path, args: &[&str]) -> Output {
     let socket = socket.to_path_buf();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        fractal_daemon::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .arg("--endpoint")
             .arg(socket)
@@ -417,7 +417,7 @@ async fn serve(state: AppState, root: &Path) -> (PathBuf, tokio::task::JoinHandl
     let socket = root.join("st3.sock");
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, st3::api::router(state))
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
             .await
             .unwrap();
     });
@@ -443,7 +443,7 @@ async fn the_cli_approves_a_gate_by_the_attention_id_it_lists_and_says_why_it_re
     reconcile_until(&reconciler, "the gate asked", || {
         store.gate_request_for_owner(&step).unwrap().is_some()
     });
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (socket, server) = serve(state, root.path()).await;
 
     // `st attention ls` leads each card with its attention ID; that is what a person copies.
@@ -603,13 +603,13 @@ async fn loop_human_gates_are_listed_approved_and_rejected_like_step_gates() {
         })
         .unwrap();
     let reconciler = reconciler(&store);
-    let loop_owner = |run: &st3::model::MissionRunView| {
+    let loop_owner = |run: &fractal_daemon::model::MissionRunView| {
         format!(
             "loop-run/{}/improve",
             run.generation.strip_prefix("run-generation/").unwrap()
         )
     };
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (socket, server) = serve(state, root.path()).await;
 
     // An exhausted loop's acceptance gate: a person sees it and approves it from a client.
@@ -733,7 +733,7 @@ mission "per-item" state="ready" {
   }
 }
 "#;
-    let mut intent = st3::parse_intent(source, NODE).unwrap();
+    let mut intent = fractal_daemon::parse_intent(source, NODE).unwrap();
     intent
         .missions
         .get_mut("per-item")
@@ -744,7 +744,7 @@ mission "per-item" state="ready" {
         .loop_spec
         .as_mut()
         .unwrap()
-        .for_each = Some(st3::model::LoopForEachSpec {
+        .for_each = Some(fractal_daemon::model::LoopForEachSpec {
         resource: "resource/batch".into(),
         field: "items".into(),
         max_parallel: 3,
@@ -800,7 +800,7 @@ async fn each_item_of_a_for_each_loop_takes_its_own_answer() {
     );
     let item = |id: &str| format!("{loop_run}/item/{id}");
     let reconciler = reconciler(&store);
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (socket, server) = serve(state, root.path()).await;
 
     // The first item, from a client: its card is fenced like any other gate's.
@@ -935,7 +935,7 @@ mission "rounds" state="ready" {
             .unwrap()
             .is_empty()
     });
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     // Each review the reviewers' list offers, and whether the reviewer has a card for it.
     let offered = async || {
         let mut offered = Vec::new();

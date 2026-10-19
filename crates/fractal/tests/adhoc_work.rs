@@ -1,22 +1,22 @@
 //! Start, checkpoint, transfer, acknowledge and close through an isolated durable daemon.
 #![cfg(unix)]
-use st3::SeatsStoreCore;
+use fractal_daemon::SeatsStoreCore;
 use serde_json::{Value, json};
-use st3::{api::AppState, model::ClaimInput, store::Store};
+use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Notify, watch};
 
 struct NoRuntime;
 
-impl st3::reconcile::RuntimeControl for NoRuntime {
-    fn snapshot_ptys(&self) -> anyhow::Result<Vec<st3::reconcile::RuntimeObservation>> {
+impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
+    fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<st3::reconcile::RuntimeObservation>> {
+    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
-    fn start(&self, _: &st3::model::MemberSpec) -> anyhow::Result<()> {
+    fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
         Ok(())
     }
     fn stop(&self, _: &str, _: bool, _: Option<&str>) -> anyhow::Result<()> {
@@ -40,7 +40,7 @@ impl st3::reconcile::RuntimeControl for NoRuntime {
 }
 
 fn finish_run(store: &Arc<Store>, run: &str) {
-    let reconciler = st3::reconcile::Reconciler::new(
+    let reconciler = fractal_daemon::reconcile::Reconciler::new(
         store.clone(),
         Arc::new(NoRuntime),
         "example".into(),
@@ -91,11 +91,11 @@ impl Daemon {
             configured_peers: vec![],
             client_relay: None,
             native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
         };
         let socket = self.socket();
         self.server = Some(tokio::spawn(async move {
-            st3::api::serve_unix(&socket, st3::api::router(state))
+            fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state))
                 .await
                 .unwrap();
         }));
@@ -121,7 +121,7 @@ impl Daemon {
     }
     async fn cli(&self, args: &[&str]) -> std::process::Output {
         let mut command =
-            st3::test_support::async_command(test_bin!("st3-fixture"));
+            fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
         command
             .env("HOME", &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
@@ -148,7 +148,7 @@ impl Daemon {
         assert!(stderr.contains(message), "expected {message}: {stderr}");
     }
     fn declare(&self) {
-        let intent = st3::parse_intent("version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\"; }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\"; }", "example").unwrap();
+        let intent = fractal_daemon::parse_intent("version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\"; }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\"; }", "example").unwrap();
         self.store.apply_internal(&intent, "seats").unwrap();
         for (actor, incarnation) in [(ALDER, "alder-one"), (BIRCH, "birch-one")] {
             for (kind, fields) in [

@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::model::*;
 use futures_util::{SinkExt as _, StreamExt as _};
 use pty_client::{AttachParams, CURSOR_TO_BOTTOM, ClientIo, Reconnect, RouteRefusedError, TERMINAL_SANITIZE, attach};
-use st3_store::client::*;
+use fractal_store::client::*;
 use axum::extract::ws::{Message as AxumWsMessage, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse as _;

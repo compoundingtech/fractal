@@ -1,7 +1,7 @@
 //! MCP transports for the paired client gateway; no daemon-control access.
 use clap::Parser;
 use rmcp::ServiceExt;
-use st_chatgpt::{Adapter, http_router};
+use fractal_chatgpt::{Adapter, http_router};
 use std::{net::SocketAddr, path::PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 

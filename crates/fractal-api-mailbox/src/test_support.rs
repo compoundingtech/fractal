@@ -1,6 +1,6 @@
 //! Process-local fixture tools: st3-api's, re-exported, and the mailbox protocol fixtures.
 
-pub use st3_api_core::test_support::*;
+pub use fractal_api_core::test_support::*;
 
 /// Build an explicit already-admitted protocol fixture. Callers own its temporary Store,
 /// socket and synthetic runtime. This adapter preserves kernel peer subject checks and

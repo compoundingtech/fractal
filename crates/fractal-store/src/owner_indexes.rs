@@ -13,8 +13,8 @@ pub const INDEX_NAMES: [&str; 5] = [
 ];
 
 fn install(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h735c5d58ef79 owner=st3_store::owner_indexes TODO=trace-statement-and-value-representation */ smallclaims::store::TRANSPORT_PAIR_INDEX)?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h0f440b8d87b1 owner=st3_store::owner_indexes TODO=trace-statement-and-value-representation */ &crate::store::RUNTIME_ID_INDEX)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h00d5d1e046d7 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ smallclaims::store::TRANSPORT_PAIR_INDEX)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc41ef8140f43 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ &crate::store::RUNTIME_ID_INDEX)?;
     Ok(())
 }
 
@@ -36,7 +36,7 @@ fn report(output: &mut impl Write, phase: &str, definitions: &[Option<String>]) 
 
 fn expected_definitions() -> Result<Vec<Option<String>>> {
     let connection = Connection::open_in_memory()?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ad40afefaf0 owner=st3_store::owner_indexes TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims (store_index INTEGER PRIMARY KEY, subject TEXT, kind TEXT, origin TEXT, body TEXT, accepted_at_unix_ms TEXT);")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2d43c40cfa36 owner=fractal_store::owner_indexes TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims (store_index INTEGER PRIMARY KEY, subject TEXT, kind TEXT, origin TEXT, body TEXT, accepted_at_unix_ms TEXT);")?;
     install(&connection)?;
     definitions(&connection)
 }

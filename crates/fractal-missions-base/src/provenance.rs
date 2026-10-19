@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use kdl::{KdlDocument, KdlNode};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::Value;
-pub use st3_schema::provenance::{Provenance, Source};
+pub use fractal_schema::provenance::{Provenance, Source};
 
 use crate::model::{NormalizedIntent, St3Error};
 
@@ -146,7 +146,7 @@ pub fn read(
     revision: &str,
 ) -> anyhow::Result<Option<Provenance>> {
     let body = connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-hc6254ed64e8f owner=st3_missions_base::provenance TODO=trace-statement-and-value-representation */ &smallclaims::store::canonical_sql("SELECT body FROM claims WHERE subject=?1 AND kind='mission.provenance' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+        /* sqlite-large-value: allow-for-now lv-h9c7916f4c08f owner=fractal_missions_base::provenance TODO=trace-statement-and-value-representation */ &smallclaims::store::canonical_sql("SELECT body FROM claims WHERE subject=?1 AND kind='mission.provenance' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
         [subject(mission, revision)], |row| row.get::<_, String>(0),
     ).optional()?;
     body.map(|body| {

@@ -197,7 +197,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut result = match result {
                 Ok((incarnation, verified, error)) => serde_json::json!({"incarnation": if verified {incarnation.clone()} else {None}, "candidate_incarnation": incarnation, "verification": if verified {"operation-incarnation"} else {"launch-accepted-unverified"}, "verification_error": error}),
                 Err(error) => {
-                    let rejected = error.downcast_ref::<st_runtime::StartRejected>()
+                    let rejected = error.downcast_ref::<fractal_runtime::StartRejected>()
                         .is_some_and(|proof| proof.operation.as_deref() == Some(id.as_str()));
                     let (closed, verification_error) = if !backend_entered || rejected { (true, None) }
                         else { match runtime.start_operation_closed(&prepared.launch_member) {

@@ -3,17 +3,17 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use st_drivers::reconcile::ObservedPtyPresentation;
-use st_drivers::reconcile::reconcile_selected;
-use st_drivers::reconcile::resolve_task;
-use st_drivers::spec::{AgentDesiredState, AgentSpec, JobType, Resource, Task, TaskKind, TaskLifecycle};
-use st_drivers::{Session, reconcile as reconcile_result};
+use fractal_drivers::reconcile::ObservedPtyPresentation;
+use fractal_drivers::reconcile::reconcile_selected;
+use fractal_drivers::reconcile::resolve_task;
+use fractal_drivers::spec::{AgentDesiredState, AgentSpec, JobType, Resource, Task, TaskKind, TaskLifecycle};
+use fractal_drivers::{Session, reconcile as reconcile_result};
 
 fn reconcile<'a>(
     specs: &'a [AgentSpec],
     sessions: &[Session],
     host: &str,
-) -> st_drivers::ReconcilePlan<'a> {
+) -> fractal_drivers::ReconcilePlan<'a> {
     reconcile_result(specs, sessions, host).unwrap()
 }
 
@@ -433,7 +433,7 @@ fn spec(
         } else {
             AgentDesiredState::Running
         },
-        residency_policy: st_drivers::ResidencyPolicy::Always,
+        residency_policy: fractal_drivers::ResidencyPolicy::Always,
         keep: false,
         restart: None,
         delivery: None,

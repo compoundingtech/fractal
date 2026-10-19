@@ -2,16 +2,16 @@
 //! their description and session, ends with tokens, and a Codex subagent's tokens in its parent's
 //! usage. An omp seat's channel writes the ledger from the frames its extension sends. These run
 //! against the real API on a private socket; the seat-level proof is `subagents_seat`.
-use st3::SeatsStoreCore;
+use fractal_daemon::SeatsStoreCore;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use st_drivers::subagents::{self as ledger, Tokens};
-use st3::api::AppState;
-use st3::client::{Client, Endpoint};
-use st3::store::Store;
+use fractal_drivers::subagents::{self as ledger, Tokens};
+use fractal_daemon::api::AppState;
+use fractal_daemon::client::{Client, Endpoint};
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const CODEX_SEAT: &str = "agent/example/codex";
@@ -44,7 +44,7 @@ async fn serve(
     let socket = root.join("st3.sock");
     let path = socket.clone();
     let server =
-        tokio::spawn(async move { st3::api::serve_unix(&path, st3::api::router(state)).await });
+        tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await });
     for _ in 0..200 {
         if socket.exists() {
             break;
@@ -116,17 +116,17 @@ async fn a_codex_subagent_run_ends_with_its_own_tokens_in_the_parents_usage() {
     let agent_dir = root.path().join("agent");
     let codex_home = root.path().join("codex");
     // The parent's own responses name the account that pays.
-    st_drivers::harness_timeline::Writer::new(&agent_dir, "codex", "codex-incarnation")
+    fractal_drivers::harness_timeline::Writer::new(&agent_dir, "codex", "codex-incarnation")
         .with_account(Some("codex/aaaaaaaaaaaaaaaa".into()))
         .append(
             "codex:usage:turn-1:10",
-            st_drivers::harness_timeline::Role::System,
-            st_drivers::harness_timeline::EntryType::Usage,
+            fractal_drivers::harness_timeline::Role::System,
+            fractal_drivers::harness_timeline::EntryType::Usage,
             json!({"semantics": "response", "model": "gpt-example", "total_tokens": 10}),
             true,
         )
         .unwrap();
-    let mut publisher = st3::subagents::Publisher::start(
+    let mut publisher = fractal_daemon::subagents::Publisher::start(
         CODEX_SEAT,
         "codex",
         "incarnation-1",
@@ -183,7 +183,7 @@ async fn a_codex_subagent_run_ends_with_its_own_tokens_in_the_parents_usage() {
     assert_eq!(ended[1]["total_tokens"], 215);
     assert_eq!(ended[1]["output_tokens"], 15);
 
-    let record = st_drivers::harness_timeline::read(&st_drivers::harness_timeline::timeline_path(
+    let record = fractal_drivers::harness_timeline::read(&fractal_drivers::harness_timeline::timeline_path(
         &agent_dir,
     ))
     .unwrap();
@@ -237,7 +237,7 @@ async fn a_new_driver_incarnation_ends_what_the_last_harness_left_running() {
     let (store, client, server) = serve(root.path()).await;
     let agent_dir = root.path().join("agent");
     let started = ledger::now_ms();
-    let mut first = st3::subagents::Publisher::start(
+    let mut first = fractal_daemon::subagents::Publisher::start(
         CLAUDE_SEAT,
         "claude",
         "incarnation-1",
@@ -254,7 +254,7 @@ async fn a_new_driver_incarnation_ends_what_the_last_harness_left_running() {
     assert_eq!(fields(&store, CLAUDE_SEAT, "subagent.appeared").len(), 1);
 
     // The driver is replaced in place: same incarnation, the subagent runs on.
-    let mut replaced = st3::subagents::Publisher::start(
+    let mut replaced = fractal_daemon::subagents::Publisher::start(
         CLAUDE_SEAT,
         "claude",
         "incarnation-1",
@@ -266,7 +266,7 @@ async fn a_new_driver_incarnation_ends_what_the_last_harness_left_running() {
     assert_eq!(fields(&store, CLAUDE_SEAT, "subagent.appeared").len(), 1);
 
     // A new incarnation means a new harness: the old one's subagent died with it.
-    let mut next = st3::subagents::Publisher::start(
+    let mut next = fractal_daemon::subagents::Publisher::start(
         CLAUDE_SEAT,
         "claude",
         "incarnation-2",
@@ -308,7 +308,7 @@ async fn a_codex_run_cut_short_by_its_harness_still_counts_its_tokens() {
     let (store, client, server) = serve(root.path()).await;
     let agent_dir = root.path().join("agent");
     let codex_home = root.path().join("codex");
-    let mut publisher = st3::subagents::Publisher::start(
+    let mut publisher = fractal_daemon::subagents::Publisher::start(
         CODEX_SEAT,
         "codex",
         "incarnation-1",
@@ -329,7 +329,7 @@ async fn a_codex_run_cut_short_by_its_harness_still_counts_its_tokens() {
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0]["outcome"], "harness-exited");
     assert_eq!(ended[0]["total_tokens"], 42);
-    let record = st_drivers::harness_timeline::read(&st_drivers::harness_timeline::timeline_path(
+    let record = fractal_drivers::harness_timeline::read(&fractal_drivers::harness_timeline::timeline_path(
         &agent_dir,
     ))
     .unwrap();
@@ -346,17 +346,17 @@ async fn a_codex_run_cut_short_by_its_harness_still_counts_its_tokens() {
 
 /// An omp seat's channel observer, as `st driver omp-channel` runs it, bound to native session
 /// `native-1`. The seat is declared, so the agents list shows it.
-fn omp_channel(store: &Store, agent_dir: &Path) -> st_drivers::pi_channel::EventObserver {
-    let intent = st3::parse_intent(
+fn omp_channel(store: &Store, agent_dir: &Path) -> fractal_drivers::pi_channel::EventObserver {
+    let intent = fractal_daemon::parse_intent(
         "version 2\nagent \"example/omp\" { workspace \"/tmp\"; command \"true\"; }",
         "example",
     )
     .unwrap();
     store.apply_internal(&intent, "seats").unwrap();
-    st_drivers::harness_events::enable(agent_dir, "runtime-1").unwrap();
+    fractal_drivers::harness_events::enable(agent_dir, "runtime-1").unwrap();
     let seq =
-        st_drivers::harness_state::claim(agent_dir, OMP_SEAT, "omp", "provider-1").unwrap();
-    let mut channel = st_drivers::pi_channel::EventObserver::new(
+        fractal_drivers::harness_state::claim(agent_dir, OMP_SEAT, "omp", "provider-1").unwrap();
+    let mut channel = fractal_drivers::pi_channel::EventObserver::new(
         agent_dir, OMP_SEAT, "omp", "provider-1", seq, "runtime-1",
     )
     .unwrap();
@@ -388,7 +388,7 @@ async fn an_omp_subagent_is_listed_on_its_seat_until_it_ends() {
     let (store, client, server) = serve(root.path()).await;
     let agent_dir = root.path().join("agent");
     let mut channel = omp_channel(&store, &agent_dir);
-    let mut publisher = st3::subagents::Publisher::start(
+    let mut publisher = fractal_daemon::subagents::Publisher::start(
         OMP_SEAT,
         "omp",
         "incarnation-1",
@@ -412,7 +412,7 @@ async fn an_omp_subagent_is_listed_on_its_seat_until_it_ends() {
     assert_eq!(appeared.len(), 1);
     let lease = appeared[0]["lease_expires_at_unix_ms"].as_u64().unwrap();
     assert!(
-        lease > before && lease <= ledger::now_ms() + st3::store::SUBAGENT_LEASE_MS,
+        lease > before && lease <= ledger::now_ms() + fractal_daemon::store::SUBAGENT_LEASE_MS,
         "a finite lease from the appearance: {lease}"
     );
 
@@ -450,7 +450,7 @@ async fn an_omp_subagent_is_listed_on_its_seat_until_it_ends() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_omp_subagent_that_stops_reporting_leaves_the_list_while_its_seat_runs() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     // SAFETY: the supervised process runs this test alone, and no other thread runs yet.
@@ -467,7 +467,7 @@ fn an_omp_subagent_that_stops_reporting_leaves_the_list_while_its_seat_runs() {
             let (store, client, server) = serve(root.path()).await;
             let agent_dir = root.path().join("agent");
             let mut channel = omp_channel(&store, &agent_dir);
-            let mut publisher = st3::subagents::Publisher::start(
+            let mut publisher = fractal_daemon::subagents::Publisher::start(
                 OMP_SEAT,
                 "omp",
                 "incarnation-1",

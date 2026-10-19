@@ -2,9 +2,9 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::LoopSpec;
-pub use st3_seats::store::attention_snapshot::*;
-pub use st3_seats::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, agent, conversation_agent, native_prompt_gone_key, person_attention_item, plan_approval, recorded, resolve_native_harness_at, screen_prompt_delivered_key, screen_prompt_gone_key};
-pub use st3_seats::store::attention_snapshot::{screen_prompt_undelivered_key};
+pub use fractal_seats::store::attention_snapshot::*;
+pub use fractal_seats::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, agent, conversation_agent, native_prompt_gone_key, person_attention_item, plan_approval, recorded, resolve_native_harness_at, screen_prompt_delivered_key, screen_prompt_gone_key};
+pub use fractal_seats::store::attention_snapshot::{screen_prompt_undelivered_key};
 
 pub trait AttentionSnapshotStore {
     /// The mission context of a person ask a mission step made: its mission, and the step that

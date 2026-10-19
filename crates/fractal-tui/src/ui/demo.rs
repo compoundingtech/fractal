@@ -166,12 +166,12 @@ pub fn loading() -> World {
 }
 
 /// The demo accounts' limits, as their harnesses last reported them.
-fn usage_limits() -> Vec<st3_client::UsageLimit> {
+fn usage_limits() -> Vec<fractal_client::UsageLimit> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as u64);
     vec![
-        st3_client::UsageLimit {
+        fractal_client::UsageLimit {
             account: s("anthropic"),
             account_ref: None,
             identified: Some(true),
@@ -186,7 +186,7 @@ fn usage_limits() -> Vec<st3_client::UsageLimit> {
             host: s("lark"),
             seats: vec![s("agent/example/atlas/builder"), s("agent/example/cos")],
         },
-        st3_client::UsageLimit {
+        fractal_client::UsageLimit {
             account: s("openai"),
             account_ref: None,
             identified: Some(true),
@@ -205,7 +205,7 @@ fn usage_limits() -> Vec<st3_client::UsageLimit> {
 }
 
 /// A day of spend: the atlas store move's compare reruns lead, as Home's note says.
-fn usage() -> Vec<st3_client::UsageRow> {
+fn usage() -> Vec<fractal_client::UsageRow> {
     let row = |agent: &str,
                run: Option<&str>,
                step: Option<&str>,
@@ -213,7 +213,7 @@ fn usage() -> Vec<st3_client::UsageRow> {
                host: &str,
                tokens: u64,
                output: u64,
-               cost: u64| st3_client::UsageRow {
+               cost: u64| fractal_client::UsageRow {
         agent: s(agent),
         mission_run: run.map(s),
         step: step.map(s),

@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_store::store::person_work::revision_provenance_tests_shared_missions::*;
-use st3_store::store::person_work::revision_provenance_tests_shared_missions::{definition_row, mission, ordered_claims, publish_below, receive_both, retain_noncanonical_source, revision_row};
+use fractal_store::store::person_work::revision_provenance_tests_shared_missions::*;
+use fractal_store::store::person_work::revision_provenance_tests_shared_missions::{definition_row, mission, ordered_claims, publish_below, receive_both, retain_noncanonical_source, revision_row};
 
 
 fn post_update(store: &Store) -> ClaimRecord {
@@ -164,7 +164,7 @@ fn person_definition_source_repairs_even_when_revision_history_is_already_canoni
         .batched(|tx| -> Result<()> {
             assert_eq!(
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h1a504bd00637 owner=st3_missions::store::person_work::revision_provenance_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET claim_id=?2 WHERE mission_id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h242ab001edcc owner=fractal_missions::store::person_work::revision_provenance_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET claim_id=?2 WHERE mission_id=?1",
                     params![spec.id, later.id],
                 )?,
                 1

@@ -3,8 +3,8 @@
 use crate::PublishedViewsAttentionStore;
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-pub use st3_seats::store::attention_list::*;
-pub use st3_seats::store::attention_list::{AttentionList, AttentionPublication, PUBLISHED_VIEWS, ViewHealth};
+pub use fractal_seats::store::attention_list::*;
+pub use fractal_seats::store::attention_list::{AttentionList, AttentionPublication, PUBLISHED_VIEWS, ViewHealth};
 #[cfg(test)]
 #[path = "attention_list/tests.rs"]
 mod tests;
@@ -141,7 +141,7 @@ fn blocked_on_human(connection: &Connection, id: &str) -> Result<bool> {
             "SELECT COALESCE(json_extract(body, '$.fields.blocked_on'), json_extract(body, '$.blocked_on'))='human'
              FROM claims WHERE id=?1",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h33b3e3f2f1a0 owner=st3_attention::store::attention_list TODO=trace-statement-and-value-representation */ [id], |row| row.get::<_, Option<bool>>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0a54149352cd owner=fractal_attention::store::attention_list TODO=trace-statement-and-value-representation */ [id], |row| row.get::<_, Option<bool>>(0))
         .optional()?
         .flatten()
         .unwrap_or(false))
@@ -152,7 +152,7 @@ fn blocked_on_human(connection: &Connection, id: &str) -> Result<bool> {
 fn declared_stop(connection: &Connection, subject: &str) -> Result<bool> {
     Ok(connection
         .prepare_cached("SELECT kind='stop' FROM desired WHERE subject=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h988277ca5bb9 owner=st3_attention::store::attention_list TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-hb49b53d4bf64 owner=fractal_attention::store::attention_list TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))
         .optional()?
         .unwrap_or(false))
 }
@@ -305,7 +305,7 @@ impl AttentionListStore for Store {
             "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_kind_index
              WHERE kind IN ('custom.client.pairing-completed','custom.client.pairing-revoked')
                AND store_index>?1 AND store_index<=?2)",
-        )?.query_row(/* sqlite-large-value: allow-for-now lv-hd3a79f42a6ae owner=st3_attention::store::attention_list TODO=trace-statement-and-value-representation */ params![checked, index], |row| row.get(0))?;
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hbd833478720f owner=fractal_attention::store::attention_list TODO=trace-statement-and-value-representation */ params![checked, index], |row| row.get(0))?;
         list.pairings_checked.store(index, AtomicOrdering::Release);
         if changed {
             for view in PUBLISHED_VIEWS.into_iter().filter(|view| self.published_view_serving(view)) {
@@ -423,7 +423,7 @@ impl AttentionListStore for Store {
         let earliest: Option<i64> = self.readers.get().prepare_cached(
             "SELECT MIN(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
              WHERE store_index>?1 AND store_index<=?2 AND CAST(accepted_at_unix_ms AS INTEGER)>?3",
-        )?.query_row(/* sqlite-large-value: allow-for-now lv-h1c6e932adae7 owner=st3_attention::store::attention_list TODO=trace-statement-and-value-representation */ params![after, through, i64::try_from(now).unwrap_or(i64::MAX)], |row| row.get(0))?;
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-h88ea458f2e12 owner=fractal_attention::store::attention_list TODO=trace-statement-and-value-representation */ params![after, through, i64::try_from(now).unwrap_or(i64::MAX)], |row| row.get(0))?;
         Ok(earliest.and_then(|at| u128::try_from(at).ok()))
     }
 

@@ -2,7 +2,7 @@
 // message it sends, and the `signature` parameter that carries the result. The key itself lives in
 // the caller's platform key store; everything here is plain data, checked by
 // tests/deviceSigning.test.mjs against fixtures/clients/device-signing-v1.json.
-import type { DeviceSignature } from '@smalltalk/st3-client';
+import type { DeviceSignature } from '@fractal/client';
 
 export const SIGNED_FIELDS = ['content', 'from', 'in_reply_to', 'session_id', 'tags', 'title', 'to'] as const;
 

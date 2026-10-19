@@ -5,8 +5,8 @@ use crate::model::{
     DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, St3Error, UsedMissionSpec,
     WorkSelector,
 };
-pub use st3_delivery::references::*;
-pub use st3_delivery::references::{Graph, Scope, graph};
+pub use fractal_delivery::references::*;
+pub use fractal_delivery::references::{Graph, Scope, graph};
 #[cfg(any(test, feature = "test-support"))]
 pub mod seats_shared_tests;
 

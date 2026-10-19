@@ -1,10 +1,10 @@
 //! Each fixture serves an isolated daemon over its own Unix socket and durable graph.
-use st3::SeatsStoreCore;
-use st3::OwnedSetsStore;
+use fractal_daemon::SeatsStoreCore;
+use fractal_daemon::OwnedSetsStore;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
-use st3::{
+use fractal_daemon::{
     api::AppState,
     client::Client,
     fleet::MemberKey,
@@ -61,7 +61,7 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, st3::api::router(state))
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
             .await
             .unwrap();
     });
@@ -227,7 +227,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
                 .is_empty()
         );
         // Typed generated clients understand the additive owned-set resource.
-        serde_json::from_value::<st3_client::Resource>(response).unwrap();
+        serde_json::from_value::<fractal_client::Resource>(response).unwrap();
     }
     let selected = amber.store.owned_sets().unwrap().remove(0);
     for (subject, member) in &selected.receipt.members {
@@ -330,7 +330,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
         let previous = previous.clone();
         tokio::task::spawn_blocking(move || {
             let mut command =
-                st3::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
             command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
@@ -442,7 +442,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
         .unwrap()
         .0;
     assert!(
-        st3::graph::schedule_spec(&schedule.desired, "ivory")
+        fractal_daemon::graph::schedule_spec(&schedule.desired, "ivory")
             .unwrap()
             .stopped
     );
@@ -453,7 +453,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
             .unwrap()
             .unwrap()
             .state,
-        st3::model::MissionState::Retired
+        fractal_daemon::model::MissionState::Retired
     );
     let launched_token = amber
         .store
@@ -503,7 +503,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
     ] {
         let socket = root.path().join("amber/st3.sock");
         let output = tokio::task::spawn_blocking(move || {
-            st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
                 .arg(socket)
@@ -531,12 +531,12 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
 #[derive(Default)]
 struct RolloutRuntime {
     observations:
-        std::sync::Mutex<std::collections::BTreeMap<String, st3::reconcile::RuntimeObservation>>,
-    starts: std::sync::Mutex<Vec<st3::model::MemberSpec>>,
+        std::sync::Mutex<std::collections::BTreeMap<String, fractal_daemon::reconcile::RuntimeObservation>>,
+    starts: std::sync::Mutex<Vec<fractal_daemon::model::MemberSpec>>,
     stops: std::sync::Mutex<Vec<String>>,
 }
-impl st3::reconcile::RuntimeControl for RolloutRuntime {
-    fn snapshot_ptys(&self) -> anyhow::Result<Vec<st3::reconcile::RuntimeObservation>> {
+impl fractal_daemon::reconcile::RuntimeControl for RolloutRuntime {
+    fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(self
             .observations
             .lock()
@@ -545,15 +545,15 @@ impl st3::reconcile::RuntimeControl for RolloutRuntime {
             .cloned()
             .collect())
     }
-    fn observe_exec(&self, id: &str) -> anyhow::Result<Option<st3::reconcile::RuntimeObservation>> {
+    fn observe_exec(&self, id: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(self.observations.lock().unwrap().get(id).cloned())
     }
-    fn start(&self, member: &st3::model::MemberSpec) -> anyhow::Result<()> {
+    fn start(&self, member: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
         let mut starts = self.starts.lock().unwrap();
         starts.push(member.clone());
         self.observations.lock().unwrap().insert(
             member.runtime_id.clone(),
-            st3::reconcile::RuntimeObservation {
+            fractal_daemon::reconcile::RuntimeObservation {
                 runtime_id: member.runtime_id.clone(),
                 terminal: member.terminal,
                 status: "running".into(),
@@ -636,7 +636,7 @@ fn native_observation(store: &Store, subject: &str, incarnation: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explicit_cli_request() {
-    use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+    use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
     let root = tempfile::tempdir().unwrap();
     let anchor = Arc::new(MemberKey::generate().unwrap().0);
     let d = daemon(root.path(), "amber", anchor.clone(), &anchor).await;
@@ -666,7 +666,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         source
     };
     let mut initial = request(&d, 1, bundle("first", true)).await;
-    initial.options.rollout = Some(st3::rollout::Policy::when_idle(1_800_000, false));
+    initial.options.rollout = Some(fractal_daemon::rollout::Policy::when_idle(1_800_000, false));
     preview(&d, &mut initial).await;
     d.client
         .post::<_, Value>("/v1/sets/apply", &initial)
@@ -740,7 +740,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         if let Some(operation) = d.store.rollout(automatic).unwrap()
             && operation.drain_ack.is_none()
         {
-            st3::rollout::phase(&d.store, automatic, &operation, "drain-ack", None, &[]).unwrap();
+            fractal_daemon::rollout::phase(&d.store, automatic, &operation, "drain-ack", None, &[]).unwrap();
         }
         for observation in runtime.snapshot_ptys().unwrap() {
             if observation.status == "running"
@@ -777,7 +777,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         vec![format!("original-{automatic}")]
     );
     assert!(
-        st3::rollout::hold_render(
+        fractal_daemon::rollout::hold_render(
             &d.store,
             &d.store
                 .desired_subject_with_writer(manual)
@@ -808,7 +808,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         "published, rollout pending (manual)"
     );
     assert_eq!(member["incarnation"], format!("original-{manual}"));
-    serde_json::from_value::<st3_client::Resource>(status).unwrap();
+    serde_json::from_value::<fractal_client::Resource>(status).unwrap();
     let agent: Value = d
         .client
         .get(&format!("/v1/client/agents/{manual}"))
@@ -820,7 +820,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         agent["rollout"]["status"],
         "published, rollout pending (manual)"
     );
-    serde_json::from_value::<st3_client::Resource>(agent).unwrap();
+    serde_json::from_value::<fractal_client::Resource>(agent).unwrap();
     // Neither restarting nor suspension may sneak around the pending publication.
     for path in ["/v1/agents/restart", "/v1/agents/suspend"] {
         let error = d
@@ -837,7 +837,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
     let (shown, output) = tokio::task::spawn_blocking(move || {
         let command = || {
             let mut command =
-                st3::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
             command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--endpoint"])
@@ -875,7 +875,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         reconciler.reconcile_once().unwrap();
         let operation = d.store.rollout(manual).unwrap().unwrap();
         if operation.drain_ack.is_none() {
-            st3::rollout::phase(&d.store, manual, &operation, "drain-ack", None, &[]).unwrap();
+            fractal_daemon::rollout::phase(&d.store, manual, &operation, "drain-ack", None, &[]).unwrap();
         }
         if let Some(incarnation) = operation.replacement_incarnation {
             native_observation(&d.store, manual, &incarnation);
@@ -952,7 +952,7 @@ async fn manual_authored_selection_publication(
     argument: &str,
     case: ManualPublicationCase,
 ) {
-    use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+    use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 
     let root = tempfile::tempdir().unwrap();
     let anchor = Arc::new(MemberKey::generate().unwrap().0);
@@ -979,7 +979,7 @@ async fn manual_authored_selection_publication(
         )
     };
     let authored_adoption = case == ManualPublicationCase::Adoption;
-    let unmanaged = st3::parse_intent(
+    let unmanaged = fractal_daemon::parse_intent(
         &bundle("first", "unmanaged", false, authored_adoption),
         "amber",
     )
@@ -1045,7 +1045,7 @@ async fn manual_authored_selection_publication(
         .unwrap()
         .unwrap()
         .0;
-    assert!(st3::rollout::manual(&adopted));
+    assert!(fractal_daemon::rollout::manual(&adopted));
     assert_eq!(adopted.member.as_ref().unwrap().launch, member.launch);
     assert!(runtime.starts.lock().unwrap().is_empty());
     assert!(runtime.stops.lock().unwrap().is_empty());
@@ -1174,7 +1174,7 @@ async fn manual_authored_selection_publication(
 
     let socket = d.client.socket_path().unwrap().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args(["--endpoint"])
             .arg(socket)
@@ -1198,7 +1198,7 @@ async fn manual_authored_selection_publication(
                 "actor":"person/operator",
                 "expected_desired":d.store.selected_desired_token(subject).unwrap().unwrap(),
                 "expected_incarnation":incarnation,
-                "policy":st3::rollout::Policy::when_idle(1_800_000, false),
+                "policy":fractal_daemon::rollout::Policy::when_idle(1_800_000, false),
                 "idempotency_key":"unsupported-manual-rollout",
             }),
         )
@@ -1269,7 +1269,7 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
     d.client.post::<_, Value>("/v1/agents/suspend",
         &json!({"subject":subject,"actor":"person/operator","idempotency_key":"suspend-before-publication"}))
         .await.unwrap();
-    let operation = st3::suspension::current(&d.store, subject).unwrap().unwrap();
+    let operation = fractal_daemon::suspension::current(&d.store, subject).unwrap().unwrap();
     assert_eq!(operation.phase, "quiescing");
 
     // Publish while suspend is in flight. Owner acknowledgements model the stopped
@@ -1277,10 +1277,10 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
     let mut changed = request(&d, 2, bundle("second")).await;
     preview(&d, &mut changed).await;
     d.client.post::<_, Value>("/v1/sets/apply", &changed).await.unwrap();
-    assert_eq!(st3::suspension::current(&d.store, subject).unwrap().unwrap().operation_id, operation.operation_id);
+    assert_eq!(fractal_daemon::suspension::current(&d.store, subject).unwrap().unwrap().operation_id, operation.operation_id);
     for (key, phase) in [
-        (st3::suspension::suspend_snapshot_key(&operation.operation_id), "snapshotting"),
-        (st3::suspension::suspend_completed_key(&operation.operation_id), "suspended"),
+        (fractal_daemon::suspension::suspend_snapshot_key(&operation.operation_id), "snapshotting"),
+        (fractal_daemon::suspension::suspend_completed_key(&operation.operation_id), "suspended"),
     ] {
         d.store.append_claim(&ClaimInput {
             subject: subject.into(),
@@ -1295,7 +1295,7 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
     append(&d.store, subject, "runtime.observed",
         json!({"status":"exited","host":"amber","runtime_id":member.runtime_id,"terminal":true,"incarnation_id":"original","exit_code":0}));
     let runtime = Arc::new(RolloutRuntime::default());
-    let reconciler = st3::reconcile::Reconciler::new(
+    let reconciler = fractal_daemon::reconcile::Reconciler::new(
         d.store.clone(), runtime.clone(), "amber".into(), Arc::new(Notify::new()));
     reconciler.reconcile_once().unwrap();
     assert!(runtime.starts.lock().unwrap().is_empty());
@@ -1304,14 +1304,14 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
     assert_eq!(shown["rollout"]["mode"], "manual");
     assert_eq!(shown["rollout"]["status"], "published, rollout pending (manual)");
     let refused = d.client.post::<_, Value>("/v1/agents/rollout",
-        &json!({"subject":subject,"actor":"person/operator","expected_desired":d.store.selected_desired_token(subject).unwrap().unwrap(),"expected_incarnation":"original","policy":st3::rollout::Policy::when_idle(1_800_000, false),"idempotency_key":"rollout-while-suspended"}))
+        &json!({"subject":subject,"actor":"person/operator","expected_desired":d.store.selected_desired_token(subject).unwrap().unwrap(),"expected_incarnation":"original","policy":fractal_daemon::rollout::Policy::when_idle(1_800_000, false),"idempotency_key":"rollout-while-suspended"}))
         .await.unwrap_err();
     assert!(refused.to_string().contains("rollout-suspended"), "{refused}");
     assert!(d.store.rollout(subject).unwrap().is_none());
     d.client.post::<_, Value>("/v1/agents/resume",
         &json!({"subject":subject,"actor":"person/operator","idempotency_key":"resume-incumbent"}))
         .await.unwrap();
-    let resumed = st3::suspension::current(&d.store, subject).unwrap().unwrap();
+    let resumed = fractal_daemon::suspension::current(&d.store, subject).unwrap().unwrap();
     assert_eq!(resumed.phase, "restoring");
     assert_eq!(resumed.native_session_id.as_deref(), Some("native-agent-garden-orchard"));
     assert_ne!(d.store.selected_desired_token(subject).unwrap().unwrap(), incumbent);
@@ -1323,7 +1323,7 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
         fields: serde_json::from_value(json!({"action":"resume","operation_status":"resumed","harness":"claude","native_session_id":"native-agent-garden-orchard","incarnation_id":"resumed-incumbent"})).unwrap(),
         evidence: vec![resumed.operation_id.clone()],
         expected_subject: None,
-        idempotency_key: Some(st3::suspension::resume_completed_key(&resumed.operation_id)),
+        idempotency_key: Some(fractal_daemon::suspension::resume_completed_key(&resumed.operation_id)),
     }).unwrap();
     append(&d.store, subject, "runtime.action.succeeded",
         json!({"action":"start","desired_token":incumbent,"incarnation_id":"resumed-incumbent"}));
@@ -1334,14 +1334,14 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
     assert_eq!(shown["state"], "running");
     assert_eq!(shown["rollout"]["status"], "published, rollout pending (manual)");
     d.client.post::<_, Value>("/v1/agents/rollout",
-        &json!({"subject":subject,"actor":"person/operator","expected_desired":d.store.selected_desired_token(subject).unwrap().unwrap(),"expected_incarnation":"resumed-incumbent","policy":st3::rollout::Policy::when_idle(1_800_000, false),"idempotency_key":"rollout-after-resume"}))
+        &json!({"subject":subject,"actor":"person/operator","expected_desired":d.store.selected_desired_token(subject).unwrap().unwrap(),"expected_incarnation":"resumed-incumbent","policy":fractal_daemon::rollout::Policy::when_idle(1_800_000, false),"idempotency_key":"rollout-after-resume"}))
         .await.unwrap();
     assert_eq!(d.store.rollout(subject).unwrap().unwrap().phase, "draining");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canonical_declaration_diffs_match_publication_reads_and_mission_previews() {
-    use st3::model::{MissionRequest, MissionResponse};
+    use fractal_daemon::model::{MissionRequest, MissionResponse};
     let root = tempfile::tempdir().unwrap();
     let key = Arc::new(MemberKey::generate().unwrap().0);
     let d = daemon(root.path(), "amber", key.clone(), &key).await;
@@ -1527,7 +1527,7 @@ async fn adoption_diff_reads_existing_unmanaged_definition_and_invalid_actors_ar
     let root = tempfile::tempdir().unwrap();
     let key = Arc::new(MemberKey::generate().unwrap().0);
     let d = daemon(root.path(), "amber", key.clone(), &key).await;
-    let initial = st3::graph::parse_intent(&bundle("unmanaged", false), "amber").unwrap();
+    let initial = fractal_daemon::graph::parse_intent(&bundle("unmanaged", false), "amber").unwrap();
     d.store
         .apply_internal(&initial, "unmanaged-fixture")
         .unwrap();

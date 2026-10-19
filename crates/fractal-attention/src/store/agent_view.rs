@@ -3,8 +3,8 @@
 use super::*;
 use serde::Deserialize;
 use smallclaims::ivm::{Contribution, Definition, View};
-pub use st3_seats::store::agent_view::*;
-pub use st3_seats::store::agent_view::{AgentView, Event, Field, Machine, Run, STATES, Status, Summary, VIEW, definitions, diagnostic, observed};
+pub use fractal_seats::store::agent_view::*;
+pub use fractal_seats::store::agent_view::{AgentView, Event, Field, Machine, Run, STATES, Status, Summary, VIEW, definitions, diagnostic, observed};
 
 /// Called only inside the authorized caller's SQLite snapshot. A row has no authority
 /// of its own, and an uncertified source never invokes a canonical read fallback.
@@ -35,7 +35,7 @@ mod tests {
     use super::*;
     use crate::store::tests::{exchange_from, exchange_of, receive_and_project};
     use smallclaims::ivm::{Readiness, SourceCut, Views};
-    use st3_seats::store::agent_view_tests_shared_attention_tests::{SEAT};
+    use fractal_seats::store::agent_view_tests_shared_attention_tests::{SEAT};
 
     struct Fixture {
         pub store: Store,

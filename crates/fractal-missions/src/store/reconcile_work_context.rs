@@ -7,8 +7,8 @@ pub use crate::store::reconcile_work_context_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::reconcile_work_context_shared_seats::{AFTER_OWNERS, AFTER_SUPPORT, MAX_SNAPSHOT_CALL_NS};
 use super::*;
-pub use st3_delivery::store::reconcile_work_context::*;
-pub use st3_delivery::store::reconcile_work_context::{CHUNK, DEFINITIONS, DefinitionFields, DefinitionIndex, Inputs, OWNERS, PHASES, SUPPORT, owners, read, support};
+pub use fractal_delivery::store::reconcile_work_context::*;
+pub use fractal_delivery::store::reconcile_work_context::{CHUNK, DEFINITIONS, DefinitionFields, DefinitionIndex, Inputs, OWNERS, PHASES, SUPPORT, owners, read, support};
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared_seats;
 

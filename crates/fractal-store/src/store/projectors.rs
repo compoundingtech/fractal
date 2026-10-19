@@ -83,7 +83,7 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "directive-notes",
-        takes: Takes::Kinds(&[st3_schema::directive_notes::KIND]),
+        takes: Takes::Kinds(&[fractal_schema::directive_notes::KIND]),
         project: |transaction, _| directive_notes::flush(transaction),
     },
     AppendProjector {

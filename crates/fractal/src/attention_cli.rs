@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 async fn run_review_decision(
     client: &Client,
@@ -236,7 +236,7 @@ pub(super) async fn run_attention(
             let response: AttentionRequestView = client
                 .post(
                     "/v1/attention",
-                    &st3::model::AttentionRequestPost {
+                    &fractal_daemon::model::AttentionRequestPost {
                         request: AttentionRequest {
                             reviewer: args.reviewer,
                             title: args.title,
@@ -246,7 +246,7 @@ pub(super) async fn run_attention(
                             actor,
                             idempotency_key,
                         },
-                        closing: st3::model::AttentionClosing {
+                        closing: fractal_daemon::model::AttentionClosing {
                             until: args.until,
                             step: args.step,
                             closed_by: args.person_closes.then(|| "person".into()),

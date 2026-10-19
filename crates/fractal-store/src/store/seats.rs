@@ -171,7 +171,7 @@ impl Store {
                    AND json_extract(body, '$.fields.incarnation_id')=?2
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                    AND after_store_index<=?3 ORDER BY id DESC LIMIT 1")?.query_row(
-                /* sqlite-large-value: allow-for-now lv-h0089217fcd70 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
+                /* sqlite-large-value: allow-for-now lv-had8224ccced3 owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             if let Some(time) = local {
                 times.push(time.max(0) as u128);
@@ -183,7 +183,7 @@ impl Store {
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                    AND store_index<=?3
                  ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1")?.query_row(
-                /* sqlite-large-value: allow-for-now lv-ha21e429f8e30 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
+                /* sqlite-large-value: allow-for-now lv-h4a9a5bfe728f owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             times.extend(replicated.and_then(|time| time.parse::<u128>().ok()));
         }
@@ -195,8 +195,8 @@ impl Store {
             "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_to_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
         ] {
             let time: Option<String> = connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd00f988e95f2 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ query)?
-                .query_row(/* sqlite-large-value: allow-for-now lv-h81aea6ba2165 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, snapshot_index], |row| row.get(0))
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h51139ef85b54 owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ query)?
+                .query_row(/* sqlite-large-value: allow-for-now lv-ha1358f6db412 owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, snapshot_index], |row| row.get(0))
                 .optional()?;
             times.extend(time.and_then(|time| time.parse::<u128>().ok()));
         }
@@ -260,7 +260,7 @@ impl Store {
     ) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        let id: Option<String> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hbbd95e9e69f8 owner=st3_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let id: Option<String> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd36f92918948 owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id FROM claims INDEXED BY claims_harness_auth_diagnostic_index
              WHERE subject=?1 AND kind='harness.diagnostic'
                AND json_extract(body, '$.fields.incarnation_id')=?2

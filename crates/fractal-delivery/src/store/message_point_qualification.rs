@@ -4,11 +4,11 @@ use crate::message_sent_recipient_match;
 use super::*;
 use std::fmt;
 use std::io::{self, Write};
-use st3_store::store::message_point_qualification_shared_delivery::*;
-use st3_store::store::message_point_qualification_shared_delivery::{AUX_PER_KEY, AUX_ROWS, Accounting, CLAIM_FIELDS, CORE_BYTES, Cause, ClaimEdge, CoreSize, DESIRED_FIELDS, Domains};
-use st3_store::store::message_point_qualification_shared_delivery::{Header, KEY_BYTES, METADATA_BYTES, OWN_ROWS, Point, PointCore, Qualified, REMINDER_BYTES, SOURCE_BYTES, Stage};
-use st3_store::store::message_point_qualification_shared_delivery::{admit_batch, admit_desired, admit_fields, admit_global, admit_replica_and_repair, admitted_core_bytes, charge, check, domains, metadata_sql};
-use st3_store::store::message_point_qualification_shared_delivery::{own_headers_sql, wide};
+use fractal_store::store::message_point_qualification_shared_delivery::*;
+use fractal_store::store::message_point_qualification_shared_delivery::{AUX_PER_KEY, AUX_ROWS, Accounting, CLAIM_FIELDS, CORE_BYTES, Cause, ClaimEdge, CoreSize, DESIRED_FIELDS, Domains};
+use fractal_store::store::message_point_qualification_shared_delivery::{Header, KEY_BYTES, METADATA_BYTES, OWN_ROWS, Point, PointCore, Qualified, REMINDER_BYTES, SOURCE_BYTES, Stage};
+use fractal_store::store::message_point_qualification_shared_delivery::{admit_batch, admit_desired, admit_fields, admit_global, admit_replica_and_repair, admitted_core_bytes, charge, check, domains, metadata_sql};
+use fractal_store::store::message_point_qualification_shared_delivery::{own_headers_sql, wide};
 #[cfg(test)]
 mod tests;
 
@@ -58,7 +58,7 @@ fn capture_pinned(
     let mut accounting = Accounting::default();
     accounting.source(subject.len())?;
     let query = own_headers_sql();
-    let mut statement = db.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7be1ea7c16d2 owner=st3_delivery::store::message_point_qualification TODO=trace-statement-and-value-representation */ &query)?;
+    let mut statement = db.prepare_cached(/* sqlite-large-value: allow-for-now lv-hda16d158eed7 owner=fractal_delivery::store::message_point_qualification TODO=trace-statement-and-value-representation */ &query)?;
     let mut rows = statement.query(params![subject, cut])?;
     let mut headers = Vec::new();
     while let Some(row) = rows.next()? {

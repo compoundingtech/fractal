@@ -28,7 +28,7 @@ pub const CHUNK: usize = 16 * 1024;
 pub async fn splice(
     socket: WebSocket,
     transport: UnixStream,
-    mode: Option<st3_client::RawTerminalMode>,
+    mode: Option<fractal_client::RawTerminalMode>,
     lease: Option<Arc<Lease>>,
     control: Option<tokio::sync::mpsc::Sender<Value>>,
     _upgrade: Option<opentelemetry::trace::SpanContext>,
@@ -161,7 +161,7 @@ pub async fn splice(
 
 /// Validate frame headers before forwarding them, without copying or buffering payloads.
 pub struct FrameGate {
-    mode: Option<st3_client::RawTerminalMode>,
+    mode: Option<fractal_client::RawTerminalMode>,
     header: [u8; 5],
     used: usize,
     remaining: usize,
@@ -169,7 +169,7 @@ pub struct FrameGate {
 }
 
 impl FrameGate {
-    pub fn new(mode: Option<st3_client::RawTerminalMode>) -> Self {
+    pub fn new(mode: Option<fractal_client::RawTerminalMode>) -> Self {
         Self {
             mode,
             header: [0; 5],
@@ -186,11 +186,11 @@ impl FrameGate {
             u32::from_be_bytes(self.header[1..].try_into().expect("four-byte header")) as usize;
         let allowed = match self.mode {
             None => true,
-            Some(st3_client::RawTerminalMode::Attach) if !self.attached => {
+            Some(fractal_client::RawTerminalMode::Attach) if !self.attached => {
                 tag == MessageType::Attach
             }
-            Some(st3_client::RawTerminalMode::Peek) if !self.attached => tag == MessageType::Peek,
-            Some(st3_client::RawTerminalMode::Attach) => matches!(
+            Some(fractal_client::RawTerminalMode::Peek) if !self.attached => tag == MessageType::Peek,
+            Some(fractal_client::RawTerminalMode::Attach) => matches!(
                 tag,
                 MessageType::Data
                     | MessageType::Resize
@@ -198,7 +198,7 @@ impl FrameGate {
                     | MessageType::Status
                     | MessageType::ResetInputModes
             ),
-            Some(st3_client::RawTerminalMode::Peek) => {
+            Some(fractal_client::RawTerminalMode::Peek) => {
                 matches!(tag, MessageType::Detach | MessageType::Status)
             }
         };

@@ -1,6 +1,6 @@
 # st3 scenarios specification
 
-This document specifies `@smalltalk/st3-scenarios`: one package that holds the scenario kit
+This document specifies `@fractal/scenarios`: one package that holds the scenario kit
 (seeded factories, slices, worlds, replay, React and Storybook bindings) and the world catalog.
 Every Fractal client uses it for realistic, coherent, privacy-safe demo and test data.
 
@@ -26,7 +26,7 @@ examples. Scenarios are product-shaped data built on that contract; they do not 
 
 These decisions are fixed for this package. Sections below cite them as D1–D10.
 
-- **D1 Home:** one public package, `clients/typescript/st3-scenarios`, holds the kit and the worlds.
+- **D1 Home:** one public package, `clients/typescript/fractal-scenarios`, holds the kit and the worlds.
 - **D2 Consumers:** fractal-ui Storybook, fractal-web (tests, dev mode, e2e), stui, the fractal
   TUI and iOS. stui's `fixtures/clients/demo-world.json` becomes one generated world.
 - **D3 Realism:** seeded synthetic worlds plus real client-v0 frames recorded from a scratch daemon
@@ -57,10 +57,10 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
 ## Package layout (D1)
 
 ```
-clients/typescript/st3-scenarios/
+clients/typescript/fractal-scenarios/
   spec.md                 this document
   README.md               usage
-  package.json            plain manifest, like st3-client and st3-views
+  package.json            plain manifest, like fractal-client and st3-views
   tsconfig.json
   vitest.config.ts        pins the test root to this package
   src/
@@ -74,7 +74,7 @@ clients/typescript/st3-scenarios/
   recordings/             committed curated recordings + their fake-harness scripts
   scripts/
     emit.ts               writes fixtures/scenarios; --check compares bytes
-    decode.ts             strict decode gate (imports @smalltalk/st3-client/schema)
+    decode.ts             strict decode gate (imports @fractal/client/schema)
     scan.ts               privacy gate
   test/                   vitest unit and property tests
 fixtures/scenarios/
@@ -82,20 +82,20 @@ fixtures/scenarios/
   <world>/<slice>.json    one file per world and slice
 ```
 
-Package name: `@smalltalk/st3-scenarios`, `private: true`, `type: module`. Like
-`@smalltalk/st3-client` and `@smalltalk/st3-views`, it exports TypeScript source with explicit
+Package name: `@fractal/scenarios`, `private: true`, `type: module`. Like
+`@fractal/client` and `@fractal/views`, it exports TypeScript source with explicit
 `.ts` import specifiers.
 
 | Export | Contents | May import |
 | --- | --- | --- |
-| `.` | catalog, `loadWorld`, world and slice types, factories | `@smalltalk/st3-client` types only |
-| `./replay` | `createReplay`, clocks | `.`, `@smalltalk/st3-client` (`applyWindow`, types) |
+| `.` | catalog, `loadWorld`, world and slice types, factories | `@fractal/client` types only |
+| `./replay` | `createReplay`, clocks | `.`, `@fractal/client` (`applyWindow`, types) |
 | `./react` | `ScenarioProvider`, `useScenarioSlice` | `.`, `react` |
 | `./storybook` | `scenarioGlobalTypes`, `withScenario`, `scenarioArgTypes`, types | `./react` |
 
 Dependencies:
 
-- Runtime: `@smalltalk/st3-client` (workspace). `react` is an optional peer, needed only by
+- Runtime: `@fractal/client` (workspace). `react` is an optional peer, needed only by
   `./react` and `./storybook`. No Effect, no faker, no MSW.
 - Development: `effect` (pinned with the client, for the decode gate only), `typescript`,
   `vitest`, `@effect/vitest` (property tests).
@@ -386,8 +386,8 @@ Only schema-declared instants move. The client-v0 schema marks them: `$ref: Time
 They cover: second, millisecond and microsecond inputs side by side (including two microsecond
 inputs in the same millisecond, which become equal); a `now` with nonzero
 milliseconds; `epoch-ms` integers; content strings and ids equal to a timestamp (unchanged);
-durations (unchanged); range errors. The TypeScript kit, the Rust reader in `crates/st3-client`
-and the Swift reader in `St3Client` each run all vectors in their own tests.
+durations (unchanged); range errors. The TypeScript kit, the Rust reader in `crates/fractal-client`
+and the Swift reader in `FractalClient` each run all vectors in their own tests.
 
 ## Committed fixtures (D6)
 
@@ -491,9 +491,9 @@ slices of the recording's own world, and recorded slices reused by narrative wor
   `emit`; the freshness, decode, privacy and fidelity gates cover them. A re-recording that
   changes the wire shape is a reviewed diff.
 
-First compile with `nix develop -c gate-slot --class gate -- cargo check -p st3 --tests
+First compile with `nix develop -c gate-slot --class gate -- cargo check -p fractal --tests
 --locked`. Once clean, run the cheap recorder tests and all seven ignored
-`-p st3 --test scenario_recorder` captures sequentially in one `gate-slot --class heavy`
+`-p fractal --test scenario_recorder` captures sequentially in one `gate-slot --class heavy`
 lease inside `nix develop`, with `-- --ignored --nocapture` for captures. Set
 `ST3_SCENARIO_SCRIPT` and `ST3_SCENARIO_OUTPUT` to absolute paths; the output must not
 already exist. Re-record into a new candidate, then review it before replacing the committed
@@ -508,10 +508,10 @@ cleanup, use the scratch environment; curl disables configuration loading with f
 `-q`, and generated shell literals quote inherited paths as data.
 
 The implementation composes three existing patterns, not a pre-existing recorder API:
-`crates/st3/tests/terminal_binding.rs` supplies scratch ownership and teardown scaffolding;
-`crates/st3/tests/no_st2_seat.rs` and `scripts/st3-no-st2-eval/{run,claude}` supply native
+`crates/fractal/tests/terminal_binding.rs` supplies scratch ownership and teardown scaffolding;
+`crates/fractal/tests/no_st2_seat.rs` and `scripts/st3-no-st2-eval/{run,claude}` supply native
 Claude transcripts and real driver hooks; `terminal_actions_survive_unrelated_writes_but_reject_changed_screens`
-in `crates/st3-daemon/src/api/client_v0.rs` supplies the real PTY/projector and terminal attach pattern.
+in `crates/fractal-daemon/src/api/client_v0.rs` supplies the real PTY/projector and terminal attach pattern.
 `terminal_binding` alone produces neither native transcripts nor styled screens.
 
 ### Recording formats
@@ -861,9 +861,9 @@ world and variant, against the expected state the slice defines:
 | Stream | Real consumer | Expected |
 | --- | --- | --- |
 | collection windows | the client's `applyWindow`, per subscription | slice state filtered, ordered and cut to that subscription's limit |
-| conversations | the conversation reducer in `@smalltalk/st3-views` (`sessionView`) | the slice's entries for that agent, joined as the reducer documents |
-| terminals | the SDK terminal follow in `@st3/sdk/effect` (`followTerminal`: attach, `subscribeTerminal`, screen decoding, and the shared follow's error and retry handling) | the latest screen at each step; after `terminal-unavailable` and after `stale-fence`, a fresh attach (runtime read plus `terminal.attach`) and a resubscribe that continues with the current incarnation's screen; `terminal-ended` ends the follow |
-| sync | the SDK sync fold in `@st3/sdk/effect` | the [sync matrix](#sync-matrix) `expected` status per surface |
+| conversations | the conversation reducer in `@fractal/views` (`sessionView`) | the slice's entries for that agent, joined as the reducer documents |
+| terminals | the SDK terminal follow in `@fractal/sdk/effect` (`followTerminal`: attach, `subscribeTerminal`, screen decoding, and the shared follow's error and retry handling) | the latest screen at each step; after `terminal-unavailable` and after `stale-fence`, a fresh attach (runtime read plus `terminal.attach`) and a resubscribe that continues with the current incarnation's screen; `terminal-ended` ends the follow |
+| sync | the SDK sync fold in `@fractal/sdk/effect` | the [sync matrix](#sync-matrix) `expected` status per surface |
 
 Windows and conversations run in this package's tests. The terminal and sync checks run in the SDK
 package, which takes the kit as a development dependency (see
@@ -881,7 +881,7 @@ remain terminal not-found.
 
 The `sync` slice's variants are rows of this matrix. Each row names a trigger (a wire script the
 replay dispatches, or a local condition the consumer test creates) and the `SyncStatus` the SDK
-must report. `SyncStatus` is the portable Amendment v2 contract of `@st3/sdk/effect`
+must report. `SyncStatus` is the portable Amendment v2 contract of `@fractal/sdk/effect`
 (`sync-status.ts`). Times in `expected` are offsets from `now`. "Pending" rows wait for server
 frames (PR A: heartbeat, coded reasons, `subscription-limit` code; PR B: progress) to enter the
 client-v0 schema; until then they are excluded from committed fixtures and the gates.
@@ -928,7 +928,7 @@ behavior is recorded in the row on first adoption (`exact`) and changes only wit
 
 Capability advertisement is discovery, not an independent server admission rule. The client-v0
 server constructs registered capabilities with granted/ungranted/unavailable states
-(`crates/st3-daemon/src/api/client_v0.rs`, `capabilities`), checks action scopes in `action`, and opens
+(`crates/fractal-daemon/src/api/client_v0.rs`, `capabilities`), checks action scopes in `action`, and opens
 terminal subscriptions through `open_terminal_subscription` and the attachment lease checks.
 It has no unsupported failure triggered solely by omission from that advertisement.
 Replay therefore imposes no new attach or subscribe restriction when an entry is omitted.
@@ -958,7 +958,7 @@ The kit hands out **wire state**, not decoded values:
 - `useScenarioSlice(slice, project)` returns `project(wireSlice)`. A projection turns wire state
   into a component's props (its DTO). Projections and DTOs belong to the consumer, because
   component props are consumer-owned.
-- A consumer whose app decodes with the Effect codecs (`@smalltalk/st3-client/schema`) or folds
+- A consumer whose app decodes with the Effect codecs (`@fractal/client/schema`) or folds
   with the SDK uses those same functions inside its projection. The consumer may import Effect;
   the kit does not. So a story and the app derive props through one source of truth.
 - **Conformance:** for every world, the consumer tests that its story projection and its app
@@ -977,7 +977,7 @@ The kit hands out **wire state**, not decoded values:
 
 ```ts
 // .storybook/preview.ts
-import { scenarioGlobalTypes, withScenario } from '@smalltalk/st3-scenarios/storybook'
+import { scenarioGlobalTypes, withScenario } from '@fractal/scenarios/storybook'
 export default { globalTypes: scenarioGlobalTypes, decorators: [withScenario] }
 
 // Sidebar.stories.tsx
@@ -1077,8 +1077,8 @@ Edge states:
 
 The path-filtered `fractal-web-execution` job runs these gates as lanes of `scripts/ci-fractal-web`
 (`typecheck`, `test`, `emit:check`, `decode`, `scan`). Its change detection includes
-`clients/typescript/st3-scenarios`, `fixtures/scenarios`, `docs/st3/client-v0`,
-`clients/typescript/st3-client` and `clients/typescript/st3-views`:
+`clients/typescript/fractal-scenarios`, `fixtures/scenarios`, `docs/st3/client-v0`,
+`clients/typescript/fractal-client` and `clients/typescript/fractal-views`:
 
 1. Typecheck and unit/property tests: determinism (same seed, same bytes); rebase (the shared
    vectors, and for any `now` every listed instant stays valid with differences exact relative
@@ -1091,7 +1091,7 @@ The path-filtered `fractal-web-execution` job runs these gates as lanes of `scri
 2. Freshness: `emit --check`, including each file's `times` list and the normalized recording
    regenerated from committed script/raw inputs. Only `emit` writes normalized artifacts.
 3. Decode: every wire value in every committed slice and in every in-process variant is decoded
-   with `@smalltalk/st3-client/schema` in strict mode, once at the anchor and once rebased to a
+   with `@fractal/client/schema` in strict mode, once at the anchor and once rebased to a
    random `now`. `huge` is the exception: every variant decodes at the anchor, and only its default
    slices decode at the random `now`, which runs the rebase path on scale-sized data and keeps the
    lane bounded. `unknown-fields` decodes tolerant and fails strict at exactly its declared paths.
@@ -1127,12 +1127,12 @@ breaks a scenario fails in the same pull request.
 | Consumer | Owner | Contract |
 | --- | --- | --- |
 | fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes` and `withScenario`. Every story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
-| `@st3/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
+| `@fractal/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
 | iOS app | native-client maintainers | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
-| Rust `st3-client` | native-client maintainers | Provides the rebase reader and passes the shared vectors. |
-| Swift `St3Client` | native-client maintainers | Provides the rebase reader, passes the shared vectors, and decodes every committed scenario file with the Swift models. |
+| Rust `fractal-client` | native-client maintainers | Provides the rebase reader and passes the shared vectors. |
+| Swift `FractalClient` | native-client maintainers | Provides the rebase reader, passes the shared vectors, and decodes every committed scenario file with the Swift models. |
 | fractal TUI | fractal-ui maintainers | Reads `fixtures/scenarios/<world>/<slice>.json` from a pinned smalltalk revision through its Rust adapter and the Rust rebase reader; its snapshot tests derive from those files. |
 
 ## Non-goals

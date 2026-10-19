@@ -26,7 +26,7 @@ pub struct SmalltalkRuntime {
     pub client_message_commit_budget: Mutex<client_messages::FoldBudget>,
     /// Simulate different build registries on isolated nodes in compatibility tests.
     #[cfg(any(test, feature = "test-support"))]
-    pub claim_registry: std::sync::OnceLock<st3_schema::Registry>,
+    pub claim_registry: std::sync::OnceLock<fractal_schema::Registry>,
     pub conversation_owner_generation: std::sync::atomic::AtomicU64,
     pub conversation_owners: Mutex<VecDeque<(u64, Arc<conversation_reads::Owners>)>>,
     pub actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
@@ -160,7 +160,7 @@ impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5eb5665e9ea owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5484380b8507 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
         retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
@@ -205,12 +205,12 @@ impl SmalltalkRuntime {
         }
     }
 
-    pub fn claim_registry(&self) -> &st3_schema::Registry {
+    pub fn claim_registry(&self) -> &fractal_schema::Registry {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(registry) = self.claim_registry.get() {
             return registry;
         }
-        st3_schema::registry()
+        fractal_schema::registry()
     }
 }
 
@@ -343,11 +343,11 @@ impl Runtime for SmalltalkRuntime {
         if !upgraded {
             replay_graph_from_nothing_tx(transaction)?;
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h0f8067adfa16 owner=st3_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version',?1)",
+                /* sqlite-large-value: allow-for-now lv-h7e93b88217c6 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('derived_tables_version',?1)",
                 [DERIVED_TABLES_VERSION],
             )?;
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hfe8506d44696 owner=st3_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2')",
+                /* sqlite-large-value: allow-for-now lv-h82c68bbd0060 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_shared_projection_rules','2')",
                 [],
             )?;
             if !work_extension_roots_tx(transaction)?.1 {
@@ -620,16 +620,16 @@ pub fn compatibility_digest(registry_digest: &str) -> String {
 fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
     if fresh {
         let transaction = connection.unchecked_transaction()?;
-        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h91f299ff7936 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
-        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hac7a83f4ed08 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
-        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h48e515fb40e9 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
-        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hd3489deb9c17 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h31d1ed089c5e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.commit()?;
     } else {
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4b6bb56a214a owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3d9dce1a3af5 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hacb85aef8915 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h01ed68d36a12 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
     }
     Ok(())
 }
@@ -955,7 +955,7 @@ mod schema_install_tests {
                 reader
                     .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                     .unwrap(),
-                st3_schema::STORAGE_VERSION
+                fractal_schema::STORAGE_VERSION
             );
             assert_eq!(
                 recovered

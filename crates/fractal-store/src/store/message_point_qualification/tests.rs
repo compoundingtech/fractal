@@ -23,7 +23,7 @@ fn metadata_opcodes_admit_every_variable_column_before_payload() {
         )
         .unwrap();
     let sql = own_headers_sql();
-    let mut statement = db.prepare(/* sqlite-large-value: allow-for-now lv-h8a6342079294 owner=st3_store::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN {sql}")).unwrap();
+    let mut statement = db.prepare(/* sqlite-large-value: allow-for-now lv-h6d737d493840 owner=fractal_store::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN {sql}")).unwrap();
     let mut rows = statement.raw_query();
     let mut roots = BTreeMap::new();
     let mut columns = 0;

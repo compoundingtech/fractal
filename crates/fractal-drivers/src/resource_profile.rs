@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-pub use st_resource_protocol::{
+pub use fractal_resource_protocol::{
     BindingId, FactError, FactValue, HostMessage, MAX_FACT_KEY_BYTES, MAX_FACT_VALUE_BYTES,
     MAX_FACTS, MAX_HEALTH_DETAIL_BYTES, MAX_OBSERVATION_DIAGNOSTIC_BYTES, MAX_PROTOCOL_LINE_BYTES,
     MAX_SELECTOR_BYTES, MAX_SNAPSHOT_BYTES, ObservationResult, OpaqueIdError, OwnerClaim,
@@ -1228,7 +1228,7 @@ impl CatchUp {
         }
 
         let prepared = publication
-            .prepare(/* sqlite-large-value: allow-for-now lv-h1425d93741cd owner=st_drivers::resource_profile TODO=trace-statement-and-value-representation */ )
+            .prepare(/* sqlite-large-value: allow-for-now lv-h40f5bf65e70d owner=fractal_drivers::resource_profile TODO=trace-statement-and-value-representation */ )
             .map_err(PublicationTransactionError::Publication)?;
         let outcome = prepared.outcome.clone();
         debug_assert_eq!(digest, outcome.digest);

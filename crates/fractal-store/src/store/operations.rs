@@ -11,7 +11,7 @@ fn recently_ended_mission_valid_until(
     now: u128,
 ) -> Result<Option<u128>> {
     let mut statement = connection.prepare(
-        /* sqlite-large-value: allow-for-now lv-hf0fc4fe0767b owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ "WITH latest AS (
+        /* sqlite-large-value: allow-for-now lv-hbbd8ae2e1bae owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ "WITH latest AS (
             SELECT mission_id,status,updated_at_unix_ms,ROW_NUMBER() OVER (
                 PARTITION BY mission_id ORDER BY created_at_unix_ms DESC,id DESC
             ) AS position FROM mission_runs
@@ -91,7 +91,7 @@ impl Store {
                 let subject = format!("mission-run/{id}");
                 let reason: Option<String> = connection
                     .query_row(
-                        /* sqlite-large-value: allow-for-now lv-hb7f1fd7bd939 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT COALESCE(json_extract(body,'$.fields.reason'),
+                        /* sqlite-large-value: allow-for-now lv-hc040070a8186 owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT COALESCE(json_extract(body,'$.fields.reason'),
                                      json_extract(body,'$.fields.summary'))
                      FROM claims WHERE subject=?1 AND kind='mission-run.state'
                        AND COALESCE(json_extract(body,'$.fields.reason'),json_extract(body,'$.fields.summary')) IS NOT NULL
@@ -258,7 +258,7 @@ impl Store {
             WHERE mission_id IN (SELECT CASE WHEN value LIKE 'mission/%'
                 THEN substr(value,9) ELSE value END FROM json_each(?1))
         )";
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd95aac5f4b8b owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h94606cbc3ea5 owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ &format!(
             "{newest}, preview AS (
                 SELECT s.*,ROW_NUMBER() OVER (
                     PARTITION BY s.run_id ORDER BY s.created_at_unix_ms,s.step_path
@@ -303,7 +303,7 @@ impl Store {
 
         // Decimal-text comparison preserves the full u128 clock range, unlike SQLite's
         // signed INTEGER cast. Only person_work::current consults acceptance time here.
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfd8255e31968 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha6d4f1e49a3b owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "{newest}
              SELECT claims.id,claims.store_index,claims.batch_id,claims.subject,claims.kind,
                     claims.origin,claims.actor,claims.body,claims.predecessors,claims.accepted_at_unix_ms
@@ -320,7 +320,7 @@ impl Store {
         if asks.is_empty() {
             return Ok(until);
         }
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8c5f7a3ac315 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h65f85a54bb18 owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ &format!(
             "{newest} SELECT id FROM newest WHERE position<=3"
         ))?;
         let runs = statement
@@ -412,7 +412,7 @@ impl Store {
                AND (?5 IS NULL OR c.actor=?5 OR s.assignee=?5 OR s.lease_owner=?5)
              ORDER BY c.store_index DESC LIMIT ?6"
         );
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h839ea7f2c066 owner=st3_store::store::operations TODO=trace-statement-and-value-representation */ &sql)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hae8b134e214e owner=fractal_store::store::operations TODO=trace-statement-and-value-representation */ &sql)?;
         let rows = statement.query_map(
             params![
                 before.min(i64::MAX as u64),

@@ -1,16 +1,16 @@
 [package]
-name = "st3-api-mailbox"
+name = "fractal-api-mailbox"
 version = "0.1.0"
 edition = "2024"
 description = "the mailbox stream API: the per-seat delivery socket, bind, receipts and attachment routes"
 license = "MIT"
 
 [features]
-# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-api-core/test-support"]
+# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
+test-support = ["fractal-api-core/test-support"]
 
 [dependencies]
-st3-api-core = { path = "../st3-api-core" }
+fractal-api-core = { path = "../fractal-api-core" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
@@ -28,14 +28,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
-st-runtime = { path = "../st-runtime" }
-st-drivers = { path = "../st-drivers" }
+fractal-runtime = { path = "../fractal-runtime" }
+fractal-drivers = { path = "../fractal-drivers" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.27"
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
-st3_api_mailbox_self = { package = "st3-api-mailbox", path = ".", features = ["test-support"] }
+fractal_api_mailbox_self = { package = "fractal-api-mailbox", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

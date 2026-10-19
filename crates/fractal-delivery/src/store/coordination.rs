@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::DeliveryStore;
 use super::*;
-pub use st3_store::store::coordination::*;
-pub use st3_store::store::coordination::{backfill, cover_synced_sends, create_schema, initialize, sync};
+pub use fractal_store::store::coordination::*;
+pub use fractal_store::store::coordination::{backfill, cover_synced_sends, create_schema, initialize, sync};
 
 #[cfg(test)]
 mod tests {

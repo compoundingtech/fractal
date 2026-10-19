@@ -1,6 +1,6 @@
 use super::*;
 // The same print macro as main.rs: CLI output goes through st3's writer.
-use st3::cli_println as println;
+use fractal_daemon::cli_println as println;
 
 fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
@@ -18,7 +18,7 @@ fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Resu
 }
 
 pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
-    st3::service::preflight(!args.no_service)?;
+    fractal_daemon::service::preflight(!args.no_service)?;
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
     let config_dir = Config::default_path()
@@ -35,7 +35,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         .map(Path::to_path_buf)
         .context("the state directory has no parent")?;
     let data_dir = data_home.join("st3");
-    let instance = st3::instance::current();
+    let instance = fractal_daemon::instance::current();
     let manifest: Option<Value> = fs::read(data_dir.join("install.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
@@ -70,9 +70,9 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         config.socket.clone(),
         config.client_gateway_socket.clone(),
     ];
-    paths.extend(st3::startup::paths(&config.socket));
-    paths.push(st3::api::unix_reservation_path(&config.socket));
-    paths.push(st3::api::unix_reservation_path(&config.client_gateway_socket));
+    paths.extend(fractal_daemon::startup::paths(&config.socket));
+    paths.push(fractal_daemon::api::unix_reservation_path(&config.socket));
+    paths.push(fractal_daemon::api::unix_reservation_path(&config.client_gateway_socket));
     if st2_only_hooks {
         paths.push(st2_state);
     }
@@ -81,8 +81,8 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     }
     // What the default install writes outside its own directories: st's Claude plugin
     // marketplace, and the copies of the st skill that seats install into harness directories.
-    let skill_copies = st3::skill::untouched_installs();
-    let plugin_files = st_drivers::claude_channel::st3_marketplace_root()
+    let skill_copies = fractal_daemon::skill::untouched_installs();
+    let plugin_files = fractal_drivers::claude_channel::st3_marketplace_root()
         .ok()
         .and_then(|root| root.ancestors().nth(2).map(Path::to_path_buf))
         .filter(|root| root.ends_with("st/plugins") && root.exists());
@@ -134,7 +134,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         "st uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
     );
     let daemon_running = client.get::<Value>("/v1/health").await.is_ok();
-    if let Some(file) = st3::config::FleetFile::load(&config.state_dir)?
+    if let Some(file) = fractal_daemon::config::FleetFile::load(&config.state_dir)?
         && file.removed.is_none()
     {
         if args.offline {
@@ -157,17 +157,17 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         "this machine's graph exists nowhere else; pass --erase-local-graph to erase it"
     );
     if !args.no_service && services_installed()? {
-        st3::service::stop_owned_runtimes(&config)?;
-        st3::service::uninstall()?;
+        fractal_daemon::service::stop_owned_runtimes(&config)?;
+        fractal_daemon::service::uninstall()?;
     } else if client.get::<Value>("/v1/health").await.is_ok()
-        || st3::startup::read(&config.socket).is_some()
+        || fractal_daemon::startup::read(&config.socket).is_some()
     {
         // Setup starts an instance's daemon without a service when the person declines one, so
         // nothing else would stop it. Only the process that answers on the instance's own socket
         // is stopped; the default install's daemon is still left for its owner to stop.
         let stopped = instance.is_some() && {
-            st3::service::stop_owned_runtimes(&config)?;
-            st3::service::stop_daemon_at(&config.socket, std::time::Duration::from_secs(20))?
+            fractal_daemon::service::stop_owned_runtimes(&config)?;
+            fractal_daemon::service::stop_daemon_at(&config.socket, std::time::Duration::from_secs(20))?
         };
         anyhow::ensure!(
             stopped,
@@ -176,7 +176,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         println!("stopped\tthe daemon this instance started without a service");
     }
     if instance.is_none()
-        && let Err(error) = st_drivers::claude_channel::remove_st3_channel(true)
+        && let Err(error) = fractal_drivers::claude_channel::remove_st3_channel(true)
         // No `claude` on this machine means there is no plugin registration to remove.
         && !error.chain().any(|cause| {
             cause

@@ -15,7 +15,7 @@ pub fn validate_actor(
         )
     })?;
     if !(actor.starts_with("person/") || actor.starts_with("agent/"))
-        || st3_schema::registry().validate_subject(actor).is_err()
+        || fractal_schema::registry().validate_subject(actor).is_err()
     {
         return Err(St3Error::new(
             "invalid-registration-actor",

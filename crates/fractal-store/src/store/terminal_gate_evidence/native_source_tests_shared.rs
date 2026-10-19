@@ -80,14 +80,14 @@ impl Fixture {
     pub fn populate_foreign(&self, n: usize) {
         let mut writer = self.store.connection.write();
         let tx = writer.transaction().unwrap();
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h7bf4e39a6bfb owner=st3_store::store::terminal_gate_evidence::native_source_tests_shared TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('foreign','node',999,'fixture-foreign','1')",[]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h1f2dfbefd22f owner=fractal_store::store::terminal_gate_evidence::native_source_tests_shared TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('foreign','node',999,'fixture-foreign','1')",[]).unwrap();
         // Keep the raw legacy volume fixture in bounded batches. Replica-record writes
         // intentionally invalidate this private source adapter; a single 100000-row legacy
         // batch would instead multiply position-recovery work while settling publication.
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h063850ef4d73 owner=st3_store::store::terminal_gate_evidence::native_source_tests_shared TODO=chunk-or-reference-exact-wire-values */ "WITH RECURSIVE pages(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM pages WHERE n<(?1-1)/64)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc1c6ea0cb228 owner=fractal_store::store::terminal_gate_evidence::native_source_tests_shared TODO=chunk-or-reference-exact-wire-values */ "WITH RECURSIVE pages(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM pages WHERE n<(?1-1)/64)
             INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
             SELECT 'foreign-page/'||n,'node',1000+n,'fixture-page/'||n,'1' FROM pages", [n]).unwrap();
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h14b8736a45b7 owner=st3_store::store::terminal_gate_evidence::native_source_tests_shared TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<?1)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hf7ffd18aab06 owner=fractal_store::store::terminal_gate_evidence::native_source_tests_shared TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<?1)
             INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
             SELECT 'foreign/'||n,'foreign-page/'||((n-1)/64),'exec/unrelated/'||n,'runtime.observed','node','{}','[]','1' FROM rows WHERE n<=?1",
             [n]).unwrap();
@@ -155,7 +155,7 @@ mission "one" state="ready" {
     .unwrap();
     project_mission_run_created(tx, &created).unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h4f41218f5393 owner=st3_store::store::terminal_gate_evidence::native_source_tests_shared TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='working' WHERE subject='step-run/one/prepare'",
+        /* sqlite-large-value: allow-for-now lv-hc17ed5ab15a3 owner=fractal_store::store::terminal_gate_evidence::native_source_tests_shared TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='working' WHERE subject='step-run/one/prepare'",
         [],
     )
     .unwrap();

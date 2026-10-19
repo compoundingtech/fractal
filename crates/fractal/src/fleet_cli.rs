@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 fn parse_fleet_duration(text: &str) -> Result<u64> {
     let text = text.trim();
@@ -93,16 +93,16 @@ async fn lock_fleet_admission(
     config: &Config,
     services: bool,
     verb: &str,
-) -> Result<st3::node_identity::StateLock> {
+) -> Result<fractal_daemon::node_identity::StateLock> {
     if client.get::<Value>("/v1/health").await.is_ok() {
         anyhow::ensure!(
             services,
             "stop the running st3 daemon first: nothing may write while this machine {verb}"
         );
-        st3::service::stop()?;
-        st3::node_identity::lock_after_stop(&config.state_dir).await
+        fractal_daemon::service::stop()?;
+        fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await
     } else {
-        st3::node_identity::lock(&config.state_dir)
+        fractal_daemon::node_identity::lock(&config.state_dir)
     }
 }
 
@@ -119,36 +119,36 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         },
         _ => false,
     };
-    st3::service::preflight(manages_services)?;
+    fractal_daemon::service::preflight(manages_services)?;
     let mut config = Config::load_unvalidated(None)?;
     // Explicit admissions can repair a pin after their prior attempt saved membership.
     // Other controls must use the daemon's resolved identity, including leave's runtime check.
     if !matches!(&command, FleetCommand::Join(_) | FleetCommand::Create(_)) {
         config.apply_fleet_file()?;
-        st3::node_identity::resolve(&mut config)?;
+        fractal_daemon::node_identity::resolve(&mut config)?;
     }
     let client = Client::new(endpoint.clone());
     match command {
         FleetCommand::Create(args) => {
             anyhow::ensure!(
-                st3::config::FleetFile::load(&config.state_dir)?.is_none(),
+                fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_none(),
                 "this machine is already in a fleet"
             );
             anyhow::ensure!(
                 config.fleet_id.is_none(),
                 "config.toml already configures a fleet with config peers; move it to membership with st fleet migrate"
             );
-            st3::node_identity::resolve(&mut config)?;
+            fractal_daemon::node_identity::resolve(&mut config)?;
             let node = args.name.unwrap_or_else(|| config.node.clone());
             anyhow::ensure!(
-                st3::store::valid_fleet_node_name(&node),
+                fractal_daemon::store::valid_fleet_node_name(&node),
                 "`{node}` cannot name a fleet member; use --name"
             );
             let services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, services, "founds a fleet").await?;
             let founded =
-                st3::fleet::join::found(&config.state_dir, &node, &args.member.settings())?;
+                fractal_daemon::fleet::join::found(&config.state_dir, &node, &args.member.settings())?;
             state_identity.record_fleet_found(&founded)?;
             drop(state_identity);
             if json_output {
@@ -159,7 +159,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 founded.fleet_id, founded.node
             );
             if services {
-                st3::service::install(Config::load_with_fleet(None)?)?;
+                fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
             }
             print!("{}", cli_help::fleet_created_next_steps(services));
             Ok(())
@@ -172,10 +172,10 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "--send-fabric needs the NAME of the machine to send it to"
                 );
             }
-            let created: st3::api::FleetInviteCreated = client
+            let created: fractal_daemon::api::FleetInviteCreated = client
                 .post(
                     "/v1/internal/fleet/invites",
-                    &st3::api::FleetInviteRequest {
+                    &fractal_daemon::api::FleetInviteRequest {
                         name: args.name.clone(),
                         expires_seconds: parse_fleet_duration(&args.expires)?,
                         via: Some(args.via.clone()),
@@ -186,19 +186,19 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 .await?;
             let command = if args.migrate { "migrate" } else { "join" };
             if let Some(path) = &args.code_file {
-                st3::fleet::join::write_private(path, created.code.as_bytes())?;
+                fractal_daemon::fleet::join::write_private(path, created.code.as_bytes())?;
                 println!("{}\t{}", created.invite, path.display());
             } else if args.send_fabric {
                 let name = args.name.as_deref().unwrap_or_default();
-                let fabric = st3::config::FleetFile::load(&config.state_dir)?
+                let fabric = fractal_daemon::config::FleetFile::load(&config.state_dir)?
                     .and_then(|file| file.fabric)
-                    .or_else(|| st3::fleet::transport::resolve_tool(None, "fabric"))
+                    .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "fabric"))
                     .context("--send-fabric needs the fabric command")?;
                 let temporary = config
                     .state_dir
                     .join("fleet")
                     .join(format!(".send-{}.code", std::process::id()));
-                st3::fleet::join::write_private(&temporary, created.code.as_bytes())?;
+                fractal_daemon::fleet::join::write_private(&temporary, created.code.as_bytes())?;
                 let invite_id = created.invite.trim_start_matches("fleet-invite/");
                 let sent = std::process::Command::new(&fabric)
                     .args(["send-file", name])
@@ -240,7 +240,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         }
         FleetCommand::Invites { all, command } => match command {
             None => {
-                let invites: Vec<st3::store::FleetInviteView> = client
+                let invites: Vec<fractal_daemon::store::FleetInviteView> = client
                     .get(&format!("/v1/internal/fleet/invites?all={all}"))
                     .await?;
                 if json_output {
@@ -277,7 +277,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 let _: Value = client
                     .post(
                         "/v1/internal/fleet/invites/revoke",
-                        &st3::api::FleetInviteRevokeRequest {
+                        &fractal_daemon::api::FleetInviteRevokeRequest {
                             invite: invite.clone(),
                             reason,
                             person,
@@ -308,7 +308,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             let use_services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
-            let joined = st3::fleet::join::join(&st3::fleet::join::JoinOptions {
+            let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
                 state_dir: config.state_dir.clone(),
                 configured_node: config.node.clone(),
                 code: code.trim().to_owned(),
@@ -317,7 +317,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 settings: args.member.settings(),
                 legacy_secret_file: None,
                 fabric_protocol: None,
-                runtime: st3::store::runtime(),
+                runtime: fractal_daemon::store::runtime(),
                 version: env!("CARGO_PKG_VERSION").into(),
             })
             .await?;
@@ -339,7 +339,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             }
             let mut sync_state = None;
             if use_services {
-                st3::service::install(Config::load_with_fleet(None)?)?;
+                fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
                 if !json_output {
                     println!("The st services now run as a fleet member.");
                 }
@@ -439,18 +439,18 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         FleetCommand::Migrate(args) => run_fleet_migrate(&client, &config, args).await,
         FleetCommand::Mode(args) => {
             let lock = lock_fleet_settings(&config.state_dir).await?;
-            let mut file = st3::config::FleetFile::load(&config.state_dir)?
+            let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
                 .context("this machine is not a fleet member")?;
             file.mode = match args.mode.as_str() {
-                "listening" => st3::config::FleetMode::Listening,
-                "dial-out" => st3::config::FleetMode::DialOut,
+                "listening" => fractal_daemon::config::FleetMode::Listening,
+                "dial-out" => fractal_daemon::config::FleetMode::DialOut,
                 _ => anyhow::bail!("the mode is listening or dial-out"),
             };
             file.port = match file.mode {
-                st3::config::FleetMode::DialOut => None,
-                st3::config::FleetMode::Listening => Some(match args.port.or(file.port) {
+                fractal_daemon::config::FleetMode::DialOut => None,
+                fractal_daemon::config::FleetMode::Listening => Some(match args.port.or(file.port) {
                     Some(port) => port,
-                    None => st3::fleet::join::free_port(st3::fleet::join::DEFAULT_PORT)?,
+                    None => fractal_daemon::fleet::join::free_port(fractal_daemon::fleet::join::DEFAULT_PORT)?,
                 }),
             };
             file.save(&config.state_dir)?;
@@ -492,7 +492,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 ),
             }
             if use_services {
-                st3::service::install(Config::load_with_fleet(None)?)?;
+                fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
                 println!("st3 now runs local-only on this machine.");
             } else {
                 println!(
@@ -502,7 +502,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             Ok(())
         }
         FleetCommand::Status => {
-            let status: st3::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
             if json_output {
                 return print_value(&status, true);
             }
@@ -565,10 +565,10 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
 
 async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArgs) -> Result<()> {
     let person = fleet_person(args.actor, config)?;
-    let removal: st3::store::FleetRemoval = client
+    let removal: fractal_daemon::store::FleetRemoval = client
         .post(
             "/v1/internal/fleet/remove",
-            &st3::api::FleetRemoveRequest {
+            &fractal_daemon::api::FleetRemoveRequest {
                 name: args.name.clone(),
                 reason: args.reason,
                 person,
@@ -586,7 +586,7 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
         "Writes {} made after this node's last exchange with it are not accepted. On {}, if it still runs: st uninstall",
         removal.name, removal.name
     );
-    if st3::config::FleetFile::load(&config.state_dir)?.is_some_and(|file| file.legacy_peers) {
+    if fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_some_and(|file| file.legacy_peers) {
         println!(
             "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until st fleet migrate --finish."
         );
@@ -596,11 +596,11 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
 
 async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::File> {
     let state_dir = state_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || st3::config::FleetFile::lock_settings(&state_dir)).await?
+    tokio::task::spawn_blocking(move || fractal_daemon::config::FleetFile::lock_settings(&state_dir)).await?
 }
 
 async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
-    let view: st3::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
     let member = view
         .members
         .iter()
@@ -619,10 +619,10 @@ async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
 async fn save_and_publish_fleet_settings(
     client: &Client,
     config: &Config,
-    file: &st3::config::FleetFile,
+    file: &fractal_daemon::config::FleetFile,
     mut endpoints: Vec<Value>,
 ) -> Result<()> {
-    if file.mode == st3::config::FleetMode::DialOut {
+    if file.mode == fractal_daemon::config::FleetMode::DialOut {
         endpoints.clear();
     } else {
         endpoints.retain(|endpoint| match endpoint["transport"].as_str() {
@@ -642,7 +642,7 @@ async fn save_and_publish_fleet_settings(
     let _: Value = client
         .post(
             "/v1/internal/fleet/endpoints",
-            &st3::api::FleetEndpointsRequest {
+            &fractal_daemon::api::FleetEndpointsRequest {
                 mode: file.mode.as_str().into(),
                 endpoints,
             },
@@ -654,7 +654,7 @@ async fn save_and_publish_fleet_settings(
 
 fn refresh_fleet_worker(no_service: bool) -> Result<()> {
     if !no_service && services_installed()? {
-        st3::service::install(Config::load_with_fleet(None)?)?;
+        fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
     } else {
         println!("Restart st3 replication-worker for the change to take effect.");
         println!(
@@ -669,9 +669,9 @@ async fn run_fleet_transports(
     config: &Config,
     command: FleetTransportsCommand,
 ) -> Result<()> {
-    use st3::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
+    use fractal_daemon::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
     let lock = lock_fleet_settings(&config.state_dir).await?;
-    let mut file = st3::config::FleetFile::load(&config.state_dir)?
+    let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
         .context("this machine is not a fleet member")?;
     anyhow::ensure!(
         file.removed.is_none(),
@@ -711,7 +711,7 @@ async fn run_fleet_transports(
             ..
         } => {
             anyhow::ensure!(
-                file.mode == st3::config::FleetMode::Listening,
+                file.mode == fractal_daemon::config::FleetMode::Listening,
                 "adding Fabric requires a listening member; run st fleet mode listening first"
             );
             let port = file
@@ -752,16 +752,16 @@ async fn run_fleet_transports(
         }
         FleetTransportsCommand::Remove { no_service, .. } => {
             // A configured but unavailable carrier cannot provide the promised rollback.
-            let local = st3::fleet::transport::local_addresses();
+            let local = fractal_daemon::fleet::transport::local_addresses();
             anyhow::ensure!(
-                (file.mode == st3::config::FleetMode::DialOut
+                (file.mode == fractal_daemon::config::FleetMode::DialOut
                     && file
                         .transports
                         .iter()
                         .any(|transport| match transport.as_str() {
                             "loopback" => local.iter().any(std::net::IpAddr::is_loopback),
                             "tailscale" =>
-                                local.iter().any(st3::fleet::transport::is_tailnet_address)
+                                local.iter().any(fractal_daemon::fleet::transport::is_tailnet_address)
                                     && resolve_tool(file.tailscale.as_deref(), "tailscale")
                                         .is_some(),
                             _ => false,
@@ -809,7 +809,7 @@ async fn run_fleet_transports(
 }
 
 /// Settings for a migrating node: its existing replication port unless one is given.
-fn migration_settings(args: &FleetMemberArgs, config: &Config) -> st3::fleet::join::MemberSettings {
+fn migration_settings(args: &FleetMemberArgs, config: &Config) -> fractal_daemon::fleet::join::MemberSettings {
     let mut settings = args.settings();
     if settings.port.is_none() {
         settings.port = config
@@ -823,10 +823,10 @@ fn migration_settings(args: &FleetMemberArgs, config: &Config) -> st3::fleet::jo
 
 async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateArgs) -> Result<()> {
     if args.finish || args.unfinish {
-        let mut file = st3::config::FleetFile::load(&config.state_dir)?
+        let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
             .context("this machine has not migrated yet")?;
         if args.finish {
-            let status: st3::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
             let waiting = config
                 .peers
                 .iter()
@@ -859,18 +859,18 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             println!("This machine accepts legacy exchanges from config peers again.");
         }
         if !args.no_service && services_installed()? {
-            st3::service::install(Config::load_with_fleet(None)?)?;
+            fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
         } else {
             println!("Restart st3 replication-worker for this to take effect.");
         }
         return Ok(());
     }
     anyhow::ensure!(
-        st3::config::FleetFile::load(&config.state_dir)?.is_none(),
+        fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_none(),
         "this machine already has fleet membership settings"
     );
     anyhow::ensure!(
-        st3::store::valid_fleet_node_name(&config.node),
+        fractal_daemon::store::valid_fleet_node_name(&config.node),
         "`{}` cannot name a fleet member",
         config.node
     );
@@ -920,14 +920,14 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     let state_identity = lock_fleet_admission(client, config, use_services, "migrates").await?;
     let settings = migration_settings(&args.member, config);
     if args.anchor {
-        let founded = st3::fleet::join::migrate_anchor(
+        let founded = fractal_daemon::fleet::join::migrate_anchor(
             &config.state_dir,
             &config.node,
             &fleet_id,
             &secret_file,
             &settings,
             args.fabric_protocol.clone(),
-            st3::store::runtime(),
+            fractal_daemon::store::runtime(),
         )?;
         state_identity.record_fleet_found(&founded)?;
         println!(
@@ -951,7 +951,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
                 None => (read_code_without_echo()?, None),
             }
         };
-        let joined = st3::fleet::join::join(&st3::fleet::join::JoinOptions {
+        let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
             state_dir: config.state_dir.clone(),
             configured_node: config.node.clone(),
             code: code.trim().to_owned(),
@@ -960,7 +960,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             settings,
             legacy_secret_file: Some(secret_file),
             fabric_protocol: args.fabric_protocol.clone(),
-            runtime: st3::store::runtime(),
+            runtime: fractal_daemon::store::runtime(),
             version: env!("CARGO_PKG_VERSION").into(),
         })
         .await?;
@@ -979,7 +979,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     }
     drop(state_identity);
     if use_services {
-        st3::service::install(Config::load_with_fleet(None)?)?;
+        fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
         println!(
             "The st3 services now run as a fleet member, with legacy exchanges still accepted."
         );
@@ -1005,7 +1005,7 @@ async fn wait_for_first_sync(
     client: &Client,
     timeout: Duration,
     progress: bool,
-) -> Result<Option<st3::model::ReplicationFirstSync>> {
+) -> Result<Option<fractal_daemon::model::ReplicationFirstSync>> {
     let started = std::time::Instant::now();
     let mut reported = None::<std::time::Instant>;
     loop {
@@ -1094,7 +1094,7 @@ async fn wait_for_caught_up(
 }
 
 /// Print how a first sync ended, and fail when an earlier build recorded it as failed.
-fn report_first_sync(first: &st3::model::ReplicationFirstSync, json_output: bool) -> Result<()> {
+fn report_first_sync(first: &fractal_daemon::model::ReplicationFirstSync, json_output: bool) -> Result<()> {
     if json_output {
         print_value(first, true)?;
         anyhow::ensure!(first.state == "verified", "the first sync failed");

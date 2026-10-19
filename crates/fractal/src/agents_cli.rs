@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 async fn run_handoff(
     client: &Client,
@@ -10,7 +10,7 @@ async fn run_handoff(
 ) -> Result<()> {
     use std::io::Read as _;
     let document = |agent: &str| {
-        st3::handoff::document_name(agent)
+        fractal_daemon::handoff::document_name(agent)
             .with_context(|| format!("`{agent}` is not an agent; only a seat has a handoff"))
     };
     match command {
@@ -61,8 +61,8 @@ async fn run_handoff(
                 .post(
                     "/v1/claims",
                     &ClaimInput {
-                        subject: st3::handoff::ready_subject(&agent),
-                        kind: st3::handoff::READY_KIND.into(),
+                        subject: fractal_daemon::handoff::ready_subject(&agent),
+                        kind: fractal_daemon::handoff::READY_KIND.into(),
                         actor: Some(agent.clone()),
                         fields: std::collections::BTreeMap::from([("agent".into(), agent.clone().into())]),
                         evidence: vec![],
@@ -130,7 +130,7 @@ pub(super) async fn run_agents(
         AgentsCommand::AcknowledgeSeed(args) => {
             let actor = args.actor.as_deref().or(configured_person)
                 .context("st agents acknowledge-seed needs --as ACTOR or a configured person")?;
-            let claim = st3::native_seed::acknowledge(
+            let claim = fractal_daemon::native_seed::acknowledge(
                 &cli_client(endpoint), &normalize_agent_subject(&args.subject), actor, &args.reason,
             ).await?;
             print_value(&claim, json_output)
@@ -142,13 +142,13 @@ pub(super) async fn run_agents(
                 let duration = args
                     .duration
                     .as_deref()
-                    .map(|value| st3::graph::parse_duration(value, true))
+                    .map(|value| fractal_daemon::graph::parse_duration(value, true))
                     .transpose()?;
                 let now = u64::try_from(current_unix_ms()?)?;
                 let claim: ClaimRecord = client
                     .post(
                         "/v1/delivery/hold",
-                        &st3::delivery_hold::HoldRequest {
+                        &fractal_daemon::delivery_hold::HoldRequest {
                             subject: subject.clone(),
                             actor: args
                                 .actor
@@ -178,7 +178,7 @@ pub(super) async fn run_agents(
                     "--as and --reason need --for or --release"
                 );
             }
-            let hold: st3::delivery_hold::HoldView = client
+            let hold: fractal_daemon::delivery_hold::HoldView = client
                 .get(&format!(
                     "/v1/delivery/hold?subject={}",
                     urlencoding::encode(&subject)
@@ -412,7 +412,7 @@ pub(super) async fn run_agents(
                         runtime_desired_revision: Some(token),
                         ..ClientFence::default()
                     },
-                    st3_client::AgentRetireParameters {
+                    fractal_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
                     },
@@ -497,12 +497,12 @@ pub(super) async fn run_agents(
                 .context("no recorded incarnation")?;
             let response: Value = client.post("/v1/agents/rollout",&json!({"subject":subject,"actor":args.actor,
                 "expected_desired":current.desired_token,"expected_incarnation":incarnation,
-                "policy":st3::rollout::Policy::when_idle(st3::graph::parse_duration(&args.deadline,true)?,args.force_after_deadline),
+                "policy":fractal_daemon::rollout::Policy::when_idle(fractal_daemon::graph::parse_duration(&args.deadline,true)?,args.force_after_deadline),
                 "idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
             return print_value(&response, json_output);
         }
         AgentsCommand::Restart(args) => {
-            let timeout = st3::graph::parse_duration(&args.timeout, false)?;
+            let timeout = fractal_daemon::graph::parse_duration(&args.timeout, false)?;
             let subject = format!("agent/{}", args.subject);
             let client = cli_client(endpoint);
             let request: ClaimRecord = client
@@ -664,7 +664,7 @@ async fn agent_start_status(
     client: &Client,
     subject: &str,
     args: &AgentStartArgs,
-) -> Result<st3_client::Agent> {
+) -> Result<fractal_client::Agent> {
     let generated = generated_client(endpoint, None)?;
     let ClientResource::Agent(mut agent) = generated.agents_get(subject).await?.value else {
         anyhow::bail!("`{subject}` is not an agent");
@@ -673,7 +673,7 @@ async fn agent_start_status(
         let handoff = agent.handoff.as_ref()
             .context("--source-offline needs a placement handoff with former source hosts")?;
         if !handoff.pending_sources.is_empty() {
-            client.post::<_, st3::model::ClaimRecord>("/v1/agents/source-offline", &json!({
+            client.post::<_, fractal_daemon::model::ClaimRecord>("/v1/agents/source-offline", &json!({
                 "subject": subject,
                 "actor": args.actor,
                 "desired_token": handoff.desired_token,
@@ -695,7 +695,7 @@ async fn agent_start_declaration(
 ) -> Result<(
     String,
     Vec<String>,
-    Option<st3::model::DesiredSubject>,
+    Option<fractal_daemon::model::DesiredSubject>,
     Option<MissionSeatStart>,
 )> {
     let mut subject = format!("agent/{}", args.identity);
@@ -728,10 +728,10 @@ async fn agent_start_declaration(
     let Some(token) = &current.desired_token else {
         return Ok((subject, Vec::new(), None, None));
     };
-    let mut claim: st3::model::ClaimRecord =
+    let mut claim: fractal_daemon::model::ClaimRecord =
         client.get(&format!("/v1/claims/by-id/{token}")).await?;
     loop {
-        let desired: st3::model::DesiredSubject = serde_json::from_value(claim.body)?;
+        let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
         if desired.kind == "agent" {
             // A mission seat starts on its run's own declaration, never as a new root seat.
             let mission = desired.owner_run.clone().map(|run| {
@@ -814,7 +814,7 @@ async fn run_agent_new(
             ),
             // An install does not restart the daemon, so a new st can meet an older daemon.
             Err(error)
-                if st3::client::is_missing_route(&error) || st3::client::is_not_found(&error) =>
+                if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
                 eprintln!(
                     "st: the daemon is older than this st and cannot check which providers are installed; creating the seat anyway"
@@ -874,7 +874,7 @@ async fn run_agent_new(
                     snapshot_id: capabilities.snapshot.id,
                     ..ClientFence::default()
                 },
-                st3_client::AgentCreateParameters {
+                fractal_client::AgentCreateParameters {
                     name: args.name.clone(),
                     harness: args.harness.clone(),
                     host: args.host.clone(),
@@ -915,7 +915,7 @@ async fn run_agent_new(
             if !json_output {
                 let state = latest.as_ref().map_or_else(
                     || cli_help::agent_state("starting", None, None, "unknown"),
-                    |agent: &st3_client::Agent| {
+                    |agent: &fractal_client::Agent| {
                         cli_help::agent_state(
                             &agent.state,
                             agent.harness_state.as_deref(),
@@ -1042,8 +1042,8 @@ async fn wait_for_agent_harness(
     subject: &str,
     attach: bool,
     json_output: bool,
-    latest: &mut Option<st3_client::Agent>,
-) -> Result<st3_client::Agent> {
+    latest: &mut Option<fractal_client::Agent>,
+) -> Result<fractal_client::Agent> {
     let health: Value = client.get("/v1/health").await?;
     let mut cursor = health["store_index"]
         .as_u64()
@@ -1249,17 +1249,17 @@ async fn run_agent_queue(
     let actor = parse_queue_move_actor(actor).map_err(anyhow::Error::msg)?;
     let agent = seat_subject(&args.agent);
     let (placement, anchor) = if args.top {
-        (st3_client::AgentQueuePlacement::Top, None)
+        (fractal_client::AgentQueuePlacement::Top, None)
     } else if args.bottom {
-        (st3_client::AgentQueuePlacement::Bottom, None)
+        (fractal_client::AgentQueuePlacement::Bottom, None)
     } else if let Some(before) = args.before.as_deref() {
         (
-            st3_client::AgentQueuePlacement::Before,
+            fractal_client::AgentQueuePlacement::Before,
             Some(mission_run_subject(before)),
         )
     } else if let Some(after) = args.after.as_deref() {
         (
-            st3_client::AgentQueuePlacement::After,
+            fractal_client::AgentQueuePlacement::After,
             Some(mission_run_subject(after)),
         )
     } else {
@@ -1272,14 +1272,14 @@ async fn run_agent_queue(
         let claim: ClaimRecord = cli_client(endpoint)
             .post(
                 "/v1/agent-queue-moves",
-                &st3::model::SeatQueueMoveRequest {
+                &fractal_daemon::model::SeatQueueMoveRequest {
                     agent: agent.clone(),
                     run: mission_run_subject(&args.run),
                     placement: match placement {
-                        st3_client::AgentQueuePlacement::Top => "top",
-                        st3_client::AgentQueuePlacement::Bottom => "bottom",
-                        st3_client::AgentQueuePlacement::Before => "before",
-                        st3_client::AgentQueuePlacement::After => "after",
+                        fractal_client::AgentQueuePlacement::Top => "top",
+                        fractal_client::AgentQueuePlacement::Bottom => "bottom",
+                        fractal_client::AgentQueuePlacement::Before => "before",
+                        fractal_client::AgentQueuePlacement::After => "after",
                     }
                     .into(),
                     anchor,
@@ -1308,7 +1308,7 @@ async fn run_agent_queue(
                 snapshot_id: capabilities.snapshot.id,
                 ..ClientFence::default()
             },
-            st3_client::AgentQueueMoveParameters {
+            fractal_client::AgentQueueMoveParameters {
                 agent_id: agent.clone(),
                 mission_run_id: mission_run_subject(&args.run),
                 placement,
@@ -1335,8 +1335,8 @@ async fn request_suspension(
     reason: Option<&str>,
     host: Option<&str>,
     timeout_text: &str,
-) -> Result<st3_client::Agent> {
-    let timeout = st3::graph::parse_duration(timeout_text, false)?;
+) -> Result<fractal_client::Agent> {
+    let timeout = fractal_daemon::graph::parse_duration(timeout_text, false)?;
     let client = cli_client(endpoint);
     let request: ClaimRecord = client
         .post(

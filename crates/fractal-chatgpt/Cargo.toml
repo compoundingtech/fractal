@@ -1,5 +1,5 @@
 [package]
-name = "st-chatgpt"
+name = "fractal-chatgpt"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -19,3 +19,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 parking_lot = "0.12"
+
+[[bin]]
+name = "st-chatgpt"
+path = "src/main.rs"

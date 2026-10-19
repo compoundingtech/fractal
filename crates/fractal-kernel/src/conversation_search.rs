@@ -42,7 +42,7 @@ impl SearchIndex {
     pub fn new() -> Result<Self> {
         let connection = Connection::open_in_memory()?;
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hb7c8335b1318 owner=st3_kernel::conversation_search TODO=trace-statement-and-value-representation */ "CREATE VIRTUAL TABLE entries USING fts5(source UNINDEXED,
+            /* sqlite-large-value: allow-for-now lv-h16a68f6ab5e8 owner=fractal_kernel::conversation_search TODO=trace-statement-and-value-representation */ "CREATE VIRTUAL TABLE entries USING fts5(source UNINDEXED,
             conversation_id UNINDEXED, entry_id UNINDEXED, agent_id UNINDEXED,
             timestamp UNINDEXED, entry_type UNINDEXED, text, tokenize='unicode61');",
         )?;
@@ -51,11 +51,11 @@ impl SearchIndex {
 
     pub fn replace(&mut self, source: &str, entries: &[SearchEntry]) -> Result<()> {
         let tx = self.connection.transaction()?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h761c351d72ae owner=st3_kernel::conversation_search TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM entries WHERE source=?1", [source])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hdfe1c1743a5f owner=fractal_kernel::conversation_search TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM entries WHERE source=?1", [source])?;
         {
-            let mut insert = tx.prepare(/* sqlite-large-value: allow-for-now lv-hf4db20f7e99a owner=st3_kernel::conversation_search TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO entries VALUES (?1,?2,?3,?4,?5,?6,?7)")?;
+            let mut insert = tx.prepare(/* sqlite-large-value: allow-for-now lv-he4d5898ca522 owner=fractal_kernel::conversation_search TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO entries VALUES (?1,?2,?3,?4,?5,?6,?7)")?;
             for entry in entries {
-                insert.execute(/* sqlite-large-value: allow-for-now lv-hd1f783d07d84 owner=st3_kernel::conversation_search TODO=trace-statement-and-value-representation */ params![
+                insert.execute(/* sqlite-large-value: allow-for-now lv-h0c4a81edd532 owner=fractal_kernel::conversation_search TODO=trace-statement-and-value-representation */ params![
                     source,
                     entry.conversation_id,
                     entry.entry_id,
@@ -72,7 +72,7 @@ impl SearchIndex {
 
     pub fn remove(&mut self, source: &str) -> Result<()> {
         self.connection
-            .execute(/* sqlite-large-value: allow-for-now lv-h3e35e15b01a5 owner=st3_kernel::conversation_search TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM entries WHERE source=?1", [source])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-hc116d4cb1ba3 owner=fractal_kernel::conversation_search TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM entries WHERE source=?1", [source])?;
         Ok(())
     }
 

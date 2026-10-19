@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_delivery::references::seats_shared_tests::*;
+pub use fractal_delivery::references::seats_shared_tests::*;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::model::{DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, St3Error, UsedMissionSpec, WorkSelector};
 use crate::graph::parse_intent;

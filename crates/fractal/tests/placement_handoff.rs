@@ -1,9 +1,9 @@
 #![cfg(unix)]
 use serde_json::Value;
-use st3::api::AppState;
-use st3::model::MemberSpec;
-use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::MemberSpec;
+use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::store::Store;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, watch};
@@ -16,7 +16,7 @@ async fn override_sources(
     sources: &[&str],
     key: &str,
 ) -> anyhow::Result<Value> {
-    st3::client::Client::unix(node.root.path().join("st3.sock"))
+    fractal_daemon::client::Client::unix(node.root.path().join("st3.sock"))
         .post(
             "/v1/agents/source-offline",
             &serde_json::json!({
@@ -79,7 +79,7 @@ async fn source_offline_cli_records_the_actor_and_returning_source_still_stops()
     assert_eq!(view["handoff"]["phase"], "waiting-for-destination");
     let proof = cobalt
         .store
-        .claims_for(SEAT, Some(st3::placement::SOURCE_OFFLINE_KIND))
+        .claims_for(SEAT, Some(fractal_daemon::placement::SOURCE_OFFLINE_KIND))
         .unwrap()
         .pop()
         .unwrap();
@@ -110,7 +110,7 @@ async fn source_offline_cli_records_the_actor_and_returning_source_still_stops()
         .find(|c| c.origin == "cobalt" && c.body["fields"]["status"] == "running")
         .unwrap();
     assert!(
-        st3::placement::acknowledges(
+        fractal_daemon::placement::acknowledges(
             &cobalt.store,
             &running,
             &std::collections::BTreeSet::from([proof.id])
@@ -156,7 +156,7 @@ async fn source_offline_overrides_are_idempotent_and_do_not_release_a_later_move
     assert_eq!(
         cobalt
             .store
-            .claims_for(SEAT, Some(st3::placement::SOURCE_OFFLINE_KIND))
+            .claims_for(SEAT, Some(fractal_daemon::placement::SOURCE_OFFLINE_KIND))
             .unwrap()
             .len(),
         1
@@ -275,7 +275,7 @@ async fn source_offline_api_rejects_stale_foreign_and_unrelated_source_requests(
             .is_err()
     );
     let token = cobalt.store.selected_desired_token(SEAT).unwrap().unwrap();
-    let client = st3::client::Client::unix(cobalt.root.path().join("st3.sock"));
+    let client = fractal_daemon::client::Client::unix(cobalt.root.path().join("st3.sock"));
     assert!(client.post::<_, Value>("/v1/agents/source-offline", &serde_json::json!({
         "subject": "agent/example/other", "actor": "person/avery", "desired_token": token,
         "sources": ["amber"], "idempotency_key": "foreign",
@@ -293,14 +293,14 @@ async fn source_offline_api_rejects_stale_foreign_and_unrelated_source_requests(
             .is_err()
     );
     assert!(client.post::<_, Value>("/v1/claims", &serde_json::json!({
-        "subject": SEAT, "kind": st3::placement::SOURCE_OFFLINE_KIND, "actor": "person/avery",
+        "subject": SEAT, "kind": fractal_daemon::placement::SOURCE_OFFLINE_KIND, "actor": "person/avery",
         "fields": {"desired_token": token, "destination": "cobalt", "sources": ["amber"]},
         "evidence": [token],
     })).await.is_err(), "ordinary claim publication cannot bypass the dedicated operation");
     assert!(
         cobalt
             .store
-            .claims_for(SEAT, Some(st3::placement::SOURCE_OFFLINE_KIND))
+            .claims_for(SEAT, Some(fractal_daemon::placement::SOURCE_OFFLINE_KIND))
             .unwrap()
             .is_empty()
     );
@@ -334,7 +334,7 @@ impl RuntimeControl for Runtime {
     }
     fn start(&self, member: &MemberSpec) -> anyhow::Result<()> {
         if *self.refuse_start.lock().unwrap() {
-            return Err(st_runtime::StartRejected {
+            return Err(fractal_runtime::StartRejected {
                 operation: member.tags.get("st3.start-operation").cloned(),
             }
             .into());
@@ -443,8 +443,8 @@ impl Node {
             planner_default: Default::default(),
         };
         let socket = root.path().join("st3.sock");
-        let router = st3::api::router(state);
-        let server = tokio::spawn(async move { st3::api::serve_unix(&socket, router).await });
+        let router = fractal_daemon::api::router(state);
+        let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });
         for _ in 0..100 {
             if root.path().join("st3.sock").exists() {
                 break;
@@ -473,7 +473,7 @@ agent "example/mover" {{
 "#,
             self.root.path().to_str().unwrap()
         );
-        let mut intent = st3::parse_intent(&kdl, &self.name).unwrap();
+        let mut intent = fractal_daemon::parse_intent(&kdl, &self.name).unwrap();
         // Agent KDL currently selects PTYs; exercise the reconciler's exec backend as well.
         intent
             .subjects
@@ -487,7 +487,7 @@ agent "example/mover" {{
             .store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl,
                     source_name: None,
                 },
@@ -549,7 +549,7 @@ agent "example/mover" {{
         .unwrap()
     }
     async fn show(&self) -> Value {
-        let client = st3::client::Client::unix(self.root.path().join("st3.sock"));
+        let client = fractal_daemon::client::Client::unix(self.root.path().join("st3.sock"));
         client
             .get(&format!("/v1/client/agents/{}", urlencoding::encode(SEAT)))
             .await
@@ -641,7 +641,7 @@ async fn move_running_seat(terminal: bool) {
     assert_eq!(stopped.body["fields"]["status"], "stopped");
     assert_eq!(stopped.body["fields"]["incarnation_id"], "fixture:1");
     assert!(
-        st3::placement::acknowledges(
+        fractal_daemon::placement::acknowledges(
             &amber.store,
             &stopped,
             &std::collections::BTreeSet::from([source_running.id.clone()]),
@@ -657,7 +657,7 @@ async fn move_running_seat(terminal: bool) {
         .find(|c| c.origin == "cobalt" && c.body["fields"]["status"] == "running")
         .unwrap();
     assert!(
-        st3::placement::acknowledges(
+        fractal_daemon::placement::acknowledges(
             &cobalt.store,
             &destination_running,
             &std::collections::BTreeSet::from([stopped.id]),
@@ -758,7 +758,7 @@ async fn source_stops_even_when_the_selected_actual_belongs_to_the_destination()
     fields.insert("incarnation_id".into(), Value::String("fixture:1".into()));
     cobalt
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: SEAT.into(),
             kind: "runtime.observed".into(),
             actor: None,
@@ -902,12 +902,12 @@ async fn a_confirmed_explicit_stop_allows_a_move_while_the_source_is_offline() {
     amber.declare("amber", true, "initial");
     amber.pass();
     amber.pass();
-    let intent = st3::parse_intent(&format!("version 2\nstop \"{SEAT}\"\n"), "amber").unwrap();
+    let intent = fractal_daemon::parse_intent(&format!("version 2\nstop \"{SEAT}\"\n"), "amber").unwrap();
     let preview = amber
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: format!("version 2\nstop \"{SEAT}\"\n"),
                 source_name: None,
             },
@@ -1071,7 +1071,7 @@ async fn stopping_a_move_before_handoff_finishes_retires_both_local_copies() {
     ]);
     cobalt
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: SEAT.into(),
             kind: "runtime.observed".into(),
             actor: None,
@@ -1135,12 +1135,12 @@ async fn legacy_stopped_observations_keep_their_causal_stop_proof() {
     amber.pass();
     amber.pass();
     let kdl = format!("version 2\nstop \"{SEAT}\"\n");
-    let intent = st3::parse_intent(&kdl, "amber").unwrap();
+    let intent = fractal_daemon::parse_intent(&kdl, "amber").unwrap();
     let preview = amber
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl,
                 source_name: None,
             },
@@ -1161,7 +1161,7 @@ async fn legacy_stopped_observations_keep_their_causal_stop_proof() {
     // its causal predecessors still retain the source's confirmed stop.
     amber
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: SEAT.into(),
             kind: "runtime.observed".into(),
             actor: None,

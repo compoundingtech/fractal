@@ -5,12 +5,12 @@ pub use crate::store::arrangements_tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::arrangements_tests_shared_seats::{A, B, SUBJECT, append, create, input};
-use st3_delivery::store::tests_shared::{exchange_from, receive_and_project};
-use st3_store::store::tests_shared_seats::exchange_of;
+use fractal_delivery::store::tests_shared::{exchange_from, receive_and_project};
+use fractal_store::store::tests_shared_seats::exchange_of;
 use super::arrangements::*;
 use super::*;
-use st3_store::store::arrangements_tests_shared_missions::*;
-use st3_store::store::arrangements_tests_shared_missions::{C, sync};
+use fractal_store::store::arrangements_tests_shared_missions::*;
+use fractal_store::store::arrangements_tests_shared_missions::{C, sync};
 
 
 fn layout(store: &Store) -> Value { store.arrangement(SUBJECT,u64::MAX).unwrap().unwrap() }
@@ -83,7 +83,7 @@ fn owner_admission_real_agent_and_atomic_identity_fences() {
     let connection = store.readers.get();
     let mut forged = accepted.clone();
     forged.actor = Some("person/other".into());
-    assert!(classify_replicated_claim_with_registry(&forged,st3_schema::registry()).is_err());
+    assert!(classify_replicated_claim_with_registry(&forged,fractal_schema::registry()).is_err());
     let status = subject_status_at(&connection,SUBJECT,None,None,crate::store::ClaimsReduction::Full).unwrap().unwrap().0;
     let mut changed_action = agent.clone();
     changed_action.fields.insert("action_id".into(),json!("action-two"));
@@ -193,7 +193,7 @@ fn reads_and_write_validation_do_not_need_claim_history() {
     let mut connection = store.connection.write();
     let transaction = connection.transaction().unwrap();
     // If either path consults edit history this fails, rather than merely asserting query text.
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4e6bc63d82ff owner=st3_missions::store::arrangements_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_history").unwrap();
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h45a0823ad2f5 owner=fractal_missions::store::arrangements_tests TODO=prepare-body-and-predecessor-values */ "ALTER TABLE claims RENAME TO unavailable_history").unwrap();
     assert_eq!(arrangement_at(&transaction,SUBJECT,u64::MAX).unwrap().unwrap(),before);
     assert_eq!(arrangements_at(&transaction,"person/ada",u64::MAX).unwrap(),vec![before.clone()]);
     prepare(&transaction,&input(json!([{"op":"folder.rename","id":A,"name":"New"}]))).unwrap();
@@ -226,7 +226,7 @@ fn heads_survive_reopen_and_an_upgrade_backfills_once() {
     let before = layout(&store);
     {
         let connection = store.connection.write();
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf4df5dc15553 owner=st3_missions::store::arrangements_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM arrangement_registers; DELETE FROM arrangements; DELETE FROM meta WHERE key='arrangement_heads_v1'").unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h6ea4a8dc8bb8 owner=fractal_missions::store::arrangements_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM arrangement_registers; DELETE FROM arrangements; DELETE FROM meta WHERE key='arrangement_heads_v1'").unwrap();
     }
     drop(store);
     let store = Store::open(&path,"node").unwrap();

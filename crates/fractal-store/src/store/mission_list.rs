@@ -43,7 +43,7 @@ pub struct MissionRows {
     /// `since` on its card, with no claim.
     pub leases: HashMap<String, u128>,
     /// The open human gates, read with `attention_runs`; every card's presentation reads them.
-    pub gates: Vec<st3_ui_model::missions::Gate>,
+    pub gates: Vec<fractal_ui_model::missions::Gate>,
     /// The agents every card's presentation reads, from the newest published roster. None until
     /// a roster is published, which is not an empty roster: then a word that hinges on an agent's
     /// queue goes unsaid.
@@ -57,7 +57,7 @@ pub struct RosterFleet {
     /// The roster publication it reads, by `Store::agent_roster_revision`: a roster republished
     /// at the same cut after local activity is a new one.
     pub revision: u64,
-    seats: HashMap<String, st3_ui_model::missions::Seat>,
+    seats: HashMap<String, fractal_ui_model::missions::Seat>,
     /// Queued step → the agent whose queue holds it.
     queues: HashMap<String, String>,
     /// Per agent, every step it holds or queues: a change to an agent changes these steps.
@@ -91,7 +91,7 @@ impl RosterFleet {
             let held = &card["current_work"][0];
             fleet.seats.insert(
                 id.to_owned(),
-                st3_ui_model::missions::Seat {
+                fractal_ui_model::missions::Seat {
                     id: id.to_owned(),
                     label: card["name"].as_str().unwrap_or(id).to_owned(),
                     state: card["state"].as_str().unwrap_or("unknown").to_owned(),
@@ -123,11 +123,11 @@ impl RosterFleet {
     }
 }
 
-impl st3_ui_model::missions::Fleet for RosterFleet {
-    fn seat(&self, agent: &str) -> Option<st3_ui_model::missions::Seat> {
+impl fractal_ui_model::missions::Fleet for RosterFleet {
+    fn seat(&self, agent: &str) -> Option<fractal_ui_model::missions::Seat> {
         self.seats.get(agent).cloned()
     }
-    fn queued_for(&self, step: &str) -> Option<st3_ui_model::missions::Seat> {
+    fn queued_for(&self, step: &str) -> Option<fractal_ui_model::missions::Seat> {
         self.queues.get(step).and_then(|agent| self.seat(agent))
     }
     fn mission_label(&self, mission: &str) -> String {
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn a_roster_fleet_names_seats_and_queues_and_says_which_agents_changed() {
-        use st3_ui_model::missions::Fleet as _;
+        use fractal_ui_model::missions::Fleet as _;
         let card = |state: &str, next: Option<&str>| {
             json!({
                 "id": "agent/example/keeper", "name": "Keeper", "state": state, "fault": null,

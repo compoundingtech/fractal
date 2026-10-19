@@ -16,7 +16,7 @@ fn empty_effect_authority_cost_does_not_grow_with_subject_history() {
             let tx = writer.transaction().unwrap();
             let batch = format!("reader-history-{history}");
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h08005dc9e248 owner=st3_store::store::owned_sets_tests::empty_authority_guard TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-haeeb16a679c7 owner=fractal_store::store::owned_sets_tests::empty_authority_guard TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'amber',?2,?1,'1')",
                 params![batch, history],
             )
@@ -24,14 +24,14 @@ fn empty_effect_authority_cost_does_not_grow_with_subject_history() {
             {
                 let mut insert = tx
                     .prepare(
-                        /* sqlite-large-value: allow-for-now lv-hfe8ec5f483ef owner=st3_store::store::owned_sets_tests::empty_authority_guard TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                        /* sqlite-large-value: allow-for-now lv-h78aebb0d7874 owner=fractal_store::store::owned_sets_tests::empty_authority_guard TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
                          VALUES(?1,?2,?3,'harness.usage','amber',NULL,?4,'[]','1')",
                     )
                     .unwrap();
                 for index in inserted..history {
                     for subject in [captured.subject.as_str(), "agent/unrelated-history"] {
                         insert
-                            .execute(/* sqlite-large-value: allow-for-now lv-h8152b4cbc368 owner=st3_store::store::owned_sets_tests::empty_authority_guard TODO=trace-statement-and-value-representation */ params![
+                            .execute(/* sqlite-large-value: allow-for-now lv-h44b70415ce36 owner=fractal_store::store::owned_sets_tests::empty_authority_guard TODO=trace-statement-and-value-representation */ params![
                                 format!("reader-history-{subject}-{index}"),
                                 batch,
                                 subject,
@@ -89,7 +89,7 @@ fn empty_proof_errors_and_pinned_reads_do_not_authorize_effects() {
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-hd224555a6530 owner=st3_store::store::owned_sets_tests::empty_authority_guard TODO=prepare-body-and-predecessor-values */ "DROP TABLE claims")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-he75efb18e0cc owner=fractal_store::store::owned_sets_tests::empty_authority_guard TODO=prepare-body-and-predecessor-values */ "DROP TABLE claims")
         .unwrap();
     let (failed, reads) = smallclaims::touched::record(|| store.owned_desired_guard(&declaration));
     assert_eq!(failed.unwrap_err().code, "internal");

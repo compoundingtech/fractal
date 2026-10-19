@@ -1,5 +1,5 @@
 {
-  "name": "@smalltalk/st3-views",
+  "name": "@fractal/views",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@smalltalk/st3-client": "workspace:*"
+    "@fractal/client": "workspace:*"
   },
   "devDependencies": {
     "typescript": "6.0.3"

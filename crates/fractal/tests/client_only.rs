@@ -1,6 +1,6 @@
 //! The actual stui binary on a daemon-less device, talking only to isolated members.
-use st3::PersonWorkStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::PersonWorkStore;
+use fractal_daemon::SeatsStoreCore;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -9,8 +9,8 @@ use alacritty_terminal::{
     vte::ansi::Processor,
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use st3::{api::AppState, model::PersonAskRequest, store::Store};
-use st3_client::{Client, PersonPairingBegin};
+use fractal_daemon::{api::AppState, model::PersonAskRequest, store::Store};
+use fractal_client::{Client, PersonPairingBegin};
 use std::{
     io::{Read, Write},
     path::Path,
@@ -157,7 +157,7 @@ fn state(root: &Path, node: &str) -> AppState {
     }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         state.store.origin(),
     )
@@ -233,7 +233,7 @@ fn carrier_with_loss(
 }
 
 async fn pair(root: &Path, local: &Client, url: &str) {
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Demo laptop".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
@@ -244,7 +244,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
     complete_challenge(root, url, &challenge).await;
 }
 
-async fn complete_challenge(root: &Path, url: &str, challenge: &st3_client::PairingChallenge) {
+async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::PairingChallenge) {
     let mut child = Command::new(test_env!("CARGO_BIN_EXE_st3"))
         .args([
             "devices",
@@ -279,7 +279,7 @@ async fn complete_challenge(root: &Path, url: &str, challenge: &st3_client::Pair
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
-    use st3_client::{Fence, MessageSendParameters, device::Profile};
+    use fractal_client::{Fence, MessageSendParameters, device::Profile};
     use std::os::unix::fs::PermissionsExt as _;
     let member = tempfile::tempdir().unwrap();
     let device = tempfile::tempdir().unwrap();
@@ -295,9 +295,9 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
         ))
         .unwrap();
     let trusted = member.path().join("trusted.sock");
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let served = trusted.clone();
-    let local_server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     let local = Client::unix_as(&trusted, "person/avery");
     for _ in 0..100 {
         if local.capabilities().await.is_ok() {
@@ -307,7 +307,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let app = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::fabric_router(state.clone());
     let http_server = tokio::spawn(async move { axum::serve(listener, app).await });
     pair(device.path(), &local, &url).await;
     let path = device.path().join("config/st3/stui-devices.json");
@@ -347,7 +347,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
                 in_reply_to: None,
                 session_id: None,
                 tags: vec![],
-                kind: st3_client::MessageKind::Wake,
+                kind: fractal_client::MessageKind::Wake,
                 attachments: vec![],
                 signature: None,
             },
@@ -374,7 +374,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
         state.store.claim_verdict(&claim.id).unwrap(),
         smallclaims::principal::Verdict::Verified
     );
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
@@ -399,13 +399,13 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     let gateway = member.path().join("gateway.sock");
     let trusted_server = tokio::spawn({
         let path = trusted.clone();
-        let app = st3::api::router(state.clone());
-        async move { st3::api::serve_unix(&path, app).await }
+        let app = fractal_daemon::api::router(state.clone());
+        async move { fractal_daemon::api::serve_unix(&path, app).await }
     });
     let gateway_server = tokio::spawn({
         let path = gateway.clone();
-        let app = st3::api::fabric_router(state.clone());
-        async move { st3::api::serve_unix(&path, app).await }
+        let app = fractal_daemon::api::fabric_router(state.clone());
+        async move { fractal_daemon::api::serve_unix(&path, app).await }
     });
     let local = Client::unix_as(&trusted, "person/avery");
     for _ in 0..100 {
@@ -523,14 +523,14 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     let alternate_gateway = second.path().join("gateway.sock");
     let alternate_server = tokio::spawn({
         let path = alternate_gateway.clone();
-        let app = st3::api::fabric_router(alternate.clone());
-        async move { st3::api::serve_unix(&path, app).await }
+        let app = fractal_daemon::api::fabric_router(alternate.clone());
+        async move { fractal_daemon::api::serve_unix(&path, app).await }
     });
     let alternate_trusted = second.path().join("trusted.sock");
     let alternate_local_server = tokio::spawn({
         let path = alternate_trusted.clone();
-        let app = st3::api::router(alternate.clone());
-        async move { st3::api::serve_unix(&path, app).await }
+        let app = fractal_daemon::api::router(alternate.clone());
+        async move { fractal_daemon::api::serve_unix(&path, app).await }
     });
     for _ in 0..100 {
         if alternate_gateway.exists() && alternate_trusted.exists() {
@@ -640,9 +640,9 @@ async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_
     state.native_session_home = Some(member.path().join("native"));
     std::fs::create_dir_all(state.native_session_home.as_ref().unwrap()).unwrap();
     let socket = member.path().join("inventory.sock");
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let served = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     let client = Client::unix_as(&socket, "person/avery");
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.capabilities().await.is_err() {
@@ -787,7 +787,7 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     let mut state = state(member.path(), "older-inventory");
     state.native_session_home = Some(member.path().join("native"));
     std::fs::create_dir_all(state.native_session_home.as_ref().unwrap()).unwrap();
-    let app = st3::api::router(state).layer(from_fn(
+    let app = fractal_daemon::api::router(state).layer(from_fn(
         |request: axum::extract::Request, next: Next| async move {
             let capabilities = request.uri().path() == "/v1/client/capabilities";
             let response = next.run(request).await;
@@ -806,7 +806,7 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     ));
     let socket = member.path().join("older.sock");
     let served = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     let client = Client::unix_as(&socket, "person/avery");
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.capabilities().await.is_err() {

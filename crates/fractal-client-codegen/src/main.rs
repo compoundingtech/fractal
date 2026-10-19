@@ -71,47 +71,47 @@ fn main() -> Result<()> {
         &swift_client,
     )?;
     output(
-        &root.join("crates/st3-client/src/contract.rs"),
+        &root.join("crates/fractal-client/src/contract.rs"),
         &rust,
         check,
     )?;
     output(
-        &root.join("clients/swift/St3Client/Sources/St3Client/Contract.generated.swift"),
+        &root.join("clients/swift/FractalClient/Sources/FractalClient/Contract.generated.swift"),
         &swift,
         check,
     )?;
     output(
-        &root.join("crates/st3-client/src/generated.rs"),
+        &root.join("crates/fractal-client/src/generated.rs"),
         &rust_models,
         check,
     )?;
     output(
-        &root.join("crates/st3-client/src/lib.rs"),
+        &root.join("crates/fractal-client/src/lib.rs"),
         &rust_client,
         check,
     )?;
     output(
-        &root.join("clients/swift/St3Client/Sources/St3Client/Models.swift"),
+        &root.join("clients/swift/FractalClient/Sources/FractalClient/Models.swift"),
         &swift_models,
         check,
     )?;
     output(
-        &root.join("clients/swift/St3Client/Sources/St3Client/Client.swift"),
+        &root.join("clients/swift/FractalClient/Sources/FractalClient/Client.swift"),
         &swift_client,
         check,
     )?;
     output(
-        &root.join("clients/typescript/st3-client/Models.generated.ts"),
+        &root.join("clients/typescript/fractal-client/Models.generated.ts"),
         &typescript_models,
         check,
     )?;
     output(
-        &root.join("clients/typescript/st3-client/Schema.generated.ts"),
+        &root.join("clients/typescript/fractal-client/Schema.generated.ts"),
         &typescript_schema,
         check,
     )?;
     output(
-        &root.join("clients/typescript/st3-client/Client.generated.ts"),
+        &root.join("clients/typescript/fractal-client/Client.generated.ts"),
         &typescript_client,
         check,
     )?;
@@ -920,7 +920,7 @@ fn output(path: &Path, contents: &str, check: bool) -> Result<()> {
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         if current != contents {
             bail!(
-                "{} is stale; run `cargo run -p st3-client-codegen`",
+                "{} is stale; run `cargo run -p fractal-client-codegen --bin st3-client-codegen`",
                 path.display()
             );
         }
@@ -1051,7 +1051,7 @@ fn swift_contract<'a>(
     }
     writeln!(
         out,
-        "}}\n\npublic let st3ClientReadPaths: [ReadOperation: String] = ["
+        "}}\n\npublic let fractalClientReadPaths: [ReadOperation: String] = ["
     )?;
     for read in reads {
         let id = read["id"].as_str().unwrap();

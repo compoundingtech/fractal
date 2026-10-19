@@ -15,9 +15,9 @@ use std::sync::{
 
 struct Control {
     store: Store,
-    owner: st3::mailbox::Fence,
+    owner: fractal_daemon::mailbox::Fence,
     binding_live: AtomicBool,
-    replacement: Mutex<Option<st3::mailbox::Fence>>,
+    replacement: Mutex<Option<fractal_daemon::mailbox::Fence>>,
     attachment_failure_once: AtomicBool,
     attachment_checks: AtomicUsize,
     end_during_attachment: Mutex<Option<(PathBuf, u64)>>,
@@ -32,7 +32,7 @@ struct Control {
 
 async fn attachment(
     State(control): State<Arc<Control>>,
-    Query(fence): Query<st3::mailbox::Fence>,
+    Query(fence): Query<fractal_daemon::mailbox::Fence>,
 ) -> Response {
     control.attachment_checks.fetch_add(1, Ordering::SeqCst);
     let mode = control.attachment.load(Ordering::SeqCst);
@@ -61,7 +61,7 @@ async fn attachment(
             .into_response();
     }
     if let Some((dir, seq)) = control.end_during_attachment.lock().unwrap().take() {
-        st_drivers::harness_state::Writer::new(&dir, "example/quartz", "claude", None)
+        fractal_drivers::harness_state::Writer::new(&dir, "example/quartz", "claude", None)
             .with_ownership("provider-hookless-terminal", seq)
             .ended("7")
             .unwrap();
@@ -133,7 +133,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let store = Store::open_memory("attachment-publication-control").unwrap();
-        let owner = st3::mailbox::Fence {
+        let owner = fractal_daemon::mailbox::Fence {
             subject: "agent/example/quartz".into(),
             incarnation: "7:quartz".into(),
             component: "title".into(),
@@ -180,14 +180,14 @@ impl Fixture {
         let client = Client::unix(&socket);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
-            st3::api::serve_unix_with_ready(&socket, app, || {
+            fractal_daemon::api::serve_unix_with_ready(&socket, app, || {
                 let _ = ready_tx.send(());
             })
             .await
             .unwrap();
         });
         ready_rx.await.unwrap();
-        let subscription = st3::mailbox::Subscription::start(
+        let subscription = fractal_daemon::mailbox::Subscription::start(
             client.clone(),
             owner.clone(),
             json!({"ready":false}),
@@ -299,7 +299,7 @@ impl Fixture {
             driver: "claude".into(),
             subject: self.control.owner.subject.clone(),
             incarnation: self.control.owner.incarnation.clone(),
-            session: st_drivers::provider_session::DetachedSession::Provider {
+            session: fractal_drivers::provider_session::DetachedSession::Provider {
                 pid: 42,
                 session: "quartz-session".into(),
                 seq: 3,
@@ -307,8 +307,8 @@ impl Fixture {
             loop_state: std::mem::take(&mut self.state),
         };
         let path =
-            st_drivers::reexec::write_state(self._root.path(), "driver-resume", &resume).unwrap();
-        let restored: DriverResume = st_drivers::reexec::read_state(&path).unwrap();
+            fractal_drivers::reexec::write_state(self._root.path(), "driver-resume", &resume).unwrap();
+        let restored: DriverResume = fractal_drivers::reexec::read_state(&path).unwrap();
         assert_eq!(restored.incarnation, resume.incarnation);
         assert_eq!(restored.session, resume.session);
         self.state = restored.loop_state;
@@ -430,7 +430,7 @@ async fn claude_attachment_publication_pending_survives_real_resume_serializatio
         driver: "claude".into(),
         subject: f.control.owner.subject.clone(),
         incarnation: f.control.owner.incarnation.clone(),
-        session: st_drivers::provider_session::DetachedSession::Provider {
+        session: fractal_drivers::provider_session::DetachedSession::Provider {
             pid: 42,
             session: "quartz-session".into(),
             seq: 3,
@@ -438,8 +438,8 @@ async fn claude_attachment_publication_pending_survives_real_resume_serializatio
         loop_state: std::mem::take(&mut f.state),
     };
     let pending = serde_json::to_value(&resume.loop_state.claude_attachment_pending).unwrap();
-    let path = st_drivers::reexec::write_state(root.path(), "driver-resume", &resume).unwrap();
-    let restored: DriverResume = st_drivers::reexec::read_state(&path).unwrap();
+    let path = fractal_drivers::reexec::write_state(root.path(), "driver-resume", &resume).unwrap();
+    let restored: DriverResume = fractal_drivers::reexec::read_state(&path).unwrap();
     assert_eq!(restored.incarnation, resume.incarnation);
     assert_eq!(restored.session, resume.session);
     assert_eq!(
@@ -545,15 +545,15 @@ async fn claude_attachment_publication_acknowledged_resume_does_not_republish() 
             driver: "claude".into(),
             subject: f.control.owner.subject.clone(),
             incarnation: f.control.owner.incarnation.clone(),
-            session: st_drivers::provider_session::DetachedSession::Provider {
+            session: fractal_drivers::provider_session::DetachedSession::Provider {
                 pid: 42,
                 session: "quartz-session".into(),
                 seq: 3,
             },
             loop_state: std::mem::take(&mut f.state),
         };
-        let path = st_drivers::reexec::write_state(root.path(), "driver-resume", &resume).unwrap();
-        let restored: DriverResume = st_drivers::reexec::read_state(&path).unwrap();
+        let path = fractal_drivers::reexec::write_state(root.path(), "driver-resume", &resume).unwrap();
+        let restored: DriverResume = fractal_drivers::reexec::read_state(&path).unwrap();
         f.state = restored.loop_state;
         assert!(f.state.claude_attachment_reconciled);
         f.check().await.unwrap();
@@ -1073,7 +1073,7 @@ async fn claude_attachment_publication_does_not_clear_other_harness_axes() {
 async fn hookless_readiness_grace_and_ack_survive_graceful_resume() {
     let mut f = Fixture::new().await;
     let dir = f._root.path().join("observations");
-    st_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
+    fractal_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
     let mut observations = NativeObservations::start(&dir, &f.control.owner.incarnation).unwrap();
     f.state.claude_readiness_fallback.initialized_at_ms = Some(1);
     publish_claude_readiness_fallback(
@@ -1125,7 +1125,7 @@ async fn hookless_readiness_never_bypasses_absent_or_rejected_attachment() {
     for mode in 0..3 {
         let mut f = Fixture::new().await;
         let dir = f._root.path().join("observations");
-        st_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
+        fractal_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
         let mut observations =
             NativeObservations::start(&dir, &f.control.owner.incarnation).unwrap();
         f.state.claude_readiness_fallback.initialized_at_ms = Some(1);
@@ -1160,15 +1160,15 @@ async fn hookless_readiness_never_bypasses_absent_or_rejected_attachment() {
 
 #[tokio::test]
 async fn hookless_readiness_never_bypasses_native_blocked_ended_or_unknown_state() {
-    use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    use fractal_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
     for state in ["blocked", "ended", "unknown"] {
         let mut f = Fixture::new().await;
         let dir = f._root.path().join("observations");
-        st_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
+        fractal_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
         let mut observations =
             NativeObservations::start(&dir, &f.control.owner.incarnation).unwrap();
         let seq =
-            st_drivers::harness_state::claim(&dir, "example/quartz", "claude", "provider").unwrap();
+            fractal_drivers::harness_state::claim(&dir, "example/quartz", "claude", "provider").unwrap();
         let mut writer = Writer::new(&dir, "example/quartz", "claude", Some("quartz-pty".into()))
             .with_ownership("provider", seq);
         if state == "ended" {
@@ -1190,21 +1190,21 @@ async fn hookless_readiness_never_bypasses_native_blocked_ended_or_unknown_state
         if state == "unknown" {
             // Unknown is derived from expired evidence; it is never a valid writer input.
             let mut snapshot: Value = serde_json::from_slice(
-                &st_drivers::harness_events::read_runtime_state(&dir, &f.control.owner.incarnation)
+                &fractal_drivers::harness_events::read_runtime_state(&dir, &f.control.owner.incarnation)
                     .unwrap()
                     .unwrap(),
             )
             .unwrap();
             snapshot["writtenAtMs"] =
-                json!(now - st_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64 - 1);
-            st_drivers::harness_events::write_snapshot(
+                json!(now - fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64 - 1);
+            fractal_drivers::harness_events::write_snapshot(
                 &dir,
                 "harness-state",
                 &serde_json::to_vec(&snapshot).unwrap(),
             )
             .unwrap();
             assert_eq!(
-                st_drivers::harness_state::read_raw_at(
+                fractal_drivers::harness_state::read_raw_at(
                     &serde_json::to_vec(&snapshot).unwrap(),
                     None,
                     now
@@ -1244,8 +1244,8 @@ async fn hookless_readiness_never_bypasses_native_blocked_ended_or_unknown_state
 async fn hookless_readiness_defers_terminal_state_queued_during_attachment_check() {
     let mut f = Fixture::new().await;
     let dir = f._root.path().join("observations");
-    st_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
-    let seq = st_drivers::harness_state::claim(
+    fractal_drivers::harness_events::enable(&dir, &f.control.owner.incarnation).unwrap();
+    let seq = fractal_drivers::harness_state::claim(
         &dir,
         "example/quartz",
         "claude",
@@ -1281,7 +1281,7 @@ async fn hookless_readiness_defers_terminal_state_queued_during_attachment_check
             .unwrap()
             .is_none()
     );
-    let pending = st_drivers::harness_events::pending(&dir, 64).unwrap();
+    let pending = fractal_drivers::harness_events::pending(&dir, 64).unwrap();
     assert_eq!(
         pending.len(),
         1,

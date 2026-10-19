@@ -12,12 +12,12 @@ fn a_second_connection_commit_is_detected_by_the_same_writer_data_version() {
     let path = directory.path().join("claims.sqlite");
     let store = Store::open(&path, "prepared-other-writer").unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h5a695c36f150 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h3817e732295a owner=fractal_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let expected = prepared.cut.as_ref().unwrap();
     let other = Connection::open(&path).unwrap();
     other
         .execute(
-            /* sqlite-large-value: allow-for-now lv-ha0c76ae0907f owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-external-write','1')",
+            /* sqlite-large-value: allow-for-now lv-h952b22a9cf9b owner=fractal_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-external-write','1')",
             [],
         )
         .unwrap();
@@ -113,7 +113,7 @@ fn preparation_never_pins_shared_cache_before_an_unrelated_publication() {
         let fence = Fence::new(store);
         take_counts();
         let mut entered = false;
-        let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-heb0858aa879b owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ store, |_| {
+        let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h80504f4844d9 owner=fractal_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ store, |_| {
             entered = true;
             concurrent_timeline(store, 2)
         });

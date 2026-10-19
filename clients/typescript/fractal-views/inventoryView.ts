@@ -1,4 +1,4 @@
-import type { ConnectedClient, Device, Machine, Runtime, Usage, CollectionWindow } from '@smalltalk/st3-client';
+import type { ConnectedClient, Device, Machine, Runtime, Usage, CollectionWindow } from '@fractal/client';
 import type { SessionView } from './sessionView.ts';
 
 export type InventoryLists = { clients: ConnectedClient[]; usage: Usage[]; machines: Machine[]; devices: Device[]; sessions: SessionView[]; terminals: Runtime[] };

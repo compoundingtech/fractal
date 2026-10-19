@@ -20,7 +20,7 @@ const FILES: usize = 8;
 
 pub type Key = (String, String, Option<String>);
 
-use st3_client::{ObservationReport, ObservationSample};
+use fractal_client::{ObservationReport, ObservationSample};
 
 pub struct Validated {
     pub key: Key,
@@ -710,7 +710,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), MAX_BODY_BYTES)
             .await
             .unwrap();
-        let accepted: st3_client::ObservationResponse = serde_json::from_slice(&body).unwrap();
+        let accepted: fractal_client::ObservationResponse = serde_json::from_slice(&body).unwrap();
         assert!(accepted.value.accepted);
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("snapshot").is_none());

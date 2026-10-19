@@ -3,8 +3,8 @@
  * subscribe from the early subscription (no second subscribe, no second socket), replays the
  * buffered snapshot under its own id, and keeps every holding state bounded.
  */
-import type { CollectionFrame, CollectionSocket, Snapshot } from '@smalltalk/st3-client'
-import { St3Client } from '@smalltalk/st3-client'
+import type { CollectionFrame, CollectionSocket, Snapshot } from '@fractal/client'
+import { FractalClient } from '@fractal/client'
 import * as Effect from 'effect/Effect'
 import * as Exit from 'effect/Exit'
 import * as Stream from 'effect/Stream'
@@ -99,7 +99,7 @@ const settle = async () => {
 beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }))
 afterEach(() => vi.useRealTimers())
 
-const noHttp = new St3Client({ baseUrl: 'http://gateway.test', fetchImpl: async () => { throw new Error('no HTTP') } })
+const noHttp = new FractalClient({ baseUrl: 'http://gateway.test', fetchImpl: async () => { throw new Error('no HTTP') } })
 
 describe('takeEarlyCollections', () => {
   it('peeks the bootstrap context without taking the socket', () => {

@@ -1,7 +1,7 @@
 //! The feed against a real st daemon over a real socket.
 
-use st3_client::{Client, Resource};
-use st3_feed::*;
+use fractal_client::{Client, Resource};
+use fractal_feed::*;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -10,11 +10,11 @@ use tokio::sync::mpsc as channel;
 use tokio::sync::{Notify, watch};
 
 mod inventory;
-pub fn test_state(root: &Path) -> st3::api::AppState {
-    st3::api::AppState {
+pub fn test_state(root: &Path) -> fractal_daemon::api::AppState {
+    fractal_daemon::api::AppState {
         owning_person: None,
         // Socket reads overlap graph writes, as on a real WAL-backed member.
-        store: Arc::new(st3::store::Store::open(&root.join("graph.db"), "stui-feed").unwrap()),
+        store: Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "stui-feed").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "stui-feed".into(),
@@ -25,7 +25,7 @@ pub fn test_state(root: &Path) -> st3::api::AppState {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     }
 }
 
@@ -53,9 +53,9 @@ async fn sidebar_arrangements_follow_the_explicit_person_and_remote_register_upd
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("sidebar.sock");
     let state = test_state(root.path());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     let client = Client::unix_as(&socket, "person/avery");
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.capabilities().await.is_err() {
@@ -105,7 +105,7 @@ async fn sidebar_arrangements_follow_the_explicit_person_and_remote_register_upd
     let append = |operations| {
         state
             .store
-            .append_client_claim(&st3::model::ClaimInput {
+            .append_client_claim(&fractal_daemon::model::ClaimInput {
                 subject: subject.into(),
                 kind: "arrangement.edited".into(),
                 actor: Some("person/avery".into()),
@@ -150,9 +150,9 @@ async fn sidebar_arrangements_follow_the_explicit_person_and_remote_register_upd
 async fn an_unreachable_member_falls_back_and_announces_glasses_before_their_window() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("live.sock");
-    let app = st3::api::router(test_state(root.path()));
+    let app = fractal_daemon::api::router(test_state(root.path()));
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -216,9 +216,9 @@ async fn an_unreachable_member_falls_back_and_announces_glasses_before_their_win
 async fn the_missions_window_is_followed_only_when_asked_and_left_when_not_wanted() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let app = st3::api::router(test_state(root.path()));
+    let app = fractal_daemon::api::router(test_state(root.path()));
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -288,13 +288,13 @@ async fn a_cursor_from_another_member_discards_the_timeline_and_reloads_snapshot
     let socket = root.path().join("st3.sock");
     let state = test_state(root.path());
     let seeded_cut = state.store.index().unwrap();
-    st3::api::start_published_lists(&state);
+    fractal_daemon::api::start_published_lists(&state);
     tokio::time::timeout(Duration::from_secs(10),
-        st3::api::wait_published_lists_at_least(&state.store, seeded_cut))
+        fractal_daemon::api::wait_published_lists_at_least(&state.store, seeded_cut))
         .await.expect("cursor-gap reload lists publish their seeded cut").unwrap();
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -335,9 +335,9 @@ async fn a_cursor_from_another_member_discards_the_timeline_and_reloads_snapshot
 async fn a_lost_stream_is_offline_only_when_st_does_not_answer_a_fresh_request() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let app = st3::api::router(test_state(root.path()));
+    let app = fractal_daemon::api::router(test_state(root.path()));
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -407,8 +407,8 @@ async fn the_feed_waits_for_st_then_keeps_every_window_current_on_one_socket() {
         }
     }
     let server_socket = socket.clone();
-    let app = st3::api::router(state.clone());
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    let app = fractal_daemon::api::router(state.clone());
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, app).await });
 
     // Retain every initial window: independent server reads may finish in any order.
     // Waiting for one ID at a time would discard an already-arrived later window.
@@ -430,12 +430,12 @@ async fn the_feed_waits_for_st_then_keeps_every_window_current_on_one_socket() {
 
     let source =
         "version 2\nmission \"feed-test\" state=\"ready\" { goal \"Push changes to stui\" }\n";
-    let intent = st3::graph::parse_intent(source, "stui-feed").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "stui-feed").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },

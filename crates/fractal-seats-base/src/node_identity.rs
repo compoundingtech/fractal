@@ -167,7 +167,7 @@ pub fn resolve(config: &mut Config) -> Result<()> {
 
 fn has_columns(connection: &Connection, table: &str, required: &[&str]) -> Result<bool> {
     // Table names are internal constants, never configuration values.
-    let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hcbec4afb61a4 owner=st3_seats_base::node_identity TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({table})"))?;
+    let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6a28c840b5dc owner=fractal_seats_base::node_identity TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({table})"))?;
     let columns = query
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;

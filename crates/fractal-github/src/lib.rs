@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_evidence::*;
+pub use fractal_evidence::*;
 
 pub mod changes;
 pub mod github;

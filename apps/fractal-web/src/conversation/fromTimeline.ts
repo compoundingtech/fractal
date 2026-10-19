@@ -1,8 +1,8 @@
 // Project decoded st3 conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineEntry } from '@smalltalk/st3-client/schema'
-import type { ConversationChunk, UnrecognizedEntry } from '@st3/sdk/effect'
+import { TimelineEntryId, Timestamp, type TimelineEntry } from '@fractal/client/schema'
+import type { ConversationChunk, UnrecognizedEntry } from '@fractal/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
 import type { ConversationItem, ToolCallItem, ToolResult } from './model.ts'

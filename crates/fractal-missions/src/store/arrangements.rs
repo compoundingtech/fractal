@@ -1,9 +1,9 @@
 //! The part of `store::arrangements` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-use st3_schema::arrangements::{self as schema, Operation};
-pub use st3_delivery::store::arrangements::*;
-pub use st3_delivery::store::arrangements::{Head, SCHEMA, arrangement_at, arrangements_at, bump_inventory_revisions, flush, open, prepare, project, project_replicated, rebuild, register};
+use fractal_schema::arrangements::{self as schema, Operation};
+pub use fractal_delivery::store::arrangements::*;
+pub use fractal_delivery::store::arrangements::{Head, SCHEMA, arrangement_at, arrangements_at, bump_inventory_revisions, flush, open, prepare, project, project_replicated, rebuild, register};
 
 pub trait ArrangementsStore {
     fn arrangements(&self, person: &str, through: u64) -> Result<Vec<Value>>;

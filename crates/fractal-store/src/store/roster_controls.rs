@@ -109,7 +109,7 @@ fn lazy_named_keys_merge_legacy_nulls_and_preserve_historical_cut() {
     let mut writer = store.connection.write();
     let tx = writer.transaction().unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h299469014ea7 owner=st3_store::store::roster_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+        /* sqlite-large-value: allow-for-now lv-h09e13da0429a owner=fractal_store::store::roster_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
         params![legacy.accepted_at_unix_ms.to_string(), latest.id],
     )
     .unwrap();

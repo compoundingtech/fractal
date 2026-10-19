@@ -46,24 +46,24 @@ impl HookEnv for ProcessEnv {
         std::env::var(name).ok()
     }
     fn var(&self, name: &str) -> Option<String> {
-        st_drivers::contracts::env_with(name, &|key| self.raw_var(key))
+        fractal_drivers::contracts::env_with(name, &|key| self.raw_var(key))
     }
 }
 
 
 fn hook_var(env: &dyn HookEnv, name: &str) -> Option<String> {
-    st_drivers::contracts::env_with(name, &|key| env.raw_var(key))
+    fractal_drivers::contracts::env_with(name, &|key| env.raw_var(key))
 }
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
 pub(crate) fn identity_conflict(env: &dyn HookEnv) -> bool {
-    st_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name))
+    fractal_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name))
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
 fn hook_identity(env: &dyn HookEnv) -> Option<String> {
     if identity_conflict(env) { return None; }
-    env.var(st_drivers::driver_paths::IDENTITY_ENV)
+    env.var(fractal_drivers::driver_paths::IDENTITY_ENV)
         .or_else(|| hook_var(env, "ST_CLAUDE_IDENTITY"))
         .or_else(|| {
             env.var("ST_AGENT").map(|subject| {
@@ -76,9 +76,9 @@ fn hook_identity(env: &dyn HookEnv) -> Option<String> {
 }
 
 /// Retain native provenance from the resolver so dispatch cannot diverge from path selection.
-fn hook_paths(env: &dyn HookEnv, identity: &str) -> Result<(st_drivers::driver_paths::Paths, bool)> {
+fn hook_paths(env: &dyn HookEnv, identity: &str) -> Result<(fractal_drivers::driver_paths::Paths, bool)> {
     if let Some(paths) =
-        st_drivers::driver_paths::Paths::from_environment(identity, &|name| env.raw_var(name))?
+        fractal_drivers::driver_paths::Paths::from_environment(identity, &|name| env.raw_var(name))?
     {
         return Ok((paths, true));
     }
@@ -90,14 +90,14 @@ fn hook_paths(env: &dyn HookEnv, identity: &str) -> Result<(st_drivers::driver_p
         .context("the old hook has no driver catalog")?;
     let root = PathBuf::from(root);
     let root = root.canonicalize().unwrap_or(root);
-    let agent_dir = st_drivers::message::resolve_declared_dir(
+    let agent_dir = fractal_drivers::message::resolve_declared_dir(
         &root,
         identity,
-        &st_drivers::run::detect_host(),
+        &fractal_drivers::run::detect_host(),
     )?
     .context("the old hook's identity is not declared")?;
-    let session_dir = st_drivers::claude_session::state_dir(&root, identity);
-    Ok((st_drivers::driver_paths::Paths {
+    let session_dir = fractal_drivers::claude_session::state_dir(&root, identity);
+    Ok((fractal_drivers::driver_paths::Paths {
         root,
         agent_dir,
         session_dir,
@@ -114,7 +114,7 @@ pub fn run(
 ) -> u8 {
     // Harness-session state stays beneath st3's driver directory, never st2's.
     if let Some(drivers) = env.var("ST3_DRIVER_STATE_DIR") {
-        st_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
+        fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
     }
     match name {
         "claude-observe" => claude_observe(args, env, stdin, report),
@@ -142,9 +142,9 @@ pub fn run(
             }
             // The tee records fail-open and chains to the operator's renderer itself.
             let rendered = if native {
-                st_drivers::claude_session::run_statusline_paths(&paths.agent_dir, &identity)
+                fractal_drivers::claude_session::run_statusline_paths(&paths.agent_dir, &identity)
             } else {
-                st_drivers::claude_session::run_statusline(&paths.root, &identity)
+                fractal_drivers::claude_session::run_statusline(&paths.root, &identity)
             };
             match rendered {
                 Ok(()) => 0,
@@ -262,8 +262,8 @@ fn claude_observe(
     let event = args.first().map(String::as_str).unwrap_or_default();
     let session_start = event == "SessionStart";
     let mandatory = session_start
-        && (hook_var(env, st_drivers::claude_session::RESUME_GENERATION_ENV).is_some()
-            || hook_var(env, st_drivers::claude_session::EXPECTED_NATIVE_SESSION_ENV).is_some());
+        && (hook_var(env, fractal_drivers::claude_session::RESUME_GENERATION_ENV).is_some()
+            || hook_var(env, fractal_drivers::claude_session::EXPECTED_NATIVE_SESSION_ENV).is_some());
     let identity = hook_identity(env);
     let Some(identity) = identity else {
         if session_start || mandatory {
@@ -292,10 +292,10 @@ fn claude_observe(
         eprintln!("st: claude-observe needs the Claude hook event name");
         return 0;
     }
-    let runtime_id = hook_var(env, st_drivers::claude_session::RUNTIME_ID_ENV)
+    let runtime_id = hook_var(env, fractal_drivers::claude_session::RUNTIME_ID_ENV)
         .unwrap_or_else(|| identity.clone());
     let observed = if native {
-        st_drivers::claude_session::run_observe_payload_paths(
+        fractal_drivers::claude_session::run_observe_payload_paths(
             &paths,
             &identity,
             &runtime_id,
@@ -304,7 +304,7 @@ fn claude_observe(
             &|name| env.raw_var(name),
         )
     } else {
-        st_drivers::claude_session::run_observe_payload(
+        fractal_drivers::claude_session::run_observe_payload(
             &paths.root,
             &identity,
             Some(&runtime_id),
@@ -356,10 +356,10 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
     let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
     // This hook's own prompt, as the seat's open prompts name it: it is answered only once the
     // seat shows it, by an answer to exactly the observation that shows it, never one to an
-    // earlier or a parallel prompt (see `st_drivers::claude_prompts`).
-    let prompt = st_drivers::claude_prompts::prompt_id(raw);
-    if st_drivers::claude_prompts::waiting(agent_dir, &prompt)
-        == st_drivers::claude_prompts::Waiting::Gone
+    // earlier or a parallel prompt (see `fractal_drivers::claude_prompts`).
+    let prompt = fractal_drivers::claude_prompts::prompt_id(raw);
+    if fractal_drivers::claude_prompts::waiting(agent_dir, &prompt)
+        == fractal_drivers::claude_prompts::Waiting::Gone
     {
         return;
     }
@@ -383,17 +383,17 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
     let client = crate::client::Client::new(endpoint);
     // The call this prompt asks about, published once the seat shows it: a client offers to
     // allow only that exact call, never whichever call happens to be pending.
-    let call = st_drivers::claude_prompts::prompt_call(agent_dir, &prompt);
+    let call = fractal_drivers::claude_prompts::prompt_call(agent_dir, &prompt);
     let mut published = false;
     let answer = wait_for_prompt_answer(
-        || match st_drivers::claude_prompts::waiting(agent_dir, &prompt) {
-            st_drivers::claude_prompts::Waiting::Gone => {
+        || match fractal_drivers::claude_prompts::waiting(agent_dir, &prompt) {
+            fractal_drivers::claude_prompts::Waiting::Gone => {
                 Some(crate::store::NativePromptState::Gone)
             }
-            st_drivers::claude_prompts::Waiting::Queued => {
+            fractal_drivers::claude_prompts::Waiting::Queued => {
                 Some(crate::store::NativePromptState::Open)
             }
-            st_drivers::claude_prompts::Waiting::Shown(ownership, transition) => {
+            fractal_drivers::claude_prompts::Waiting::Shown(ownership, transition) => {
                 if !published && let Some(call) = call.as_deref() {
                     published = runtime.block_on(publish_prompt_call(
                         &client, "claude", &subject, ownership, transition, call,
@@ -446,7 +446,7 @@ fn hook_client(
 }
 
 /// Raise each call Claude's auto mode classifier denied since the last turn as an alert for the
-/// seat's person (see `st_drivers::claude_denials`): its tool, the classifier's reason, and the
+/// seat's person (see `fractal_drivers::claude_denials`): its tool, the classifier's reason, and the
 /// call's id in the seat's conversation, never its input. Fails open: a turn's end is never held.
 fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
     let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
@@ -464,7 +464,7 @@ fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str
     {
         return;
     }
-    let denials = match st_drivers::claude_denials::new_denials(agent_dir, session, transcript) {
+    let denials = match fractal_drivers::claude_denials::new_denials(agent_dir, session, transcript) {
         Ok(denials) if !denials.is_empty() => denials,
         Ok(_) => return,
         Err(error) => {
@@ -506,7 +506,7 @@ fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str
         match posted {
             Ok(Ok(record)) => {
                 if let Err(error) =
-                    st_drivers::claude_denials::raised(agent_dir, &denial.call_id, &record.id)
+                    fractal_drivers::claude_denials::raised(agent_dir, &denial.call_id, &record.id)
                 {
                     eprintln!("st: a denied call's alert was not remembered: {error:#}");
                 }
@@ -527,7 +527,7 @@ fn allow_approved_call(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw:
     };
     let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
     let mut client = None;
-    let approved = st_drivers::claude_denials::approved(agent_dir, tool, &input, |claim| {
+    let approved = fractal_drivers::claude_denials::approved(agent_dir, tool, &input, |claim| {
         if client.is_none() {
             client = Some(hook_client(env, identity)?);
         }
@@ -696,7 +696,7 @@ fn session_start_binding(
     env: &dyn HookEnv,
     raw: &str,
 ) -> std::result::Result<(), String> {
-    let wrapper = hook_var(env, st_drivers::claude_session::SESSION_ENV)
+    let wrapper = hook_var(env, fractal_drivers::claude_session::SESSION_ENV)
         .ok_or("the SessionStart hook has no wrapper session (ST_CLAUDE_SESSION)")?;
     let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
     let native = payload["session_id"]
@@ -723,7 +723,7 @@ fn unbound(env: &dyn HookEnv, report: &mut dyn FnMut(Diagnostic), reason: &str) 
         .or_else(|| env.var("ST_AGENT"))
         .filter(|subject| subject.starts_with("agent/"))
     {
-        let session = hook_var(env, st_drivers::claude_session::SESSION_ENV)
+        let session = hook_var(env, fractal_drivers::claude_session::SESSION_ENV)
             .unwrap_or_else(|| "unknown".into());
         report(Diagnostic {
             idempotency_key: format!("{UNBOUND_CODE}-hook:{subject}:{session}"),
@@ -802,7 +802,7 @@ mod tests {
 
     fn seat(root: &Path) -> (PathBuf, BTreeMap<String, String>) {
         let catalog = root.join("catalog");
-        let host = st_drivers::run::detect_host();
+        let host = fractal_drivers::run::detect_host();
         let agent_dir = catalog.join("agents").join(&host).join("seat");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn native_hooks_record_without_catalog_discovery_and_keep_session_fencing() {
         let root = tempfile::tempdir().unwrap();
-        let paths = st_drivers::driver_paths::Paths {
+        let paths = fractal_drivers::driver_paths::Paths {
             root: root.path().to_path_buf(),
             agent_dir: root.path().join("observations"),
             session_dir: root.path().join("sessions/claude"),
@@ -947,7 +947,7 @@ mod tests {
             ),
         ]);
         let seq =
-            st_drivers::harness_state::claim(&paths.agent_dir, "example/seat", "claude", "current")
+            fractal_drivers::harness_state::claim(&paths.agent_dir, "example/seat", "claude", "current")
                 .unwrap();
         env.insert("ST_CLAUDE_SESSION_SEQ".into(), seq.to_string());
         assert_eq!(
@@ -960,12 +960,12 @@ mod tests {
             .0,
             0
         );
-        let record_path = st_drivers::harness_state::harness_state_path(&paths.agent_dir);
+        let record_path = fractal_drivers::harness_state::harness_state_path(&paths.agent_dir);
         let current = std::fs::read(&record_path).unwrap();
-        let observed = st_drivers::harness_state::read(&record_path, None).unwrap();
-        assert_eq!(observed.state, st_drivers::harness_state::Activity::Active);
+        let observed = fractal_drivers::harness_state::read(&record_path, None).unwrap();
+        assert_eq!(observed.state, fractal_drivers::harness_state::Activity::Active);
         assert_eq!(observed.evidence_incarnation.as_deref(), Some("current"));
-        st_drivers::harness_state::claim(&paths.agent_dir, "example/seat", "claude", "successor")
+        fractal_drivers::harness_state::claim(&paths.agent_dir, "example/seat", "claude", "successor")
             .unwrap();
         let successor = std::fs::read(&record_path).unwrap();
         assert_ne!(current, successor);
@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(std::fs::read(&record_path).unwrap(), successor);
         assert!(!root.path().join("catalog").exists());
         assert!(!paths.agent_dir.join("agent.kdl").exists());
-        env.remove(st_drivers::driver_paths::SESSION_DIR_ENV);
+        env.remove(fractal_drivers::driver_paths::SESSION_DIR_ENV);
         let (code, reported) = hook(
             "claude-observe",
             &["SessionStart"],
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn fractal_only_native_hooks_bind_and_observe_without_catalog_declarations() {
         let root = tempfile::tempdir().unwrap();
-        let paths = st_drivers::driver_paths::Paths {
+        let paths = fractal_drivers::driver_paths::Paths {
             root: root.path().to_path_buf(),
             agent_dir: root.path().join("observations"),
             session_dir: root.path().join("sessions/claude"),
@@ -1006,7 +1006,7 @@ mod tests {
             .filter(|(name, _)| name.starts_with("FRACTAL_"))
             .collect();
         let seq =
-            st_drivers::harness_state::claim(&paths.agent_dir, "example/seat", "claude", "current")
+            fractal_drivers::harness_state::claim(&paths.agent_dir, "example/seat", "claude", "current")
                 .unwrap();
         env.extend([
             ("FRACTAL_CLAUDE_RUNTIME_ID".into(), "example/seat".into()),
@@ -1030,9 +1030,9 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert!(reported.is_empty(), "{reported:?}");
-        let record_path = st_drivers::harness_state::harness_state_path(&paths.agent_dir);
-        let observed = st_drivers::harness_state::read(&record_path, None).unwrap();
-        assert_eq!(observed.state, st_drivers::harness_state::Activity::Active);
+        let record_path = fractal_drivers::harness_state::harness_state_path(&paths.agent_dir);
+        let observed = fractal_drivers::harness_state::read(&record_path, None).unwrap();
+        assert_eq!(observed.state, fractal_drivers::harness_state::Activity::Active);
         assert_eq!(observed.evidence_incarnation.as_deref(), Some("current"));
         assert!(!root.path().join("catalog.kdl").exists());
         assert!(!paths.agent_dir.join("agent.kdl").exists());
@@ -1101,11 +1101,11 @@ mod tests {
         assert_eq!(hook("claude-observe", &["Stop"], &env, "{}").0, 0);
         // A mandatory resume fence propagates its failure, as st2's hook did.
         env.insert(
-            st_drivers::claude_session::RESUME_GENERATION_ENV.into(),
+            fractal_drivers::claude_session::RESUME_GENERATION_ENV.into(),
             "3".into(),
         );
         env.insert(
-            st_drivers::claude_session::EXPECTED_NATIVE_SESSION_ENV.into(),
+            fractal_drivers::claude_session::EXPECTED_NATIVE_SESSION_ENV.into(),
             "native-9".into(),
         );
         assert_eq!(hook("claude-observe", &["SessionStart"], &env, "{}").0, 1);

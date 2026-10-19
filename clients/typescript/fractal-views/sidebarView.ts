@@ -1,4 +1,4 @@
-import type { Arrangement } from '@smalltalk/st3-client';
+import type { Arrangement } from '@fractal/client';
 
 export type NodeRef = { _tag: 'Folder'; id: string } | { _tag: 'Subject'; subject: string };
 export type Parent = { _tag: 'Root' } | NodeRef;

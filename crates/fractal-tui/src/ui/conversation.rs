@@ -6,7 +6,7 @@ use super::view::Entry;
 use std::collections::HashSet;
 
 #[derive(Default)]
-pub struct Cache(st3_conversation_ui::Cache);
+pub struct Cache(fractal_conversation_ui::Cache);
 
 impl Cache {
     pub fn render(
@@ -15,7 +15,7 @@ impl Cache {
         width: usize,
         expanded: &HashSet<String>,
         spinner: &str,
-        density: st3_conversation_ui::Density,
+        density: fractal_conversation_ui::Density,
     ) -> Doc {
         let rendered = self.0.render_as(
             entries,

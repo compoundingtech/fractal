@@ -259,7 +259,7 @@ async fn barrier(mut predicate: impl FnMut() -> bool, label: &str) -> Result<()>
     while !predicate() { ensure!(Instant::now() < deadline, "readiness timeout: {label}"); tokio::time::sleep(Duration::from_millis(25)).await; }
     Ok(())
 }
-async fn frame_until(stream: &mut st3_client::CollectionStream, capture: &mut Capture, socket: &str, mut predicate: impl FnMut(&Value) -> bool) -> Result<Value> {
+async fn frame_until(stream: &mut fractal_client::CollectionStream, capture: &mut Capture, socket: &str, mut predicate: impl FnMut(&Value) -> bool) -> Result<Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let frame = tokio::time::timeout_at(deadline, stream.next()).await??.context("socket closed")?;
@@ -291,7 +291,7 @@ fn conversation_id(index: usize) -> String {
     if index == 0 { "conversation".into() } else { format!("conversation#{}", index + 1) }
 }
 
-async fn subscribe_catalogs(stream: &mut st3_client::CollectionStream, capture: &mut Capture, socket: &str) -> Result<()> {
+async fn subscribe_catalogs(stream: &mut fractal_client::CollectionStream, capture: &mut Capture, socket: &str) -> Result<()> {
     for collection in ["agents", "terminals"] {
         capture.record("command", Some(socket), json!({"kind":"subscribe","id":collection,"collection":collection,"limit":100,"actor":null,"status":null}))?;
         stream.subscribe(collection, collection, 100, None, None).await?;
@@ -300,7 +300,7 @@ async fn subscribe_catalogs(stream: &mut st3_client::CollectionStream, capture: 
     Ok(())
 }
 
-async fn subscribe_cast(stream: &mut st3_client::CollectionStream, capture: &mut Capture, socket: &str, cast: &[&str]) -> Result<()> {
+async fn subscribe_cast(stream: &mut fractal_client::CollectionStream, capture: &mut Capture, socket: &str, cast: &[&str]) -> Result<()> {
     for (index, agent) in cast.iter().enumerate() {
         let id = conversation_id(index);
         capture.record("command", Some(socket), json!({"kind":"subscribe","id":id,"collection":"conversation","conversation":agent}))?;
@@ -310,7 +310,7 @@ async fn subscribe_cast(stream: &mut st3_client::CollectionStream, capture: &mut
     Ok(())
 }
 
-async fn subscribe_terminal(stream: &mut st3_client::CollectionStream, capture: &mut Capture, socket: &str, terminal: &str, incarnation: &str, capability: &str) -> Result<Value> {
+async fn subscribe_terminal(stream: &mut fractal_client::CollectionStream, capture: &mut Capture, socket: &str, terminal: &str, incarnation: &str, capability: &str) -> Result<Value> {
     capture.record("command", Some(socket), json!({"kind":"subscribe","id":"terminal","collection":"terminal","terminal":terminal,"incarnation":incarnation,"capability":capability}))?;
     stream.subscribe_terminal("terminal", terminal, Some(incarnation), capability).await?;
     let frame = frame_until(stream, capture, socket, |frame| frame["id"] == "terminal").await?;
@@ -354,7 +354,7 @@ async fn record_scenario() -> Result<()> {
     capture.record("header", None, json!({"format_version":1,"script_format_version":script.format_version,"world":script.world,"daemon_build":String::from_utf8(version.stdout)?.trim(),"daemon_sha256":daemon_digest,"started_at":started_at}))?;
     scratch.start()?;
     barrier(|| scratch.http("GET", "/v1/health", None).is_ok(), "daemon health").await?;
-    let client = st3_client::Client::unix(scratch.root.path().join("run/st.sock"));
+    let client = fractal_client::Client::unix(scratch.root.path().join("run/st.sock"));
     let mut socket_number = 1;
     let mut socket = format!("socket#{socket_number}");
     let mut stream = client.collection_stream().await?;

@@ -1,16 +1,16 @@
 //! Isolated real router/store coverage; no daemon, subprocess, ambient profile, or managed agent.
-use st3::AttentionListStore;
-use st3::PersonWorkStore;
-use st3::MissionsStore as _;
-use st3::{SeatsStore as _, SeatsStoreCore};
+use fractal_daemon::AttentionListStore;
+use fractal_daemon::PersonWorkStore;
+use fractal_daemon::MissionsStore as _;
+use fractal_daemon::{SeatsStore as _, SeatsStoreCore};
 use std::{path::PathBuf, sync::Arc};
 
 use axum::{Router, body::Body, http::{Request, StatusCode}};
 use http_body_util::BodyExt as _;
 use serde::Serialize;
 use serde_json::{Value, json};
-use st3::{EvidenceStore as _, api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
-use st3_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantMinimalReadMode,
+use fractal_daemon::{EvidenceStore as _, api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
+use fractal_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantMinimalReadMode,
     AssistantPairedSession, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
     Fence, MessageKind, MessageSendParameters, PairingComplete, PersonAnswerInput,
     PersonStepParameters};
@@ -34,7 +34,7 @@ impl Harness {
         store.bind_fleet("3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69").unwrap();
         store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
         let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
-        store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
+        store.apply_internal(&fractal_daemon::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
         // There is no daemon task in this harness. Register its production publication
         // surfaces; pair() explicitly refreshes them before reading the summary.
         store.start_attention_list_refresher().unwrap();
@@ -48,7 +48,7 @@ impl Harness {
             fleet_id: None, configured_peers: vec![], client_relay: None,
             native_session_home: None, planner_default: Default::default(),
         };
-        Self { local: st3::api::router(state.clone()), fabric: st3::api::fabric_router(state.clone()), root, state }
+        Self { local: fractal_daemon::api::router(state.clone()), fabric: fractal_daemon::api::fabric_router(state.clone()), root, state }
     }
 
     async fn owner(&self, method: &str, path: &str, body: &impl Serialize) -> Value {
@@ -63,7 +63,7 @@ impl Harness {
 
     async fn pair(&self) -> AssistantPairedSession {
         let begin = AssistantPairingBegin {
-            api_version: st3_client::API_VERSION.into(), device_name: "Native ChatGPT test".into(),
+            api_version: fractal_client::API_VERSION.into(), device_name: "Native ChatGPT test".into(),
             assistant_id: AssistantPrincipal::Chatgpt, scopes: scopes(), expires_in_seconds: Some(3600),
             disclosure_consent: true, consent_evidence: "Isolated integration disclosure consent".into(),
             minimal_read_mode: Some(AssistantMinimalReadMode::CallerBoundAllow),
@@ -71,7 +71,7 @@ impl Harness {
         let challenge = self.owner("POST", "/v1/client/pairings", &begin).await;
         let path = format!("/v1/client/pairings/{}/complete", challenge["value"]["pairing_id"].as_str().unwrap().trim_start_matches("pairing/"));
         let complete = PairingComplete {
-            api_version: st3_client::API_VERSION.into(), code: challenge["value"]["code"].as_str().unwrap().into(),
+            api_version: fractal_client::API_VERSION.into(), code: challenge["value"]["code"].as_str().unwrap().into(),
             device_public_key: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into(),
             key_storage: Some("software".into()),
         };
@@ -88,8 +88,8 @@ impl Harness {
         }
         // Complete the same publications the daemon performs at startup, including
         // an empty owner view. Pairing alone does not make these views ready.
-        st3::api::refresh_agent_roster_for_test(&self.state.store).unwrap();
-        st3::api::refresh_attention_list(&self.state.store).unwrap();
+        fractal_daemon::api::refresh_agent_roster_for_test(&self.state.store).unwrap();
+        fractal_daemon::api::refresh_attention_list(&self.state.store).unwrap();
         let publication = self.state.store.published_attention_list()
             .expect("the fixture must publish attention before assistant reads");
         assert_eq!(publication.cut, self.state.store.index().unwrap());
@@ -113,7 +113,7 @@ impl Harness {
 
     async fn policy(&self, paired: &AssistantPairedSession, scopes: Vec<AssistantScope>) -> AssistantGrant {
         let policy = AssistantGrantPolicy {
-            api_version: st3_client::API_VERSION.into(), scopes, expires_in_seconds: Some(3600),
+            api_version: fractal_client::API_VERSION.into(), scopes, expires_in_seconds: Some(3600),
             disclosure_consent: true, consent_evidence: "Native owner explicit policy".into(),
             minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
             recipient_allowlist: Some(vec![]),
@@ -244,7 +244,7 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     assert_eq!(projected["assistant_session_actor"], paired.session_actor);
     assert_eq!(projected["sender_class"], "external-assistant");
     assert_eq!(projected["assistant_grant_id"], paired.grant.id);
-    let decoded: st3_client::Work = serde_json::from_value(shown["value"].clone()).unwrap();
+    let decoded: fractal_client::Work = serde_json::from_value(shown["value"].clone()).unwrap();
     assert_eq!(decoded.person_answers[0].respondent, "assistant/chatgpt");
     assert_eq!(decoded.person_answers[0].assistant_owner.as_deref(), Some(OWNER));
     assert_eq!(decoded.person_answers[0].assistant_session_actor.as_deref(), Some(paired.session_actor.as_str()));
@@ -263,12 +263,12 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     assert_eq!(notification_claim.body["fields"]["assistant_owner"], OWNER);
     assert_eq!(notification_claim.body["fields"]["assistant_session_actor"], paired.session_actor);
     let metadata = notification.assistant_metadata().unwrap();
-    let ding = st_drivers::ding::st3_notification_with_metadata(
+    let ding = fractal_drivers::ding::st3_notification_with_metadata(
         &notification.subject, &notification.from, &notification.to, notification.title.as_deref(),
         &notification.content, "test-body-digest",
-        st_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+        fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
     );
-    assert!(ding.contains(st_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
+    assert!(ding.contains(fractal_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
     assert!(ding.contains(&format!("assistant_grant_id=\"{}\"", paired.grant.id)));
     let notification = serde_json::to_value(notification).unwrap();
     assert_eq!(notification["sender_class"], "external-assistant");
@@ -339,15 +339,15 @@ async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_re
     let projected = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
     assert_eq!(projected.from, "assistant/chatgpt");
     let metadata = projected.assistant_metadata().unwrap();
-    let notification = st_drivers::ding::st3_notification_with_metadata(
+    let notification = fractal_drivers::ding::st3_notification_with_metadata(
         &projected.subject, &projected.from, &projected.to, projected.title.as_deref(),
         &projected.content, &"0".repeat(64),
-        st_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+        fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
     );
     assert!(notification.contains("from=\"assistant/chatgpt\""));
     assert!(notification.contains(&format!("assistant_grant_id=\"{}\"", paired.grant.id)));
-    assert!(notification.contains(st_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
-    assert!(!notification.contains(st_drivers::ding::PERSON_REPLY_INSTRUCTION));
+    assert!(notification.contains(fractal_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
+    assert!(!notification.contains(fractal_drivers::ding::PERSON_REPLY_INSTRUCTION));
     let audit = h.state.store.claims_page(None, None, 0, None, false, 1000).unwrap().claims
         .into_iter().find(|claim| claim.kind == "custom.client.assistant.v1.audit"
             && claim.body["fields"]["operation"] == "grant-authorized-write").unwrap();
@@ -380,7 +380,7 @@ async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_re
 
 #[tokio::test]
 async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation() {
-    use st3::store::assistant_write::{AssistantWriteAuthorization, authorize};
+    use fractal_daemon::store::assistant_write::{AssistantWriteAuthorization, authorize};
     let h = Harness::new();
     let paired = h.pair().await;
     let grant = h.policy(&paired, scopes()).await;
@@ -431,7 +431,7 @@ async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() 
     let h = Arc::new(Harness::new());
     let paired = h.pair().await;
     let gate = h.root.path().join("mutation-gate");
-    st3::store::assistant_write_gate::install(&gate, Some(grant_subject(&paired))).unwrap();
+    fractal_daemon::store::assistant_write_gate::install(&gate, Some(grant_subject(&paired))).unwrap();
     let connection = rusqlite::Connection::open(h.root.path().join("store.sqlite")).unwrap();
     let count_messages = || connection.query_row(
         "SELECT count(*) FROM claims WHERE kind='message.sent'", [], |row| row.get::<_, u64>(0),
@@ -460,7 +460,7 @@ async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() 
             h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
         } else {
             h.owner("POST", &grant_path(&paired, "/policy"), &AssistantGrantPolicy {
-                api_version: st3_client::API_VERSION.into(),
+                api_version: fractal_client::API_VERSION.into(),
                 scopes: scopes().into_iter().filter(|scope| *scope != AssistantScope::Messages).collect(),
                 expires_in_seconds: Some(3600), disclosure_consent: true,
                 consent_evidence: "Owner removes message scope during held send".into(),
@@ -512,8 +512,8 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
 async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
     let h = Harness::new();
     let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"authored-review\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to \"person/ada\"; goal \"Review release\"; }} }}", h.root.path());
-    h.state.store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "authored-review").unwrap();
-    let run = h.state.store.create_mission_run(&st3::model::MissionRunRequest {
+    h.state.store.apply_internal(&fractal_daemon::graph::parse_intent(&source, "assistant-native").unwrap(), "authored-review").unwrap();
+    let run = h.state.store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
         mission: "authored-review".into(), revision: None, workspace: h.root.path().to_string_lossy().into_owned(),
         requester: Some(OWNER.into()), mode: Some("run".into()), inputs: Default::default(), idempotency_key: "authored-review".into(),
     }).unwrap();

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use sha2::{Digest as _, Sha256};
 
-fn assigned_to(step: &st3::model::StepSpec) -> Option<&str> {
+fn assigned_to(step: &fractal_daemon::model::StepSpec) -> Option<&str> {
     match &step.work_selector {
-        Some(st3::model::WorkSelector::Assigned { agent }) => Some(agent),
+        Some(fractal_daemon::model::WorkSelector::Assigned { agent }) => Some(agent),
         _ => None,
     }
 }
@@ -140,7 +140,7 @@ fn every_tracked_st3_example_uses_the_normative_grammar() {
     assert!(!files.is_empty());
     for file in files {
         let source = fs::read_to_string(&file).expect("read example");
-        st3::parse_intent(&source, "local")
+        fractal_daemon::parse_intent(&source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
     }
 }
@@ -228,12 +228,12 @@ fn walkthrough_work_warns_before_the_worker_seat_exists() {
         .join("../..")
         .join("examples/st3/walkthrough-work.kdl");
     let source = fs::read_to_string(&file).expect("read walkthrough work mission");
-    let intent = st3::parse_intent(&source, "local").expect("parse walkthrough work mission");
-    let store = st3::store::Store::open_memory("local").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse walkthrough work mission");
+    let store = fractal_daemon::store::Store::open_memory("local").unwrap();
     let preview = store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: Some(file.display().to_string()),
             },
@@ -254,7 +254,7 @@ fn every_harness_seat_example_declares_the_shared_worker_seat() {
     let mut providers = Vec::new();
     for file in example_files("examples/st3/seats") {
         let source = fs::read_to_string(&file).expect("read seat example");
-        let intent = st3::parse_intent(&source, "local")
+        let intent = fractal_daemon::parse_intent(&source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
         assert!(
             intent.missions.is_empty(),
@@ -316,7 +316,7 @@ fn no_example_mission_owns_runtimes_without_work() {
     // step-less mission can never be a standing agent, observer, subscription, or schedule.
     for file in example_files("examples/st3") {
         let source = fs::read_to_string(&file).expect("read example");
-        let intent = st3::parse_intent(&source, "local")
+        let intent = fractal_daemon::parse_intent(&source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
         for mission in intent.missions.values() {
             if mission.declarations_kdl.is_some() {
@@ -336,13 +336,13 @@ fn the_declarative_gates_dream_fixture_previews_without_rewriting() {
     let fixture =
         PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/declarative-gates.kdl");
     let source = fs::read_to_string(&fixture).expect("read declarative gates fixture");
-    let intent = st3::parse_intent(&source, "local")
+    let intent = fractal_daemon::parse_intent(&source, "local")
         .unwrap_or_else(|error| panic!("{}: {error}", fixture.display()));
-    let store = st3::store::Store::open_memory("local").unwrap();
+    let store = fractal_daemon::store::Store::open_memory("local").unwrap();
     let preview = store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: Some(fixture.display().to_string()),
             },
@@ -385,7 +385,7 @@ fn every_native_st3_eval_uses_the_normative_grammar() {
     assert!(!files.is_empty());
     for file in files {
         let source = fs::read_to_string(&file).expect("read eval");
-        st3::parse_intent(&source, "local")
+        fractal_daemon::parse_intent(&source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
     }
 }
@@ -434,7 +434,7 @@ fn continuous_stewardship_has_two_serial_cycles_and_a_latest_only_wake() {
         .join("../..")
         .join("evals/st3/continuous-stewardship/eval.kdl");
     let source = fs::read_to_string(&file).unwrap();
-    let intent = st3::parse_intent(&source, "local").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     let mission = &intent.missions["eval/continuous-stewardship"];
     let cycle = &intent.missions["eval/continuous-stewardship/cycle"];
     assert!(
@@ -464,7 +464,7 @@ fn automatic_intake_pins_its_review_mission() {
         .join("../..")
         .join("evals/st3/automatic-github-intake/eval.kdl");
     let source = fs::read_to_string(&file).unwrap();
-    let intent = st3::parse_intent(&source, "local").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     let revision = &intent.missions["eval/automatic-github-intake/review"].revision;
     assert!(source.contains(&format!("review@{revision}")), "{revision}");
 }
@@ -475,7 +475,7 @@ fn migration_rehearsal_uses_an_exact_migration_document_and_no_custom_prompt() {
         .join("../..")
         .join("evals/st3/agent-migration-rehearsal/eval.kdl");
     let source = fs::read_to_string(&file).unwrap();
-    let intent = st3::parse_intent(&source, "local").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     assert!(intent.document_refs.contains(
         "doc/hosts/migration-rehearsal@7a0773a714975b4563b15638cc5b5b6608849dc6c5b1ea07e2632b0edc6a8665"
     ));
@@ -804,10 +804,10 @@ fn every_selected_eval_uses_current_grammar_and_harness_policy() {
         let st3_document: kdl::KdlDocument = st3_source.parse().expect("parse st3 KDL");
 
         assert_eq!(
-            st_drivers::kdl_version::document_version(&st3_document).unwrap(),
+            fractal_drivers::kdl_version::document_version(&st3_document).unwrap(),
             2
         );
-        st3::parse_intent(&st3_source, "local")
+        fractal_daemon::parse_intent(&st3_source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", st3_file.display()));
         if model_free.contains(&name) {
             assert_eq!(
@@ -829,7 +829,7 @@ fn every_selected_eval_uses_current_grammar_and_harness_policy() {
             );
         }
         let old_version = st3_source.replacen("version 2", "version 1", 1);
-        assert!(st3::parse_intent(&old_version, "local").is_err());
+        assert!(fractal_daemon::parse_intent(&old_version, "local").is_err());
     }
 }
 
@@ -920,7 +920,7 @@ fn license_and_ghost_bug_keep_the_complete_team_loop_in_the_graph() {
         let source = fs::read_to_string(root.join(name).join("eval.kdl")).unwrap();
         assert!(!source.contains("message \"kickoff"));
         assert!(!source.contains("wait-team-done"));
-        let intent = st3::parse_intent(&source, "local").unwrap();
+        let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
         let mission = &intent.missions[mission_id];
         for (step, assignee) in assignments {
             assert_eq!(assigned_to(&mission.steps[*step]), Some(*assignee));
@@ -946,7 +946,7 @@ fn mission_document_lift_produces_and_uses_one_exact_mission_output() {
         .join("../..")
         .join("evals/st3/mission-document-lift");
     let source = fs::read_to_string(root.join("eval.kdl")).unwrap();
-    let intent = st3::parse_intent(&source, "local").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     let mission = &intent.missions["eval/mission-document-lift"];
     assert_eq!(mission.baselines.len(), 1);
     assert_eq!(
@@ -961,7 +961,7 @@ fn mission_document_lift_produces_and_uses_one_exact_mission_output() {
     );
     assert_eq!(
         mission.steps["execute-lifted-mission"].uses_mission,
-        Some(st3::model::UsedMissionSpec::StepOutput {
+        Some(fractal_daemon::model::UsedMissionSpec::StepOutput {
             step: "lift-mission-document".into()
         })
     );
@@ -1017,7 +1017,7 @@ fn signal_rename_keeps_work_structure_in_the_mission_graph() {
     assert!(!source.contains("wait-team-done"));
     assert!(!source.contains("message \"kickoff"));
 
-    let intent = st3::parse_intent(&source, "local").expect("parse Signal Rename eval");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse Signal Rename eval");
     let mission = &intent.missions["eval/signal-rename-codex"];
     assert_eq!(
         mission.display_order,
@@ -1061,7 +1061,7 @@ fn signal_rename_keeps_work_structure_in_the_mission_graph() {
             .dependencies
             .iter()
             .filter_map(|dependency| match dependency {
-                st3::model::DependencySpec::Step { step, state } if state == "completed" => {
+                fractal_daemon::model::DependencySpec::Step { step, state } if state == "completed" => {
                     Some(step.as_str())
                 }
                 _ => None,
@@ -1139,7 +1139,7 @@ fn restart_continuity_keeps_recovery_state_in_the_mission_graph() {
     let source = fs::read_to_string(&file).expect("read Restart continuity eval");
     assert!(!source.contains("message \"kickoff"));
 
-    let intent = st3::parse_intent(&source, "local").expect("parse Restart continuity eval");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse Restart continuity eval");
     let mission = &intent.missions["eval/restart-continuity"];
     assert_eq!(
         mission.display_order,
@@ -1167,7 +1167,7 @@ fn restart_continuity_keeps_recovery_state_in_the_mission_graph() {
             .dependencies
             .iter()
             .filter_map(|dependency| match dependency {
-                st3::model::DependencySpec::Step { step, state } if state == "completed" => {
+                fractal_daemon::model::DependencySpec::Step { step, state } if state == "completed" => {
                     Some(step.as_str())
                 }
                 _ => None,
@@ -1220,7 +1220,7 @@ fn fork_in_the_road_keeps_parallel_debate_in_the_mission_graph() {
     let source = fs::read_to_string(&file).expect("read Fork in the road eval");
     assert!(!source.contains("message \"kickoff"));
 
-    let intent = st3::parse_intent(&source, "local").expect("parse Fork in the road eval");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse Fork in the road eval");
     let mission = &intent.missions["eval/fork-in-the-road"];
     let team = mission.steps["start-team"]
         .declarations_kdl
@@ -1301,7 +1301,7 @@ fn fork_in_the_road_keeps_parallel_debate_in_the_mission_graph() {
             .dependencies
             .iter()
             .filter_map(|dependency| match dependency {
-                st3::model::DependencySpec::Step { step, state } if state == "completed" => {
+                fractal_daemon::model::DependencySpec::Step { step, state } if state == "completed" => {
                     Some(step.as_str())
                 }
                 _ => None,
@@ -1357,7 +1357,7 @@ fn poisoned_pr_keeps_review_state_in_the_mission_graph() {
     let source = fs::read_to_string(&file).expect("read Poisoned pull request eval");
     assert!(!source.contains("message \"kickoff"));
 
-    let intent = st3::parse_intent(&source, "local").expect("parse Poisoned pull request eval");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse Poisoned pull request eval");
     let mission = &intent.missions["eval/poisoned-pr"];
     assert_eq!(
         mission.display_order,
@@ -1439,7 +1439,7 @@ fn new_paid_evals_keep_work_and_products_in_the_mission_graph() {
     for (name, mission_id, assignments, expected_products) in cases {
         let source = fs::read_to_string(root.join(name).join("eval.kdl")).unwrap();
         assert!(!source.contains("message \"kickoff"));
-        let intent = st3::parse_intent(&source, "local").unwrap();
+        let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
         let mission = &intent.missions[mission_id];
         for (step, assignee) in assignments {
             assert_eq!(assigned_to(&mission.steps[*step]), Some(*assignee));
@@ -1497,7 +1497,7 @@ fn new_paid_eval_fixtures_match_their_native_harnesses() {
 
 #[test]
 fn every_example_previews_cleanly_once_its_seats_exist() {
-    let store = st3::store::Store::open_memory("local").unwrap();
+    let store = fractal_daemon::store::Store::open_memory("local").unwrap();
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     for seat in [
         "examples/st3/seats/omp.kdl",
@@ -1506,11 +1506,11 @@ fn every_example_previews_cleanly_once_its_seats_exist() {
         "examples/st3/seats/reviewer.kdl",
     ] {
         let source = fs::read_to_string(root.join(seat)).expect("read seat example");
-        let intent = st3::parse_intent(&source, "local").expect("parse seat example");
+        let intent = fractal_daemon::parse_intent(&source, "local").expect("parse seat example");
         let preview = store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl: source,
                     source_name: Some(seat.into()),
                 },
@@ -1538,12 +1538,12 @@ fn every_example_previews_cleanly_once_its_seats_exist() {
             continue;
         }
         let source = fs::read_to_string(&file).expect("read example");
-        let intent = st3::parse_intent(&source, "local")
+        let intent = fractal_daemon::parse_intent(&source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
         let preview = store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl: source,
                     source_name: Some(file.display().to_string()),
                 },

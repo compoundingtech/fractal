@@ -7,9 +7,9 @@ use kdl::{KdlDocument, KdlEntry, KdlNode};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use st3::client::Client;
-use st3::config::Config;
-use st3::model::{
+use fractal_daemon::client::Client;
+use fractal_daemon::config::Config;
+use fractal_daemon::model::{
     ApplyRequest, ApplyResponse, DocumentListResponse, DocumentPutRequest, IntentInput,
     MissionRequest, MissionResponse, MissionRunView, StatusResponse,
 };
@@ -18,9 +18,9 @@ pub const ASSISTANT_SUBJECT: &str = "agent/st/assistant";
 /// The seat's subject is durable; people see this name.
 const ASSISTANT_NAME: &str = "Fractal Assistant";
 const MISSION: &str = "st/onboarding";
-const ASSISTANT: &str = /* sqlite-large-value: allow-for-now lv-h43a8d8fd5ba8 owner=st3::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/assistant.kdl");
-const ONBOARDING: &str = /* sqlite-large-value: allow-for-now lv-h5048786621c3 owner=st3::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/onboarding.kdl");
-const GUIDE: &str = /* sqlite-large-value: allow-for-now lv-he9271c41f835 owner=st3::onboarding TODO=trace-statement-and-value-representation */ include_str!("../../../docs/st3/onboarding-guide.md");
+const ASSISTANT: &str = /* sqlite-large-value: allow-for-now lv-h600fa9139184 owner=fractal::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/assistant.kdl");
+const ONBOARDING: &str = /* sqlite-large-value: allow-for-now lv-he44bc85b76e1 owner=fractal::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/onboarding.kdl");
+const GUIDE: &str = /* sqlite-large-value: allow-for-now lv-h7a6c6da8c836 owner=fractal::onboarding TODO=trace-statement-and-value-representation */ include_str!("../../../docs/st3/onboarding-guide.md");
 
 type Sink = Box<dyn FnMut(String)>;
 
@@ -77,10 +77,10 @@ async fn has_run_on(client: &Client) -> Result<bool> {
             .context("onboarding history has no run count")?
             > 0),
         // The named mission has no overview yet: nothing has run.
-        Err(error) if st3::client::is_not_found(&error) => Ok(false),
+        Err(error) if fractal_daemon::client::is_not_found(&error) => Ok(false),
         // An older daemon without the overview route cannot say, and guessing "never" would
         // start a second onboarding on an install that already finished one.
-        Err(error) if st3::client::is_missing_route(&error) => Err(error.context(
+        Err(error) if fractal_daemon::client::is_missing_route(&error) => Err(error.context(
             "the running daemon is older than this st and cannot say whether onboarding already ran; restart it, or run st setup --onboarding to begin explicitly",
         )),
         Err(error) => Err(error),
@@ -155,7 +155,7 @@ pub async fn start(
         .await?;
     let hash = hex::encode(Sha256::digest(GUIDE.as_bytes()));
     if !versions.items.iter().any(|version| version.hash == hash) {
-        let _: st3::model::DocumentVersion = client
+        let _: fractal_daemon::model::DocumentVersion = client
             .post(
                 "/v1/documents",
                 &DocumentPutRequest {
@@ -171,7 +171,7 @@ pub async fn start(
             .await?;
     }
     let mission_source = mission_source(&hash, harness, ready);
-    let parsed = st3::parse_intent(&mission_source, &config.node)?;
+    let parsed = fractal_daemon::parse_intent(&mission_source, &config.node)?;
     let revision = &parsed
         .missions
         .get(MISSION)
@@ -230,7 +230,7 @@ pub async fn start(
             .insert(ASSISTANT_SUBJECT.into(), expected);
     }
     if let Err(error) = apply(&client, definition_preview, config).await {
-        if !rerun && st3::client::http_status(&error) == Some(409) {
+        if !rerun && fractal_daemon::client::http_status(&error) == Some(409) {
             return declaration_changed(false);
         }
         return Err(error);
@@ -252,9 +252,9 @@ pub async fn start(
     let token = current
         .desired_token
         .context("the built-in Fractal Assistant has no declaration")?;
-    let claim: st3::model::ClaimRecord = client.get(&format!("/v1/claims/by-id/{token}")).await?;
-    let desired: st3::model::DesiredSubject = serde_json::from_value(claim.body)?;
-    let mut agent = st3::graph::render_desired_node(&desired.desired)?;
+    let claim: fractal_daemon::model::ClaimRecord = client.get(&format!("/v1/claims/by-id/{token}")).await?;
+    let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
+    let mut agent = fractal_daemon::graph::render_desired_node(&desired.desired)?;
     // Typed harnesses require a body even when the provider has no default flags.
     if let Some(body) = agent.children_mut()
         && let Some(harness) = body.get_mut("harness")
@@ -280,7 +280,7 @@ pub async fn start(
     let result = apply(&client, preview, config).await;
     if let Err(error) = result {
         // A concurrent first setup may have won the same named run's publication fence.
-        if !rerun && st3::client::http_status(&error) == Some(409) {
+        if !rerun && fractal_daemon::client::http_status(&error) == Some(409) {
             return declaration_changed(false);
         }
         return Err(error);
@@ -302,7 +302,7 @@ fn declaration_changed(rerun: bool) -> Result<Option<String>> {
     Ok(None)
 }
 
-async fn assistant_status(client: &Client) -> Result<Option<st3::model::SubjectStatus>> {
+async fn assistant_status(client: &Client) -> Result<Option<fractal_daemon::model::SubjectStatus>> {
     let status: StatusResponse = client.get("/v1/status?subject=agent%2Fst%2Fassistant").await?;
     Ok(status
         .subjects
@@ -329,7 +329,7 @@ fn declarations(
         .and_then(|node| node.get(0))
         .and_then(|value| value.as_string())
         .context("built-in Fractal Assistant description is missing")?;
-    let args = st3_client::AgentCreateParameters {
+    let args = fractal_client::AgentCreateParameters {
         name: "st/assistant".into(),
         harness: harness.into(),
         description: Some(description.into()),
@@ -344,7 +344,7 @@ fn declarations(
         remove_at_run_end: None,
     };
     let mut document: KdlDocument =
-        st3::creation::agent_document(&args, &workspace.to_string_lossy(), false, None)
+        fractal_daemon::creation::agent_document(&args, &workspace.to_string_lossy(), false, None)
             .parse()?;
     let mut display_name = KdlNode::new("name");
     display_name.entries_mut().push(KdlEntry::new(ASSISTANT_NAME));
@@ -426,7 +426,7 @@ mod tests {
         );
         let guide = hex::encode(sha2::Sha256::digest(super::GUIDE.as_bytes()));
         let ready = ["claude".to_string(), "codex".to_string()];
-        let mission = st3::parse_intent(&super::mission_source(&guide, "claude", &ready), "studio")
+        let mission = fractal_daemon::parse_intent(&super::mission_source(&guide, "claude", &ready), "studio")
             .unwrap();
         assert!(
             mission
@@ -434,7 +434,7 @@ mod tests {
                 .contains(&format!("doc/st/guide@{guide}"))
         );
         let revision = &mission.missions[super::MISSION].revision;
-        for harness in st3::environment::HARNESSES {
+        for harness in fractal_daemon::environment::HARNESSES {
             let source = super::declarations(
                 harness,
                 std::path::Path::new("/work/st-assistant"),
@@ -443,7 +443,7 @@ mod tests {
                 "person/ada",
             )
             .unwrap();
-            let intent = st3::parse_intent(&source, "studio").unwrap();
+            let intent = fractal_daemon::parse_intent(&source, "studio").unwrap();
             assert!(intent.subjects.contains_key(super::ASSISTANT_SUBJECT));
             assert!(!source.contains("model "));
             assert!(source.contains("name \"Fractal Assistant\""));
@@ -493,7 +493,7 @@ mod tests {
     fn the_play_is_three_acts_spoken_to_you_with_an_alert_in_act_three() {
         let guide = hex::encode(sha2::Sha256::digest(super::GUIDE.as_bytes()));
         let mission =
-            st3::parse_intent(&super::mission_source(&guide, "claude", &[]), "studio").unwrap();
+            fractal_daemon::parse_intent(&super::mission_source(&guide, "claude", &[]), "studio").unwrap();
         assert!(mission.missions.contains_key(super::MISSION));
         for act in ["hello", "act-one", "act-two", "act-three"] {
             assert!(
@@ -524,7 +524,7 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("```").next())
             .expect("the guide carries the demo mission");
-        let demo = st3::parse_intent(block, "studio").unwrap();
+        let demo = fractal_daemon::parse_intent(block, "studio").unwrap();
         assert!(demo.missions.contains_key("st/onboarding-demo"));
     }
     /// The words the 2026-10-09 eval found between tool calls. The instructions that tell the

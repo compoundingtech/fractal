@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AgentMessagesStore;
 use super::*;
-pub use st3_missions::store::usage_period::*;
-pub use st3_missions::store::usage_period::{create_schema};
+pub use fractal_missions::store::usage_period::*;
+pub use fractal_missions::store::usage_period::{create_schema};
 
 pub fn boundary_rows(
     connection: &Connection,
@@ -13,18 +13,18 @@ pub fn boundary_rows(
     let observed = observed_sql();
     let boundaries = boundaries.iter().map(|boundary| format!("{boundary:>20}")).collect::<Vec<_>>();
     // A loose index scan: one successor seek per series, regardless of its history length.
-    let mut next = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h88cbee2c7e36 owner=st3_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
+    let mut next = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9c902113b98b owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
         "SELECT {series} FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}>?1 ORDER BY {series} LIMIT 1"
     ))?;
-    let mut timestamp = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd294ae49c5a0 owner=st3_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
+    let mut timestamp = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h301f0cf2b659 owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
         "SELECT {observed} FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}=?1 AND {observed}<=?2 ORDER BY {observed} DESC LIMIT 1"
     ))?;
-    let mut snapshots = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf5e4933479cd owner=st3_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
+    let mut snapshots = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h88ebca0a4792 owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
         "SELECT id,subject,store_index,body FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}=?1 AND {observed}=?2 LIMIT 2"
     ))?;
     // Canonical order matters only when a series has several snapshots at the same observed
     // timestamp. Keep the exact replicated tie-breaker, but never sort its whole history.
-    let mut tied = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbc4cdc2788ac owner=st3_seats::store::usage_period TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+    let mut tied = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd19875ba803a owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT id,subject,store_index,body FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}=?1 AND {observed}=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"
     )))?;
     let read_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, String, u64, String)> {
@@ -32,10 +32,10 @@ pub fn boundary_rows(
     };
     let mut result = BTreeMap::new();
     let mut previous = String::new();
-    while let Some(key) = next.query_row(/* sqlite-large-value: allow-for-now lv-h1d0def8a68f0 owner=st3_seats::store::usage_period TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0)).optional()? {
+    while let Some(key) = next.query_row(/* sqlite-large-value: allow-for-now lv-h569a833c55b3 owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0)).optional()? {
         let mut previous_at = None;
         for boundary in &boundaries {
-            let Some(at) = timestamp.query_row(/* sqlite-large-value: allow-for-now lv-h45f90dfcf5db owner=st3_seats::store::usage_period TODO=trace-statement-and-value-representation */ params![key, boundary], |row| row.get::<_, String>(0)).optional()? else {
+            let Some(at) = timestamp.query_row(/* sqlite-large-value: allow-for-now lv-hee0474334795 owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ params![key, boundary], |row| row.get::<_, String>(0)).optional()? else {
                 continue;
             };
             if previous_at.as_ref() == Some(&at) {
@@ -46,7 +46,7 @@ pub fn boundary_rows(
             let has_ties = candidates.next()?.is_some();
             drop(candidates);
             let winner = if has_ties {
-                tied.query_row(/* sqlite-large-value: allow-for-now lv-hd618852271c1 owner=st3_seats::store::usage_period TODO=trace-statement-and-value-representation */ params![key, at], read_row)?
+                tied.query_row(/* sqlite-large-value: allow-for-now lv-h69f7e511eb9e owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ params![key, at], read_row)?
             } else {
                 first
             };
@@ -63,8 +63,8 @@ pub fn boundary_rows(
 mod tests {
     use super::*;
     use std::time::Instant;
-    use st3_missions::store::usage_period_tests_shared_seats::*;
-    use st3_missions::store::usage_period_tests_shared_seats::{DAY, fixture};
+    use fractal_missions::store::usage_period_tests_shared_seats::*;
+    use fractal_missions::store::usage_period_tests_shared_seats::{DAY, fixture};
 
     fn oracle(store: &Store, since: u64, until: u64) -> (Vec<Value>, Value) {
         let connection = store.readers.get();

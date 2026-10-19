@@ -5,8 +5,8 @@ use super::*;
 use crate::fleet::MemberKey;
 use crate::model::PersonStepResponse;
 use rusqlite::StatementStatus;
-use st3_missions::store::directive_notes::tests_shared_seats::*;
-use st3_missions::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
+use fractal_missions::store::directive_notes::tests_shared_seats::*;
+use fractal_missions::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 
 
 #[test]

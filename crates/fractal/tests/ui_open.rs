@@ -1,6 +1,6 @@
 //! `st ui open` against the real terminal interface: a seat asks, in a separate process, for an
 //! agent or a mission to be shown in a tab or a split, and the picture in a PTY changes.
-use st3::SeatsStoreCore;
+use fractal_daemon::SeatsStoreCore;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -9,8 +9,8 @@ use alacritty_terminal::{
     vte::ansi::Processor,
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use st3::{api::AppState, store::Store};
-use st3_client::Client;
+use fractal_daemon::{api::AppState, store::Store};
+use fractal_client::Client;
 use std::{
     io::{Read, Write},
     path::Path,
@@ -173,14 +173,14 @@ async fn serve(
 ) {
     let state = state(root, "seat-one");
     for source in sources {
-        let intent = st3::graph::parse_intent(source, state.store.origin()).unwrap();
+        let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
         state.store.apply_internal(&intent, "ui-open-test").unwrap();
     }
     let socket = root.join("trusted.sock");
     let server = tokio::spawn({
         let path = socket.clone();
-        let app = st3::api::router(state.clone());
-        async move { st3::api::serve_unix(&path, app).await }
+        let app = fractal_daemon::api::router(state.clone());
+        async move { fractal_daemon::api::serve_unix(&path, app).await }
     });
     let client = Client::unix_as(&socket, PERSON);
     for _ in 0..200 {
@@ -439,7 +439,7 @@ async fn an_alert_a_seat_raises_for_itself_shows_above_the_input_and_is_dismisse
 
 /// The request the bundled guide tells a seat to raise for itself is one the daemon accepts.
 /// (Lives here, not in `onboarding.rs`, because that file is compiled into the binary too, where
-/// the daemon's modules are reached as `st3::…`.)
+/// the daemon's modules are reached as `fractal_daemon::…`.)
 #[test]
 fn the_guides_alert_request_is_one_the_daemon_accepts() {
     const GUIDE: &str = include_str!("../../../docs/st3/onboarding-guide.md");
@@ -447,7 +447,7 @@ fn the_guides_alert_request_is_one_the_daemon_accepts() {
     let json = &GUIDE[start..];
     let json = &json[..json.find("\nJSON\n").expect("the end of the request")];
     let value: serde_json::Value = serde_json::from_str(json).unwrap();
-    let (request, _) = st3::person_request::StructuredRequest::parse(&value).unwrap();
+    let (request, _) = fractal_daemon::person_request::StructuredRequest::parse(&value).unwrap();
     request.validate().unwrap();
     assert_eq!(request.answers.len(), 2, "one tap to dismiss, either way");
 }

@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_store::*;
+pub use fractal_store::*;
 
 pub mod maintenance;
 pub mod store;

@@ -36,11 +36,11 @@ fn insert(store: &Store, key: &str, deadline: i64) {
         .connection
         .batched(|transaction| {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-ha176c04f12f1 owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES (?1,'{}',1)",
+                /* sqlite-large-value: allow-for-now lv-ha451d61b7cc9 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES (?1,'{}',1)",
                 [key],
             )?;
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h8394017fe09a owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=?2 WHERE operation_id=?1",
+                /* sqlite-large-value: allow-for-now lv-h2e7f7a17ec11 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=?2 WHERE operation_id=?1",
                 rusqlite::params![key, deadline],
             )?;
             Ok::<_, rusqlite::Error>(())
@@ -108,7 +108,7 @@ async fn response_expiry_retries_a_busy_writer_and_recovers_after_release() {
         .unwrap();
     insert(&store, "busy", 0);
     let blocker = rusqlite::Connection::open(directory.path().join("claims.sqlite3")).unwrap();
-    blocker.execute_batch(/* sqlite-large-value: allow-for-now lv-h126f10b41d17 owner=st3::response_expiry_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
+    blocker.execute_batch(/* sqlite-large-value: allow-for-now lv-h19c3781a5977 owner=fractal::response_expiry_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
     // Both bounded maintenance APIs must retain SQLite's numeric error, including when
     // BEGIN fails before the chunk callback runs.
     for error in [
@@ -130,7 +130,7 @@ async fn response_expiry_retries_a_busy_writer_and_recovers_after_release() {
         "transient contention must not stop cleanup"
     );
     assert_eq!(store.next_idempotency_expiry().unwrap(), Some(0));
-    blocker.execute_batch(/* sqlite-large-value: allow-for-now lv-h4ecd35720039 owner=st3::response_expiry_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
+    blocker.execute_batch(/* sqlite-large-value: allow-for-now lv-hbf15c1bae497 owner=fractal::response_expiry_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     count_becomes(&store, changes, 0).await;
     task.abort();
 }
@@ -158,7 +158,7 @@ async fn response_expiry_earlier_commit_interrupts_a_future_deadline() {
         .connection
         .batched(|transaction| {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h1c20e8e0afb7 owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id='future'",
+                /* sqlite-large-value: allow-for-now lv-hed0fec49251f owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0 WHERE operation_id='future'",
                 [],
             )
         })
@@ -179,12 +179,12 @@ async fn response_expiry_loan_return_and_rollback_publish_only_authority() {
         let transaction = writer.transaction().unwrap();
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hb03b0eaa0762 owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES ('rolled-back','{}',1)",
+                /* sqlite-large-value: allow-for-now lv-h17b499518340 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES ('rolled-back','{}',1)",
                 [],
             )
             .unwrap();
         transaction
-            .execute(/* sqlite-large-value: allow-for-now lv-h1567d16bb5c8 owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-hc050d803d636 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
             .unwrap();
         transaction.rollback().unwrap();
     }
@@ -193,12 +193,12 @@ async fn response_expiry_loan_return_and_rollback_publish_only_authority() {
     let transaction = writer.transaction().unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h46c8b34da031 owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES ('committed','{}',1)",
+            /* sqlite-large-value: allow-for-now lv-h6ad293d27aa3 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES ('committed','{}',1)",
             [],
         )
         .unwrap();
     transaction
-        .execute(/* sqlite-large-value: allow-for-now lv-h3704a546ca92 owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hbc44e4318e38 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
         .unwrap();
     transaction.commit().unwrap();
     assert_eq!(
@@ -235,11 +235,11 @@ async fn response_expiry_yields_between_sixty_four_row_commits() {
         .batched(|transaction| {
             for index in 0..130 {
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h851e95bef6d9 owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES (?1,'{}',1)",
+                    /* sqlite-large-value: allow-for-now lv-he8657293c8f5 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id,response,replay_safe) VALUES (?1,'{}',1)",
                     [format!("receipt-{index}")],
                 )?;
             }
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h1f5f3f15d22e owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h4df8c4c1af39 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])?;
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap()
@@ -255,7 +255,7 @@ async fn response_expiry_schema_read_failure_stops_visibly() {
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-ha012ce544ebb owner=st3::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE idempotency")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h06ed6b522e72 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE idempotency")
         .unwrap();
     let task = spawn_response_expiry(store);
     tokio::time::timeout(Duration::from_secs(5), task)

@@ -7,9 +7,9 @@ The functions, types and constants the fold, the schema and the open path reach 
 depends on) must stay in the lower crate; everything else only calls down and can move up. This tool
 computes that partition and applies it:
 
-    crate_cut.py plan  --src crates/st3-store/src --config .st/crate-cut.json [--pins FILE] [--json OUT]
-    crate_cut.py apply --src crates/st3-store/src --config .st/crate-cut.json --layer evidence \\
-                       --crate st3-evidence --lower st3-store [--pins FILE]
+    crate_cut.py plan  --src crates/fractal-store/src --config .st/crate-cut.json [--pins FILE] [--json OUT]
+    crate_cut.py apply --src crates/fractal-store/src --config .st/crate-cut.json --layer evidence \\
+                       --crate fractal-evidence --lower fractal-store [--pins FILE]
 
 Items are the unit: free fns, types, consts, statics, traits, macros and inline modules; the fns of
 an `impl Store` block (each moves on its own and becomes a method of an extension trait implemented for
@@ -1909,7 +1909,7 @@ def apply_cut(args, nodes, files, tfiles, order):
     lib = ['//! %s: the %s domain of the store, cut out of %s at function level. Everything of %s is re-exported at the root;' % (args.crate, args.layer, args.lower, args.lower),
            "//! the modules below shadow the lower crate's modules of the same name and re-export them, so every old path still resolves.",
            "",
-           "// Test helpers widened for st3-daemon's tests are unused when only the feature is on.",
+           "// Test helpers widened for fractal-daemon's tests are unused when only the feature is on.",
            '#![cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]',
            "",
            '#[cfg(any(test, feature = "test-support"))]',
@@ -1924,8 +1924,8 @@ def apply_cut(args, nodes, files, tfiles, order):
     lib += [""] + ["pub use %s::%s;" % (mp, t) for mp, t in traits_out]
     os.makedirs(new_src, exist_ok=True)
     open(os.path.join(new_src, "lib.rs"), "w").write("\n".join(lib) + "\n")
-    if os.path.exists("crates/st3-daemon/build.rs"):
-        open(os.path.join(crate_dir, "build.rs"), "w").write(open("crates/st3-daemon/build.rs").read())
+    if os.path.exists("crates/fractal-daemon/build.rs"):
+        open(os.path.join(crate_dir, "build.rs"), "w").write(open("crates/fractal-daemon/build.rs").read())
     print("moved %d items into %s (%d files, %d traits)" % (stats["items"], args.crate, len(out_files), stats["traits"]))
     args.traits = [t for _, t in traits_out]
     return top_mods
@@ -1940,7 +1940,7 @@ def wire_crate(args, top_mods):
     crate, lower, upper = args.crate, args.lower, args.upper
     ident = crate.replace("-", "_")
     root = os.path.join("crates", crate)
-    daemon_text = open("crates/st3-daemon/Cargo.toml").read()
+    daemon_text = open("crates/fractal-daemon/Cargo.toml").read()
     files = []
     for dp, _, fs in os.walk(os.path.join(root, "src")):
         files += [os.path.join(dp, f) for f in fs if f.endswith(".rs")]
@@ -1954,16 +1954,16 @@ def wire_crate(args, top_mods):
     dev_section = daemon_text.split("[dev-dependencies]")[1]
     lines = {m.group(1): ln for ln in section.split("\n") if (m := re.match(r"^([A-Za-z0-9_-]+)\s*=", ln))}
     devlines = {m.group(1): ln for ln in dev_section.split("\n") if (m := re.match(r"^([A-Za-z0-9_-]+)\s*=", ln))}
-    skip = {"st3-github", "st3-peer", "st3-reconcile", "st3-api-core", lower}
+    skip = {"fractal-github", "fractal-peer", "fractal-reconcile", "fractal-api-core", lower}
     out = ["[package]", f'name = "{crate}"', 'version = "0.1.0"', 'edition = "2024"',
            f'description = "{args.description}"', 'license = "MIT"', "", "[features]",
-           "# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.",
+           "# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.",
            f'test-support = ["{lower}/test-support"]', "", "[dependencies]", f'{lower} = {{ path = "../{lower}" }}']
     out += [ln for k, ln in lines.items() if k not in skip and uses(k)]
     internal = sorted({m.replace("_", "-") for m in re.findall(r"\b(st3_[a-z0-9_]+)::", text)} - skip - {crate} - set(lines))
     out += [f'{n} = {{ path = "../{n}" }}' for n in internal if os.path.isdir(f"crates/{n}") and n not in {l.split(" ")[0] for l in out}]
     out += ["", "[dev-dependencies]", f'{ident}_self = {{ package = "{crate}", path = ".", features = ["test-support"] }}']
-    out += [ln for k, ln in devlines.items() if k != "st3_daemon_self" and uses(k)]
+    out += [ln for k, ln in devlines.items() if k != "fractal_daemon_self" and uses(k)]
     out.append("")
     open(os.path.join(root, "Cargo.toml"), "w").write("\n".join(out))
 
@@ -1979,12 +1979,12 @@ def wire_crate(args, top_mods):
     sub("flake.nix", f'            "-p"\n            "{lower}"\n', f'            "-p"\n            "{lower}"\n            "-p"\n            "{crate}"\n')
     sub("scripts/module_layers.py", f'"crates/{lower}/src", ', f'"crates/{lower}/src", "crates/{crate}/src", ')
     nx = open(".config/nextest.toml").read()
-    nx = re.sub(r"package\((=?)st3-daemon\)", lambda m: m.group(0) + f" or package({m.group(1)}{crate})" if f"package({m.group(1)}{crate})" not in nx else m.group(0), nx)
+    nx = re.sub(r"package\((=?)fractal-daemon\)", lambda m: m.group(0) + f" or package({m.group(1)}{crate})" if f"package({m.group(1)}{crate})" not in nx else m.group(0), nx)
     open(".config/nextest.toml", "w").write(nx)
-    dc = open("crates/st3-daemon/Cargo.toml").read()
+    dc = open("crates/fractal-daemon/Cargo.toml").read()
     dc = re.sub(r"(?m)^(" + re.escape(lower) + r' = \{ path = "\.\./' + re.escape(lower) + r'" \}\n)', lambda m: m.group(1) + f'{crate} = {{ path = "../{crate}" }}\n', dc, count=1)
     dc = dc.replace(f'"{lower}/test-support"', f'"{lower}/test-support", "{crate}/test-support"', 1)
-    open("crates/st3-daemon/Cargo.toml", "w").write(dc)
+    open("crates/fractal-daemon/Cargo.toml", "w").write(dc)
     if upper:
         up = f"crates/{upper}/Cargo.toml"
         t = open(up).read()
@@ -2000,8 +2000,8 @@ def wire_crate(args, top_mods):
         t = open(ul).read()
         t = t.replace(f"pub use {lower.replace('-', '_')}::*;", f"pub use {ident}::*;", 1)
         open(ul, "w").write(t)
-    dl = open("crates/st3-daemon/src/lib.rs").read()
-    # grouped re-exports (`pub(crate) use st3_store::{checkout, external_sessions};`) follow the modules too
+    dl = open("crates/fractal-daemon/src/lib.rs").read()
+    # grouped re-exports (`pub(crate) use fractal_store::{checkout, external_sessions};`) follow the modules too
     for it in ri.parse(dl):
         if it.kind != "use":
             continue
@@ -2021,11 +2021,11 @@ def wire_crate(args, top_mods):
     for m in top_mods:
         dl = re.sub(r"(?m)^pub use " + re.escape(lower.replace("-", "_")) + r"::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
     if getattr(args, "traits", None):
-        dl = dl.replace("pub use st3_github::{GitChangesStore", "pub use %s::{%s};\npub use st3_github::{GitChangesStore" % (ident, ", ".join(sorted(args.traits))), 1)
-    open("crates/st3-daemon/src/lib.rs", "w").write(dl)
-    # code that named the crate below directly (`st3_store::store::..`) now goes through the daemon's re-export
+        dl = dl.replace("pub use fractal_github::{GitChangesStore", "pub use %s::{%s};\npub use fractal_github::{GitChangesStore" % (ident, ", ".join(sorted(args.traits))), 1)
+    open("crates/fractal-daemon/src/lib.rs", "w").write(dl)
+    # code that named the crate below directly (`fractal_store::store::..`) now goes through the daemon's re-export
     pat = re.compile(r"\b" + re.escape(lower.replace("-", "_")) + r"::(" + "|".join(map(re.escape, top_mods)) + r")\b")
-    for f in _src_files(["crates/st3-daemon/src"]):
+    for f in _src_files(["crates/fractal-daemon/src"]):
         if f.endswith("/lib.rs") and f.count("/") == 3:
             continue
         t = Path(f).read_text()
@@ -2123,11 +2123,11 @@ def _make_fields_pub(roots, struct, fields):
 
 
 def _daemon_root(crate_name):
-    """How a crate outside the chain names the daemon library (`st3`, the alias most use, or `st3_daemon`),
+    """How a crate outside the chain names the daemon library (`st3`, the alias most use, or `fractal_daemon`),
     and whether it only has it for tests."""
     manifest = Path("crates") / crate_name / "Cargo.toml"
     text = manifest.read_text() if manifest.exists() else ""
-    for pat, name in ((r"(?m)^st3\s*=", "st3"), (r"(?m)^st3[-_]daemon\s*=", "st3_daemon")):
+    for pat, name in ((r"(?m)^st3\s*=", "st3"), (r"(?m)^st3[-_]daemon\s*=", "fractal_daemon")):
         m = re.search(pat, text)
         if m:
             dev = text.find("[dev-dependencies]")
@@ -2249,7 +2249,7 @@ def fix_once(diags, roots, traits):
         t = Path(f).read_text()
         add = []
         crate_name = f.split("/")[1] if f.startswith("crates/") else ""
-        chain = {"st3-store", "st3-github", "st3-peer", "st3-reconcile", "st3-api-core", "st3-api-mailbox", "st3-api-client-v0", "st3-daemon"} | {r.split("/")[1] for r in roots if r.startswith("crates/")}
+        chain = {"fractal-store", "fractal-github", "fractal-peer", "fractal-reconcile", "fractal-api-core", "fractal-api-mailbox", "fractal-api-client-v0", "fractal-daemon"} | {r.split("/")[1] for r in roots if r.startswith("crates/")}
         root, dev_only = ("crate", False) if crate_name in chain else _daemon_root(crate_name)
         for leaf in sorted({u.split("::")[-1] for u in uses}):
             if re.search(r"\buse [^;]*\b" + leaf + r"\b", t):
@@ -2304,8 +2304,8 @@ def _absolute_super_import(span, supers, first):
     if raw[start : span["byte_start"]].decode() != "super::" * supers:
         return 0
     tail = raw[span["byte_start"] : span["byte_end"]].decode()
-    lower = "st3_store"
-    decl_file = Path("crates/st3-store/src") / ("/".join(base) + ".rs")
+    lower = "fractal_store"
+    decl_file = Path("crates/fractal-store/src") / ("/".join(base) + ".rs")
     if not decl_file.exists():
         return 0
     dt = decl_file.read_text()
@@ -2768,7 +2768,7 @@ def main(argv=None):
         load(path, nodes=nodes, fixed=config["order"].index(lay) + 1)
         if config["order"].index(lay) + 1 < current:
             named_by_cut |= _imported_names(path)
-    # what a crate already cut imports from below by name stays below (its `pub use st3_store::store::{..}` lists)
+    # what a crate already cut imports from below by name stays below (its `pub use fractal_store::store::{..}` lists)
     for n in nodes:
         if n.fixed is None and not n.test and n.name in named_by_cut and n.kind in FREE_KINDS:
             n.pinned = True
@@ -2778,9 +2778,9 @@ def main(argv=None):
         below = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] < current]
         above = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] > current]
         if not args.lower:
-            args.lower = max(below)[1] if below else "st3-store"
+            args.lower = max(below)[1] if below else "fractal-store"
         if not args.upper:
-            args.upper = min(above)[1] if above else "st3-github"
+            args.upper = min(above)[1] if above else "fractal-github"
         if not args.crate:
             args.crate = config["crates"][args.layer]
     build_refs(nodes)

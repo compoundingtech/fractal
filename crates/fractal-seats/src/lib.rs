@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_missions::*;
+pub use fractal_missions::*;
 
 pub mod external_sessions;
 pub mod references;

@@ -10,8 +10,8 @@ use crate::SeatsStoreCore;
 use super::*;
 use crate::WatchesStore;
 use crate::mailbox::{Fence, Frame, Receipt};
-pub use st3_api_core::api::mailbox::*;
-pub use st3_api_core::api::mailbox::{hold_pre_boot_mail};
+pub use fractal_api_core::api::mailbox::*;
+pub use fractal_api_core::api::mailbox::{hold_pre_boot_mail};
 pub mod authority;
 #[cfg(test)]
 #[path = "mailbox_profile.rs"]
@@ -1134,7 +1134,7 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
-    use st3_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
+    use fractal_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
 
     #[cfg(all(feature = "test-support", target_os = "linux"))]
     mod replay_native_tests {
@@ -2679,7 +2679,7 @@ mod tests {
     #[cfg(all(feature = "test-support", target_os = "linux"))]
     async fn report_control_effects(native: bool) {
         use crate::store::owned_sets::{Options, Source};
-        use st_drivers::{harness_events, harness_state};
+        use fractal_drivers::{harness_events, harness_state};
         use std::sync::atomic::Ordering::SeqCst;
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
@@ -2718,7 +2718,7 @@ mod tests {
         // An explicitly already-admitted fixture lease isolates report consumption.
         // This is not a physical bind/launch authentication certificate.
         let owner = crate::mailbox::Authority { provider: "omp".into(), session: "report-session".into(),
-            sequence, pid: peer.pid, process_token: st_runtime::process_start_token(peer.pid).unwrap() };
+            sequence, pid: peer.pid, process_token: fractal_runtime::process_start_token(peer.pid).unwrap() };
         let fence = state.store.bind_mailbox_with_lease(&Fence::new(&subject, "current", "delivery"), Some(&owner)).unwrap();
         state.store.request_rollout(&subject, &selected.desired_token, member, "current",
             "person/test", &policy, "report-drain").unwrap();

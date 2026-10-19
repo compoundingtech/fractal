@@ -3,7 +3,7 @@
 //! Proves a tile's boundary on a real Linux host, with synthetic accounts.
 //!
 //! ```sh
-//! ST_TILES_ROOT_TEST=1 cargo test -p st3 --test integration tiles_root:: -- --nocapture
+//! ST_TILES_ROOT_TEST=1 cargo test -p fractal --test integration tiles_root:: -- --nocapture
 //! ```
 //!
 //! It needs passwordless `sudo -n`, systemd as PID 1, cgroups v2 and `python3` on a Nix host,
@@ -19,7 +19,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 
-use st3::tile_registry::{self as registry, Registry};
+use fractal_daemon::tile_registry::{self as registry, Registry};
 
 fn enabled() -> bool {
     if std::env::var_os("ST_TILES_ROOT_TEST").as_deref() != Some("1".as_ref()) {
@@ -708,7 +708,7 @@ fn a_tile_reaches_its_endpoint_and_the_kernel_says_which_tile_called() {
     let serve = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let (pid, uid) = peer(&stream);
-        let cgroup = st3::sekrets::identity::process_cgroup(pid).unwrap();
+        let cgroup = fractal_daemon::sekrets::identity::process_cgroup(pid).unwrap();
         let identified = registry
             .identify(uid, &cgroup)
             .map(|(name, tile)| (name.to_owned(), tile.agent.clone()));
@@ -1161,13 +1161,13 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
     // This test process is the tiles' supervisor: its daemon state serves both endpoints.
     let state_dir = tempfile::tempdir().unwrap();
     let store = std::sync::Arc::new(
-        st3::store::Store::open(&state_dir.path().join("graph.sqlite3"), "example").unwrap(),
+        fractal_daemon::store::Store::open(&state_dir.path().join("graph.sqlite3"), "example").unwrap(),
     );
     let runtime = tokio::runtime::Runtime::new().unwrap();
     {
         let _context = runtime.enter();
-        st3::api::spawn_tile_endpoints_from(
-            st3::api::AppState {
+        fractal_daemon::api::spawn_tile_endpoints_from(
+            fractal_daemon::api::AppState {
                 store: store.clone(),
                 notify: std::sync::Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -1180,7 +1180,7 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
                 client_relay: None,
                 native_session_home: None,
                 owning_person: None,
-                planner_default: st3::model::PlannerSpec::default(),
+                planner_default: fractal_daemon::model::PlannerSpec::default(),
             },
             host.registry.clone(),
         );
@@ -1188,7 +1188,7 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
     for tile in [a, b] {
         let socket = registry
             .endpoint_dir(&tile.name)
-            .join(st3::api::TILE_ENDPOINT_SOCKET);
+            .join(fractal_daemon::api::TILE_ENDPOINT_SOCKET);
         // The daemon binds when it sees the directory; give it a bounded moment.
         let mut served = false;
         for _ in 0..400 {
@@ -1233,12 +1233,12 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
 /// The kernel's word about a caller, read from /proc as the gateway itself does.
 struct ProcKernel;
 
-impl st3::sekrets::gateway::Kernel for ProcKernel {
+impl fractal_daemon::sekrets::gateway::Kernel for ProcKernel {
     fn cgroup(&self, pid: i32) -> Option<String> {
-        st3::sekrets::identity::process_cgroup(pid)
+        fractal_daemon::sekrets::identity::process_cgroup(pid)
     }
     fn start(&self, pid: i32) -> Option<u64> {
-        st3::sekrets::identity::process_start(pid)
+        fractal_daemon::sekrets::identity::process_start(pid)
     }
 }
 
@@ -1264,7 +1264,7 @@ fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
         true,
     );
     let a = host.tile("a");
-    let config: st3::sekrets::gateway::GatewayConfig = toml::from_str(&format!(
+    let config: fractal_daemon::sekrets::gateway::GatewayConfig = toml::from_str(&format!(
         "socket = {socket:?}\nstore = {store:?}\npath = [\"/run/current-system/sw/bin\"]\n\
          tile_registry = {registry:?}\n[people]\n",
         registry = host.registry,
@@ -1272,7 +1272,7 @@ fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
     .unwrap();
     // The gateway reads root's registry the way it does in production: Registry::load.
     let gateway = std::sync::Arc::new(
-        st3::sekrets::gateway::Gateway::new(
+        fractal_daemon::sekrets::gateway::Gateway::new(
             config,
             unsafe { libc::getuid() },
             None,

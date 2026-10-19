@@ -1,4 +1,4 @@
-# @smalltalk/st3-scenarios
+# @fractal/scenarios
 
 Seeded, privacy-safe scenario worlds for every Fractal client, and the kit that builds and
 replays them. [spec.md](spec.md) is the contract.
@@ -32,8 +32,8 @@ not claims that fictional project checkouts or tests executed. Terminal runtime 
 are screen-derived adapters, and the captured stdout is not a full native PTY-server stream.
 
 ```ts
-import { loadWorld } from '@smalltalk/st3-scenarios'
-import { createReplay, realClock } from '@smalltalk/st3-scenarios/replay'
+import { loadWorld } from '@fractal/scenarios'
+import { createReplay, realClock } from '@fractal/scenarios/replay'
 
 const world = loadWorld('fleet-mid-refactor') // instants relative to the load time
 const oneAgent = world.with({ roster: 'one-agent' }) // same cast, one slice replaced
@@ -44,13 +44,13 @@ const replay = createReplay(world, { clock: realClock({ start: world.now }) })
 ```
 
 Components read wire state through `ScenarioProvider` and `useScenarioSlice(kind, project?)` from
-`@smalltalk/st3-scenarios/react`. The provider owns a clock (a `manualClock` at `world.now` unless
+`@fractal/scenarios/react`. The provider owns a clock (a `manualClock` at `world.now` unless
 one is passed) and records each slice a story reads. Projections from wire state to props belong
 to the consumer.
 
 ```ts
 // .storybook/preview.ts
-import { scenarioGlobalTypes, withScenario } from '@smalltalk/st3-scenarios/storybook'
+import { scenarioGlobalTypes, withScenario } from '@fractal/scenarios/storybook'
 export default { globalTypes: scenarioGlobalTypes, decorators: [withScenario] }
 
 // a story file
@@ -133,8 +133,8 @@ manifest or shards. The bounded history window preserves the unchanged 8 MiB/fil
 
 | Command | Effect |
 | --- | --- |
-| `pnpm --filter @smalltalk/st3-scenarios emit` | rewrites `fixtures/scenarios` |
-| `pnpm --filter @smalltalk/st3-scenarios emit:check` | fails when the committed files are stale |
-| `pnpm --filter @smalltalk/st3-scenarios decode` | strict-decodes every variant of every world |
-| `pnpm --filter @smalltalk/st3-scenarios scan` | privacy gate |
-| `CI=1 pnpm --filter @smalltalk/st3-scenarios test` | unit and property tests |
+| `pnpm --filter @fractal/scenarios emit` | rewrites `fixtures/scenarios` |
+| `pnpm --filter @fractal/scenarios emit:check` | fails when the committed files are stale |
+| `pnpm --filter @fractal/scenarios decode` | strict-decodes every variant of every world |
+| `pnpm --filter @fractal/scenarios scan` | privacy gate |
+| `CI=1 pnpm --filter @fractal/scenarios test` | unit and property tests |

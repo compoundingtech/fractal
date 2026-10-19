@@ -1,5 +1,5 @@
-use st3::{api::AppState, store::Store};
-use st3_client::{Client, CollectionEvent};
+use fractal_daemon::{api::AppState, store::Store};
+use fractal_client::{Client, CollectionEvent};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::{Notify, watch};
 
@@ -27,10 +27,10 @@ fn state(root: &Path) -> AppState {
 async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_optional() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("client.sock");
-    let app = st3::api::router(state(root.path()));
+    let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -60,7 +60,7 @@ async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_opti
     assert_eq!((unnamed.via.as_str(), unnamed.connected), ("local", false));
 
     // A named client's stream is connected while it is open, with what it follows.
-    st3_client::set_client_name("presence-test 1.0+abc");
+    fractal_client::set_client_name("presence-test 1.0+abc");
     let mut stream = client.collection_stream().await.unwrap();
     stream.subscribe_glasses("glasses").await.unwrap();
     let first = tokio::time::timeout(Duration::from_secs(5), stream.next_event())
@@ -72,7 +72,7 @@ async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_opti
         matches!(first, CollectionEvent::Snapshot { .. }),
         "{first:?}"
     );
-    let named = |listed: &st3_client::ClientConnections| {
+    let named = |listed: &fractal_client::ClientConnections| {
         listed
             .items
             .iter()
@@ -109,10 +109,10 @@ async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_opti
 async fn a_collection_stream_answers_a_websocket_ping_without_a_request() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("client.sock");
-    let app = st3::api::router(state(root.path()));
+    let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -155,10 +155,10 @@ async fn an_observer_sees_request_and_frame_timings_without_contents() {
     install_observer();
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("client.sock");
-    let app = st3::api::router(state(root.path()));
+    let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -193,7 +193,7 @@ static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 fn install_observer() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        st3_client::set_observer(|observation| {
+        fractal_client::set_observer(|observation| {
             SEEN.lock().unwrap().push(format!("{observation:?}"));
         });
     });
@@ -241,10 +241,10 @@ async fn an_observer_keeps_first_frame_timers_only_for_live_subscriptions() {
     install_observer();
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("client.sock");
-    let app = st3::api::router(state(root.path()));
+    let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {

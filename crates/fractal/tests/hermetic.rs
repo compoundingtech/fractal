@@ -11,7 +11,7 @@ fn fixture_commands_clear_host_seat_settings_before_adding_their_own() {
         .env("ST3_ENDPOINT", "/host-daemon.sock")
         .env("ST3_INCARNATION", "host-incarnation")
         .env("ST3_PERSON", "person/pat");
-    st3::test_support::clear_seat_environment(&mut command);
+    fractal_daemon::test_support::clear_seat_environment(&mut command);
     command.env("ST3_ENDPOINT", "/fixture-daemon.sock")
         .args(["--noprofile", "--norc", "-c",
             "test -z \"${ST_AGENT+x}\" && test -z \"${ST3_INCARNATION+x}\" && test -z \"${ST3_PERSON+x}\" && test \"$ST3_ENDPOINT\" = /fixture-daemon.sock"]);
@@ -22,7 +22,7 @@ fn fixture_commands_clear_host_seat_settings_before_adding_their_own() {
 fn fixture_commits_ignore_local_hook_and_signing_policy() {
     let root = tempfile::tempdir().unwrap();
     let git = |args: &[&str]| {
-        let output = st3::test_support::git()
+        let output = fractal_daemon::test_support::git()
             .current_dir(root.path())
             .args(args)
             .output()
@@ -40,7 +40,7 @@ fn fixture_commits_ignore_local_hook_and_signing_policy() {
     git(&["config", "gpg.program", "/absent-fixture-signer"]);
     git(&["commit", "--quiet", "--allow-empty", "-m", "Fixture commit"]);
     // Policy stays in the repository. Only this fixture command bypassed it.
-    let output = st3::test_support::git()
+    let output = fractal_daemon::test_support::git()
         .current_dir(root.path())
         .args(["config", "--local", "--get", "core.hooksPath"])
         .output()

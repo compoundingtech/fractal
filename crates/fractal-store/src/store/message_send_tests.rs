@@ -28,17 +28,17 @@ fn message_operation_reconciliation_matches_replay_for_orders_tombstones_and_rep
                 if number == 1 {
                     let claim: &ClaimRecord = first.as_ref().unwrap();
                     if mode == "checkpoint" {
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-h789631746b77 owner=st3_store::store::message_send_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-hd7cd14b1d0a5 owner=fractal_store::store::message_send_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
                             actor,predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
                             VALUES (?1,'invented-peer',1,'invented-envelope',?2,'message.sent',NULL,'[]',
                             'op/invented-parity',?3,0,'checkpoint/2026-10-01')",
                             params![claim.id, claim.subject, digests[0]]).unwrap();
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-h0e91a591e430 owner=st3_store::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id='op/invented-parity'", [])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h0cfe32b4b70b owner=fractal_store::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id='op/invented-parity'", [])
                             .unwrap();
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-he720c27162e7 owner=st3_store::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h9e78aaf35467 owner=fractal_store::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id])
                             .unwrap();
                     } else if mode == "repaired" {
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-he798b60449d9 owner=st3_store::store::message_send_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h1e6ea42f1255 owner=fractal_store::store::message_send_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,
                             raw,state,claim_id,updated_at_unix_ms) VALUES ('record/invented-repair','invented-peer',
                             1,'invented-envelope',0,X'','repaired',?1,'1')", [&claim.id]).unwrap();
                     }

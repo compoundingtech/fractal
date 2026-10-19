@@ -5,8 +5,8 @@ use crate::SeatStatusStore;
 use super::checkpoint::*;
 use super::*;
 use proptest::prelude::*;
-use st3_missions::store::checkpoint_tests_shared_seats::*;
-use st3_missions::store::checkpoint_tests_shared_seats::{AGENT, LIMITS_HOUR, dropped, input, limits_history, limits_reading, rollup};
+use fractal_missions::store::checkpoint_tests_shared_seats::*;
+use fractal_missions::store::checkpoint_tests_shared_seats::{AGENT, LIMITS_HOUR, dropped, input, limits_history, limits_reading, rollup};
 
 
 #[test]
@@ -467,7 +467,7 @@ fn account_limits_keep_each_seats_newest_and_the_last_hour_of_each_account() {
 
 #[test]
 fn compact_harness_questions_survive_indefinitely_while_redundant_history_expires() {
-    use st3_schema::harness_questions::{Question, Status};
+    use fractal_schema::harness_questions::{Question, Status};
     use super::harness_questions::QuestionObservation;
     const AGENT: &str = "agent/ada";
     let store = Store::open_memory("operator").unwrap();

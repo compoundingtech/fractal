@@ -389,8 +389,8 @@ fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, 
 fn structured_request(
     card: &mut Doc,
     from: &str,
-    request: &st3_client::StructuredRequest,
-    images: &[st3_conversation_ui::MailImage],
+    request: &fractal_client::StructuredRequest,
+    images: &[fractal_conversation_ui::MailImage],
     drafts: &Drafts<'_>,
     inner: usize,
 ) {
@@ -477,7 +477,7 @@ fn structured_request(
                 line: card.lines.len(),
                 column: 0,
                 width: inner as u16,
-                hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())),
+                hit: Hit::Pane(fractal_conversation_ui::PaneIntent::Image(image.clone())),
             });
             card.line(Line::from(vec![
                 span(

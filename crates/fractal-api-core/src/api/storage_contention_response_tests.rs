@@ -37,14 +37,14 @@ fn accepted_replication_survives_a_contended_begin_and_projects_after_release() 
     assert!(target > before);
     store.connection.write().busy_timeout(std::time::Duration::ZERO).unwrap();
     let holder = rusqlite::Connection::open(&path).unwrap();
-    holder.execute_batch(/* sqlite-large-value: allow-for-now lv-h9f5586a1d681 owner=st3_api_core::api::storage_contention_response_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
+    holder.execute_batch(/* sqlite-large-value: allow-for-now lv-h934301fb4a5c owner=fractal_api_core::api::storage_contention_response_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
     let pending = admitted_projection_result(store.project_replication_backlog().map(Some)).unwrap();
     assert_eq!(pending, None);
     assert!(store.replication_projection_deferred());
     assert_eq!(frontier(), before);
     assert_eq!(store.index().unwrap(), target);
     assert!(!store.claims_for("resource/receive-busy", Some("resource.observed")).unwrap().is_empty());
-    holder.execute_batch(/* sqlite-large-value: allow-for-now lv-h27b3fcc4d1ed owner=st3_api_core::api::storage_contention_response_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
+    holder.execute_batch(/* sqlite-large-value: allow-for-now lv-h4a02b3d7af28 owner=fractal_api_core::api::storage_contention_response_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     assert!(store.project_replication_backlog().unwrap());
     assert_eq!(frontier(), target);
     assert!(!store.replication_projection_deferred());

@@ -107,9 +107,9 @@ async fn assistant_approved_pages_decode_native_sync_through_typed_sdk() {
             assert_eq!(status, StatusCode::OK, "{route}: {value}");
             assert_eq!(value["value"]["sync"]["state"], if diverged { "diverged" } else { "catching-up" });
             match route {
-                "attention" => { let page: st3_client::Envelope<st3_client::AssistantAttentionPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
-                "missions" => { let page: st3_client::Envelope<st3_client::AssistantMissionPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
-                _ => { let page: st3_client::Envelope<st3_client::AssistantAgentPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
+                "attention" => { let page: fractal_client::Envelope<fractal_client::AssistantAttentionPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
+                "missions" => { let page: fractal_client::Envelope<fractal_client::AssistantMissionPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
+                _ => { let page: fractal_client::Envelope<fractal_client::AssistantAgentPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
             }
         }
     }

@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_peer::*;
+pub use fractal_peer::*;
 
 pub mod reconcile;
 pub mod delivery_presence;

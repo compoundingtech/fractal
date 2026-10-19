@@ -1,4 +1,4 @@
-import type { Agent as AgentRow, Attention } from '@smalltalk/st3-client/schema'
+import type { Agent as AgentRow, Attention } from '@fractal/client/schema'
 import * as Option from 'effect/Option'
 
 /** Open st attention about an agent: it raised, requested, or owns or shows the card in its conversation, or the card is on one of its current missions. */

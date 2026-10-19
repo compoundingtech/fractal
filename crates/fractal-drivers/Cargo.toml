@@ -1,5 +1,5 @@
 [package]
-name = "st-drivers"
+name = "fractal-drivers"
 version = "0.1.0"
 edition = "2024"
 description = "Harness drivers, native delivery, and catalog support shared by st2 and st3"
@@ -19,11 +19,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
-st-resource-protocol = { path = "../st-resource-protocol" }
-st2-resource-providers = { path = "../st2-resource-providers", optional = true }
-st2-resource-wasip2 = { path = "../st2-resource-wasip2", optional = true, features = ["runtime"] }
-st-wire = { path = "../st-wire" }
-st3-schema = { path = "../st3-schema" }
+fractal-resource-protocol = { path = "../fractal-resource-protocol" }
+fractal-resource-providers = { path = "../fractal-resource-providers", optional = true }
+fractal-resource-wasip2 = { path = "../fractal-resource-wasip2", optional = true, features = ["runtime"] }
+fractal-wire = { path = "../fractal-wire" }
+fractal-schema = { path = "../fractal-schema" }
 tempfile = "3"
 toml = "0.9"
 opentelemetry = "0.30"
@@ -51,9 +51,9 @@ path = "tests/integration.rs"
 # runner binary carries no wasmtime unless a build opts in.
 wasm-resolver = ["agent-spec/wasm-resolver"]
 # Typed Component Model resource providers. This is the sole feature that admits Wasmtime for
-# observation; default members and the default st2 binary remain Wasmtime-free.
+# observation; default members and the default fractal-legacy-runner binary remain Wasmtime-free.
 wasip2-provider-runtime = [
   "wasm-resolver",
-  "dep:st2-resource-providers",
-  "dep:st2-resource-wasip2",
+  "dep:fractal-resource-providers",
+  "dep:fractal-resource-wasip2",
 ]

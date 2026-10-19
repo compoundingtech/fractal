@@ -37,7 +37,7 @@ impl Refusal {
 
 /// The native session this launch must resume, if the daemon named one.
 pub fn requested() -> Option<String> {
-    st_drivers::contracts::env(RESUME_ENV)
+    fractal_drivers::contracts::env(RESUME_ENV)
         .filter(|id| !id.trim().is_empty())
 }
 
@@ -626,7 +626,7 @@ pub fn opencode_argv(
 
 /// The session an OpenCode seat's driver bound, from its record in the agent directory.
 pub fn opencode_bound_session(agent_dir: &Path) -> Option<String> {
-    let bytes = fs::read(agent_dir.join(st_drivers::opencode_session::NATIVE_SESSION_FILE)).ok()?;
+    let bytes = fs::read(agent_dir.join(fractal_drivers::opencode_session::NATIVE_SESSION_FILE)).ok()?;
     let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     record["sessionId"]
         .as_str()

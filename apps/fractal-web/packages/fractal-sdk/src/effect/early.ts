@@ -13,7 +13,7 @@
  * after a deadline, and an early subscription the SDK never claims is unsubscribed after a
  * deadline, so its server slot and buffer never outlive the page's actual interest.
  */
-import type { CollectionSocket } from '@smalltalk/st3-client'
+import type { CollectionSocket } from '@fractal/client'
 import * as Option from 'effect/Option'
 import * as Schema from 'effect/Schema'
 

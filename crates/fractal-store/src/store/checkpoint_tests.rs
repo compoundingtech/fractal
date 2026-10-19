@@ -22,7 +22,7 @@ fn compact_capture_metadata_rejects_malformed_claim_times() {
         )).unwrap();
         store.seal_local_batches().unwrap();
         store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h840206155832 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+            /* sqlite-large-value: allow-for-now lv-h904644aeeedb owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
             params![malformed, claim.id],
         ).unwrap();
         let error = store.checkpoint_sealed_set_paged(150, None, 1, 1).unwrap_err();
@@ -400,7 +400,7 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
     // The Rust sort of the pages is the SQL canonical order, on a fixture of many batches.
     let connection = store.readers.get();
     let sql_order: Vec<String> = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-h9bfb2d7429b7 owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &canonical_sql(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h201c47f6e232 owner=fractal_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT claims.id FROM claims
              JOIN replica_records records ON records.claim_id=claims.id
              WHERE records.state<>'repaired' ORDER BY CANONICAL_ASC(claims)",
@@ -419,7 +419,7 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
     // The record page query is driven from replica_records by its rowid range. A plan that
     // drove from claims would read every claim for every window.
     let plan: Vec<String> = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-h797a0e1c7503 owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", sealed_records_page_sql()))
+        .prepare(/* sqlite-large-value: allow-for-now lv-hfa4268263481 owner=fractal_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", sealed_records_page_sql()))
         .unwrap()
         .query_map(params![0_i64, 1_000_i64, i64::try_from(cut).unwrap(), whole.seal_rowid], |row| row.get::<_, String>(3))
         .unwrap()
@@ -469,7 +469,7 @@ fn sealed_record_windows_leave_later_envelopes_out_before_reading_bodies() {
         vec![older.as_str()]
     );
     let connection = store.readers.get();
-    let record_ids = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0b560d5467cf owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &sealed_records_page_sql()).unwrap()
+    let record_ids = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9e09ef5f4592 owner=fractal_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &sealed_records_page_sql()).unwrap()
         .query_map(params![0_i64, i64::MAX, 150_i64, sealed.seal_rowid], |row| row.get::<_, String>(6))
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(record_ids, vec![older.clone()], "the later body is not part of the metadata window");
@@ -499,17 +499,17 @@ fn sealed_capture_rejects_invalid_times_even_when_another_claim_excludes_the_env
         {
             let connection = store.connection.write();
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hdd4c37fdf367 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-h20b935346aaf owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 params![malformed, broken.id],
             ).unwrap();
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h83afe6ba2ae3 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='200' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h138ec076dc3d owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='200' WHERE id=?1",
                 [&later.id],
             ).unwrap();
             // Put both records in one envelope so a late claim would otherwise hide
             // the malformed claim when the envelope is excluded from the sealed set.
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hfb7d86a3dce9 owner=st3_store::store::checkpoint_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET (writer, sequence, envelope_hash, position)=(
+                /* sqlite-large-value: allow-for-now lv-hd2b8ee34df34 owner=fractal_store::store::checkpoint_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET (writer, sequence, envelope_hash, position)=(
                     SELECT writer, sequence, envelope_hash, position+1 FROM replica_records
                     WHERE claim_id=?1) WHERE claim_id=?2",
                 params![broken.id, later.id],
@@ -534,7 +534,7 @@ fn sealed_capture_rejects_invalid_envelope_times_at_first_use() {
         )).unwrap();
         store.seal_local_batches().unwrap();
         store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-he3ba3f1763ac owner=st3_store::store::checkpoint_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET accepted_at_unix_ms=?1", [malformed],
+            /* sqlite-large-value: allow-for-now lv-hfc4e350112f9 owner=fractal_store::store::checkpoint_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET accepted_at_unix_ms=?1", [malformed],
         ).unwrap();
         assert!(
             store.checkpoint_sealed_set(150).is_err(),
@@ -660,7 +660,7 @@ fn sealed_capture_fails_closed_after_three_consecutive_invalidations() {
         };
         if sql.to_bytes() == b"SELECT value FROM checkpoint_capture_epoch WHERE id=1" {
             mutation.connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h796d9f483f1a owner=st3_store::store::checkpoint_tests TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1", [],
+                /* sqlite-large-value: allow-for-now lv-h1b6d79047515 owner=fractal_store::store::checkpoint_tests TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1", [],
             ).unwrap();
             mutation.changes.set(mutation.changes.get() + 1);
         }
@@ -675,7 +675,7 @@ fn sealed_capture_fails_closed_after_three_consecutive_invalidations() {
     )).unwrap();
     let cut = now_ms() + 1_000;
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hd4f3200c49e7 owner=st3_store::store::checkpoint_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE capture_registration_count(value INTEGER NOT NULL);
+        /* sqlite-large-value: allow-for-now lv-h5c86cd14f5b2 owner=fractal_store::store::checkpoint_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE capture_registration_count(value INTEGER NOT NULL);
          INSERT INTO capture_registration_count VALUES (0);
          CREATE TRIGGER capture_registration_count AFTER UPDATE OF envelope_frontier, cut_unix_ms
          ON checkpoint_capture_epoch BEGIN
@@ -687,7 +687,7 @@ fn sealed_capture_fails_closed_after_three_consecutive_invalidations() {
         "SELECT value FROM capture_registration_count", [], |row| row.get::<_, i64>(0),
     ).unwrap(), 1);
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h6004bdd16653 owner=st3_store::store::checkpoint_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE capture_registration_count SET value=0", [],
+        /* sqlite-large-value: allow-for-now lv-h8d2f36182a08 owner=fractal_store::store::checkpoint_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE capture_registration_count SET value=0", [],
     ).unwrap();
     let mutation = Mutate {
         connection: rusqlite::Connection::open(&path).unwrap(),
@@ -1728,7 +1728,7 @@ fn seal_identity_pages_seek_the_identity_key() {
             vec![0_i64.into(), "alder".to_owned().into(), 1_i64.into(), "hash".to_owned().into()];
         values.extend(std::iter::repeat_n(rusqlite::types::Value::from(64_i64), parameters - 4));
         let plan: Vec<String> = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-hc5c0b704ba9c owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h60aa75e03cc5 owner=fractal_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap()
             .query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
             .unwrap()
@@ -1872,7 +1872,7 @@ fn peak_use_while<T>(path: &Path, work: impl FnOnce() -> T) -> (T, u64) {
 /// Plans a checkpoint over a copy of a real store and prints the dry run, with the most disk
 /// space opening the store (its schema upgrade) and the proof each took at once:
 /// `ST3_CHECKPOINT_STORE=/var/tmp/copy.sqlite3 ST3_CHECKPOINT_ORIGIN=example-linux
-/// ST3_CHECKPOINT_DAY=2026-09-27 cargo test -p st3-daemon --lib plan_a_copy_of_a_real_store --
+/// ST3_CHECKPOINT_DAY=2026-09-27 cargo test -p fractal-daemon --lib plan_a_copy_of_a_real_store --
 /// --ignored --nocapture`. Without `ST3_CHECKPOINT_DAY` it plans the newest due checkpoint.
 /// The copy is changed; the store it came from is not read.
 #[test]
@@ -2306,7 +2306,7 @@ fn a_repaired_usage_claim_is_folded_afresh_once_kept_reductions_are_forgotten() 
     assert_eq!(store.usage_summaries_at(&subjects, None).unwrap()[AGENT].total_tokens, 100);
     // A repair rewrites rows without a new store index, then forgets every kept reduction.
     store.connection.lock().unwrap().execute(
-        /* sqlite-large-value: allow-for-now lv-h97ca6c195876 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body, '$.fields.total_tokens', 250) WHERE id=?1",
+        /* sqlite-large-value: allow-for-now lv-h4e383ba176b1 owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body, '$.fields.total_tokens', 250) WHERE id=?1",
         params![claim.id],
     ).unwrap();
     store.forget_current_views();
@@ -2387,7 +2387,7 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
 
 #[test]
 fn review_reader_retains_durable_history_and_every_referenced_drop_candidate() {
-    for kind in st3_schema::review::KINDS {
+    for kind in fractal_schema::review::KINDS {
         let mut sealed = Sealed::default();
         let mut refs = serde_json::Map::new();
         for name in ["binding_claim", "previous_binding", "request", "verdict", "carry_forward_from", "attempt_receipt", "observation"] {
@@ -2433,7 +2433,7 @@ fn review_reader_retains_durable_history_and_every_referenced_drop_candidate() {
 fn staged_review_reader_retains_every_reference_and_predecessor_like_in_memory() {
     use smallclaims::store::checkpoint_staging::{StagedPlan, without_reference_plan};
 
-    for kind in st3_schema::review::KINDS.into_iter().chain(["gate.requested"]) {
+    for kind in fractal_schema::review::KINDS.into_iter().chain(["gate.requested"]) {
         for retain_references in [true, false] {
             let store = Store::open_memory("ada").unwrap();
             let mut references = serde_json::Map::new();
@@ -2490,7 +2490,7 @@ fn staged_review_reader_retains_every_reference_and_predecessor_like_in_memory()
                     ("author".into(), json!("agent/alex")),
                     ("delta_ref".into(), json!(uncited.first().unwrap())),
                 ]);
-                assert!(st3_schema::review::REQUEST_FIELDS.iter().all(|name| references.contains_key(*name)));
+                assert!(fractal_schema::review::REQUEST_FIELDS.iter().all(|name| references.contains_key(*name)));
             }
             store.set_write_clock_at(T + 3).unwrap();
             let history = store.append_claim(&input(
@@ -2511,7 +2511,7 @@ fn staged_review_reader_retains_every_reference_and_predecessor_like_in_memory()
                 Vec::new()
             };
             store.connection.write().execute(
-                /* sqlite-large-value: allow-for-now lv-h391b48dc5187 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET subject=?1,kind=?2,body=?3,predecessors=?4 WHERE id=?5",
+                /* sqlite-large-value: allow-for-now lv-hfec20105134f owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET subject=?1,kind=?2,body=?3,predecessors=?4 WHERE id=?5",
                 params![
                     "gate-operation/tester", kind, serde_json::to_string(&body).unwrap(),
                     serde_json::to_string(&predecessors).unwrap(), history.id,
@@ -2645,7 +2645,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         json!({"observer": "observer/example", "facts": {}}),
         json!({"code": "slow", "request": "request-2"}),
     ];
-    let mut kinds = st3_schema::registry().claims.keys().cloned().collect::<Vec<_>>();
+    let mut kinds = fractal_schema::registry().claims.keys().cloned().collect::<Vec<_>>();
     kinds.push("custom.example.kind".into());
     let mut claims = Vec::new();
     for kind in &kinds {
@@ -2677,7 +2677,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
     let mut new_to_old = BTreeMap::new();
     for claim in &claims {
         // Rules version 16 added the harness question rule.
-        if claim.kind == st3_schema::harness_questions::OBSERVED {
+        if claim.kind == fractal_schema::harness_questions::OBSERVED {
             let slot = vec![claim.subject.clone(), claim.kind.clone()];
             assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("question", slot)));
             continue;

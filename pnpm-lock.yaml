@@ -13,15 +13,15 @@ importers:
       '@effect/atom-react':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(react@19.2.3)(scheduler@0.27.0)
-      '@smalltalk/fractal-ui':
+      '@fractal/client':
+        specifier: file:../../clients/typescript/fractal-client
+        version: link:../../clients/typescript/fractal-client
+      '@fractal/sdk':
+        specifier: workspace:*
+        version: link:packages/fractal-sdk
+      '@fractal/ui':
         specifier: workspace:*
         version: link:../../packages/fractal-ui
-      '@smalltalk/st3-client':
-        specifier: file:../../clients/typescript/st3-client
-        version: link:../../clients/typescript/st3-client
-      '@st3/sdk':
-        specifier: workspace:*
-        version: link:packages/st3-sdk
       '@stylexjs/stylex':
         specifier: 0.19.0
         version: 0.19.0
@@ -50,9 +50,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@4.1.9(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
-      '@smalltalk/st3-scenarios':
+      '@fractal/scenarios':
         specifier: workspace:*
-        version: link:../../clients/typescript/st3-scenarios
+        version: link:../../clients/typescript/fractal-scenarios
       '@stylexjs/unplugin':
         specifier: 0.19.0
         version: 0.19.0(supports-color@8.1.1)(unplugin@2.3.11)
@@ -87,11 +87,11 @@ importers:
         specifier: 4.1.9
         version: 4.1.9(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
 
-  apps/fractal-web/packages/st3-sdk:
+  apps/fractal-web/packages/fractal-sdk:
     dependencies:
-      '@smalltalk/st3-client':
+      '@fractal/client':
         specifier: workspace:^
-        version: link:../../../../clients/typescript/st3-client
+        version: link:../../../../clients/typescript/fractal-client
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -101,6 +101,9 @@ importers:
       '@expo-google-fonts/ibm-plex-mono':
         specifier: ^0.4.1
         version: 0.4.1
+      '@fractal/views':
+        specifier: workspace:*
+        version: link:../../clients/typescript/fractal-views
       '@react-native-async-storage/async-storage':
         specifier: 2.2.0
         version: 2.2.0(react-native@0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))
@@ -122,9 +125,6 @@ importers:
       '@react-navigation/native-stack':
         specifier: ^7.20.0
         version: 7.20.0(@react-navigation/native@7.5.0(react-native@0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))(react@19.2.3))(react-native-safe-area-context@5.7.0(react-native@0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))(react@19.2.3))(react-native-screens@4.26.2(react-native@0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))(react@19.2.3))(react-native@0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))(react@19.2.3)
-      '@smalltalk/st3-views':
-        specifier: workspace:*
-        version: link:../../clients/typescript/st3-views
       expo:
         specifier: ~57.0.0
         version: 57.0.26(@babel/core@7.29.7(supports-color@8.1.1))(react-dom@19.2.3(react@19.2.3))(react-native@0.86.3(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))(react@19.2.3)(supports-color@8.1.1)(typescript@6.0.3)
@@ -166,7 +166,7 @@ importers:
         specifier: ~6.0.3
         version: 6.0.3
 
-  clients/typescript/st3-client:
+  clients/typescript/fractal-client:
     devDependencies:
       effect:
         specifier: 4.0.0
@@ -175,11 +175,11 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
 
-  clients/typescript/st3-scenarios:
+  clients/typescript/fractal-scenarios:
     dependencies:
-      '@smalltalk/st3-client':
+      '@fractal/client':
         specifier: workspace:*
-        version: link:../st3-client
+        version: link:../fractal-client
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.0
@@ -212,11 +212,11 @@ importers:
         specifier: 4.1.9
         version: 4.1.9(@types/node@26.6.4)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.3.3(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
 
-  clients/typescript/st3-views:
+  clients/typescript/fractal-views:
     dependencies:
-      '@smalltalk/st3-client':
+      '@fractal/client':
         specifier: workspace:*
-        version: link:../st3-client
+        version: link:../fractal-client
     devDependencies:
       typescript:
         specifier: 6.0.3
@@ -258,9 +258,9 @@ importers:
         specifier: 4.0.1
         version: 4.0.1(supports-color@8.1.1)
     devDependencies:
-      '@smalltalk/st3-scenarios':
+      '@fractal/scenarios':
         specifier: workspace:*
-        version: link:../../clients/typescript/st3-scenarios
+        version: link:../../clients/typescript/fractal-scenarios
       '@storybook/addon-a11y':
         specifier: 10.6.1
         version: 10.6.1(storybook@10.6.1(@types/react@19.2.18)(react@19.2.3))

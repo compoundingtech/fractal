@@ -1,4 +1,4 @@
-import { ClientError, St3Client, type TimelineEntry } from '@smalltalk/st3-client'
+import { ClientError, FractalClient, type TimelineEntry } from '@fractal/client'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { decodeSlice } from '../scripts/decode.ts'
@@ -243,7 +243,7 @@ describe('real client paging', () => {
   const clock = manualClock(world.now)
   const replay = createReplay(world, { clock })
   let timelineRequests = 0
-  const client = new St3Client({
+  const client = new FractalClient({
     baseUrl: 'http://scenario.invalid',
     fetchImpl: async (input, init) => {
       const response = await replay.fetch(input, init)

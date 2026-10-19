@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { St3Client } from './Client.generated';
+import { FractalClient } from './Client.generated';
 import type { TerminalSocket } from './Client.generated';
 
 test('uses the global receiver for the default browser fetch', async () => {
@@ -17,7 +17,7 @@ test('uses the global receiver for the default browser fetch', async () => {
         });
     };
     try {
-        const client = new St3Client({ baseUrl: 'https://example.test/' });
+        const client = new FractalClient({ baseUrl: 'https://example.test/' });
         const result = await client.capabilities();
         assert.equal(result.request_id, 'request/receiver');
     } finally {
@@ -30,7 +30,7 @@ test('HTTP and stream receivers accept both API names and reject unknown or conf
         'smalltalk.client.v0', ['st3.client.v0', 'fractal.client.v0']]) {
         const accepted = api_version === 'st3.client.v0' || api_version === 'fractal.client.v0';
         const snapshot = { id: 'snapshot/test' };
-        const client = new St3Client({ baseUrl: 'https://example.test',
+        const client = new FractalClient({ baseUrl: 'https://example.test',
             fetchImpl: async () => Response.json({ api_version, snapshot, value: {} }) });
         if (accepted) assert.equal((await client.capabilities()).api_version, api_version);
         else await assert.rejects(client.capabilities(), /Unexpected st client API response/);

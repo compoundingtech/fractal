@@ -1469,7 +1469,7 @@ pub fn agent_todo_value(
     let Some(claim) = claim else {
         return Value::Null;
     };
-    let snapshot = match st3_schema::HarnessTodoSnapshot::deserialize(
+    let snapshot = match fractal_schema::HarnessTodoSnapshot::deserialize(
         claim.body.get("fields").unwrap_or(&claim.body),
     ) {
         Ok(snapshot) => snapshot,
@@ -1949,7 +1949,7 @@ fn suppress_native_echoes(
             .filter_map(|item| item.pointer("/_delivery_correlation/thread_id").and_then(Value::as_str))
             .collect::<BTreeSet<_>>().into_iter().map(|thread| {
                 (thread.to_owned(), incoming.iter().map(|subject| {
-                    st_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject)
+                    fractal_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject)
                 }).collect::<BTreeSet<_>>())
             }).collect::<BTreeMap<_, _>>();
         items.retain(|item| {
@@ -2444,7 +2444,7 @@ pub fn post_snapshot_native_sends(
                 let Some(thread) = correlation["thread_id"].as_str() else { return true };
                 let Some(id) = correlation["id"].as_str() else { return true };
                 !subjects.iter().any(|subject| {
-                    st_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject) == id
+                    fractal_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject) == id
                 })
             });
         if delta.len() == 256 && unresolved {
@@ -2735,7 +2735,7 @@ fn managed_claude_transcript(
     let directory = crate::hooks::claude_agent_dir(
         &state.state_dir.join("drivers"),
         owner,
-        &st_drivers::run::detect_host(),
+        &fractal_drivers::run::detect_host(),
     );
     // The current wrapper's SessionStart hook binds the Claude session it started. A previous
     // provider's binding can survive a restart, so it counts only when it names the same
@@ -2776,7 +2776,7 @@ fn managed_claude_transcript(
     // A seat started before its binding recorded a path, on an account's own login: look in the
     // declared accounts' login directories too. Only reached when the ordinary places miss.
     if matches!(found, Ok(None)) {
-        let host = st_drivers::run::detect_host();
+        let host = fractal_drivers::run::detect_host();
         let roots = state
             .store
             .declared_accounts()
@@ -2858,7 +2858,7 @@ fn managed_pi_family_transcript(
         crate::hooks::legacy_claude_agent_dir(
             &state.state_dir.join("drivers"),
             owner,
-            &st_drivers::run::detect_host(),
+            &fractal_drivers::run::detect_host(),
         )
         .join("provider-sessions")
     };

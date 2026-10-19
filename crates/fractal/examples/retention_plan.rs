@@ -1,5 +1,5 @@
 //! Plan a checkpoint on a private, previously copied store and report what it would drop.
-//! Usage: cargo run --release -p st3 --example retention_plan -- CLONE DAY [SCRATCH] [--trim]
+//! Usage: cargo run --release -p fractal --example retention_plan -- CLONE DAY [SCRATCH] [--trim]
 //! DAY names the checkpoint's cut, such as 2026-10-10. With SCRATCH, the plan is also proved on a
 //! copy written there, as a real checkpoint proves it. With `--trim`, the plan is then trimmed
 //! from CLONE as a stable checkpoint is, and the report adds the writer's holds and the pages
@@ -13,7 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use smallclaims::store::checkpoint::checkpoint_cut;
-use st3::store::Store;
+use fractal_daemon::store::Store;
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();

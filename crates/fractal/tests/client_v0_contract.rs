@@ -1,6 +1,6 @@
-use st3::MissionsStore;
-use st3::PersonWorkStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::PersonWorkStore;
+use fractal_daemon::SeatsStoreCore;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,8 +9,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use st3::api::AppState;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::store::Store;
 use tokio::sync::{Barrier, Notify, watch};
 use tower::ServiceExt as _;
 
@@ -348,13 +348,13 @@ fn mission_step_actor_references_conform_without_accepting_other_id_families() {
 async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         state.store.origin(),
     )
     .unwrap();
     state.store.apply_internal(&intent, "contract-person-asker").unwrap();
-    let ask = state.store.ask_person(&st3::model::PersonAskRequest {
+    let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
         legacy_request: None,
         person: "person/avery".into(),
         title: "Choose a release date".into(),
@@ -366,7 +366,7 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
         idempotency_key: "contract-person-ask".into(),
         request: None,
     }).unwrap();
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let (status, list) = client_json(app.clone(), "/v1/client/missions").await;
     assert_eq!(status, StatusCode::OK, "{list}");
     let mission = list["value"]["items"].as_array().unwrap().iter()
@@ -377,7 +377,7 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     assert_eq!(status, StatusCode::OK, "{detail}");
     for row in [mission, &detail["value"]] {
         assert_conforms(&contract_validator("Mission"), "emitted person-ask mission", row);
-        let decoded: st3_client::Mission = serde_json::from_value(row.clone()).unwrap();
+        let decoded: fractal_client::Mission = serde_json::from_value(row.clone()).unwrap();
         let run = decoded.run_details.iter()
             .find(|run| run.id == ask.run).unwrap();
         assert_eq!(run.current_steps[0]["assignee"], "person/avery");
@@ -403,7 +403,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
             let granted = advertised.load(std::sync::atomic::Ordering::SeqCst);
             async move {
                 let capabilities = if granted {
-                    serde_json::json!([{"id":st3_client::EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":"granted"}])
+                    serde_json::json!([{"id":fractal_client::EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":"granted"}])
                 } else {
                     serde_json::json!([{"id":"collections", "version":1, "state":"granted"}])
                 };
@@ -443,7 +443,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         axum::serve(listener, app).await.unwrap();
     });
     let client =
-        st3_client::Client::fabric_loopback(format!("http://{address}"), "synthetic-token");
+        fractal_client::Client::fabric_loopback(format!("http://{address}"), "synthetic-token");
     let mut stream = client.collection_stream().await.unwrap();
     stream
         .subscribe("agents", "agents", 100, None, None)
@@ -455,7 +455,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         .await
         .unwrap_err();
     assert!(
-        refused.to_string().contains(st3_client::EXACT_AGENT_SELECTOR_CAPABILITY),
+        refused.to_string().contains(fractal_client::EXACT_AGENT_SELECTOR_CAPABILITY),
         "{refused}"
     );
     advertise.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -529,7 +529,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
 #[tokio::test]
 async fn strict_daemon_contract_rejects_undeclared_fields_and_unknown_known_cases() {
     let root = tempfile::tempdir().unwrap();
-    let app = st3::api::router(test_state(root.path()));
+    let app = fractal_daemon::api::router(test_state(root.path()));
     let (status, emitted) = client_json(app, "/v1/client/machines").await;
     assert_eq!(status, StatusCode::OK, "{emitted}");
     let validator = contract_validator("Envelope");
@@ -573,7 +573,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     let incarnation = "contract-terminal:i1";
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: agent.into(),
             kind: "runtime.observed".into(),
             actor: Some(agent.into()),
@@ -587,7 +587,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
             idempotency_key: None,
         })
         .unwrap();
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (status, agents) = client_json(app.clone(), "/v1/client/agents").await;
     assert_eq!(status, StatusCode::OK, "{agents}");
     assert_conforms(&envelope_validator, "live terminal agent", &agents);
@@ -597,7 +597,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
         .to_owned();
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "message/contract-first".into(),
             kind: "message.sent".into(),
             actor: Some("person/alex".into()),
@@ -615,7 +615,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     let server_socket = socket.clone();
     let server_app = app.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, server_app)
+        fractal_daemon::api::serve_unix(&server_socket, server_app)
             .await
             .unwrap();
     });
@@ -625,7 +625,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let client = st3_client::Client::unix_as(&socket, "person/alex");
+    let client = fractal_client::Client::unix_as(&socket, "person/alex");
     let mut stream = client.collection_stream().await.unwrap();
     stream
         .subscribe_conversation("talk", agent)
@@ -657,7 +657,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
 
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: agent.into(),
             kind: "harness.timeline".into(),
             actor: Some(agent.into()),
@@ -754,7 +754,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     assert_eq!(frame["value"]["lines"], screen["value"]["lines"]);
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: agent.into(),
             kind: "runtime.observed".into(),
             actor: Some(agent.into()),
@@ -1144,9 +1144,9 @@ fn event_feeds_are_contiguous_and_terminal_streams_replace_whole_screens() {
 
 async fn publish_fixture_lists(state: &AppState) -> u64 {
     let seeded_cut = state.store.index().unwrap();
-    st3::api::start_published_lists(state);
+    fractal_daemon::api::start_published_lists(state);
     tokio::time::timeout(std::time::Duration::from_secs(10),
-        st3::api::wait_published_lists_at_least(&state.store, seeded_cut))
+        fractal_daemon::api::wait_published_lists_at_least(&state.store, seeded_cut))
         .await.expect("contract lists publish the complete seeded graph cut").unwrap();
     seeded_cut
 }
@@ -1168,7 +1168,7 @@ fn test_state(root: &Path) -> AppState {
         configured_peers: Vec::new(),
         client_relay: None,
         native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     }
 }
 
@@ -1181,7 +1181,7 @@ async fn collection_socket_multiplexes_snapshot_then_changes_and_resubscribes() 
     let server_state = state.clone();
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, st3::api::router(server_state))
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(server_state))
             .await
             .unwrap();
     });
@@ -1191,7 +1191,7 @@ async fn collection_socket_multiplexes_snapshot_then_changes_and_resubscribes() 
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let client = st3_client::Client::unix(&socket);
+    let client = fractal_client::Client::unix(&socket);
     let mut stream = client.collection_stream().await.unwrap();
     stream
         .subscribe("missions", "missions", 20, None, None)
@@ -1224,12 +1224,12 @@ async fn collection_socket_multiplexes_snapshot_then_changes_and_resubscribes() 
 
     let source =
         "version 2\nmission \"socket-test\" state=\"ready\" { goal \"Test collection changes\" }\n";
-    let intent = st3::graph::parse_intent(source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -1287,7 +1287,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("client.sock");
     let state = test_state(root.path());
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         state.store.origin(),
     )
@@ -1298,7 +1298,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
         .unwrap();
     let ask = state
         .store
-        .ask_person(&st3::model::PersonAskRequest {
+        .ask_person(&fractal_daemon::model::PersonAskRequest {
             legacy_request: None,
             person: "person/avery".into(),
             title: "Choose date".into(),
@@ -1314,7 +1314,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let server_state = state.clone();
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, st3::api::router(server_state))
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(server_state))
             .await
             .unwrap();
     });
@@ -1324,7 +1324,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let client = st3_client::Client::unix(&socket);
+    let client = fractal_client::Client::unix(&socket);
     let mut stream = client.collection_stream().await.unwrap();
     stream
         .subscribe("attention", "attention", 20, None, None)
@@ -1362,7 +1362,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     stream.unsubscribe("alerts").await.unwrap();
     let card_id = card["id"].clone();
     let revision = card["revision"].clone();
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let action = serde_json::json!({"api_version":"st3.client.v0", "id":"action/socket-done", "type":"work.done",
         "idempotency_key":"socket-done-00000001", "fence":{"snapshot_id":first["snapshot"]["id"], "subject_revisions":{(card_id.as_str().unwrap()):revision}},
         "parameters":{"target_id":ask.subject, "episode":card["episode"], "summary":"Friday", "evidence":[]}});
@@ -1417,12 +1417,12 @@ async fn missions_first_page_returns_fifty_cards_and_a_cursor() {
             .map(|index| format!("mission \"page-{index:02}\" state=\"ready\" {{ goal \"Read a page\" }}\n"))
             .collect::<String>()
     );
-    let intent = st3::graph::parse_intent(&source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: None,
             },
@@ -1432,7 +1432,7 @@ async fn missions_first_page_returns_fifty_cards_and_a_cursor() {
         .store
         .apply(&intent, &planned.subject_tokens, "mission-page-smoke")
         .unwrap();
-    let (status, page) = client_json(st3::api::router(state), "/v1/client/missions?limit=50").await;
+    let (status, page) = client_json(fractal_daemon::api::router(state), "/v1/client/missions?limit=50").await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["value"]["items"].as_array().unwrap().len(), 50);
     assert_eq!(page["value"]["page"]["has_more"], true);
@@ -1442,7 +1442,7 @@ async fn missions_first_page_returns_fifty_cards_and_a_cursor() {
 #[tokio::test]
 async fn client_v0_read_routes_conform_to_the_manifest() {
     let root = tempfile::tempdir().unwrap();
-    let app = st3::api::router(test_state(root.path()));
+    let app = fractal_daemon::api::router(test_state(root.path()));
     let response = app
         .oneshot(
             Request::builder()
@@ -1468,15 +1468,15 @@ async fn client_v0_read_routes_conform_to_the_manifest() {
 #[tokio::test]
 async fn daemon_build_identity_is_shared_by_doctor_and_capabilities() {
     let root = tempfile::tempdir().unwrap();
-    let app = st3::api::router(test_state(root.path()));
+    let app = fractal_daemon::api::router(test_state(root.path()));
     let (status, envelope) = client_json(app.clone(), "/v1/client/capabilities").await;
     assert_eq!(status, StatusCode::OK);
-    let version = st_drivers::version::machine_version();
+    let version = fractal_drivers::version::machine_version();
     assert_eq!(envelope["value"]["machine_version"], version);
     contract_validator("Capabilities")
         .validate(&envelope["value"])
         .unwrap();
-    let capabilities: st3_client::Capabilities =
+    let capabilities: fractal_client::Capabilities =
         serde_json::from_value(envelope["value"].clone()).unwrap();
     assert_eq!(
         capabilities.machine_version.as_deref(),
@@ -1497,14 +1497,14 @@ async fn daemon_build_identity_is_shared_by_doctor_and_capabilities() {
         .validate(&old_capabilities)
         .unwrap();
     assert!(
-        serde_json::from_value::<st3_client::Capabilities>(old_capabilities)
+        serde_json::from_value::<fractal_client::Capabilities>(old_capabilities)
             .unwrap()
             .machine_version
             .is_none()
     );
     doctor.as_object_mut().unwrap().remove("machine_version");
     assert!(
-        serde_json::from_value::<st3::model::DoctorReport>(doctor)
+        serde_json::from_value::<fractal_daemon::model::DoctorReport>(doctor)
             .unwrap()
             .machine_version
             .is_none()
@@ -1522,14 +1522,14 @@ mission "garden/workspace" state="ready" {
   step "work" { assigned-to "agent/${ST_MISSION_RUN}/interactive"; goal "Wait." }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, state.store.origin()).unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
     state
         .store
         .apply_internal(&intent, "workspace-mission")
         .unwrap();
     let run = state
         .store
-        .create_mission_run(&st3::model::MissionRunRequest {
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
             mission: "garden/workspace".into(),
             revision: None,
             workspace: "/work/run".into(),
@@ -1547,7 +1547,7 @@ mission "garden/workspace" state="ready" {
         .into_iter()
         .find(|desired| desired.kind == "agent")
         .unwrap();
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let path = format!("/v1/client/agent-workspaces/{}", seat.subject);
     let (status, response) = client_json(app.clone(), &path).await;
     assert_eq!(status, StatusCode::OK, "{response}");
@@ -1580,7 +1580,7 @@ mission "garden/workspace" state="ready" {
     assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "agent/garden/observed".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/garden/observed".into()),
@@ -1599,7 +1599,7 @@ mission "garden/workspace" state="ready" {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
-    let stop = st3::graph::parse_intent(
+    let stop = fractal_daemon::graph::parse_intent(
         "version 2\nstop \"agent/garden/undeclared\"\n",
         state.store.origin(),
     )
@@ -1731,7 +1731,7 @@ async fn completed_read_surface_is_versioned_and_cursor_gaps_require_resync() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
     publish_fixture_lists(&state).await;
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     for collection in ["now", "machines", "missions", "runtimes", "operations"] {
         let (status, envelope) =
             client_json(app.clone(), &format!("/v1/client/{collection}")).await;
@@ -1755,12 +1755,12 @@ mission "now-work" state="ready" {
   step "implement" { assigned-to "agent/worker" }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -1772,7 +1772,7 @@ mission "now-work" state="ready" {
         .unwrap();
     let run = state
         .store
-        .create_mission_run(&st3::model::MissionRunRequest {
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
             mission: "now-work".into(),
             revision: None,
             workspace: root.path().display().to_string(),
@@ -1786,7 +1786,7 @@ mission "now-work" state="ready" {
         .store
         .set_step_state(&run.steps[0].subject, "ready", None)
         .unwrap();
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let (_, default) = client_json_person(app.clone(), "/v1/client/now", "person/alex").await;
     assert!(
         default["value"]["items"]
@@ -1814,7 +1814,7 @@ mission "now-work" state="ready" {
 async fn unchanged_store_index_names_one_stable_snapshot_and_payload() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
 
     let (status, empty_first) = client_json(app.clone(), "/v1/client/capabilities").await;
     assert_eq!(status, StatusCode::OK, "{empty_first}");
@@ -1830,7 +1830,7 @@ async fn unchanged_store_index_names_one_stable_snapshot_and_payload() {
 
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "agent/stable-snapshot".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/stable-snapshot".into()),
@@ -1866,7 +1866,7 @@ async fn unchanged_store_index_names_one_stable_snapshot_and_payload() {
     let (_, before) = client_json(app.clone(), "/v1/client/agents?limit=1").await;
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "agent/snapshot-changed".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/snapshot-changed".into()),
@@ -1893,8 +1893,8 @@ async fn concurrent_pairing_completion_mints_exactly_one_credential() {
     // has SQLite table-lock semantics that are deliberately different from production.
     state.store =
         Arc::new(Store::open(&root.path().join("pairing.sqlite"), "client-v0-baseline").unwrap());
-    let local = st3::api::router(state.clone());
-    let fabric = st3::api::fabric_router(state.clone());
+    let local = fractal_daemon::api::router(state.clone());
+    let fabric = fractal_daemon::api::fabric_router(state.clone());
     let (status, challenge) = client_post_json(
         local,
         "/v1/client/pairings",
@@ -1987,7 +1987,7 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
     let fleet = "issuer-envelope-proof";
     issuer.store.bind_fleet(fleet).unwrap();
     receiver.store.bind_fleet(fleet).unwrap();
-    let issuer_app = st3::api::router(issuer.clone());
+    let issuer_app = fractal_daemon::api::router(issuer.clone());
     let (status, challenge) = client_post_json(
         issuer_app.clone(),
         "/v1/client/pairings",
@@ -2031,7 +2031,7 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
         receiver.store.apply_replication_repairs().unwrap();
     }
     assert!(receiver.store.project_replication_backlog().unwrap());
-    let app = st3::api::router(receiver.clone());
+    let app = fractal_daemon::api::router(receiver.clone());
     let (status, capabilities) =
         client_json_person(app.clone(), "/v1/client/capabilities", "person/alex").await;
     assert_eq!(status, StatusCode::OK, "{capabilities}");
@@ -2074,8 +2074,8 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
 async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let app = st3::api::router(state.clone());
-    let fabric = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
+    let fabric = fractal_daemon::api::fabric_router(state.clone());
     let (_, capabilities) = client_json(app.clone(), "/v1/client/capabilities").await;
     let snapshot = capabilities["snapshot"]["id"].as_str().unwrap();
     let action = serde_json::json!({
@@ -2120,7 +2120,7 @@ async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
     let device = paired["value"]["device_id"].as_str().unwrap();
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "custom/client/pairing-expired-inventory".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),
@@ -2232,7 +2232,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     std::fs::create_dir(&workspace).unwrap();
     let state = test_state(root.path());
     let store = state.store.clone();
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         store.origin(),
     )
@@ -2242,7 +2242,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
         .unwrap();
     let ask = |person: &str| {
         store
-            .ask_person(&st3::model::PersonAskRequest {
+            .ask_person(&fractal_daemon::model::PersonAskRequest {
                 legacy_request: None,
                 person: person.into(),
                 title: format!("Decision for {person}"),
@@ -2258,8 +2258,8 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     };
     let ada_step = ask("person/ada");
     let alex_step = ask("person/alex");
-    let local = st3::api::router(state.clone());
-    let fabric = st3::api::fabric_router(state.clone());
+    let local = fractal_daemon::api::router(state.clone());
+    let fabric = fractal_daemon::api::fabric_router(state.clone());
 
     let (status, challenge) = client_post_json_person(
         local.clone(),
@@ -2439,7 +2439,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
         local.clone(),
         "/v1/launches",
         "person/alex",
-        serde_json::to_value(st3::model::PlanningSessionStartRequest {
+        serde_json::to_value(fractal_daemon::model::PlanningSessionStartRequest {
             mission: "paired-alex".into(),
             run: None,
             request: b"Draft Alex's mission.".to_vec(),
@@ -2484,7 +2484,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
 
     let expired_credential = "expired-paired-credential-000000000000000000";
     store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "custom/client/pairing-expired-proof".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/ada".into()),
@@ -2531,8 +2531,8 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
 async fn full_control_pairing_requires_explicit_local_person_opt_in_and_can_be_revoked() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let local = st3::api::router(state.clone());
-    let paired_gateway = st3::api::fabric_router(state);
+    let local = fractal_daemon::api::router(state.clone());
+    let paired_gateway = fractal_daemon::api::fabric_router(state);
 
     let begin = serde_json::json!({
         "api_version": "st3.client.v0",
@@ -2621,14 +2621,14 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
     std::fs::create_dir(&workspace).unwrap();
     let state = test_state(root.path());
     let store = state.store.clone();
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         store.origin(),
     )
     .unwrap();
     store.apply_internal(&intent, "read-only-asker").unwrap();
     let step = store
-        .ask_person(&st3::model::PersonAskRequest {
+        .ask_person(&fractal_daemon::model::PersonAskRequest {
             legacy_request: None,
             person: "person/ada".into(),
             title: "Decision for Ada".into(),
@@ -2641,8 +2641,8 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
             request: None,
         })
         .unwrap();
-    let local = st3::api::router(state.clone());
-    let gateway = st3::api::fabric_router(state);
+    let local = fractal_daemon::api::router(state.clone());
+    let gateway = fractal_daemon::api::fabric_router(state);
     let begin = |scopes: Value| {
         serde_json::json!({
             "api_version": "st3.client.v0",
@@ -2759,7 +2759,7 @@ async fn core_launch_and_mission_actions_use_session_identity_and_exact_fences()
     std::fs::create_dir(&workspace).unwrap();
     let state = test_state(root.path());
     let store = state.store.clone();
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
 
     let (_, capabilities) = client_json(app.clone(), "/v1/client/capabilities").await;
     let create = serde_json::json!({
@@ -2813,7 +2813,7 @@ mission "client-action-demo" state="ready" {
     let (status, submitted) = client_post_json(
         app.clone(),
         &format!("/v1/launches/{session_id}/variants/default/submit"),
-        serde_json::to_value(st3::model::PlanningCandidateSubmitRequest {
+        serde_json::to_value(fractal_daemon::model::PlanningCandidateSubmitRequest {
             actor: session.planner,
             markdown: b"# Client action demo\n\nRecord proof.\n".to_vec(),
             kdl: candidate.to_vec(),
@@ -2966,11 +2966,11 @@ agent "example/operator" { workspace "."; command "true"; mission-authority { ca
 mission "example/jobs/one" state="ready" { concurrent-runs; goal "Wait for cancellation."; step "wait" { agentless } }
 mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside any grant."; step "wait" { agentless } }
 "#;
-    let intent = st3::graph::parse_intent(source, store.origin()).unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, store.origin()).unwrap();
     let preview = store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -2986,7 +2986,7 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
         .unwrap();
     let start = |mission: &str, key: &str| {
         store
-            .create_mission_run(&st3::model::MissionRunRequest {
+            .create_mission_run(&fractal_daemon::model::MissionRunRequest {
                 mission: mission.into(),
                 revision: None,
                 workspace: root.path().display().to_string(),
@@ -2997,7 +2997,7 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
             })
             .unwrap()
     };
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     for agent in ["agent/example/operator", "agent/example/undeclared"] {
         let (_, capabilities) =
             client_json_person(app.clone(), "/v1/client/capabilities", agent).await;
@@ -3013,7 +3013,7 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
             assert_eq!(capability["state"], "granted", "{agent}: {capability}");
         }
     }
-    let cancel = |run: &st3::model::MissionRunView,
+    let cancel = |run: &fractal_daemon::model::MissionRunView,
                   generation: &str,
                   snapshot: &Value,
                   key: &str| {
@@ -3089,7 +3089,7 @@ async fn launch_revise_and_cancel_are_revision_fenced() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
     let store = state.store.clone();
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let (_, capabilities) = client_json(app.clone(), "/v1/client/capabilities").await;
     let create = serde_json::json!({
         "api_version": "st3.client.v0", "id": "action/launch-create-cancel",
@@ -3112,7 +3112,7 @@ mission "client-cancel-demo" state="ready" {
     let (status, submitted) = client_post_json(
         app.clone(),
         &format!("/v1/launches/{session_id}/variants/default/submit"),
-        serde_json::to_value(st3::model::PlanningCandidateSubmitRequest {
+        serde_json::to_value(fractal_daemon::model::PlanningCandidateSubmitRequest {
             actor: planner,
             markdown: b"# Revision demo\n".to_vec(),
             kdl: candidate.to_vec(),
@@ -3153,7 +3153,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
         ("agent/beta", "beta-runtime", "beta-runtime:i1"),
     ] {
         store
-            .append_claim(&st3::model::ClaimInput {
+            .append_claim(&fractal_daemon::model::ClaimInput {
                 subject: subject.into(),
                 kind: "runtime.observed".into(),
                 actor: Some(subject.into()),
@@ -3170,7 +3170,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
             .unwrap();
     }
     publish_fixture_lists(&state).await;
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     for collection in [
         "attention",
         "messages",
@@ -3211,7 +3211,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
     );
 
     store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "agent/gamma".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/gamma".into()),
@@ -3258,12 +3258,12 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
     let source = format!(
         "version 2\nagent \"builder\" {{ workspace \"/tmp\"; command \"true\" }}\nmission \"state-contract\" state=\"ready\" {{ goal \"Show every step state\"; {steps} }}"
     );
-    let intent = st3::graph::parse_intent(&source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: None,
             },
@@ -3275,7 +3275,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
         .unwrap();
     let run = state
         .store
-        .create_mission_run(&st3::model::MissionRunRequest {
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
             mission: "state-contract".into(),
             revision: None,
             workspace: root.path().display().to_string(),
@@ -3297,7 +3297,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .work_action(
                     &step.subject,
                     "claim",
-                    &st3::model::WorkRequest {
+                    &fractal_daemon::model::WorkRequest {
                         wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
@@ -3313,7 +3313,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .work_action(
                     &step.subject,
                     "progress",
-                    &st3::model::WorkRequest {
+                    &fractal_daemon::model::WorkRequest {
                         wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
@@ -3344,7 +3344,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .unwrap();
         }
     }
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     for path in ["/v1/client/missions", "/v1/client/missions/state-contract"] {
         let (status, response) = client_json(app.clone(), path).await;
         assert_eq!(status, StatusCode::OK, "{response}");
@@ -3414,12 +3414,12 @@ mission "ios-proof" state="ready" {
   step "automated-proof" { assigned-to "agent/ios-owner" }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -3431,7 +3431,7 @@ mission "ios-proof" state="ready" {
         .unwrap();
     let run = state
         .store
-        .create_mission_run(&st3::model::MissionRunRequest {
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
             mission: "ios-proof".into(),
             revision: None,
             workspace: root.path().display().to_string(),
@@ -3443,7 +3443,7 @@ mission "ios-proof" state="ready" {
         .unwrap();
     let subject = run.steps[0].subject.clone();
     state.store.set_step_state(&subject, "ready", None).unwrap();
-    let request = |key: &str, reason: Option<&str>| st3::model::WorkRequest {
+    let request = |key: &str, reason: Option<&str>| fractal_daemon::model::WorkRequest {
         wait_ms: None,
         actor: Some("agent/client-v0-baseline.ios-owner".into()),
         incarnation: Some("ios-owner-one".into()),
@@ -3458,7 +3458,7 @@ mission "ios-proof" state="ready" {
         .unwrap();
     let ask = state
         .store
-        .ask_person(&st3::model::PersonAskRequest {
+        .ask_person(&fractal_daemon::model::PersonAskRequest {
             legacy_request: None,
             person: "person/alex".into(),
             title: "Repair simulator components".into(),
@@ -3471,7 +3471,7 @@ mission "ios-proof" state="ready" {
             request: None,
         })
         .unwrap();
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (status, response) = client_json(app.clone(), "/v1/client/work").await;
     assert_eq!(status, StatusCode::OK, "{response}");
     let item = response["value"]["items"]
@@ -3487,7 +3487,7 @@ mission "ios-proof" state="ready" {
     state
         .store
         .finish_person_step(
-            &st3::model::PersonStepResponse {
+            &fractal_daemon::model::PersonStepResponse {
                 delegation: None,
                 subject: ask.subject,
                 actor: "person/alex".into(),
@@ -3526,12 +3526,12 @@ mission "release-proof" state="ready" {
   step "tag-proof" { assigned-to "agent/release-owner"; goal "Prove the published tag builds." }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -3543,7 +3543,7 @@ mission "release-proof" state="ready" {
         .unwrap();
     let run = state
         .store
-        .create_mission_run(&st3::model::MissionRunRequest {
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
             mission: "release-proof".into(),
             revision: None,
             workspace: root.path().display().to_string(),
@@ -3561,7 +3561,7 @@ mission "release-proof" state="ready" {
         .work_action(
             &subject,
             "claim",
-            &st3::model::WorkRequest {
+            &fractal_daemon::model::WorkRequest {
                 wait_ms: None,
                 actor: Some(actor.into()),
                 incarnation: Some("release-owner-one".into()),
@@ -3575,7 +3575,7 @@ mission "release-proof" state="ready" {
     let ask = |step: Option<String>, new_run: Option<String>, key: &str| {
         state
             .store
-            .ask_person(&st3::model::PersonAskRequest {
+            .ask_person(&fractal_daemon::model::PersonAskRequest {
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Allocate capacity?".into(),
@@ -3591,7 +3591,7 @@ mission "release-proof" state="ready" {
     };
     let from_step = ask(Some(subject.clone()), None, "ask-context-from-step");
     let standalone = ask(None, Some("standalone".into()), "ask-context-standalone");
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (status, response) = client_json_person(app, "/v1/client/attention", "person/alex").await;
     assert_eq!(status, StatusCode::OK, "{response}");
     let items = response["value"]["items"].as_array().unwrap();
@@ -3626,7 +3626,7 @@ async fn stopped_agents_are_annotated_history_not_default_membership() {
     let state = test_state(root.path());
     state
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: "agent/retired".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/retired".into()),
@@ -3644,7 +3644,7 @@ async fn stopped_agents_are_annotated_history_not_default_membership() {
             idempotency_key: None,
         })
         .unwrap();
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let (_, current) = client_json(app.clone(), "/v1/client/agents").await;
     assert!(current["value"]["items"].as_array().unwrap().is_empty());
     let (_, history) = client_json(app, "/v1/client/agents?history=true").await;
@@ -3664,7 +3664,7 @@ async fn stopped_agents_are_annotated_history_not_default_membership() {
 async fn client_v0_action_route_accepts_the_golden_fenced_action() {
     let root = tempfile::tempdir().unwrap();
     let action = std::fs::read(asset_root().join("fixtures/action.json")).unwrap();
-    let response = st3::api::router(test_state(root.path()))
+    let response = fractal_daemon::api::router(test_state(root.path()))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -3691,12 +3691,12 @@ mission "queued-work" state="ready" {
   step "work" { assigned-to "agent/queue-seat" }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -3711,7 +3711,7 @@ mission "queued-work" state="ready" {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let run = state
             .store
-            .create_mission_run(&st3::model::MissionRunRequest {
+            .create_mission_run(&fractal_daemon::model::MissionRunRequest {
                 mission: "queued-work".into(),
                 revision: None,
                 workspace: root.path().display().to_string(),
@@ -3728,7 +3728,7 @@ mission "queued-work" state="ready" {
         runs.push(run);
     }
     let seat = runs[0].steps[0].assigned_to.clone().unwrap();
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let queue_path = format!("/v1/client/agent-queues/{seat}");
     let order = |queue: &Value| {
         queue["value"]["runs"]
@@ -3850,14 +3850,14 @@ mission "queued-work" state="ready" {
 /// A runtime that starts nothing: a reconcile pass here only writes a run's own declarations.
 struct NoRuntime;
 
-impl st3::reconcile::RuntimeControl for NoRuntime {
-    fn snapshot_ptys(&self) -> anyhow::Result<Vec<st3::reconcile::RuntimeObservation>> {
+impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
+    fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<st3::reconcile::RuntimeObservation>> {
+    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
-    fn start(&self, _: &st3::model::MemberSpec) -> anyhow::Result<()> {
+    fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
         Ok(())
     }
     fn stop(&self, _: &str, _: bool, _: Option<&str>) -> anyhow::Result<()> {
@@ -3883,7 +3883,7 @@ impl st3::reconcile::RuntimeControl for NoRuntime {
 /// Run one reconcile pass as the store's own node, which writes each of its running missions'
 /// lane declarations.
 fn materialize_run_declarations(store: &Arc<Store>) {
-    st3::reconcile::Reconciler::new(
+    fractal_daemon::reconcile::Reconciler::new(
         store.clone(),
         Arc::new(NoRuntime),
         "client-v0-baseline".into(),
@@ -3909,12 +3909,12 @@ mission "example/merge-train" state="ready" {
   step "drive" { assigned-to "agent/lane-driver" }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, "client-v0-baseline").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -3926,7 +3926,7 @@ mission "example/merge-train" state="ready" {
         .unwrap();
     let run = state
         .store
-        .create_mission_run(&st3::model::MissionRunRequest {
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
             mission: "example/merge-train".into(),
             revision: None,
             workspace: root.path().display().to_string(),
@@ -3942,7 +3942,7 @@ mission "example/merge-train" state="ready" {
         run.subject.strip_prefix("mission-run/").unwrap()
     );
     let entry = |number: &str| format!("resource/github/acme/app/ci/pull-request/{number}");
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
 
     let (status, listed) = client_json(app.clone(), "/v1/client/lanes").await;
     assert_eq!(status, StatusCode::OK, "{listed}");
@@ -4055,8 +4055,8 @@ mission "example/merge-train" state="ready" {
     assert_eq!(detail["recent"][1]["change"], "moved");
     assert_eq!(detail["recent"][1]["anchor_id"], entry("42"));
     assert_ne!(detail["revision"], "empty");
-    let typed: st3_client::Resource = serde_json::from_value(detail.clone()).unwrap();
-    assert!(matches!(typed, st3_client::Resource::Lane(_)), "{detail}");
+    let typed: fractal_client::Resource = serde_json::from_value(detail.clone()).unwrap();
+    assert!(matches!(typed, fractal_client::Resource::Lane(_)), "{detail}");
 
     let (status, absent) = client_json(app, "/v1/client/lanes/lane/absent/app").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{absent}");
@@ -4066,7 +4066,7 @@ mission "example/merge-train" state="ready" {
 async fn client_structured_decision_carries_named_answers_both_ways() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         state.store.origin(),
     )
@@ -4076,7 +4076,7 @@ async fn client_structured_decision_carries_named_answers_both_ways() {
         .apply_internal(&intent, "structured-person-asker")
         .unwrap();
     let actor = format!("agent/{}.asker", state.store.origin());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let request = serde_json::json!({
         "version": 1,
         "type": "decision",
@@ -4175,7 +4175,7 @@ fn a_dismissed_person_answer_conforms_and_an_unknown_outcome_does_not() {
 async fn native_agent_person_asks_use_source_authority_and_reject_malformed_evidence() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         state.store.origin(),
     )
@@ -4185,7 +4185,7 @@ async fn native_agent_person_asks_use_source_authority_and_reject_malformed_evid
         .apply_internal(&intent, "native-person-asker")
         .unwrap();
     let actor = format!("agent/{}.asker", state.store.origin());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (_, snapshot) = client_json(app.clone(), "/v1/client/attention").await;
     let ask = serde_json::json!({"api_version":"st3.client.v0", "id":"action/native-ask", "type":"work.ask",
         "idempotency_key":"native-ask-00000001", "fence":{"snapshot_id":snapshot["snapshot"]["id"]}, "parameters":{"person_id":"person/avery",
@@ -4240,7 +4240,7 @@ async fn native_agent_person_asks_use_source_authority_and_reject_malformed_evid
 #[tokio::test]
 async fn missing_mission_preserves_the_client_v0_not_found_error_shape() {
     let root = tempfile::tempdir().unwrap();
-    let app = st3::api::router(test_state(root.path()));
+    let app = fractal_daemon::api::router(test_state(root.path()));
     let (status, error) = client_json(app, "/v1/client/missions/example/missing").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
     assert_eq!(error["code"], "not-found");
@@ -4261,14 +4261,14 @@ async fn status_history_is_typed_and_readable_through_the_paired_gateway() {
         ("harness.observed", serde_json::json!({"state":"idle", "incarnation_id":"one"})),
         ("runtime.observed", serde_json::json!({"status":"running", "runtime_id":"native", "incarnation_id":"two"})),
     ] {
-        state.store.append_claim(&st3::model::ClaimInput {
+        state.store.append_claim(&fractal_daemon::model::ClaimInput {
             subject: "agent/cedar".into(), kind: kind.into(), actor: Some("agent/cedar".into()),
             fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
             expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = st3::api::router(state.clone());
-    let fabric = st3::api::fabric_router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
+    let fabric = fractal_daemon::api::fabric_router(state.clone());
     let (status, challenge) = client_post_json(app.clone(), "/v1/client/pairings", serde_json::json!({
         "api_version":"st3.client.v0", "device_name":"Cedar client", "person_id":"person/alex"
     })).await;
@@ -4285,7 +4285,7 @@ async fn status_history_is_typed_and_readable_through_the_paired_gateway() {
     assert_eq!(status, StatusCode::OK, "{remote}");
     assert_eq!(local["value"], remote["value"]);
     assert_conforms(&contract_validator("StatusHistory"), "paired history", &remote["value"]);
-    let typed: st3_client::StatusHistory = serde_json::from_value(remote["value"].clone()).unwrap();
+    let typed: fractal_client::StatusHistory = serde_json::from_value(remote["value"].clone()).unwrap();
     assert!(typed.complete);
     assert_eq!(typed.items.last().unwrap().runtime_incarnation, "two");
     assert!(typed.items.last().unwrap().reset);
@@ -4298,20 +4298,20 @@ async fn status_history_is_typed_and_readable_through_the_paired_gateway() {
 async fn custom_subject_contract_pagination_and_paired_person_reply() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let mut manifest: st3_schema::custom::Manifest = serde_json::from_str(include_str!(
+    let mut manifest: fractal_schema::custom::Manifest = serde_json::from_str(include_str!(
         "../../../examples/st3/custom-review.json"
     )).unwrap();
-    manifest.attention.as_mut().unwrap().episode = st3_schema::custom::Expr::Constant {
+    manifest.attention.as_mut().unwrap().episode = fractal_schema::custom::Expr::Constant {
         value: serde_json::json!("garden question; keep"),
     };
-    state.store.register_custom_kind(&st3::store::custom::RegistrationRequest {
+    state.store.register_custom_kind(&fractal_daemon::store::custom::RegistrationRequest {
         manifest, actor: "agent/garden/seed".into(),
     }).unwrap();
     for name in ["one", "two"] {
-        state.store.append_claim(&st3::model::ClaimInput{subject:format!("custom/garden/review/v1/{name}"),kind:"custom.garden.review.v1.requested".into(),actor:Some("agent/garden/seed".into()),fields:serde_json::from_value(serde_json::json!({"title":"Retain the seed history?","detail":"Choose Keep or Discard.","recipient":"person/lichen"})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
+        state.store.append_claim(&fractal_daemon::model::ClaimInput{subject:format!("custom/garden/review/v1/{name}"),kind:"custom.garden.review.v1.requested".into(),actor:Some("agent/garden/seed".into()),fields:serde_json::from_value(serde_json::json!({"title":"Retain the seed history?","detail":"Choose Keep or Discard.","recipient":"person/lichen"})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
     }
-    let local = st3::api::router(state.clone());
-    let fabric = st3::api::fabric_router(state.clone());
+    let local = fractal_daemon::api::router(state.clone());
+    let fabric = fractal_daemon::api::fabric_router(state.clone());
     let (status, page) = client_json(
         local.clone(),
         "/v1/client/custom-subjects?kind=garden.review&version=1&limit=1",
@@ -4421,13 +4421,13 @@ mission "timing/run" state="ready" {
   }
 }
 "#;
-    let intent = st3::graph::parse_intent(source, state.store.origin()).unwrap();
-    let planned = state.store.mission(&intent, st3::model::IntentInput {
+    let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
+    let planned = state.store.mission(&intent, fractal_daemon::model::IntentInput {
         kdl: source.into(),
         source_name: None,
     }).unwrap();
     state.store.apply(&intent, &planned.subject_tokens, "timing-definition").unwrap();
-    let run = state.store.create_mission_run(&st3::model::MissionRunRequest {
+    let run = state.store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
         mission: "timing/run".into(),
         revision: None,
         workspace: root.path().display().to_string(),
@@ -4441,7 +4441,7 @@ mission "timing/run" state="ready" {
     let ready = &run.steps.iter().find(|step| step.step == "wake").unwrap().subject;
     state.store.set_step_state(ready, "ready", None).unwrap();
     state.store.set_step_state(held, "ready", None).unwrap();
-    state.store.work_action(held, "claim", &st3::model::WorkRequest {
+    state.store.work_action(held, "claim", &fractal_daemon::model::WorkRequest {
         wait_ms: None,
         actor: Some("agent/timing/worker".into()),
         incarnation: Some("timing-worker-one".into()),
@@ -4453,7 +4453,7 @@ mission "timing/run" state="ready" {
     state.store.set_step_state(retry, "failed", Some("rate limited")).unwrap();
     assert!(state.store.retry_step(retry, "rate limited", 60_000).unwrap());
     let improve = run.loops.iter().find(|loop_run| loop_run.path == "improve").unwrap();
-    state.store.append_claim(&st3::model::ClaimInput {
+    state.store.append_claim(&fractal_daemon::model::ClaimInput {
         subject: improve.subject.clone(),
         kind: "loop.state".into(),
         actor: None,
@@ -4467,14 +4467,14 @@ mission "timing/run" state="ready" {
         idempotency_key: None,
     }).unwrap();
 
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let path = "/v1/client/missions/mission%2Ftiming%2Frun";
     let (status, response) = client_json(app.clone(), path).await;
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_conforms(&contract_validator("Envelope"), path, &response);
-    let envelope: st3_client::Envelope<st3_client::Resource> =
+    let envelope: fractal_client::Envelope<fractal_client::Resource> =
         serde_json::from_value(response).unwrap();
-    let st3_client::Resource::Mission(mission) = envelope.value else {
+    let fractal_client::Resource::Mission(mission) = envelope.value else {
         panic!("mission detail must be a mission resource");
     };
     let detail = &mission.run_details[0];
@@ -4518,7 +4518,7 @@ mission "timing/run" state="ready" {
     let (status, missing) = client_json(app, "/v1/client/missions/timing/missing").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
     let credential = "timing-no-projection-scope";
-    state.store.append_claim(&st3::model::ClaimInput {
+    state.store.append_claim(&fractal_daemon::model::ClaimInput {
         subject: "custom/client/pairing-timing".into(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some("person/avery".into()),
@@ -4533,7 +4533,7 @@ mission "timing/run" state="ready" {
         expected_subject: None,
         idempotency_key: None,
     }).unwrap();
-    let (status, denied) = client_json_auth(st3::api::fabric_router(state), path, credential).await;
+    let (status, denied) = client_json_auth(fractal_daemon::api::fabric_router(state), path, credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
 }
 
@@ -4550,7 +4550,7 @@ async fn terminal_filters_use_projected_state_and_preserve_history_selection() {
         let subject = format!("agent/lookup/{name}");
         state
             .store
-            .append_claim(&st3::model::ClaimInput {
+            .append_claim(&fractal_daemon::model::ClaimInput {
                 subject: subject.clone(),
                 kind: "runtime.observed".into(),
                 actor: Some(subject),
@@ -4570,7 +4570,7 @@ async fn terminal_filters_use_projected_state_and_preserve_history_selection() {
             })
             .unwrap();
     }
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     for query in [
         "owner=agent%2Flookup%2Fstopped",
         "owner=agent%2Flookup%2Fno-terminal&history=true",
@@ -4614,7 +4614,7 @@ async fn terminal_filters_are_acknowledged_only_on_terminal_pages() {
         let subject = format!("agent/lookup/{name}");
         state
             .store
-            .append_claim(&st3::model::ClaimInput {
+            .append_claim(&fractal_daemon::model::ClaimInput {
                 subject: subject.clone(),
                 kind: "runtime.observed".into(),
                 actor: Some(subject),
@@ -4635,7 +4635,7 @@ async fn terminal_filters_are_acknowledged_only_on_terminal_pages() {
             .unwrap();
     }
     publish_fixture_lists(&state).await;
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     for collection in [
         "agents",
         "runtimes",

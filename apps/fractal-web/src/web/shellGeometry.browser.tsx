@@ -1,4 +1,4 @@
-import { Agent, decodeUnknownSync, type AgentEncoded } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createRoot } from 'react-dom/client'

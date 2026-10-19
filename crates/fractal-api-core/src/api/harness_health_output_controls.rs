@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use st_drivers::harness_timeline::Operation;
+use fractal_drivers::harness_timeline::Operation;
 
 pub const CAPABILITY: &str = "native-output-v1";
 pub const SILENCE_MS: u64 = 10 * 60 * 1_000;

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import St3Client
+@testable import FractalClient
 
 final class ConversationNormalizationTests: XCTestCase {
     func testNormalizedFallbackDecodesWithFrozenOldTimelineEnum() throws {

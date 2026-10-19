@@ -1,8 +1,8 @@
 //! The part of `store::unread_mail` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::unread_mail::*;
-pub use st3_store::store::unread_mail::{create_schema};
+pub use fractal_store::store::unread_mail::*;
+pub use fractal_store::store::unread_mail::{create_schema};
 
 const COUNT_SQL: &str = "WITH levels(shift) AS (VALUES(56),(48),(40),(32),(24),(16),(8),(0))
          SELECT COALESCE(SUM((
@@ -19,9 +19,9 @@ fn flush_pending(connection: &Connection) -> Result<()> {
     if pending.is_empty() {
         return Ok(());
     }
-    let mut remove = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b96709bc8f8 owner=st3_delivery::store::unread_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM unread_mail WHERE subject=?1")?;
+    let mut remove = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3b5efa6a0e33 owner=fractal_delivery::store::unread_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM unread_mail WHERE subject=?1")?;
     let mut insert = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-hbce3dc302dd7 owner=st3_delivery::store::unread_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO unread_mail(subject,sent_time)
+        /* sqlite-large-value: allow-for-now lv-h00f1697e24c6 owner=fractal_delivery::store::unread_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO unread_mail(subject,sent_time)
          SELECT ?1,MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
          WHERE subject=?1 AND kind='message.sent'
          AND NOT EXISTS (
@@ -30,11 +30,11 @@ fn flush_pending(connection: &Connection) -> Result<()> {
          ) HAVING COUNT(*)>0",
     )?;
     let mut clear =
-        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h43f33ac0d66f owner=st3_delivery::store::unread_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM unread_mail_pending WHERE subject=?1")?;
+        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf8adfca107e0 owner=fractal_delivery::store::unread_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM unread_mail_pending WHERE subject=?1")?;
     for subject in pending {
-        remove.execute(/* sqlite-large-value: allow-for-now lv-hf18005a6a6a9 owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [&subject])?;
-        insert.execute(/* sqlite-large-value: allow-for-now lv-h3590697748cd owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [&subject])?;
-        clear.execute(/* sqlite-large-value: allow-for-now lv-h3c9f05fb7746 owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [&subject])?;
+        remove.execute(/* sqlite-large-value: allow-for-now lv-h73ff2371e6f9 owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [&subject])?;
+        insert.execute(/* sqlite-large-value: allow-for-now lv-hbf6fa2c8c66c owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [&subject])?;
+        clear.execute(/* sqlite-large-value: allow-for-now lv-h44428bdd4bcf owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [&subject])?;
     }
     Ok(())
 }
@@ -44,8 +44,8 @@ fn flush_pending(connection: &Connection) -> Result<()> {
 pub fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -> Result<u64> {
     let before = i64::try_from(before_unix_ms).unwrap_or(i64::MAX);
     let base: i64 = connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h5a4b125218a8 owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ COUNT_SQL)?
-        .query_row(/* sqlite-large-value: allow-for-now lv-had99b310e212 owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [before], |row| row.get(0))?;
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4b33b176a0ae owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ COUNT_SQL)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h095a886f7dd7 owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [before], |row| row.get(0))?;
     let delta: i64 = connection
         .prepare_cached(
             "SELECT COALESCE(SUM(
@@ -59,7 +59,7 @@ pub fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -> Resul
                    THEN 1 ELSE 0 END
          ),0) FROM unread_mail_pending pending",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h9a8f60772ba3 owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [before], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-he57b8c61e68c owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [before], |row| row.get(0))?;
     Ok(u64::try_from(base + delta)?)
 }
 
@@ -108,8 +108,8 @@ pub fn count_before(transaction: &Transaction<'_>, before_unix_ms: u128) -> Resu
     // become visible together, and a concurrent message cannot disappear between the two.
     flush_pending(transaction)?;
     let before = i64::try_from(before_unix_ms).unwrap_or(i64::MAX);
-    let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h306e124a486d owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ COUNT_SQL)?;
-    Ok(statement.query_row(/* sqlite-large-value: allow-for-now lv-hc4cfa1c7b822 owner=st3_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [before], |row| row.get(0))?)
+    let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5fd0c39b53d0 owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ COUNT_SQL)?;
+    Ok(statement.query_row(/* sqlite-large-value: allow-for-now lv-hbd67150d3c18 owner=fractal_delivery::store::unread_mail TODO=trace-statement-and-value-representation */ [before], |row| row.get(0))?)
 }
 
 #[cfg(test)]

@@ -633,7 +633,7 @@ export const perfStoresCache = (stage: string) => ({
   uses: 'actions/cache@v4',
   with: {
     path: '${{ runner.temp }}/st-bench',
-    key: `perf-${stage}-stores-\${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}`,
+    key: `perf-${stage}-stores-\${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}`,
   },
 })
 

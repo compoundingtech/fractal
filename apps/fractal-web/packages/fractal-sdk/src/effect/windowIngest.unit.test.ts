@@ -1,5 +1,5 @@
-import type { CollectionFrame, Resource } from '@smalltalk/st3-client'
-import { decodeUnknownSync, Resource as ResourceCodec } from '@smalltalk/st3-client/schema'
+import type { CollectionFrame, Resource } from '@fractal/client'
+import { decodeUnknownSync, Resource as ResourceCodec } from '@fractal/client/schema'
 import { describe, expect, it } from 'vitest'
 
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'

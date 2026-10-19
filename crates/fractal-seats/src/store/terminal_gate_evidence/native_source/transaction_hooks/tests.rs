@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use st3_missions::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats::*;
+use fractal_missions::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats::*;
 use super::*;
 use crate::store::{ClaimInput, append_claim_record_tx};
 use serde_json::json;

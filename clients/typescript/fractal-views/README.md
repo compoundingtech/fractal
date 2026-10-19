@@ -1,7 +1,7 @@
 # Shared client views
 
-`@smalltalk/st3-views` is the phone's view model, usable by an IDE or another TypeScript
-client. It exports TypeScript source, like the sibling generated `@smalltalk/st3-client`.
+`@fractal/views` is the phone's view model, usable by an IDE or another TypeScript
+client. It exports TypeScript source, like the sibling generated `@fractal/client`.
 Use a TypeScript-aware bundler, or Node 24 with `--experimental-transform-types`.
 It has no React, React Native, Expo or platform key-store dependency.
 
@@ -10,7 +10,7 @@ The phone depends on this package through `workspace:*`, and this package uses
 use the same dependency convention.
 
 ```ts
-import { conversationEntries, applyConversation, homeRows, clientName } from '@smalltalk/st3-views';
+import { conversationEntries, applyConversation, homeRows, clientName } from '@fractal/views';
 
 const held = applyConversation(undefined, frame);
 const entries = conversationEntries(held.entries, agentNames);
@@ -32,8 +32,8 @@ and the phone passes `phone` to retain its wording.
 
 ## Folder-only sidebar semantics
 
-`@smalltalk/st3-views/sidebarView` is the React-free twin of
-`st3_ui_model::sidebar`. `build(arrangement, inventory)` projects native version-1
+`@fractal/views/sidebarView` is the React-free twin of
+`fractal_ui_model::sidebar`. `build(arrangement, inventory)` projects native version-1
 arrangements using the daemon's authoritative `resolved` maps. Its tagged result
 is `Built { tree }` or `Refused { error }`; missing resolution is `NotReady`,
 not a guessed parent graph. Opaque register revisions cannot establish which
@@ -75,8 +75,8 @@ From the repository root with Node 24 and Corepack (or `nix develop .#web`):
 ```sh
 corepack enable # Outside the Nix web shell
 pnpm install --frozen-lockfile
-pnpm --filter @smalltalk/st3-views test
-pnpm --filter @smalltalk/st3-views typecheck
+pnpm --filter @fractal/views test
+pnpm --filter @fractal/views typecheck
 ```
 
 The moved tests run without phone dependencies. Transcript tests read the original

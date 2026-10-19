@@ -267,7 +267,7 @@ future_route = 7
         assert_eq!(config.node, "fixture");
         assert_eq!(
             config.active_seat_priority(),
-            st_runtime::SeatPriority::Normal
+            fractal_runtime::SeatPriority::Normal
         );
         assert_eq!(config.peers[0].name, "peer");
         assert_eq!(

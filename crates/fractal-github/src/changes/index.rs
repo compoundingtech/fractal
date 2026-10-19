@@ -97,13 +97,13 @@ impl GitChangesStore for Store {
             );
         } else {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h1828cce3bada owner=st3_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_records(repository,object_id,change_id,record_json,indexed_at)
+                /* sqlite-large-value: allow-for-now lv-h618581a9badb owner=fractal_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_records(repository,object_id,change_id,record_json,indexed_at)
                  VALUES(?1,?2,?3,?4,?5)",
                 params![repository, revision.oid, revision.record.change_id, body, indexed_at],
             )?;
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h96c87e2cf044 owner=st3_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_latest(repository,change_id,object_id,generation)
+            /* sqlite-large-value: allow-for-now lv-h79930c0706a2 owner=fractal_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_latest(repository,change_id,object_id,generation)
              VALUES(?1,?2,?3,?4)
              ON CONFLICT(repository,change_id) DO UPDATE SET object_id=excluded.object_id,generation=excluded.generation
              WHERE excluded.generation>local_git_change_latest.generation",
@@ -134,7 +134,7 @@ impl GitChangesStore for Store {
         let mut records = BTreeMap::new();
         for object in objects {
             let row: Option<(String, String)> = statement
-                .query_row(/* sqlite-large-value: allow-for-now lv-h59f5adb61d8b owner=st3_github::changes::index TODO=trace-statement-and-value-representation */ params![repository, object], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-hb027d1e7ecd9 owner=fractal_github::changes::index TODO=trace-statement-and-value-representation */ params![repository, object], |row| {
                     Ok((row.get(0)?, row.get(1)?))
                 })
                 .optional()?;
@@ -331,8 +331,8 @@ pub mod tests {
         {
             let mut writer = store.connection.write();
             let tx = writer.transaction().unwrap();
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h9b19d305c623 owner=st3_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_records VALUES('other/repo',printf('%040x',0),'I'||printf('%040x',0),'{}','fixture')", []).unwrap();
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h411e04f13d48 owner=st3_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_latest VALUES('other/repo','I'||printf('%040x',0),printf('%040x',0),1)", []).unwrap();
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h0c13ac9b0bb6 owner=fractal_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_records VALUES('other/repo',printf('%040x',0),'I'||printf('%040x',0),'{}','fixture')", []).unwrap();
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hae281c833adb owner=fractal_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_latest VALUES('other/repo','I'||printf('%040x',0),printf('%040x',0),1)", []).unwrap();
             tx.commit().unwrap();
         }
         let measure = || {
@@ -351,9 +351,9 @@ pub mod tests {
         {
             let mut writer = store.connection.write();
             let tx = writer.transaction().unwrap();
-            tx.execute(/* sqlite-large-value: allow-for-now lv-haf7040e31b71 owner=st3_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he6428daef1bc owner=fractal_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
                 INSERT INTO local_git_change_records SELECT 'other/repo',printf('%040x',n),'I'||printf('%040x',n),'{}','fixture' FROM rows", []).unwrap();
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h2e9694654016 owner=st3_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he2c360d4a1c7 owner=fractal_github::changes::index TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
                 INSERT INTO local_git_change_latest SELECT 'other/repo','I'||printf('%040x',n),printf('%040x',n),1 FROM rows", []).unwrap();
             tx.commit().unwrap();
         }

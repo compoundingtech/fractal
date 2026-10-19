@@ -1,9 +1,9 @@
 #![allow(unused_imports)]
 use crate::OwnedSetsStore;
-use st3_attention::store::owned_sets_tests_shared::*;
+use fractal_attention::store::owned_sets_tests_shared::*;
 use super::*;
-use st3_attention::store::owned_sets_tests_shared::*;
-use st3_attention::store::owned_sets_tests_shared::{bundle, direct, share, signed_fleet, signed_share};
+use fractal_attention::store::owned_sets_tests_shared::*;
+use fractal_attention::store::owned_sets_tests_shared::{bundle, direct, share, signed_fleet, signed_share};
 
 
 #[test]
@@ -92,13 +92,13 @@ fn staged_only_proof_uses_any_claim_and_the_exact_non_null_marker() {
             let tx = writer.transaction().unwrap();
             let id = "reader-staged-fixture";
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h19ac7b405a95 owner=st3_evidence::store::owned_sets_tests::empty_authority_guard TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hb86ee6eef76c owner=fractal_evidence::store::owned_sets_tests::empty_authority_guard TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'amber',1,?1,'1')",
                 [id],
             )
             .unwrap();
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h1f02c743efc1 owner=st3_evidence::store::owned_sets_tests::empty_authority_guard TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h40cf798ef6fd owner=fractal_evidence::store::owned_sets_tests::empty_authority_guard TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?1,?2,'fixture.staged','amber','person/operator',?3,'[]','1')",
                 params![id, captured.subject, json!({"owned_set": marker}).to_string()],
             ).unwrap();

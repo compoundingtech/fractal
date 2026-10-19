@@ -11,8 +11,8 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_kernel::*;
-pub use st3_telemetry::*;
+pub use fractal_kernel::*;
+pub use fractal_telemetry::*;
 pub use smallclaims::{performance, profile, task_cpu};
 
 #[cfg(any(test, feature = "test-support"))]

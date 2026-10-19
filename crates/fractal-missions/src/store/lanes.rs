@@ -3,7 +3,7 @@
 use super::*;
 use crate::lane::{self, Change, Event};
 use crate::model::{LaneChangeRequest, LaneChangeResponse, LaneSpec, LaneView};
-pub use st3_delivery::store::lanes::*;
+pub use fractal_delivery::store::lanes::*;
 
 /// How many joins, leaves, moves, and approvals a lane view lists.
 const LANE_RECENT_LIMIT: usize = 20;
@@ -18,7 +18,7 @@ fn lane_not_found(argument: &str) -> St3Error {
 /// The full entry subject for an argument in this lane, checked against its prefix.
 fn lane_entry(view: &LaneView, argument: &str) -> Result<String, St3Error> {
     let entry = lane::entry_subject(view.entries_prefix.as_deref(), argument);
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_subject(&entry)
         .map_err(|error| St3Error::new("invalid-lane-entry", error.message))?;
     if let Some(prefix) = view.entries_prefix.as_deref()
@@ -33,7 +33,7 @@ fn lane_entry(view: &LaneView, argument: &str) -> Result<String, St3Error> {
 }
 
 fn lane_declarations_tx(connection: &Connection, run: Option<&str>) -> Result<Vec<DesiredSubject>> {
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0ba6ab0de8d6 owner=st3_missions::store::lanes TODO=trace-statement-and-value-representation */ if run.is_some() {
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9b93bbbdbb39 owner=fractal_missions::store::lanes TODO=trace-statement-and-value-representation */ if run.is_some() {
         "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
          FROM desired WHERE owner_run=?1 AND kind='lane' ORDER BY subject"
     } else {
@@ -112,7 +112,7 @@ fn lane_view_tx(connection: &Connection, declaration: &DesiredSubject) -> Result
 
 /// A lane's claims in the store's replica-stable order.
 pub fn lane_events_tx(connection: &Connection, subject: &str) -> Result<Vec<Event>> {
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h47dfe6f20759 owner=st3_missions::store::lanes TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-ha9bd7a5e5f62 owner=fractal_missions::store::lanes TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.id, claims.kind, claims.actor, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind IN

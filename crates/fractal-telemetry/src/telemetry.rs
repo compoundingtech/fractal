@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
-use st3_kernel::model::ClaimInput;
+use fractal_kernel::model::ClaimInput;
 
 /// What a hook sees of its process environment.
 pub trait HookEnv {
@@ -25,7 +25,7 @@ impl HookEnv for BTreeMap<String, String> {
         self.get(name).cloned()
     }
     fn var(&self, name: &str) -> Option<String> {
-        st_drivers::contracts::env_with(name, &|key| self.raw_var(key))
+        fractal_drivers::contracts::env_with(name, &|key| self.raw_var(key))
     }
 }
 
@@ -119,7 +119,7 @@ pub fn hook(
                 .with_filter(stderr_filter()),
         );
     let (code, invocations) = tracing::subscriber::with_default(subscriber, || {
-        st_drivers::metrics::capture_hook_invocations(run)
+        fractal_drivers::metrics::capture_hook_invocations(run)
     });
     let logs = capture
         .0
@@ -129,12 +129,12 @@ pub fn hook(
     if invocations.is_empty() && logs.is_empty() && code == 0 {
         return code;
     }
-    let subject = (!st_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name)))
+    let subject = (!fractal_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name)))
         .then(|| env.var("ST3_SUBJECT").or_else(|| env.var("ST_AGENT")))
         .flatten()
         .filter(|subject| subject.starts_with("agent/"));
     let incarnation =
-        st_drivers::contracts::env_with(st_drivers::claude_session::SESSION_ENV, &|name| {
+        fractal_drivers::contracts::env_with(fractal_drivers::claude_session::SESSION_ENV, &|name| {
             env.raw_var(name)
         });
     if let (Some(subject), Some(incarnation)) = (subject, incarnation) {

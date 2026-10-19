@@ -2,7 +2,7 @@
 use crate::AttentionStore;
 use super::*;
 use smallclaims::store::checkpoint_agreement::*;
-use st3_seats::store::checkpoint_agreement_tests_shared_attention_tests::{FLEET, claim_ids, context, kinds, observe, stable_cuts, step, sync};
+use fractal_seats::store::checkpoint_agreement_tests_shared_attention_tests::{FLEET, claim_ids, context, kinds, observe, stable_cuts, step, sync};
 
 
 #[test]

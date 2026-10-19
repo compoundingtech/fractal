@@ -1,4 +1,4 @@
-import type { TimelineEntry, Work } from '@smalltalk/st3-client'
+import type { TimelineEntry, Work } from '@fractal/client'
 
 import type { Asciicast } from '../kit/asciicast.ts'
 import { child, type FactoryContext } from '../kit/context.ts'

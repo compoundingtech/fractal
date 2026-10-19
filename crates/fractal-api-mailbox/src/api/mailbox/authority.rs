@@ -33,8 +33,8 @@ pub fn episode(fence: &Fence) -> String {
 
 /// Decode ownership at the record's own stamp: observation freshness cannot erase a
 /// terminal ownership decision. This grants custody only, never fresh activity or readiness.
-fn decode_provider_authority(raw: &[u8]) -> Result<st_drivers::harness_state::Observed, St3Error> {
-    use st_drivers::harness_state::{Activity, read_raw_at};
+fn decode_provider_authority(raw: &[u8]) -> Result<fractal_drivers::harness_state::Observed, St3Error> {
+    use fractal_drivers::harness_state::{Activity, read_raw_at};
     let record: Value =
         serde_json::from_slice(raw).map_err(|_| refused("malformed provider authority"))?;
     let stamp = record["writtenAtMs"]
@@ -59,9 +59,9 @@ fn decode_provider_authority(raw: &[u8]) -> Result<st_drivers::harness_state::Ob
     Ok(observed)
 }
 
-fn provider_authority(raw: &[u8]) -> Result<st_drivers::harness_state::Observed, St3Error> {
+fn provider_authority(raw: &[u8]) -> Result<fractal_drivers::harness_state::Observed, St3Error> {
     let observed = decode_provider_authority(raw)?;
-    if observed.state == st_drivers::harness_state::Activity::Ended {
+    if observed.state == fractal_drivers::harness_state::Activity::Ended {
         return Err(refused("the provider authority is terminal"));
     }
     Ok(observed)
@@ -82,11 +82,11 @@ fn current_provider_record(
     agent_dir: &Path,
     owner: &Authority,
 ) -> Result<(), St3Error> {
-    let raw = st_drivers::harness_events::read_runtime_state(agent_dir, &fence.incarnation)
+    let raw = fractal_drivers::harness_events::read_runtime_state(agent_dir, &fence.incarnation)
         .map_err(internal)?
         .ok_or_else(|| refused("the provider source disappeared"))?;
     let current = provider_authority(&raw)?;
-    if current.state == st_drivers::harness_state::Activity::Ended
+    if current.state == fractal_drivers::harness_state::Activity::Ended
         || current.harness.as_deref() != Some(&owner.provider)
         || current.evidence_incarnation.as_deref() != Some(&owner.session)
         || current.ownership_sequence != Some(owner.sequence)
@@ -157,7 +157,7 @@ fn admit_report_with(
         return Err(refused("the admitted process generation disappeared"));
     }
     let agent_dir = source_agent_dir(state, fence);
-    let result = st_drivers::harness_state::with_current_ownership(
+    let result = fractal_drivers::harness_state::with_current_ownership(
         &agent_dir,
         &owner.session,
         owner.sequence,
@@ -173,7 +173,7 @@ fn admit_report_with(
     if result.is_ok() || evaluated.get() {
         return result;
     }
-    let current = st_drivers::harness_events::read_runtime_state(&agent_dir, &fence.incarnation)
+    let current = fractal_drivers::harness_events::read_runtime_state(&agent_dir, &fence.incarnation)
         .map_err(internal)?
         .ok_or_else(|| refused("the provider source disappeared"))?;
     let observed = provider_authority(&current)?;
@@ -207,16 +207,16 @@ pub fn loss_if_current(
     }
     state.store.mailbox_session_active(fence, &owner)?;
     let agent_dir = source_agent_dir(state, fence);
-    let bytes = st_drivers::harness_events::read_runtime_state(&agent_dir, &fence.incarnation)
+    let bytes = fractal_drivers::harness_events::read_runtime_state(&agent_dir, &fence.incarnation)
         .map_err(internal)?
         .ok_or_else(|| refused("the current provider source is unavailable"))?;
     let observed = provider_authority(&bytes)?;
-    if observed.state == st_drivers::harness_state::Activity::Ended
+    if observed.state == fractal_drivers::harness_state::Activity::Ended
         || observed.harness.as_deref() != Some(&owner.provider)
     {
         return Ok(());
     }
-    st_drivers::harness_state::with_current_ownership(&agent_dir, &owner.session, owner.sequence, || {
+    fractal_drivers::harness_state::with_current_ownership(&agent_dir, &owner.session, owner.sequence, || {
         current_provider(state, fence, &agent_dir, &owner)?;
         if !state.store.owns_mailbox_lease(fence, &owner)? { return Ok(()); }
         let reviewer = state.store.agent_person(&fence.subject).map_err(internal)?
@@ -308,7 +308,7 @@ impl ReplayProofInputs {
             && process_birth(peer.pid).is_ok_and(|birth| birth == self.process_birth)
             && state.store.mailbox_replay_owner_matches(fence, &self.lease_owner)
                 .is_ok_and(|matches| matches)
-            && st_drivers::harness_events::read_runtime_state(
+            && fractal_drivers::harness_events::read_runtime_state(
                 &self.agent_dir, &fence.incarnation,
             ).ok().flatten().is_some_and(|raw| {
                 provider_authority(&raw).is_ok_and(|owner| {
@@ -489,7 +489,7 @@ impl BootstrapWitness {
 }
 
 fn process_birth(pid: u32) -> Result<u64, St3Error> {
-    st_runtime::process_start_token(pid)
+    fractal_runtime::process_start_token(pid)
         .map_err(|error| unavailable(format!("process generation is unavailable: {error}")))
 }
 
@@ -502,7 +502,7 @@ fn terminal_stats(state: &AppState, name: &str) -> Result<pty_core::stats::Stats
 /// agree with the selected creation stamp before its terminal child grants bootstrap custody.
 fn bootstrap_witness(
     state: &AppState,
-    physical: &st_runtime::PtyObservation,
+    physical: &fractal_runtime::PtyObservation,
     peer: &NativeDeliveryPeer,
     peer_birth: u64,
     bound: bool,
@@ -554,7 +554,7 @@ pub fn with_argv_channel<T>(
     {
         return Err(refused("this is not an explicit local argv channel seat"));
     }
-    let physical = st_runtime::PtyRuntime::new(state.pty_root.clone())
+    let physical = fractal_runtime::PtyRuntime::new(state.pty_root.clone())
         .with_binary(state.pty_binary.to_string_lossy()).snapshot().map_err(internal)?
         .into_iter().find(|runtime| runtime.name == member.runtime_id
             && runtime.status == "running"
@@ -653,7 +653,7 @@ pub fn with_authority<T>(
     {
         return Err(refused("the bound terminal invocation was replaced"));
     }
-    let physical = st_runtime::PtyRuntime::new(state.pty_root.clone())
+    let physical = fractal_runtime::PtyRuntime::new(state.pty_root.clone())
         .with_binary(state.pty_binary.to_string_lossy())
         .snapshot()
         .map_err(internal)?
@@ -689,14 +689,14 @@ pub fn with_authority<T>(
     // The daemon chooses the source path. Inherited environment cannot redirect custody.
     let agent_dir = source_agent_dir(state, fence);
     if let Some(paths) =
-        st_drivers::driver_paths::Paths::from_environment(identity, &var).map_err(internal)?
+        fractal_drivers::driver_paths::Paths::from_environment(identity, &var).map_err(internal)?
         && paths.agent_dir != agent_dir
     {
         return Err(refused(
             "the channel carries another runtime's observation paths",
         ));
     }
-    let source = st_drivers::harness_events::read_bound_provider_state(&agent_dir)
+    let source = fractal_drivers::harness_events::read_bound_provider_state(&agent_dir)
         .map_err(|error| unavailable(error.to_string()))?;
     if let Some((_, raw)) = &source {
         let observed = decode_provider_authority(raw)?;
@@ -758,7 +758,7 @@ pub fn with_authority<T>(
         let validate = || {
             witness.validate(state)?;
             // Do not admit a stale bootstrap capture after qualified ownership appeared.
-            let current = st_drivers::harness_events::read_bound_provider_state(&agent_dir)
+            let current = fractal_drivers::harness_events::read_bound_provider_state(&agent_dir)
                 .map_err(|error| unavailable(error.to_string()))?;
             if current != captured_source {
                 return Err(St3Error::new(
@@ -772,7 +772,7 @@ pub fn with_authority<T>(
     };
     let observed = provider_authority(&bytes)?;
     if observed.harness.as_deref() != Some(&provider)
-        || observed.state == st_drivers::harness_state::Activity::Ended
+        || observed.state == fractal_drivers::harness_state::Activity::Ended
     {
         return Err(refused("the provider ownership is foreign or terminal"));
     }
@@ -798,8 +798,8 @@ pub fn with_authority<T>(
     }
     if provider == "claude"
         && fence.component == "delivery"
-        && (var(st_drivers::claude_session::SESSION_ENV).as_deref() != Some(&session)
-            || var(st_drivers::claude_session::SESSION_SEQ_ENV)
+        && (var(fractal_drivers::claude_session::SESSION_ENV).as_deref() != Some(&session)
+            || var(fractal_drivers::claude_session::SESSION_SEQ_ENV)
                 .and_then(|seq| seq.parse::<u64>().ok())
                 != Some(sequence))
     {
@@ -816,7 +816,7 @@ pub fn with_authority<T>(
     };
     // Lock provider ownership through the Store writer decision. It cannot change between
     // capture and admission; Store rechecks runtime and terminal completion in that decision.
-    st_drivers::harness_state::with_current_ownership(
+    fractal_drivers::harness_state::with_current_ownership(
         &agent_dir,
         &authority.session,
         authority.sequence,
@@ -886,7 +886,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
                 session: "runtime:current".into(),
                 sequence: 0,
                 pid: std::process::id(),
-                process_token: st_runtime::process_start_token(std::process::id()).unwrap(),
+                process_token: fractal_runtime::process_start_token(std::process::id()).unwrap(),
             };
             let bound = store
                 .bind_mailbox_with_lease(
@@ -1043,7 +1043,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
 
     #[test]
     fn reports_evaluate_one_fence_and_preserve_terminal_authority_under_clock_skew() {
-        use st_drivers::{harness_events, harness_state};
+        use fractal_drivers::{harness_events, harness_state};
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open_memory("node").unwrap());
         let intent = crate::graph::parse_intent(
@@ -1078,7 +1078,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             session: "provider".into(),
             sequence,
             pid: std::process::id(),
-            process_token: st_runtime::process_start_token(std::process::id()).unwrap(),
+            process_token: fractal_runtime::process_start_token(std::process::id()).unwrap(),
         };
         let fence = store
             .bind_mailbox_with_lease(&request, Some(&owner))

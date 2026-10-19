@@ -9,14 +9,14 @@ iOS app.
 
 The TUI library connects through the generated Rust `st3.client.v0` client, the same typed data boundary
 used by the CLI. Its subscriptions, reconnects, snapshot model and cache come from
-[`st3-feed`](../st3-feed/README.md). It paints immediately, hydrates attention/agents/sessions first, then fills in
+[`fractal-feed`](../fractal-feed/README.md). It paints immediately, hydrates attention/agents/sessions first, then fills in
 mission and fleet details without blocking keys. A private, actor-and-endpoint-scoped read-only
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
 Install the repo's `.#st3` Nix package and run `ST3_PERSON=person/<your-id> st` in a terminal
 with a running st3 daemon. For source development, use
-`ST3_PERSON=person/<your-id> cargo run -p st3 --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
+`ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Now and devices show the right data.
 
@@ -65,18 +65,18 @@ input modes, query replies, and remaining gaps, including the headless PTY probe
 Verification:
 
 ```sh
-cargo test -p stui --locked --lib
-cargo test -p st3 --locked --test integration typed_keys
-cargo test -p st3 --locked --test integration client_only
-cargo build -p st3 --locked
-ST3_PERSON=person/<your-id> python3 crates/stui/tests/pty_smoke.py target/debug/st3 --ui
+cargo test -p fractal-tui --locked --lib
+cargo test -p fractal --locked --test integration typed_keys
+cargo test -p fractal --locked --test integration client_only
+cargo build -p fractal --locked
+ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
 ```
 
 The PTY smoke test runs with or without a local daemon or st config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
 binary, pass its path followed by `--ui --no-panic`; the release build has no debug panic hook. The two
-`attach_default_probe` (run by `cargo test -p stui --lib`, beside `terminal_tab_protocols`) drives a
+`attach_default_probe` (run by `cargo test -p fractal-tui --lib`, beside `terminal_tab_protocols`) drives a
 real terminal tab in PTYs through the default attach, conversation first, an alert over the
 terminal and a dropped link. The two
 QA scripts need a live daemon and the `pty` executable: one opens an agent from `Ctrl+K`, scrolls

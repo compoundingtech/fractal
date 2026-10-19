@@ -1,4 +1,4 @@
-import type { WireSlice } from '@smalltalk/st3-scenarios/react'
+import type { WireSlice } from '@fractal/scenarios/react'
 import type { TranscriptHistory, TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { Sender, TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'

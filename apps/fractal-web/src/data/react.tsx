@@ -1,6 +1,6 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
 /** Shared derivations over generated rows, installed once per data source. */
-import type { Agent as AgentRow, Attention, Mission } from '@smalltalk/st3-client/schema'
+import type { Agent as AgentRow, Attention, Mission } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createContext, type ReactNode, useContext } from 'react'

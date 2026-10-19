@@ -6,7 +6,7 @@ use crate::accounts::{
     AccountDecl, Binding, Candidate, HarnessBinding, harness_binding, most_usage_left,
     parse_account,
 };
-pub use st3_missions::store::accounts::*;
+pub use fractal_missions::store::accounts::*;
 
 /// The account a seat starts on, and the directory its login lives in on this host.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,14 +75,14 @@ fn observation_at(
     kind: &str,
 ) -> Result<Option<ClaimRecord>> {
     let claim = connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-h0e5d2307b83a owner=st3_seats::store::accounts TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
+        /* sqlite-large-value: allow-for-now lv-he6d1d9f14a2c owner=fractal_seats::store::accounts TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
             claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
             FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
         params![seat, kind], claim_from_row,
     ).optional()?;
     let local = connection
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-h994d3dd8706e owner=st3_seats::store::accounts TODO=trace-statement-and-value-representation */ &format!(
+            /* sqlite-large-value: allow-for-now lv-h353bb76d16ca owner=fractal_seats::store::accounts TODO=trace-statement-and-value-representation */ &format!(
                 "{LOCAL_OBSERVATION_COLUMNS} WHERE subject=?1 AND kind=?2 ORDER BY id DESC LIMIT 1"
             ),
             params![seat, kind],
@@ -247,7 +247,7 @@ impl AccountsStore for Store {
         self.connection
             .batched(|tx| {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-hbf7b42468a0e owner=st3_seats::store::accounts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_seat_accounts(seat, account, chosen_at_unix_ms) VALUES (?1, ?2, ?3)
+                    /* sqlite-large-value: allow-for-now lv-h8be475afe9ec owner=fractal_seats::store::accounts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_seat_accounts(seat, account, chosen_at_unix_ms) VALUES (?1, ?2, ?3)
                      ON CONFLICT(seat) DO UPDATE SET account=excluded.account,
                                                      chosen_at_unix_ms=excluded.chosen_at_unix_ms",
                     params![seat, account, now as i64],
@@ -466,7 +466,7 @@ impl AccountsStore for Store {
                 body["_operation"] = json!({"id": id, "request_digest": digest});
             }
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-he8920159d728 owner=st3_seats::store::accounts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_seat_accounts(seat,account,chosen_at_unix_ms) VALUES (?1,?2,?3)
+                /* sqlite-large-value: allow-for-now lv-h4c2777965c02 owner=fractal_seats::store::accounts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_seat_accounts(seat,account,chosen_at_unix_ms) VALUES (?1,?2,?3)
                  ON CONFLICT(seat) DO UPDATE SET account=excluded.account, chosen_at_unix_ms=excluded.chosen_at_unix_ms",
                 params![seat, next, now as i64],
             ).map_err(internal)?;
@@ -475,7 +475,7 @@ impl AccountsStore for Store {
                 .map_err(claim_append_error)?;
             register_operation_tx(tx, &claim).map_err(internal)?;
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-hfef36e363e6e owner=st3_seats::store::accounts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_limit_stops(account,episode,seat,stopped_at_unix_ms) VALUES (?1,?2,?3,?4)",
+                /* sqlite-large-value: allow-for-now lv-h156962f6c4eb owner=fractal_seats::store::accounts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_limit_stops(account,episode,seat,stopped_at_unix_ms) VALUES (?1,?2,?3,?4)",
                 params![episode_account, episode, seat, now as i64],
             ).map_err(internal)?;
             Ok(true)

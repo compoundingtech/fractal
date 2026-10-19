@@ -23,7 +23,7 @@ fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::
     let log = std::fs::File::create(root.join("daemon.log")).unwrap();
     let binary = test_bin!("st3-fixture");
     let mut service = Service(
-        st3::test_support::command(binary)
+        fractal_daemon::test_support::command(binary)
             .env_clear()
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", root.join("config"))
@@ -55,7 +55,7 @@ fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::
 }
 
 fn doctor_report(home: &Path, socket: &Path) -> serde_json::Value {
-    let output = st3::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
         .env_clear()
         .env("HOME", home)
         .arg("--endpoint")
@@ -68,10 +68,10 @@ fn doctor_report(home: &Path, socket: &Path) -> serde_json::Value {
 
 #[test]
 fn a_fixture_listener_ignores_the_callers_host_seat_ancestry() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join(".bash_profile"), format!("export PATH='{}'\n", std::env::var("PATH").unwrap())).unwrap();
@@ -86,7 +86,7 @@ mission "hermetic" state="ready" {
   }
 }
 "#).unwrap();
-    let env = st_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap();
+    let env = fractal_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap();
     // Keep a synthetic agent parent alive while its CLI child has ST_AGENT removed. CI thus
     // exercises the ancestry boundary too, even when its runner is not itself an agent seat.
     let output = std::process::Command::new(env!("ST3_FIXTURE_BASH"))
@@ -105,10 +105,10 @@ mission "hermetic" state="ready" {
 
 #[test]
 fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     // The service has no PATH; its login shell must provide one before socket discovery.
@@ -123,13 +123,13 @@ fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(st3_client::Client::unix(&socket).agents_list_after(None, None, false, 0))
+        .block_on(fractal_client::Client::unix(&socket).agents_list_after(None, None, false, 0))
         .expect("the fixture must publish its initial roster");
     let state_socket = state_home.join("st3/run/st3.sock");
     assert!(state_socket.as_os_str().len() > 108);
     assert_eq!(std::fs::read_link(&state_socket).unwrap(), socket);
 
-    let output = st3::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
         .env_clear()
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -148,10 +148,10 @@ fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
 
 #[test]
 fn bare_service_environment_loads_shell_path_and_rechecks_credentials() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -224,17 +224,17 @@ fn bare_service_environment_loads_shell_path_and_rechecks_credentials() {
 
 #[test]
 fn doctor_reports_missing_build_tools_and_whether_a_small_crate_links() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
     // The login PATH holds only these tools, so the report names exactly what is absent. The
     // shell needs `env` to export its environment.
     std::os::unix::fs::symlink(
-        st_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap(),
+        fractal_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap(),
         bin.join("env"),
     )
     .unwrap();
@@ -293,10 +293,10 @@ fn doctor_reports_missing_build_tools_and_whether_a_small_crate_links() {
 /// daemon must retry with more patience and start, not exit.
 #[test]
 fn a_login_shell_too_slow_for_the_first_capture_still_lets_the_daemon_start() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -351,23 +351,23 @@ fn a_login_shell_too_slow_for_the_first_capture_still_lets_the_daemon_start() {
 
 #[test]
 fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_credentials() {
-    if st3::test_support::supervise_test() { return; }
-    use st3::sekrets::protocol::{self, CallerView, Reply, Request};
+    if fractal_daemon::test_support::supervise_test() { return; }
+    use fractal_daemon::sekrets::protocol::{self, CallerView, Reply, Request};
     use base64::Engine as _;
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let calls = root.path().join("gh-calls");
     executable(&bin.join("gh"), &format!("#!/bin/sh\nprintf x >> '{}'\nprintf fixture-local-credential\n", calls.display()));
-    let config = st3::config::Config {
+    let config = fractal_daemon::config::Config {
         node: "fixture-node".into(), person: Some("person/fixture".into()),
         state_dir: root.path().join("node-state"),
-        github: st3::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None, observer_requests_per_hour: None },
+        github: fractal_daemon::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None, observer_requests_per_hour: None },
         ..Default::default()
     };
     let key = smallclaims::fleet::MemberKey::load_or_create(
-        &st3::fleet::join::key_directory(&config.state_dir).join("node.key")).unwrap();
+        &fractal_daemon::fleet::join::key_directory(&config.state_dir).join("node.key")).unwrap();
     let config_path = root.path().join("config/st3/config.toml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -384,13 +384,13 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
                 nonce: "fixture nonce".into(), gateway: "fixture".into() }, &[]).unwrap();
             let (hello,_) = protocol::recv::<Request>(&stream).unwrap().unwrap();
             let Request::Hello { attestation: Some(attestation) } = hello else { panic!("node did not attest"); };
-            let statement: st3::sekrets::identity::Statement = serde_json::from_str(&attestation.statement).unwrap();
+            let statement: fractal_daemon::sekrets::identity::Statement = serde_json::from_str(&attestation.statement).unwrap();
             assert_eq!(statement.node, "host/fixture-node");
             assert_eq!(statement.agent, "host/fixture-node");
             assert_eq!(statement.person, "person/fixture");
             assert_eq!(statement.nonce, "fixture nonce");
             assert!(!attestation.signature.is_empty());
-            assert_eq!(key.sign(&st3::sekrets::identity::signing_message(&attestation.statement)), attestation.signature);
+            assert_eq!(key.sign(&fractal_daemon::sekrets::identity::signing_message(&attestation.statement)), attestation.signature);
             protocol::send(&stream, &Reply::Hello { caller: CallerView::Host {
                 node: "host/fixture-node".into(), person: "person/fixture".into() },
                 nonce: "fixture nonce".into(), gateway: "fixture".into() }, &[]).unwrap();
@@ -409,7 +409,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
         }
     });
     for expected_code in [0, 3] {
-        let output = st3::test_support::command(test_bin!("st3-fixture"))
+        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
             .env_clear().env("HOME", &home).env("PATH", &bin)
             .env("GH_TOKEN", "fixture-local-credential").env("GITHUB_TOKEN", "fixture-secondary")
             .env("ST_SEKRETS_SOCKET", &socket).env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -423,10 +423,10 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
 
 #[test]
 fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     for identity in [
         None,
         Some("ST_AGENT"),
@@ -436,7 +436,7 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
         let agent = identity.is_some();
         for json in [false, true] {
             let mut command =
-                st3::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
             command
                 .env_clear()
                 .env("HOME", root.path())
@@ -480,15 +480,15 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
 
 #[test]
 fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("studio-bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(
-        st_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap(),
+        fractal_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap(),
         bin.join("env"),
     )
     .unwrap();
@@ -498,7 +498,7 @@ fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
     )
     .unwrap();
     let run = || {
-        st3::test_support::command(test_bin!("st3-fixture"))
+        fractal_daemon::test_support::command(test_bin!("st3-fixture"))
             .env_clear()
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -538,7 +538,7 @@ fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
 
 #[test]
 fn developer_doctor_cannot_be_combined_with_performance() {
-    let output = st3::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
         .args(["doctor", "--developer", "--performance"])
         .output()
         .unwrap();

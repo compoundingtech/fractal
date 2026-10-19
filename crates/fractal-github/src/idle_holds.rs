@@ -88,7 +88,7 @@ impl IdleHoldsStore for Store {
                 "SELECT subject FROM local_idle_messages INDEXED BY local_idle_messages_pending
                  WHERE recipient IN (?1,?2) AND pending=1 LIMIT 1",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h9258013853bb owner=st3_github::idle_holds TODO=trace-statement-and-value-representation */ params![recipient, bare_recipient], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h76d9efb37dff owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ params![recipient, bare_recipient], |row| row.get(0))
             .optional()?;
         if let Some(subject) = &found {
             smallclaims::touched::note_read(|| subject.clone());
@@ -101,8 +101,8 @@ impl IdleHoldsStore for Store {
         smallclaims::touched::note_read(|| format!("mailbox:{recipient}"));
         let connection = self.readers.get();
         Ok(connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h5dd572ca3a3c owner=st3_github::idle_holds TODO=trace-statement-and-value-representation */ LAST_WAKE_SQL)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hcf5787f4af0e owner=st3_github::idle_holds TODO=trace-statement-and-value-representation */ params![recipient, bare_recipient, tag, prefix], |row| {
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf057430ab711 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ LAST_WAKE_SQL)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h4c18f6a96664 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ params![recipient, bare_recipient, tag, prefix], |row| {
                 row.get::<_, Option<u64>>(0)
             })?
             .map(u128::from))
@@ -156,7 +156,7 @@ impl IdleHoldsStore for Store {
         let item = format!("{resource}/pull-request/{}", thread.number);
         smallclaims::touched::note_read(|| item.clone());
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3722ffb4ed97 owner=st3_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_SQL)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfeb913b593a6 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_SQL)?;
         let mut rows = statement.query_map(params![item, THREAD_SCAN], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
@@ -229,7 +229,7 @@ impl IdleHoldsStore for Store {
              ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, store_index DESC
              LIMIT 1",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h997bf9f7e120 owner=st3_github::idle_holds TODO=trace-statement-and-value-representation */ params![step.subject, step.attempt], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h0d3eebfbbb73 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ params![step.subject, step.attempt], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .optional()?;
@@ -247,7 +247,7 @@ impl IdleHoldsStore for Store {
                AND json_extract(body, '$.fields.state')='working'
                AND json_extract(body, '$.fields.incarnation_id')=?2)",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hca613b9f1970 owner=st3_github::idle_holds TODO=trace-statement-and-value-representation */ params![agent, incarnation, after], |row| row.get(0))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-h367ce6c05697 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ params![agent, incarnation, after], |row| row.get(0))?)
     }
 
     fn latest_nudge(&self, step: &str) -> Result<Option<ClaimRecord>> {
@@ -298,7 +298,7 @@ impl IdleHoldsStore for Store {
                     _ => unreachable!(),
                 })
                 .collect::<Vec<_>>();
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hbaf03230d5fe owner=st3_github::idle_holds TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7a4e130e6c46 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))?;
             for row in statement.query_map(rusqlite::params_from_iter(args), |row| {
                 row.get::<_, String>(3)
             })? {

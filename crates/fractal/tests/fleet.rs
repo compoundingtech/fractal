@@ -4,7 +4,7 @@
 //! `st3` CLI. Nothing here touches the real fleet's state, services, ports, or Fabric names: every
 //! node runs in the foreground under a temporary root, and no test installs a service.
 
-use st3::WatchesStore;
+use fractal_daemon::WatchesStore;
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -13,8 +13,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::client::Client;
-use st3::model::ClaimInput;
+use fractal_daemon::client::Client;
+use fractal_daemon::model::ClaimInput;
 
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_st3-fixture")
@@ -185,7 +185,7 @@ impl Node {
                 .map(|argument| (*argument).to_owned())
                 .collect(),
         );
-        let mut command = st3::test_support::command(&self.binary);
+        let mut command = fractal_daemon::test_support::command(&self.binary);
         command
             .args(arguments)
             .current_dir(&self.root)
@@ -619,7 +619,7 @@ async fn joined(root: &Path, sponsor: &Node, name: &str, extra: &[&str]) -> Node
 /// child finishes. Put the next real weekly tick close enough to exercise it in this daemon.
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduled_occurrence_survives_parent_reapply_revision_and_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -637,7 +637,7 @@ mission "harvest" state="ready" {{
 }}"#
         );
         revisions.push(
-            st3::parse_intent(&source, "orchard").unwrap().missions["harvest"]
+            fractal_daemon::parse_intent(&source, "orchard").unwrap().missions["harvest"]
                 .revision
                 .clone(),
         );
@@ -760,7 +760,7 @@ mission "orchard/weekly" state="ready" {{
 /// A stopped origin's earlier running claims must not fence a seat placed on another host.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stopped_seat_is_reachable_after_a_cross_host_move() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     cross_host_seat_move(SeatMove::Stopped).await;
@@ -768,7 +768,7 @@ async fn a_stopped_seat_is_reachable_after_a_cross_host_move() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placement_handoff_moves_a_running_seat_between_real_daemons() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     cross_host_seat_move(SeatMove::Running).await;
@@ -776,7 +776,7 @@ async fn placement_handoff_moves_a_running_seat_between_real_daemons() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placement_handoff_source_offline_retires_the_returning_real_daemon_runtime() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     cross_host_seat_move(SeatMove::SourceOffline).await;
@@ -1019,7 +1019,7 @@ fn authority_digest(node: &Node) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_populated_standalone_daemon_founds_a_fleet_with_verified_person_and_agent_claims() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1109,7 +1109,7 @@ async fn a_populated_standalone_daemon_founds_a_fleet_with_verified_person_and_a
 #[tokio::test(flavor = "multi_thread")]
 #[cfg(target_os = "linux")]
 async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1209,7 +1209,7 @@ fi
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_after_standalone_run_records_explicit_name_before_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1249,7 +1249,7 @@ async fn create_after_standalone_run_records_explicit_name_before_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn saved_join_resumes_when_membership_was_saved_before_the_identity_pin() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1276,7 +1276,7 @@ async fn saved_join_resumes_when_membership_was_saved_before_the_identity_pin() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn invite_and_join_sync_full_history() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1360,7 +1360,7 @@ async fn invite_and_join_sync_full_history() {
 /// must say it has no route rather than that it is temporarily unavailable.
 #[tokio::test(flavor = "multi_thread")]
 async fn members_read_each_others_owner_state_and_unreachable_owners_say_why() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1403,7 +1403,7 @@ async fn members_read_each_others_owner_state_and_unreachable_owners_say_why() {
         .await
         .unwrap_err();
     let (status, code, message, details) =
-        st3::client::api_error_parts(&error).unwrap_or_else(|| panic!("{error:#}"));
+        fractal_daemon::client::api_error_parts(&error).unwrap_or_else(|| panic!("{error:#}"));
     assert_eq!(status, 503, "{message}");
     assert_eq!(code, "remote-unavailable", "{message}");
     assert!(!message.contains("temporarily"), "{message}");
@@ -1428,7 +1428,7 @@ fn peer_sync(node: &Node, peer: &str) -> Value {
 /// Sync never repairs one member's claims or graph from the other.
 #[tokio::test(flavor = "multi_thread")]
 async fn members_with_the_same_envelopes_but_different_claims_report_divergence() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1464,7 +1464,7 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence(
     b.stop();
     {
         let store = rusqlite::Connection::open(b.state_dir().join("claims.sqlite3")).unwrap();
-        st3::store::configure_projection_writer(&store).unwrap();
+        fractal_daemon::store::configure_projection_writer(&store).unwrap();
         let dropped = store
             .execute(
                 "DELETE FROM mission_definitions WHERE mission_id LIKE '%divergence-probe%'",
@@ -1544,7 +1544,7 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dial_out_member_is_caught_up_and_never_reported_down() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1597,7 +1597,7 @@ async fn a_dial_out_member_is_caught_up_and_never_reported_down() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_join_resumes_with_the_same_code() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1682,7 +1682,7 @@ async fn an_interrupted_join_resumes_with_the_same_code() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn expired_revoked_and_used_codes_are_refused() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1730,7 +1730,7 @@ async fn expired_revoked_and_used_codes_are_refused() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leaked_code_is_visible_and_can_be_revoked() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1816,7 +1816,7 @@ async fn a_leaked_code_is_visible_and_can_be_revoked() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_secret_never_leaves_its_file() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1900,7 +1900,7 @@ async fn the_secret_never_leaves_its_file() {
 /// offline trims; this test does not manufacture certificates or transport tombstones.
 #[tokio::test(flavor = "multi_thread")]
 async fn rejoin_exchanges_live_claims_beyond_differing_checkpoint_tombstones() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     rejoin_tombstone_fixture(false).await;
@@ -1908,7 +1908,7 @@ async fn rejoin_exchanges_live_claims_beyond_differing_checkpoint_tombstones() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rejoin_slow_exports_preserve_live_claims_and_show_overload_retry() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     rejoin_tombstone_fixture(true).await;
@@ -2041,7 +2041,7 @@ async fn rejoin_tombstone_fixture(slow_export: bool) {
 /// everything its peer held, instead of returning at once with the old verdict.
 #[tokio::test(flavor = "multi_thread")]
 async fn fleet_wait_after_a_restart_waits_until_the_member_has_caught_up() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2080,7 +2080,7 @@ async fn fleet_wait_after_a_restart_waits_until_the_member_has_caught_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_removed_member_is_refused() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2197,7 +2197,7 @@ fn doctor_check(node: &Node, name: &str) -> Value {
 /// measurement stale with the envelopes written since it, and doctor warns.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_frozen_member_is_not_reported_up() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2277,7 +2277,7 @@ async fn a_frozen_member_is_not_reported_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn leave_drains_the_refusal_settings_writer_before_removing_its_directory() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     refusal_settings_writer_across_leave("loaded").await;
@@ -2285,7 +2285,7 @@ async fn leave_drains_the_refusal_settings_writer_before_removing_its_directory(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_late_refusal_settings_writer_cannot_recreate_a_fleet_after_leave() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     refusal_settings_writer_across_leave("before-lock").await;
@@ -2510,7 +2510,7 @@ fn supervise_leave_with_diagnostics() -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2642,7 +2642,7 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leave_already_refused_as_left_finishes_when_run_again() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2709,7 +2709,7 @@ async fn a_leave_already_refused_as_left_finishes_when_run_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uninstall_leaves_nothing_behind() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2793,7 +2793,7 @@ async fn uninstall_leaves_nothing_behind() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_of_invalid_join_requests_does_not_block_a_valid_join() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2843,7 +2843,7 @@ async fn down_observations(node: &Node, host: &str) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_config_peer_fleet_migrates_to_membership() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -2972,7 +2972,7 @@ async fn a_config_peer_fleet_migrates_to_membership() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leaving_member_writes_nothing_after_it_begins_to_leave() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -3043,7 +3043,7 @@ async fn a_leaving_member_writes_nothing_after_it_begins_to_leave() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_switches_between_listening_and_dial_out() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -3090,7 +3090,7 @@ async fn a_member_switches_between_listening_and_dial_out() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_replicates_with_new_members_and_preserves_history_on_upgrade() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let old = PathBuf::from(
@@ -3183,7 +3183,7 @@ async fn previous_release_replicates_with_new_members_and_preserves_history_on_u
         "upgrade lost release history"
     );
     assert_eq!(
-        st3::config::FleetFile::load(&o.state_dir())
+        fractal_daemon::config::FleetFile::load(&o.state_dir())
             .unwrap()
             .unwrap()
             .fleet_id,
@@ -3241,7 +3241,7 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
         )
         .unwrap()
         .query_map([], |row| {
-            Ok(st3::model::ReplicaEnvelope {
+            Ok(fractal_daemon::model::ReplicaEnvelope {
                 writer: row.get(0)?,
                 sequence: row.get(1)?,
                 hash: row.get(2)?,
@@ -3257,11 +3257,11 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
         .unwrap();
     drop(reader);
     let archive = directory.join("baseline-claims.jsonl");
-    let header = st3::backup::create_from_database(&copy, &archive).unwrap();
-    let source = st3::store::Store::open(&copy, "backup-reader").unwrap();
+    let header = fractal_daemon::backup::create_from_database(&copy, &archive).unwrap();
+    let source = fractal_daemon::store::Store::open(&copy, "backup-reader").unwrap();
     let target = directory.join("baseline-restored.db");
-    let report = st3::backup::restore(&archive, &target).unwrap();
-    let restored = st3::store::Store::open(&target, &report.writer).unwrap();
+    let report = fractal_daemon::backup::restore(&archive, &target).unwrap();
+    let restored = fractal_daemon::store::Store::open(&target, &report.writer).unwrap();
     assert!(old_schema <= header.source_schema);
     assert_eq!(report.graph_digest, header.graph_digest);
     assert!(report.projections_match);
@@ -3269,7 +3269,7 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
         .replica_envelopes(
             baseline_envelopes
                 .iter()
-                .map(|envelope| st3::model::ReplicaEnvelopeId {
+                .map(|envelope| fractal_daemon::model::ReplicaEnvelopeId {
                     writer: envelope.writer.clone(),
                     sequence: envelope.sequence,
                     hash: envelope.hash.clone(),
@@ -3300,7 +3300,7 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
 
 #[test]
 fn fleet_workflows_have_no_path_filter() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let workflows = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
@@ -3384,8 +3384,8 @@ esac
     shim
 }
 
-fn configured_file(node: &Node) -> st3::config::FleetFile {
-    st3::config::FleetFile::load(&node.state_dir())
+fn configured_file(node: &Node) -> fractal_daemon::config::FleetFile {
+    fractal_daemon::config::FleetFile::load(&node.state_dir())
         .unwrap()
         .unwrap()
 }
@@ -3407,7 +3407,7 @@ fn member_has_fabric(status: &Value, name: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -3457,7 +3457,7 @@ async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
                 .contains(&format!("FABRIC-PROTOCOL  {protocol}"))
         );
         // Re-adding is a no-op, including a conflicting requested protocol.
-        let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+        let before = fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap();
         node.st_ok(&[
             "fleet",
             "transports",
@@ -3468,7 +3468,7 @@ async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
             "--no-service",
         ]);
         assert_eq!(
-            fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+            fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap(),
             before
         );
     }
@@ -3621,7 +3621,7 @@ async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -3633,7 +3633,7 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
     node.start_worker();
     let registry = root.path().join("fabric-registry");
     fs::write(registry.join("fail-expose-birch-fabric-id"), "refuse").unwrap();
-    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let before = fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap();
     let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
     let absent = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
     assert!(!absent.status.success());
@@ -3642,7 +3642,7 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("exposure failed"));
     assert_eq!(
-        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap(),
         before
     );
     assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
@@ -3652,11 +3652,11 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
     let mut file = configured_file(&node);
     assert_eq!(
         file.fabric_protocol.as_deref(),
-        Some(st3::fleet::transport::default_fabric_protocol(&file.fleet_id).as_str())
+        Some(fractal_daemon::fleet::transport::default_fabric_protocol(&file.fleet_id).as_str())
     );
     file.transports = vec!["fabric".into(), "tailscale".into()];
     file.save(&node.state_dir()).unwrap();
-    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let before = fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap();
     let output = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
     assert!(!output.status.success());
     assert!(
@@ -3664,17 +3664,17 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
             .contains("no remaining configured transport is usable")
     );
     assert_eq!(
-        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap(),
         before
     );
     file.transports = vec!["fabric".into()];
     file.save(&node.state_dir()).unwrap();
-    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let before = fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap();
     let output = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("last transport"));
     assert_eq!(
-        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap(),
         before
     );
     file.transports.push("loopback".into());
@@ -3695,26 +3695,26 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
     file.transports = vec!["loopback".into()];
     file.save(&node.state_dir()).unwrap();
     node.st_ok(&["fleet", "mode", "dial-out", "--no-service"]);
-    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let before = fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap();
     let output = node.st(&["fleet", "transports", "add", "fabric", "--no-service"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires a listening member"));
     assert_eq!(
-        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        fs::read(fractal_daemon::config::FleetFile::path(&node.state_dir())).unwrap(),
         before
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_local_settings_failure_fails_the_worker_and_repair_allows_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "spruce").await;
     let mut b = joined(root.path(), &a, "willow", &[]).await;
     b.wait_listening().await;
-    let path = st3::config::FleetFile::path(&b.state_dir());
+    let path = fractal_daemon::config::FleetFile::path(&b.state_dir());
     let settings = configured_file(&b);
     // This local defect must be visible as a failed worker, rather than leaving it alive
     // forever with endpoint publication silently gone or adding local interval retries.
@@ -3759,7 +3759,7 @@ async fn a_local_settings_failure_fails_the_worker_and_repair_allows_restart() {
 /// Legacy helper ports must be unnecessary after membership advertises native Fabric routes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -3858,7 +3858,7 @@ async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history(
         "--tailscale",
         absent_tailscale.to_str().unwrap(),
     ]);
-    let file = st3::config::FleetFile::load(&b.state_dir())
+    let file = fractal_daemon::config::FleetFile::load(&b.state_dir())
         .unwrap()
         .unwrap();
     assert_eq!(file.fleet_id, fleet_id);
@@ -3904,7 +3904,7 @@ async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history(
     }
     for node in [&a, &b] {
         wait_for_notes(node, &expected, 60, &[&a, &b]).await;
-        let file = st3::config::FleetFile::load(&node.state_dir())
+        let file = fractal_daemon::config::FleetFile::load(&node.state_dir())
             .unwrap()
             .unwrap();
         assert!(!file.legacy_peers);
@@ -3933,7 +3933,7 @@ async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_fabric_transport_works_through_the_worker_alone() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -3979,12 +3979,12 @@ async fn the_fabric_transport_works_through_the_worker_alone() {
     ));
     let shim_b = fabric_shim(root.path(), "b");
     let port = b.port.to_string();
-    let file = st3::config::FleetFile::load(&a.state_dir())
+    let file = fractal_daemon::config::FleetFile::load(&a.state_dir())
         .unwrap()
         .unwrap();
     let route = format!(
         "fabric://a-fabric-id/{}",
-        st3::fleet::transport::default_fabric_protocol(&file.fleet_id)
+        fractal_daemon::fleet::transport::default_fabric_protocol(&file.fleet_id)
     );
     b.st_ok(&[
         "fleet",
@@ -4073,7 +4073,7 @@ async fn the_fabric_transport_works_through_the_worker_alone() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -4151,7 +4151,7 @@ async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() 
 /// but its network accepts no inbound connection. Two servers keep syncing while it sleeps.
 #[tokio::test(flavor = "multi_thread")]
 async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alerts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4334,7 +4334,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
 /// leave the rest to the 30-second quiet window that follows the peer's last inbound exchange.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backlog_of_several_pages_is_fetched_without_waiting_for_the_quiet_window() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     // Pages of 100 envelopes make a backlog of several pages cheap to write and to admit.
@@ -4410,7 +4410,7 @@ async fn a_backlog_of_several_pages_is_fetched_without_waiting_for_the_quiet_win
 
 #[tokio::test(flavor = "multi_thread")]
 async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -4555,7 +4555,7 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
 
 #[tokio::test(flavor = "multi_thread")]
 async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -4768,9 +4768,9 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     // Store::open also initializes projections, so inspect without the daemon's writer.
     node.stop();
     let store =
-        st3::store::Store::open(&node.state_dir().join("claims.sqlite3"), "fixture-watch").unwrap();
+        fractal_daemon::store::Store::open(&node.state_dir().join("claims.sqlite3"), "fixture-watch").unwrap();
     for (kind, id) in [("comment", 801), ("review", 802)] {
-        let subject = st3::github_watch::github_post_subject("fixture/app", kind, id);
+        let subject = fractal_daemon::github_watch::github_post_subject("fixture/app", kind, id);
         assert_eq!(
             store
                 .claims_for(&subject, Some("github.posted"))
@@ -4837,10 +4837,10 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
 /// and the target launches only after receiving the Git workspace and the same native transcript.
 #[tokio::test(flavor = "multi_thread")]
 async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_conversation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::canonical_tempdir();
+    let root = fractal_daemon::test_support::canonical_tempdir();
     struct SeatCleanup {
         pty: PathBuf,
         roots: Vec<PathBuf>,
@@ -4868,8 +4868,8 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         }
     }
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
-    let pty = st_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
-    let node_program = st_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
+    let pty = fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
+    let node_program = fractal_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
     let mut cleanup = SeatCleanup {
         pty: pty.clone(),
         roots: Vec::new(),
@@ -4967,8 +4967,8 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         .unwrap()
         .to_owned();
     let source_sessions =
-        st3::seat_snapshot::sessions(&amber.state_dir().join("drivers"), seat, "omp");
-    let transcript = st3::native_resume::pi_family_transcript(&source_sessions, &native).unwrap();
+        fractal_daemon::seat_snapshot::sessions(&amber.state_dir().join("drivers"), seat, "omp");
+    let transcript = fractal_daemon::native_resume::pi_family_transcript(&source_sessions, &native).unwrap();
     let before = fs::read(&transcript).unwrap();
     assert!(String::from_utf8_lossy(&before).contains("Remember the copper orchard"));
     wait_until("suspension replicates to target", 60, || async {
@@ -5023,9 +5023,9 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     );
     assert_eq!(git(&["rev-parse", "HEAD"]), head);
     let target_sessions =
-        st3::seat_snapshot::sessions(&jade.state_dir().join("drivers"), seat, "omp");
+        fractal_daemon::seat_snapshot::sessions(&jade.state_dir().join("drivers"), seat, "omp");
     let target_transcript =
-        st3::native_resume::pi_family_transcript(&target_sessions, &native).unwrap();
+        fractal_daemon::native_resume::pi_family_transcript(&target_sessions, &native).unwrap();
     assert!(fs::read(&target_transcript).unwrap().starts_with(&before));
     jade.st_ok(&[
         "conversations",
@@ -5090,14 +5090,14 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_TERMINALS_COMPAT_BIN: an st3 build before terminal owner filters"]
 async fn terminal_owner_filters_are_safe_across_mixed_builds() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
     let mut old = Node::new(root.path(), "terminal-legacy");
     old.binary = PathBuf::from(std::env::var("ST3_TERMINALS_COMPAT_BIN").unwrap());
     old.start().await;
-    let current_client = st3_client::Client::unix(old.socket());
+    let current_client = fractal_client::Client::unix(old.socket());
     current_client
         .terminals_list(None, Some(50), false)
         .await
@@ -5113,7 +5113,7 @@ async fn terminal_owner_filters_are_safe_across_mixed_builds() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, st3_client::ClientError::Protocol(message) if message.contains("upgrade the server"))
+        matches!(error, fractal_client::ClientError::Protocol(message) if message.contains("upgrade the server"))
     );
 
     let mut current = Node::new(root.path(), "terminal-current");
@@ -5144,7 +5144,7 @@ async fn terminal_owner_filters_are_safe_across_mixed_builds() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_PROVENANCE_COMPAT_BIN: a pre-provenance build with the current mission format"]
 async fn an_older_daemon_runs_a_provenance_revision_and_reads_its_sidecar_after_upgrade() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let old = PathBuf::from(

@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_store::store::directive_notes::tests_shared_seats::*;
+pub use fractal_store::store::directive_notes::tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_store::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
+pub use fractal_store::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 use super::*;
 use crate::fleet::MemberKey;
 use rusqlite::StatementStatus;
@@ -109,7 +109,7 @@ mission "shared-work" state="ready" {
     let people = |actor: &str| store.directive_notes(actor).unwrap().into_iter().map(|note| note.person).collect::<BTreeSet<_>>();
     assert_eq!(people("agent/note/worker"), BTreeSet::from(["person/avery".into(), "person/alex".into(), "person/blair".into()]));
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h9c768fc19660 owner=st3_missions::store::directive_notes::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET available_to='[\"agent/note/offered\"]' WHERE subject=?1", [&runs[0].steps[0].subject])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hd79e738bcb8f owner=fractal_missions::store::directive_notes::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET available_to='[\"agent/note/offered\"]' WHERE subject=?1", [&runs[0].steps[0].subject])?;
         Ok(())
     }).unwrap().unwrap();
     assert_eq!(people("agent/note/offered"), BTreeSet::from(["person/avery".into()]), "an offer is not a work-for relationship");

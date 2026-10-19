@@ -1,5 +1,5 @@
 //! Screen-scoped inventory subscriptions, reserving all existing conversation and terminal slots.
-use st3_client::{ClientError, CollectionStream};
+use fractal_client::{ClientError, CollectionStream};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Inventory {

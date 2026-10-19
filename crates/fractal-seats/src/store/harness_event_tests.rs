@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use crate::harness_events::Publication;
-use st3_missions::store::harness_event_tests_shared_seats::*;
-use st3_missions::store::harness_event_tests_shared_seats::{SEAT, event, runtime};
+use fractal_missions::store::harness_event_tests_shared_seats::*;
+use fractal_missions::store::harness_event_tests_shared_seats::{SEAT, event, runtime};
 
 
 #[test]

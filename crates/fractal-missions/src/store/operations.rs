@@ -1,7 +1,7 @@
 //! The part of `store::operations` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_delivery::store::operations::*;
+pub use fractal_delivery::store::operations::*;
 
 /// The generated fleet fixture, a `Store` method before the cut.
 #[cfg(any(test, feature = "test-support"))]
@@ -45,7 +45,7 @@ impl OperationsFixtureStore for Store {
             .unwrap();
         let at = now_ms().to_string();
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h978e990d304e owner=st3_missions::store::operations TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<249999)
+            /* sqlite-large-value: allow-for-now lv-h58850df68114 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<249999)
              INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
              SELECT 'fixture-heartbeat-' || n,?1,'agent/example/observer','harness.observed',
                     'fixture',?2,'[]',?3 FROM seq",
@@ -60,12 +60,12 @@ impl OperationsFixtureStore for Store {
             } else {
                 "terminal"
             };
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h2ded5dbbb63e owner=st3_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs SELECT ?1,mission_id,initial_revision,?2,root_revision,?1,NULL,workspace,requester,inputs,mode,?3,?4,?5,?5 FROM mission_runs WHERE id=?6",
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hcb67b6580e72 owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs SELECT ?1,mission_id,initial_revision,?2,root_revision,?1,NULL,workspace,requester,inputs,mode,?3,?4,?5,?5 FROM mission_runs WHERE id=?6",
                 params![id,generation,status,phase,at,run.id]).unwrap();
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-hd442988b9e57 owner=st3_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations SELECT ?1,?2,revision,NULL,?3,actor,reason,?4,?4 FROM run_generations WHERE id=?5",
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h5574f8672a86 owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations SELECT ?1,?2,revision,NULL,?3,actor,reason,?4,?4 FROM run_generations WHERE id=?5",
                 params![generation,id,status,at,run.generation.trim_start_matches("run-generation/")]).unwrap();
             let step = format!("step-run/{generation}/build");
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h6c7073fefca7 owner=st3_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms)
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h3566d793378e owner=fractal_missions::store::operations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms)
                 SELECT ?1,?2,?3,step_path,definition_hash,?4,attempt,'agent/example/builder',available_to,agentless,title,goals,?5,?5 FROM step_runs WHERE subject=?6",
                 params![step,id,generation,status,at,run.steps[0].subject]).unwrap();
             let reason = if i % 8 == 2 {
@@ -77,7 +77,7 @@ impl OperationsFixtureStore for Store {
                 (format!("mission-run/{id}"), "mission-run.state"),
                 (step, "step-run.state"),
             ] {
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-h39722d143261 owner=st3_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?2,?3,?4,'fixture',?5,'[]',?6)",
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hbf4b8385d9a3 owner=fractal_missions::store::operations TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?2,?3,?4,'fixture',?5,'[]',?6)",
                     params![format!("fixture-{kind}-{i}"),batch,subject,kind,json!({"fields":{"status":status,"phase":phase,"reason":reason}}).to_string(),at]).unwrap();
             }
         }

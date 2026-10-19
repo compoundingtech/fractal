@@ -142,7 +142,7 @@ fn record_rank_changed(connection: &Connection, rowid: i64, previous_frontier: i
                    AND legacy_position.store_index<claim.store_index))
          FROM replica_records inserted JOIN claims claim ON claim.id=inserted.claim_id
          WHERE inserted.rowid=?1"
-    )?.query_row(/* sqlite-large-value: allow-for-now lv-h6efe33069b7b owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ params![rowid, previous_frontier], |row| row.get(0))
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h4e75eda80b1d owner=fractal_store::store::observer_actuals TODO=trace-statement-and-value-representation */ params![rowid, previous_frontier], |row| row.get(0))
 }
 
 impl WriterObserver for Actuals {
@@ -246,8 +246,8 @@ impl WriterObserver for Actuals {
                     "replica_records" => "SELECT claims.subject FROM replica_records LEFT JOIN claims ON claims.id=replica_records.claim_id WHERE replica_records.rowid=?1 AND replica_records.claim_id IS NOT NULL",
                     _ => "SELECT subject FROM claims WHERE id=(SELECT id FROM projection_digest_repaired_claims WHERE rowid=?1)",
                 };
-                match connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h856fd3ad7ada owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql).and_then(|mut statement|
-                    statement.query_row(/* sqlite-large-value: allow-for-now lv-h76495336e10a owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, String>(0)).optional()) {
+                match connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf3508dcc87e3 owner=fractal_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql).and_then(|mut statement|
+                    statement.query_row(/* sqlite-large-value: allow-for-now lv-h2e7a86d13af7 owner=fractal_store::store::observer_actuals TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, String>(0)).optional()) {
                     Ok(Some(subject)) => {
                         if table == "replica_records" {
                             if !state.entries.iter().any(|(key, _, _)| key == &subject) {

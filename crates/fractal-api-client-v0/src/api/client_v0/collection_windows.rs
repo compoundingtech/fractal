@@ -8,8 +8,8 @@ use crate::PublishedViewsStore;
 use super::*;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
-pub use st3_api_core::api::client_v0::collection_windows::*;
-pub use st3_api_core::api::client_v0::collection_windows::{COLLECTIONS, Prepared, ReadFence, Windows};
+pub use fractal_api_core::api::client_v0::collection_windows::*;
+pub use fractal_api_core::api::client_v0::collection_windows::{COLLECTIONS, Prepared, ReadFence, Windows};
 
 #[cfg(test)]
 mod tests {
@@ -1091,7 +1091,7 @@ mod tests {
     #[test]
     fn mission_attention_invalidation_covers_projection_claim_families() {
         for collection in ["missions", "attention"] {
-            for kind in st3_schema::registry().claims.keys() {
+            for kind in fractal_schema::registry().claims.keys() {
                 let telemetry = matches!(kind.as_str(),
                     "daemon.diagnostic" | "transport.observed" | "workspace.observed")
                     || (collection == "missions" && matches!(kind.as_str(),

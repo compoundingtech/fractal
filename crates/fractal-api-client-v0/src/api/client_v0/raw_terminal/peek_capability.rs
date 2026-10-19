@@ -3,7 +3,7 @@
 use super::*;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
-pub use st3_api_core::api::client_v0::raw_terminal::peek_capability::*;
+pub use fractal_api_core::api::client_v0::raw_terminal::peek_capability::*;
 
 const MAX_CAPABILITIES: usize = 4096;
 

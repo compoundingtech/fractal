@@ -5,8 +5,8 @@ use super::*;
 use crate::model::DoctorCheck;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch;
-pub use st3_store::store::mailbox_wakes::*;
-pub use st3_store::store::mailbox_wakes::{Dependency, Registry, Subscription, Wakes};
+pub use fractal_store::store::mailbox_wakes::*;
+pub use fractal_store::store::mailbox_wakes::{Dependency, Registry, Subscription, Wakes};
 
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -164,7 +164,7 @@ impl MailboxWakesStore for Store {
                 "SELECT COALESCE((SELECT MAX(store_index) FROM claims),0),
                     COALESCE((SELECT MAX(id) FROM local_observations),0)",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h0718307716d5 owner=st3_delivery::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-hb895da732cc2 owner=fractal_delivery::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?)
     }
 
     fn mailbox_wake_batch(
@@ -225,8 +225,8 @@ impl MailboxWakesStore for Store {
 mod tests {
     use super::*;
     use crate::mailbox::Fence;
-    use st3_store::store::mailbox_wakes_tests_shared_delivery::*;
-    use st3_store::store::mailbox_wakes_tests_shared_delivery::{sent};
+    use fractal_store::store::mailbox_wakes_tests_shared_delivery::*;
+    use fractal_store::store::mailbox_wakes_tests_shared_delivery::{sent};
 
     #[tokio::test]
     async fn unrelated_writes_do_not_wake_a_stream_and_dependencies_are_released() {

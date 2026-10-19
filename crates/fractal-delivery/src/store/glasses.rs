@@ -1,9 +1,9 @@
 //! The part of `store::glasses` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-use st3_schema::glasses::MAX_GLASSES;
-pub use st3_store::store::glasses::*;
-pub use st3_store::store::glasses::{glasses_at, prepare, resource};
+use fractal_schema::glasses::MAX_GLASSES;
+pub use fractal_store::store::glasses::*;
+pub use fractal_store::store::glasses::{glasses_at, prepare, resource};
 
 pub trait GlassesStore {
     fn glasses_changed(&self, after: u64, through: u64) -> Result<bool>;
@@ -28,8 +28,8 @@ mod tests {
     use super::super::tests::{exchange_from, exchange_of, receive_and_project};
     use super::*;
     use crate::model::ReplicationInventory;
-    use st3_store::store::glasses_tests_shared_delivery::*;
-    use st3_store::store::glasses_tests_shared_delivery::{history_oracle, input, sync};
+    use fractal_store::store::glasses_tests_shared_delivery::*;
+    use fractal_store::store::glasses_tests_shared_delivery::{history_oracle, input, sync};
 
     #[test]
     fn historical_glass_snapshot_survives_many_newer_heads() {
@@ -384,7 +384,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            st3_store::store::validate_replicated_claim(&connection, &batch, &forged)
+            fractal_store::store::validate_replicated_claim(&connection, &batch, &forged)
                 .err()
                 .unwrap()
                 .code,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { St3Client, type CollectionFrame } from '@smalltalk/st3-client'
+import { FractalClient, type CollectionFrame } from '@fractal/client'
 import { decodeSlice } from '../scripts/decode.ts'
 import { buildWorld } from '../src/kit/world.ts'
 import { genericVariants } from '../src/kit/variants.ts'
@@ -47,7 +47,7 @@ describe.each(definitions)('$id', (definition) => {
     const world = buildWorld(definition, genericVariants, ANCHOR_MS)
     const clock = manualClock(world.now)
     const replay = createReplay(world, { clock })
-    const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
+    const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
     const cause = definition.selected?.sync
     const thread = world.slices.conversation.state.threads[0]!
     try {
@@ -159,7 +159,7 @@ it('withholds requested snapshots, then releases progress-absent without invente
     const replay = createReplay(world, { clock })
     const frames: CollectionFrame[] = []
     try {
-      const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
+      const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
       const stream = await client.collectionStream({ socket: replay.socket, onFrame: (frame) => frames.push(frame) })
       stream.subscribe('agents', 'agents', 200)
       clock.advance(0)
@@ -176,7 +176,7 @@ it('holds connecting socket opens without reporting transport failure', async ()
   const world = buildWorld(syntheticFleetMidRefactor, genericVariants, ANCHOR_MS, { sync: 'connecting' })
   const clock = manualClock(world.now)
   const replay = createReplay(world, { clock })
-  const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
+  const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
   const frames: CollectionFrame[] = []
   let ended = false
   try {

@@ -15,7 +15,7 @@ fleet_compat() {
   export FRACTAL_COMPAT_BIN="$baseline" ST3_COMPAT_BIN="$baseline"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   test -x "${FRACTAL_COMPAT_BIN-${ST3_COMPAT_BIN-}}" || return
-  cargo test -p st3 --locked --test integration -- --ignored --exact \
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade 2>&1 | tee "$logs/compat-result.log" || return
   grep -q "test result: ok. 1 passed" "$logs/compat-result.log"
 }
@@ -31,21 +31,21 @@ clippy_and_codegen() {
   cargo clippy --workspace --all-targets --locked --message-format=json \
     | tee "$logs/clippy-workspace.jsonl" | python3 scripts/clippy_ratchet.py --render || return
   # Workspace consumers enable drawing; check the standalone model separately.
-  cargo clippy -p st3-conversation-ui --no-default-features --all-targets --locked --message-format=json \
+  cargo clippy -p fractal-conversation-ui --no-default-features --all-targets --locked --message-format=json \
     | tee "$logs/clippy-model.jsonl" | python3 scripts/clippy_ratchet.py --render || return
   local base_args=()
   if [[ -n "${CLIPPY_BASE_SHA:-}" && "$CLIPPY_BASE_SHA" != 0000000000000000000000000000000000000000 ]]; then
     base_args=(--base-ref "$CLIPPY_BASE_SHA")
   fi
   python3 scripts/clippy_ratchet.py --logs "$logs" "${base_args[@]}" || return
-  cargo run --locked -p st3-client-codegen -- --check
+  cargo run --locked -p fractal-client-codegen -- --check
 }
 
 conversation_model() {
   # A workspace build unifies stui/st's ratatui feature, which would hide model dependencies.
-  cargo test -p st3-conversation-ui --no-default-features --locked || return
+  cargo test -p fractal-conversation-ui --no-default-features --locked || return
   local dependencies
-  dependencies=$(cargo tree -p st3-conversation-ui --no-default-features --locked -e normal --prefix none) || return
+  dependencies=$(cargo tree -p fractal-conversation-ui --no-default-features --locked -e normal --prefix none) || return
   if [[ "$dependencies" == *ratatui* ]]; then
     echo "the standalone conversation model must not depend on ratatui" >&2
     return 1

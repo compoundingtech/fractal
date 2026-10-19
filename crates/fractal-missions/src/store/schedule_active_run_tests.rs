@@ -1,15 +1,15 @@
 #![allow(unused_imports)]
 use super::*;
 use rusqlite::StatementStatus;
-use st3_store::store::schedule_active_run_tests_shared_missions::*;
-use st3_store::store::schedule_active_run_tests_shared_missions::{LEGACY_QUERY, insert_claim, insert_run};
+use fractal_store::store::schedule_active_run_tests_shared_missions::*;
+use fractal_store::store::schedule_active_run_tests_shared_missions::{LEGACY_QUERY, insert_claim, insert_run};
 
 
 fn assert_result(store: &Store, subject: &str, expected: bool) {
     let legacy: bool = store
         .readers
         .get()
-        .query_row(/* sqlite-large-value: allow-for-now lv-h9d2134abbe5b owner=st3_missions::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ LEGACY_QUERY, [subject], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h144bb3d83c7d owner=fractal_missions::store::schedule_active_run_tests TODO=trace-statement-and-value-representation */ LEGACY_QUERY, [subject], |row| row.get(0))
         .unwrap();
     assert_eq!(legacy, expected, "legacy fixture: {subject}");
     assert_eq!(
@@ -212,7 +212,7 @@ fn schedule_active_run_seek_preserves_status_only_and_historical_started_semanti
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h98910b87bdc0 owner=st3_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='failed' WHERE id='older'",
+            /* sqlite-large-value: allow-for-now lv-hab7aa40ba425 owner=fractal_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='failed' WHERE id='older'",
             [],
         )
         .unwrap();
@@ -221,7 +221,7 @@ fn schedule_active_run_seek_preserves_status_only_and_historical_started_semanti
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h7fcf9d7713f1 owner=st3_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running',phase='terminal' WHERE id='older'",
+            /* sqlite-large-value: allow-for-now lv-h94c71c910970 owner=fractal_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running',phase='terminal' WHERE id='older'",
             [],
         )
         .unwrap();
@@ -275,19 +275,19 @@ fn schedule_active_run_seek_keeps_claim_and_run_at_one_reader_cut() {
                 // Both complete cuts are negative; either mixed claim/run cut is positive.
                 transaction
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-h18529f4e856e owner=st3_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running' WHERE id='cut-old'",
+                        /* sqlite-large-value: allow-for-now lv-h1c8ff1061589 owner=fractal_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running' WHERE id='cut-old'",
                         [],
                     )
                     .unwrap();
                 transaction
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-hdfc8dc15850a owner=st3_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='failed' WHERE id='cut-new'",
+                        /* sqlite-large-value: allow-for-now lv-h9e933dacf5e8 owner=fractal_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='failed' WHERE id='cut-new'",
                         [],
                     )
                     .unwrap();
                 transaction
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-ha328278a6146 owner=st3_missions::store::schedule_active_run_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='cut-started'",
+                        /* sqlite-large-value: allow-for-now lv-hb580223b7856 owner=fractal_missions::store::schedule_active_run_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='cut-started'",
                         [json!({"fields":{"mission_run":"mission-run/cut-new"}}).to_string()],
                     )
                     .unwrap();
@@ -306,7 +306,7 @@ fn schedule_active_run_seek_keeps_claim_and_run_at_one_reader_cut() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h355a3915e7fd owner=st3_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running' WHERE id='cut-new'",
+            /* sqlite-large-value: allow-for-now lv-h144dd83f3e11 owner=fractal_missions::store::schedule_active_run_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running' WHERE id='cut-new'",
             [],
         )
         .unwrap();

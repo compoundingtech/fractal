@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use serde_json::{Value, json};
-use st2_resource_protocol::{ObservationResult, SnapshotDigest};
-use st2_resource_wasip2::{
+use fractal_resource_protocol::{ObservationResult, SnapshotDigest};
+use fractal_resource_wasip2::{
     CapabilityContext, CapabilityModule, Executor, InterruptionReason, InvocationControl,
     InvocationStore, ObservationRequest, ObserveError, RuntimeConfig,
 };

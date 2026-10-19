@@ -13,7 +13,7 @@ impl Drop for Daemon {
 }
 
 fn command(root: &Path, node: &str, socket: &Path) -> std::process::Command {
-    let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
     command
         .env_clear()
         .env("HOME", root.join("home"))
@@ -49,7 +49,7 @@ fn start(root: &Path, node: &str, socket: &Path) -> Daemon {
         .enable_all()
         .build()
         .unwrap();
-    let client = st3::client::Client::unix(socket.to_path_buf());
+    let client = fractal_daemon::client::Client::unix(socket.to_path_buf());
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(
@@ -72,7 +72,7 @@ fn start(root: &Path, node: &str, socket: &Path) -> Daemon {
 
 #[test]
 fn daemon_cli_retains_same_state_identity_and_rejects_a_second_socket_owner() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();

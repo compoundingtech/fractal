@@ -13,18 +13,18 @@ pub use ui::checklist;
 pub use version::display_version;
 
 #[cfg(test)]
-use st3::EvidenceStore;
+use fractal_daemon::EvidenceStore;
 #[cfg(test)]
-use st3::MissionsStore;
-use st3_feed as feed;
+use fractal_daemon::MissionsStore;
+use fractal_feed as feed;
 #[cfg(test)]
-use st3_feed::terminal_screen_fence;
-use st3_feed::{action_pair, cache, model, terminal_fence};
+use fractal_feed::terminal_screen_fence;
+use fractal_feed::{action_pair, cache, model, terminal_fence};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
-use st3_client::{
+use fractal_client::{
     Client, ClientError, ErrorCode, Fence, LaunchVariantParameters, PersonStepParameters, Resource,
     TargetParameters, TerminalInputMode, TerminalInputParameters,
 };
@@ -35,7 +35,7 @@ use std::{
     time::Duration,
 };
 
-fn mission_label(mission: &st3_client::Mission) -> String {
+fn mission_label(mission: &fractal_client::Mission) -> String {
     let slug = mission.title.rsplit('/').next().unwrap_or(&mission.title);
     slug.split('-')
         .map(|word| match word.to_ascii_lowercase().as_str() {
@@ -56,7 +56,7 @@ fn mission_label(mission: &st3_client::Mission) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-fn mission_display_label(mission: &st3_client::Mission) -> String {
+fn mission_display_label(mission: &fractal_client::Mission) -> String {
     let path = mission
         .header
         .id
@@ -119,7 +119,7 @@ fn configured_person() -> Result<Option<String>> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
     base.map(|base| {
         person_from_config(
-            &st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
+            &fractal_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
                 .join("config.toml"),
         )
     })
@@ -209,7 +209,7 @@ fn watch_terminal_hangup() {
         }
     });
 }
-fn agent_label(agent: &st3_client::Agent) -> String {
+fn agent_label(agent: &fractal_client::Agent) -> String {
     let slug = agent.name.rsplit('/').next().unwrap_or(&agent.name);
     // `st agents new NAME` names a seat HOST.NAME; the host shows beside it, so the label is
     // NAME ("harbor.image-sorter" reads as Image Sorter).
@@ -269,10 +269,10 @@ fn key_input(key: KeyEvent) -> Option<String> {
     }
 }
 
-fn terminal_run_style(run: &st3_client::TerminalRun) -> Style {
-    let color = |color: &st3_client::TerminalColor| match color {
-        st3_client::TerminalColor::Palette(index) => Some(Color::Indexed(*index)),
-        st3_client::TerminalColor::Rgb(hex) => {
+fn terminal_run_style(run: &fractal_client::TerminalRun) -> Style {
+    let color = |color: &fractal_client::TerminalColor| match color {
+        fractal_client::TerminalColor::Palette(index) => Some(Color::Indexed(*index)),
+        fractal_client::TerminalColor::Rgb(hex) => {
             let value = u32::from_str_radix(hex.strip_prefix('#')?, 16).ok()?;
             Some(Color::Rgb(
                 (value >> 16) as u8,
@@ -308,7 +308,7 @@ async fn attention_action(
     client: &Client,
     actor: &str,
     attention_id: &str,
-    seen: Option<&st3_client::Attention>,
+    seen: Option<&fractal_client::Attention>,
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
@@ -324,8 +324,8 @@ async fn attention_action(
 async fn act_on_attention(
     client: &Client,
     actor: &str,
-    current: std::result::Result<st3_client::Envelope<Resource>, ClientError>,
-    seen: Option<&st3_client::Attention>,
+    current: std::result::Result<fractal_client::Envelope<Resource>, ClientError>,
+    seen: Option<&fractal_client::Attention>,
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
@@ -392,7 +392,7 @@ async fn current_card(
     actor: &str,
     source: &str,
     kind: &str,
-) -> Result<Option<st3_client::Envelope<Resource>>> {
+) -> Result<Option<fractal_client::Envelope<Resource>>> {
     let mut cursor = None;
     loop {
         let page = client
@@ -404,7 +404,7 @@ async fn current_card(
                     && card.person_id == actor && card.state != "resolved")
         });
         if let Some(card) = card {
-            return Ok(Some(st3_client::Envelope {
+            return Ok(Some(fractal_client::Envelope {
                 api_version: page.api_version,
                 request_id: page.request_id,
                 snapshot: page.snapshot,
@@ -448,10 +448,10 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
 /// the request takes them. Words alone on a structured request were refused (`answer-required`),
 /// so an answer typed into a custom choice left the item on Home (Nathan, 2026-10-03).
 fn person_answer(
-    request: Option<&st3_client::StructuredRequest>,
+    request: Option<&fractal_client::StructuredRequest>,
     chosen: Option<String>,
     words: &str,
-) -> Result<Option<st3_client::PersonAnswerInput>> {
+) -> Result<Option<fractal_client::PersonAnswerInput>> {
     if let Some(id) = chosen {
         // Requesting changes carries the changes, in the person's words.
         let changes = request.is_some_and(|request| {
@@ -459,7 +459,7 @@ fn person_answer(
                 answer.id == id && answer.outcome.as_deref() == Some("request_changes")
             })
         });
-        return Ok(Some(st3_client::PersonAnswerInput {
+        return Ok(Some(fractal_client::PersonAnswerInput {
             id: Some(id),
             text: changes.then(|| words.trim().to_owned()),
         }));
@@ -469,15 +469,15 @@ fn person_answer(
     };
     let text = Some(words.trim().to_owned());
     match request.entry_type.as_str() {
-        "feedback" => Ok(Some(st3_client::PersonAnswerInput { id: None, text })),
-        "choice" if request.custom => Ok(Some(st3_client::PersonAnswerInput { id: None, text })),
+        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
+        "choice" if request.custom => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
         // A decision takes words as its request for changes, when it offers one.
         _ => match request
             .answers
             .iter()
             .find(|answer| answer.outcome.as_deref() == Some("request_changes"))
         {
-            Some(changes) => Ok(Some(st3_client::PersonAnswerInput {
+            Some(changes) => Ok(Some(fractal_client::PersonAnswerInput {
                 id: Some(changes.id.clone()),
                 text,
             })),
@@ -490,7 +490,7 @@ fn person_answer(
 async fn act_on_card(
     client: &Client,
     actor: &str,
-    current: st3_client::Envelope<Resource>,
+    current: fractal_client::Envelope<Resource>,
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
@@ -540,7 +540,7 @@ async fn act_on_card(
         "custom.reply" => {
             let text = reason.ok_or_else(|| anyhow::anyhow!("enter a reply"))?;
             let fields = custom_form_input(attention.custom_form.as_ref(), &text)?;
-            let mut parameters: st3_client::CustomReplyParameters = serde_json::from_value({
+            let mut parameters: fractal_client::CustomReplyParameters = serde_json::from_value({
                 let mut p = attention.action_parameters["custom.reply"].clone();
                 p["fields"] = serde_json::json!({});
                 p
@@ -575,7 +575,7 @@ async fn act_on_card(
                     id,
                     idem,
                     fence,
-                    st3_client::PromptRespondParameters {
+                    fractal_client::PromptRespondParameters {
                         target_id: source,
                         episode: attention.episode.clone(),
                         answer,
@@ -918,7 +918,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return Ok(());
     }
     let open_timing = ui::open_timing::Trace::from_env(process_started);
-    st3_client::set_client_name(version::client_name());
+    fractal_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
     if let Some(path) = std::env::var_os("STUI_TIMING_LOG") {
         install_timing_log(path.into());
@@ -981,7 +981,7 @@ pub fn run(mut options: Args) -> Result<()> {
             )
         }
         None => {
-            let path = st3_client::discover_unix_endpoint(
+            let path = fractal_client::discover_unix_endpoint(
                 options
                     .endpoint
                     .or_else(|| std::env::var_os("ST3_ENDPOINT").map(PathBuf::from)),
@@ -1074,7 +1074,7 @@ mod tests {
         let request = |kind: &str,
                        custom: bool,
                        answers: serde_json::Value|
-         -> st3_client::StructuredRequest {
+         -> fractal_client::StructuredRequest {
             serde_json::from_value(serde_json::json!({
                 "version": 1, "type": kind, "question": "Ship it?", "why_person": "You own it.",
                 "custom": custom, "answers": answers
@@ -1151,9 +1151,9 @@ mod tests {
     }
     #[test]
     fn regression_mission_labels_are_unique() {
-        let first: st3_client::Resource = serde_json::from_str(r#"{"kind":"mission","id":"mission/a/issue-triage","revision":"a","updated_at":"2026-09-25T08:00:00Z","title":"Issue Triage","state":"running","mission_revision":"a"}"#).unwrap();
-        let second: st3_client::Resource = serde_json::from_str(r#"{"kind":"mission","id":"mission/b/issue-triage","revision":"b","updated_at":"2026-09-25T08:00:00Z","title":"Issue Triage","state":"running","mission_revision":"b"}"#).unwrap();
-        let (st3_client::Resource::Mission(a), st3_client::Resource::Mission(b)) = (first, second)
+        let first: fractal_client::Resource = serde_json::from_str(r#"{"kind":"mission","id":"mission/a/issue-triage","revision":"a","updated_at":"2026-09-25T08:00:00Z","title":"Issue Triage","state":"running","mission_revision":"a"}"#).unwrap();
+        let second: fractal_client::Resource = serde_json::from_str(r#"{"kind":"mission","id":"mission/b/issue-triage","revision":"b","updated_at":"2026-09-25T08:00:00Z","title":"Issue Triage","state":"running","mission_revision":"b"}"#).unwrap();
+        let (fractal_client::Resource::Mission(a), fractal_client::Resource::Mission(b)) = (first, second)
         else {
             panic!()
         };
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn terminal_fence_uses_owner_sequence_for_relayed_screen() {
-        let mut screen: st3_client::Envelope<st3_client::TerminalScreen> = serde_json::from_str(
+        let mut screen: fractal_client::Envelope<fractal_client::TerminalScreen> = serde_json::from_str(
             include_str!("../../../docs/st3/client-v0/fixtures/terminal-screen.json"),
         )
         .unwrap();
@@ -1243,13 +1243,13 @@ mod tests {
 
     #[test]
     fn omp_agent_label_names_the_seat_and_driver() {
-        let agent: st3_client::Agent = serde_json::from_str(r#"{"kind":"agent","id":"agent/example/pty-rust/omp","revision":"one","updated_at":"2026-09-25T08:00:00Z","name":"fleet/pty-rust/omp","state":"running","reachability":"local","runtime_ids":[],"under":[]}"#).unwrap();
+        let agent: fractal_client::Agent = serde_json::from_str(r#"{"kind":"agent","id":"agent/example/pty-rust/omp","revision":"one","updated_at":"2026-09-25T08:00:00Z","name":"fleet/pty-rust/omp","state":"running","reachability":"local","runtime_ids":[],"under":[]}"#).unwrap();
         assert_eq!(agent_label(&agent), "PTY Rust · OMP");
     }
 
     #[test]
     fn a_seat_named_after_its_host_is_labelled_without_the_host() {
-        let agent = |name: &str, host: &str| -> st3_client::Agent {
+        let agent = |name: &str, host: &str| -> fractal_client::Agent {
             serde_json::from_value(serde_json::json!({"kind":"agent","id":format!("agent/{name}"),"revision":"one","updated_at":"2026-10-04T08:00:00Z","name":name,"state":"running","reachability":"local","runtime_ids":[],"under":[],"host_id":host})).unwrap()
         };
         assert_eq!(
@@ -1267,17 +1267,17 @@ mod tests {
     /// A runtime that starts nothing: the gate in these tests waits only on a person.
     struct NoRuntime;
 
-    impl st3::reconcile::RuntimeControl for NoRuntime {
-        fn snapshot_ptys(&self) -> anyhow::Result<Vec<st3::reconcile::RuntimeObservation>> {
+    impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
+        fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
             Ok(Vec::new())
         }
         fn observe_exec(
             &self,
             _: &str,
-        ) -> anyhow::Result<Option<st3::reconcile::RuntimeObservation>> {
+        ) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
             Ok(None)
         }
-        fn start(&self, _: &st3::model::MemberSpec) -> anyhow::Result<()> {
+        fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
             Ok(())
         }
         fn stop(&self, _: &str, _: bool, _: Option<&str>) -> anyhow::Result<()> {
@@ -1303,12 +1303,12 @@ mod tests {
     /// st in this process, running a release whose one step waits on person/avery's approval.
     struct WaitingGate {
         _root: tempfile::TempDir,
-        store: Arc<st3::store::Store>,
-        reconciler: st3::reconcile::Reconciler<NoRuntime>,
+        store: Arc<fractal_daemon::store::Store>,
+        reconciler: fractal_daemon::reconcile::Reconciler<NoRuntime>,
         client: Client,
         step: String,
         server: tokio::task::JoinHandle<()>,
-        state: st3::api::AppState,
+        state: fractal_daemon::api::AppState,
         socket: std::path::PathBuf,
     }
 
@@ -1339,12 +1339,12 @@ mission "release" state="ready" {
             let root = tempfile::tempdir().unwrap();
             let node = "stui-gate";
             let store =
-                Arc::new(st3::store::Store::open(&root.path().join("graph.db"), node).unwrap());
-            let intent = st3::graph::parse_intent(source, node).unwrap();
+                Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), node).unwrap());
+            let intent = fractal_daemon::graph::parse_intent(source, node).unwrap();
             let planned = store
                 .mission(
                     &intent,
-                    st3::model::IntentInput {
+                    fractal_daemon::model::IntentInput {
                         kdl: source.into(),
                         source_name: None,
                     },
@@ -1354,7 +1354,7 @@ mission "release" state="ready" {
                 .apply(&intent, &planned.subject_tokens, "release")
                 .unwrap();
             let run = store
-                .create_mission_run(&st3::model::MissionRunRequest {
+                .create_mission_run(&fractal_daemon::model::MissionRunRequest {
                     mission: "release".into(),
                     revision: None,
                     workspace: "/tmp".into(),
@@ -1364,7 +1364,7 @@ mission "release" state="ready" {
                     idempotency_key: "release-run".into(),
                 })
                 .unwrap();
-            let state = st3::api::AppState {
+            let state = fractal_daemon::api::AppState {
                 owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
@@ -1377,13 +1377,13 @@ mission "release" state="ready" {
                 configured_peers: vec![],
                 client_relay: None,
                 native_session_home: None,
-                planner_default: st3::model::PlannerSpec::default(),
+                planner_default: fractal_daemon::model::PlannerSpec::default(),
             };
             let socket = root.path().join("st3.sock");
             let server_socket = socket.clone();
             let served_state = state.clone();
             let server = tokio::spawn(async move {
-                st3::api::serve_unix(&server_socket, st3::api::router(served_state))
+                fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(served_state))
                     .await
                     .unwrap();
             });
@@ -1394,7 +1394,7 @@ mission "release" state="ready" {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             Self {
-                reconciler: st3::reconcile::Reconciler::new(
+                reconciler: fractal_daemon::reconcile::Reconciler::new(
                     store.clone(),
                     Arc::new(NoRuntime),
                     node.into(),
@@ -1415,12 +1415,12 @@ mission "release" state="ready" {
             let _ = (&mut self.server).await;
             std::fs::remove_file(&self.socket).unwrap();
             self.store = Arc::new(
-                st3::store::Store::open(&self._root.path().join("graph.db"), "stui-gate").unwrap(),
+                fractal_daemon::store::Store::open(&self._root.path().join("graph.db"), "stui-gate").unwrap(),
             );
             self.state.store = self.store.clone();
             self.state.notify = Arc::new(tokio::sync::Notify::new());
             self.state.event_notify = tokio::sync::watch::channel(0_u64).0;
-            self.reconciler = st3::reconcile::Reconciler::new(
+            self.reconciler = fractal_daemon::reconcile::Reconciler::new(
                 self.store.clone(),
                 Arc::new(NoRuntime),
                 "stui-gate".into(),
@@ -1429,7 +1429,7 @@ mission "release" state="ready" {
             let state = self.state.clone();
             let socket = self.socket.clone();
             self.server = tokio::spawn(async move {
-                st3::api::serve_unix(&socket, st3::api::router(state))
+                fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state))
                     .await
                     .unwrap();
             });
@@ -1465,7 +1465,7 @@ mission "release" state="ready" {
         }
 
         /// The person's card for the gate, as stui lists it.
-        async fn card(&self) -> Option<st3_client::Attention> {
+        async fn card(&self) -> Option<fractal_client::Attention> {
             self.client
                 .attention_list(None, Some(50), false)
                 .await
@@ -1512,10 +1512,10 @@ mission "release" state="ready" {
                         snapshot_id: snapshot,
                         ..Fence::default()
                     },
-                    st3_client::LaunchCreateParameters {
+                    fractal_client::LaunchCreateParameters {
                         title: "Copper launch".into(),
                         request: "Prepare the copper proof".into(),
-                        target: st3_client::LaunchTarget::NewMission {
+                        target: fractal_client::LaunchTarget::NewMission {
                             mission_id: "mission/example/copper".into(),
                             workspace: gate._root.path().display().to_string(),
                         },
@@ -1527,9 +1527,9 @@ mission "release" state="ready" {
                 .await
                 .unwrap();
             let session = gate.store.planning_sessions(true).unwrap().pop().unwrap();
-            let transport = st3::client::Client::unix_as(&gate.socket, "person/avery").unwrap();
+            let transport = fractal_daemon::client::Client::unix_as(&gate.socket, "person/avery").unwrap();
             for variant in ["default", "alternate"] {
-                let _: serde_json::Value = transport.post(&format!("/v1/launches/{}/variants/{variant}/submit", session.id), &st3::model::PlanningCandidateSubmitRequest {
+                let _: serde_json::Value = transport.post(&format!("/v1/launches/{}/variants/{variant}/submit", session.id), &fractal_daemon::model::PlanningCandidateSubmitRequest {
                     actor: session.planner.clone(), markdown: b"Copper proof".to_vec(),
                     kdl: b"version 2\nmission \"example/copper\" state=\"ready\" { goal \"Record copper proof.\"; step \"proof\" { agentless } }\n".to_vec(), idempotency_key: format!("ui-submit-{variant}"),
                 }).await.unwrap();
@@ -1704,7 +1704,7 @@ mission "release" state="ready" {
                 .work_action(
                     &gate.step,
                     action,
-                    &st3::model::WorkRequest {
+                    &fractal_daemon::model::WorkRequest {
                         wait_ms: None,
                         actor: Some(worker.clone()),
                         incarnation: Some("worker-one".into()),
@@ -1893,15 +1893,15 @@ fn install_timing_log(path: PathBuf) {
     // process's clock (a runner's key writes, a recipient's record).
     let _ = writeln!(file, "{}", timing_start_line(std::time::SystemTime::now()));
     let file = std::sync::Mutex::new(file);
-    st3_client::set_observer(move |observation| {
+    fractal_client::set_observer(move |observation| {
         let at_ms = started.elapsed().as_millis() as u64;
         let line = match observation {
-            st3_client::Observation::Request { method, route, outcome, status, took } => serde_json::json!({
+            fractal_client::Observation::Request { method, route, outcome, status, took } => serde_json::json!({
                 "at_ms": at_ms, "type": "request", "method": method, "route": route,
                 "outcome": format!("{outcome:?}"), "status": status,
                 "took_ms": took.as_secs_f64() * 1000.0,
             }),
-            st3_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
+            fractal_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
                 "at_ms": at_ms, "type": "frame", "id": id, "kind": kind, "bytes": bytes,
                 "since_subscribe_ms": since_subscribe.map(|d| d.as_secs_f64() * 1000.0),
             }),

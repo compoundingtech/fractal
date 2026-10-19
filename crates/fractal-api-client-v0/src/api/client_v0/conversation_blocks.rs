@@ -6,8 +6,8 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use ring::aead;
 use std::io::Read as _;
 use std::sync::LazyLock;
-pub use st3_api_core::api::client_v0::conversation_blocks::*;
-pub use st3_api_core::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, legacy, prepare, prepare_one, read, read_slice, source};
+pub use fractal_api_core::api::client_v0::conversation_blocks::*;
+pub use fractal_api_core::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, legacy, prepare, prepare_one, read, read_slice, source};
 #[cfg(test)]
 mod conformance_tests;
 
@@ -879,7 +879,7 @@ mod tests {
             let full = read(&native, &session, &native.id).unwrap();
             assert!(serde_json::to_vec(&full).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
             assert_native_keyset_pages_match_full_read(&state, &native, &session, &full);
-            let _: Vec<st3_client::TimelineEntry> = serde_json::from_value(json!(full)).unwrap();
+            let _: Vec<fractal_client::TimelineEntry> = serde_json::from_value(json!(full)).unwrap();
             if !negotiated {
                 assert!(full.iter().all(|item| item["body"].get("blocks").is_none()));
                 continue;
@@ -965,7 +965,7 @@ mod tests {
                 assert_eq!(fetched["blocks"][0]["metadata"], details);
             } else {
                 assert!(item["body"].get("blocks").is_none());
-                let _: Vec<st3_client::TimelineEntry> =
+                let _: Vec<fractal_client::TimelineEntry> =
                     serde_json::from_value(json!(page)).unwrap();
             }
             let socket_state = state.clone();
@@ -1114,16 +1114,16 @@ mod tests {
                 }
                 outcomes.push(item);
             }
-            let decoded: Vec<st3_client::TimelineEntry> =
+            let decoded: Vec<fractal_client::TimelineEntry> =
                 serde_json::from_value(json!(items)).unwrap();
             let status = decoded
                 .iter()
                 .find_map(|entry| match &entry.body {
-                    st3_client::TimelineBody::Status(body) => Some(body),
+                    fractal_client::TimelineBody::Status(body) => Some(body),
                     _ => None,
                 })
                 .unwrap();
-            assert_eq!(status.status, st3_client::TimelineStatus::Cancelled);
+            assert_eq!(status.status, fractal_client::TimelineStatus::Cancelled);
             assert_eq!(items.iter().filter(|item| item["type"] == "error").count(), 1);
             assert_eq!(
                 items.iter().filter(|item| item["type"] == "content" && item["role"] == "assistant").count(),
@@ -1469,7 +1469,7 @@ mod tests {
                 assert_eq!(full["blocks"][0]["metadata"], details);
             } else {
                 assert!(marker["body"].get("blocks").is_none());
-                let _: Vec<st3_client::TimelineEntry> =
+                let _: Vec<fractal_client::TimelineEntry> =
                     serde_json::from_value(json!(items)).unwrap();
             }
         }
@@ -1599,7 +1599,7 @@ mod tests {
                 .iter()
                 .all(|item| item["body"].get("blocks").is_none())
         );
-        let decoded: Vec<st3_client::TimelineEntry> =
+        let decoded: Vec<fractal_client::TimelineEntry> =
             serde_json::from_value(json!(legacy)).unwrap();
         assert_eq!(decoded.len(), items.len());
     }

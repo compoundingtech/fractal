@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use serde::Deserialize;
-pub use st3_store::store::agent_messages::*;
-pub use st3_store::store::agent_messages::{DAY_MS, create_schema, flush, open, ready, synthetic};
+pub use fractal_store::store::agent_messages::*;
+pub use fractal_store::store::agent_messages::{DAY_MS, create_schema, flush, open, ready, synthetic};
 
 pub struct DailyUsage {
     pub since: u64,
@@ -18,7 +18,7 @@ fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
     let filled = ready(transaction)?;
     if !filled {
         transaction.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-he24328a53a3f owner=st3_delivery::store::agent_messages TODO=prepare-body-and-predecessor-values */ "DELETE FROM agent_message_sends;
+            /* sqlite-large-value: allow-for-now lv-he4aeb14851ad owner=fractal_delivery::store::agent_messages TODO=prepare-body-and-predecessor-values */ "DELETE FROM agent_message_sends;
              DELETE FROM agent_message_days;
              INSERT OR IGNORE INTO local_agent_message_pending
              SELECT DISTINCT subject FROM claims WHERE kind='message.sent';",
@@ -29,7 +29,7 @@ fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
     flush_with_coordination(transaction, filled, true)?;
     if !filled {
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hd46f1c08c322 owner=st3_delivery::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('agent_message_days_v1','1')",
+            /* sqlite-large-value: allow-for-now lv-h9ed4d2dfdbb5 owner=fractal_delivery::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('agent_message_days_v1','1')",
             [],
         )?;
     }
@@ -208,8 +208,8 @@ impl AgentMessagesStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::agent_messages_tests_shared_delivery::*;
-    use st3_store::store::agent_messages_tests_shared_delivery::{send};
+    use fractal_store::store::agent_messages_tests_shared_delivery::*;
+    use fractal_store::store::agent_messages_tests_shared_delivery::{send};
 
     fn estimate_days(store: &Store, days: &[(u64, u64, u64, u64)]) -> Result<Value> {
         let days = days

@@ -6,21 +6,21 @@ pub(super) fn run_driver_hook() -> ExitCode {
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
             "usage: st {} NAME [ARGS]; NAME is one of {}",
-            st3::driver_hook::SUBCOMMAND,
-            st3::driver_hook::HOOKS.join(", ")
+            fractal_daemon::driver_hook::SUBCOMMAND,
+            fractal_daemon::driver_hook::HOOKS.join(", ")
         );
         return ExitCode::from(2);
     };
-    let env = st3::driver_hook::ProcessEnv;
+    let env = fractal_daemon::driver_hook::ProcessEnv;
     let run = || {
-        st3::driver_hook::run(
+        fractal_daemon::driver_hook::run(
             name,
             rest,
             &env,
             // Unlocked: the status-line tee reads stdin itself, and a held lock would deadlock it.
             &mut std::io::stdin(),
             &mut |diagnostic| {
-                if let Err(error) = st3::driver_hook::post_diagnostic(&env, &diagnostic) {
+                if let Err(error) = fractal_daemon::driver_hook::post_diagnostic(&env, &diagnostic) {
                     eprintln!(
                         "st: could not record the {} diagnostic: {error:#}",
                         diagnostic.code
@@ -30,9 +30,9 @@ pub(super) fn run_driver_hook() -> ExitCode {
         )
     };
     let code = if name == "claude-observe" {
-        st3::telemetry::hook(&env, run, st3::driver_hook::submit_telemetry)
+        fractal_daemon::telemetry::hook(&env, run, fractal_daemon::driver_hook::submit_telemetry)
     } else {
-        st3::telemetry::local_only();
+        fractal_daemon::telemetry::local_only();
         run()
     };
     ExitCode::from(code)
@@ -46,13 +46,13 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
     if args.seed.is_some() {
         anyhow::ensure!(
             args.driver == "omp"
-                && st3::native_resume::selector_scope(&args.driver, &args.argv).is_none(),
+                && fractal_daemon::native_resume::selector_scope(&args.driver, &args.argv).is_none(),
             "native seed cannot accompany an authored session selector"
         );
         for variable in [
-            st3::suspension::RESUME_ENV,
-            st3::suspension::CONTINUE_ENV,
-            st3::suspension::CONTINUE_PATH_ENV,
+            fractal_daemon::suspension::RESUME_ENV,
+            fractal_daemon::suspension::CONTINUE_ENV,
+            fractal_daemon::suspension::CONTINUE_PATH_ENV,
         ] {
             anyhow::ensure!(
                 std::env::var_os(variable).is_none(),
@@ -65,7 +65,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             args.argv.is_empty(),
             "the Claude channel takes no provider argv"
         );
-        let fallback_subject = st_drivers::contracts::env("ST3_SUBJECT");
+        let fallback_subject = fractal_drivers::contracts::env("ST3_SUBJECT");
         let Some(subject) = args
             .subject
             .as_deref()
@@ -76,17 +76,17 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
                 args.identity.is_none(),
                 "the Claude channel identity requires a subject"
             );
-            return st3::claude_channel::run_idle().await;
+            return fractal_daemon::claude_channel::run_idle().await;
         };
         let identity = subject.strip_prefix("agent/").unwrap_or(subject);
-        let paths = match st_drivers::driver_paths::Paths::from_environment(identity, &|name| {
+        let paths = match fractal_drivers::driver_paths::Paths::from_environment(identity, &|name| {
             std::env::var(name).ok()
         })? {
             Some(paths) => NativePaths::from_resolved(subject, paths),
             None => NativePaths::legacy(subject, "claude")?,
         };
         if push_mailbox_enabled() {
-            return st3::claude_channel::run(
+            return fractal_daemon::claude_channel::run(
                 client,
                 subject,
                 wait_for_agent_incarnation(client, subject),
@@ -96,7 +96,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             )
             .await;
         }
-        return st_drivers::claude_mcp::run_st3(&paths.driver_root, &paths.identity);
+        return fractal_drivers::claude_mcp::run_st3(&paths.driver_root, &paths.identity);
     }
     if matches!(args.driver.as_str(), "pi-channel" | "omp-channel") {
         let identity = args
@@ -113,7 +113,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             "pi"
         };
         let subject = normalize_agent_subject(identity);
-        let paths = st_drivers::driver_paths::Paths::from_environment(
+        let paths = fractal_drivers::driver_paths::Paths::from_environment(
             subject.strip_prefix("agent/").unwrap_or(&subject),
             &|name| std::env::var(name).ok(),
         )?;
@@ -128,14 +128,14 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         .subject
         .as_deref()
         .context("the driver has no subject")?;
-    if st3::skill::HARNESSES.contains(&args.driver.as_str()) {
+    if fractal_daemon::skill::HARNESSES.contains(&args.driver.as_str()) {
         // A seat starts idle: a declaration stored before st dropped the startup prompt still
         // carries it, and it would start a turn nobody asked for.
         let mut argv = args.argv;
-        st3::boot::strip_legacy_prompt(&args.driver, &mut argv);
+        fractal_daemon::boot::strip_legacy_prompt(&args.driver, &mut argv);
         // Install the skill from this binary, so it describes the commands this driver serves.
         // A seat without it still runs; the failure is logged beside the driver's other warnings.
-        if let Err(error) = st3::skill::install(&args.driver) {
+        if let Err(error) = fractal_daemon::skill::install(&args.driver) {
             let _ = write_driver_log(
                 subject,
                 &format!(
@@ -147,19 +147,19 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         // Harness-session state (OpenCode delivery ledgers, Claude resume bindings) stays beneath
         // st3's driver directory, never st2's; the seat's hooks choose the same root.
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
-            st_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
+            fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
-        if let Some(state) = st_drivers::reexec::resume_path(st_drivers::reexec::DRIVER_RESUME_ENV) {
+        if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;
         }
         let incarnation = wait_for_agent_incarnation(client, subject).await?;
         let paths = NativePaths::prepare(subject, &args.driver)?;
         let sessions = paths.session_dir.join("provider-sessions");
-        if let Some(session) = st3::native_seed::first_launch(
+        if let Some(session) = fractal_daemon::native_seed::first_launch(
             client, subject, &incarnation, &args.driver, args.seed.as_deref(), &sessions,
-            st3::native_resume::requested().is_some(),
+            fractal_daemon::native_resume::requested().is_some(),
         ).await? {
-            argv = st3::native_resume::pi_family_argv("omp", argv, &sessions, &session, None)
+            argv = fractal_daemon::native_resume::pi_family_argv("omp", argv, &sessions, &session, None)
                 .map_err(|refusal| anyhow::anyhow!("{}: {}", refusal.code, refusal.reason))?;
         }
         if let (Some(message), Some(id)) = (&args.initial_message, &args.initial_message_id) {
@@ -167,11 +167,11 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             // the first message; adoption resumes above without invoking a new provider.
             let incarnation = wait_for_agent_incarnation(client, subject).await?;
             if retry_while_daemon_unreachable(subject, || {
-                st3::creation::claim_initial_message(client, subject, id, &incarnation)
+                fractal_daemon::creation::claim_initial_message(client, subject, id, &incarnation)
             })
             .await?
             {
-                st3::creation::append_native_message(&args.driver, &mut argv, message)?;
+                fractal_daemon::creation::append_native_message(&args.driver, &mut argv, message)?;
             }
         }
         if args.driver == "codex" {
@@ -242,7 +242,7 @@ async fn run_st2_native_driver(
     }
     #[cfg(unix)]
     if matches!(driver, "pi" | "omp")
-        && let Err(skip) = st3::native_resume::pi_family_link_transcript(
+        && let Err(skip) = fractal_daemon::native_resume::pi_family_link_transcript(
             &argv,
             &paths.session_dir.join("provider-sessions"),
         )
@@ -267,23 +267,23 @@ async fn run_st2_native_driver(
     .await?;
     let select = |argv: Vec<String>, session: &str, path: Option<&Path>| -> Result<_> {
         Ok(match driver {
-            "claude" => st3::native_resume::claude_argv(
+            "claude" => fractal_daemon::native_resume::claude_argv(
                 argv,
                 session,
                 &std::env::current_dir()?,
-                st3::native_resume::claude_home().as_deref(),
+                fractal_daemon::native_resume::claude_home().as_deref(),
             ),
-            "pi" | "omp" => st3::native_resume::pi_family_argv(
+            "pi" | "omp" => fractal_daemon::native_resume::pi_family_argv(
                 driver,
                 argv,
                 &paths.session_dir.join("provider-sessions"),
                 session,
                 path,
             ),
-            "opencode" => st3::native_resume::opencode_argv(
+            "opencode" => fractal_daemon::native_resume::opencode_argv(
                 argv,
                 session,
-                st3::native_resume::opencode_data_dir().as_deref(),
+                fractal_daemon::native_resume::opencode_data_dir().as_deref(),
             ),
             _ => unreachable!("the native driver was checked"),
         })
@@ -293,13 +293,13 @@ async fn run_st2_native_driver(
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     let mut selected_session = None;
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-    let argv = if let Some(session) = st3::native_resume::requested() {
+    let argv = if let Some(session) = fractal_daemon::native_resume::requested() {
         if driver == "claude" {
-            let path = std::env::var_os(st3::rollout::RESUME_PATH_ENV).map(PathBuf::from);
-            if let Err(refusal) = st3::native_resume::claude_carry_transcript(
+            let path = std::env::var_os(fractal_daemon::rollout::RESUME_PATH_ENV).map(PathBuf::from);
+            if let Err(refusal) = fractal_daemon::native_resume::claude_carry_transcript(
                 &session,
                 &std::env::current_dir()?,
-                st3::native_resume::claude_home().as_deref(),
+                fractal_daemon::native_resume::claude_home().as_deref(),
                 path.as_deref(),
             ) {
                 return Err(refuse_native_resume(
@@ -307,12 +307,12 @@ async fn run_st2_native_driver(
                     subject,
                     &incarnation,
                     driver,
-                    st3::native_resume::Refusal::new("transcript-copy-failed", refusal.to_string()),
+                    fractal_daemon::native_resume::Refusal::new("transcript-copy-failed", refusal.to_string()),
                 )
                 .await);
             }
         }
-        let path = std::env::var_os(st3::rollout::RESUME_PATH_ENV).map(PathBuf::from);
+        let path = std::env::var_os(fractal_daemon::rollout::RESUME_PATH_ENV).map(PathBuf::from);
         match select(argv, &session, path.as_deref())? {
             Ok(argv) => {
                 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
@@ -326,13 +326,13 @@ async fn run_st2_native_driver(
                 );
             }
         }
-    } else if let Some((session, path)) = st3::native_resume::continued() {
+    } else if let Some((session, path)) = fractal_daemon::native_resume::continued() {
         if driver == "claude" {
             // A seat whose workspace changed finds its transcript under the earlier one.
-            let _ = st3::native_resume::claude_carry_transcript(
+            let _ = fractal_daemon::native_resume::claude_carry_transcript(
                 &session,
                 &std::env::current_dir()?,
-                st3::native_resume::claude_home().as_deref(),
+                fractal_daemon::native_resume::claude_home().as_deref(),
                 path.as_deref(),
             );
         }
@@ -359,10 +359,10 @@ async fn run_st2_native_driver(
     if driver == "omp" {
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(tool_call_id) =
-            st3::omp_ask_resume::pending_for_selected(&sessions, selected_session.as_deref())
+            fractal_daemon::omp_ask_resume::pending_for_selected(&sessions, selected_session.as_deref())
         {
             // Fail open: bridge I/O or diagnostics must never prevent native continuation.
-            match st3::omp_ask_resume::heal(
+            match fractal_daemon::omp_ask_resume::heal(
                 &argv[0],
                 &sessions,
                 selected_session.as_deref().expect("pending ask has a selected session"),
@@ -385,11 +385,11 @@ async fn run_st2_native_driver(
         let _ = fs::remove_file(
             paths
                 .agent_dir
-                .join(st_drivers::opencode_session::NATIVE_SESSION_FILE),
+                .join(fractal_drivers::opencode_session::NATIVE_SESSION_FILE),
         );
     }
-    st_drivers::harness_events::enable(&paths.agent_dir, &incarnation)?;
-    let harness_state_path = st_drivers::harness_state::harness_state_path(&paths.agent_dir);
+    fractal_drivers::harness_events::enable(&paths.agent_dir, &incarnation)?;
+    let harness_state_path = fractal_drivers::harness_state::harness_state_path(&paths.agent_dir);
     let loop_state = NativeLoopState {
         paths: Some(paths.resolved()),
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
@@ -424,7 +424,7 @@ enum ProviderStart {
         Vec<(String, String)>,
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     ),
-    Adopt(st_drivers::provider_session::DetachedSession),
+    Adopt(fractal_drivers::provider_session::DetachedSession),
 }
 
 fn spawn_st3_provider(
@@ -432,11 +432,11 @@ fn spawn_st3_provider(
     paths: &NativePaths,
     start: ProviderStart,
 ) -> tokio::task::JoinHandle<Result<()>> {
-    use st_drivers::provider_session::DetachedSession;
+    use fractal_drivers::provider_session::DetachedSession;
     let paths = paths.clone();
     let driver = driver.to_owned();
     if push_mailbox_enabled() && driver == "opencode" {
-        st_drivers::push_mailbox::register(&paths.agent_dir);
+        fractal_drivers::push_mailbox::register(&paths.agent_dir);
     }
     tokio::task::spawn_blocking(move || {
         let outcome = match start {
@@ -446,19 +446,19 @@ fn spawn_st3_provider(
             environment,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
         ) => match driver.as_str() {
-            "claude" => st_drivers::claude_session::run_controlled_paths(
+            "claude" => fractal_drivers::claude_session::run_controlled_paths(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
                 argv,
             ),
-            "pi" => st_drivers::pi_session::run_native(
+            "pi" => fractal_drivers::pi_session::run_native(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
                 argv,
             ),
-            "omp" => st_drivers::omp_session::run_native(
+            "omp" => fractal_drivers::omp_session::run_native(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
@@ -467,18 +467,18 @@ fn spawn_st3_provider(
                 &environment,
                 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             ),
-            "opencode" => st_drivers::opencode_session::run_with_paths(
+            "opencode" => fractal_drivers::opencode_session::run_with_paths(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
                 argv,
-                st_drivers::session_control::SessionControl::Graph(paths.delivery_gate),
+                fractal_drivers::session_control::SessionControl::Graph(paths.delivery_gate),
             ),
             _ => unreachable!("the native driver was checked"),
         },
         ProviderStart::Adopt(session) => match (driver.as_str(), session) {
             ("claude", DetachedSession::Provider { pid, session, seq }) => {
-                st_drivers::claude_session::adopt_controlled_paths(
+                fractal_drivers::claude_session::adopt_controlled_paths(
                     &paths.resolved(),
                     &paths.identity,
                     &paths.runtime_id,
@@ -488,7 +488,7 @@ fn spawn_st3_provider(
                 )
             }
             ("pi", DetachedSession::Provider { pid, session, seq }) => {
-                st_drivers::pi_session::adopt_native(
+                fractal_drivers::pi_session::adopt_native(
                     &paths.resolved(),
                     paths.identity,
                     paths.runtime_id,
@@ -498,7 +498,7 @@ fn spawn_st3_provider(
                 )
             }
             ("omp", DetachedSession::Provider { pid, session, seq }) => {
-                st_drivers::omp_session::adopt_native(
+                fractal_drivers::omp_session::adopt_native(
                     &paths.resolved(),
                     paths.identity,
                     paths.runtime_id,
@@ -518,7 +518,7 @@ fn spawn_st3_provider(
                     version_ok,
                     producer_version,
                 },
-            ) => st_drivers::opencode_session::adopt_with_paths(
+            ) => fractal_drivers::opencode_session::adopt_with_paths(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
@@ -529,7 +529,7 @@ fn spawn_st3_provider(
                 password,
                 version_ok,
                 producer_version,
-                st_drivers::session_control::SessionControl::Graph(paths.delivery_gate),
+                fractal_drivers::session_control::SessionControl::Graph(paths.delivery_gate),
             ),
             (driver, session) => {
                 anyhow::bail!("a {driver} driver cannot adopt this provider session: {session:?}")
@@ -538,7 +538,7 @@ fn spawn_st3_provider(
         };
         #[cfg(feature = "test-support")]
         if env!("CARGO_BIN_NAME") == "st3-fixture" {
-            st3::test_support::hold_provider_completion(&outcome)?;
+            fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
     })
@@ -552,7 +552,7 @@ async fn resume_native_driver(
     argv: Vec<String>,
     state_path: &Path,
 ) -> Result<()> {
-    let mut resume: DriverResume = st_drivers::reexec::read_state(state_path)?;
+    let mut resume: DriverResume = fractal_drivers::reexec::read_state(state_path)?;
     anyhow::ensure!(
         resume.subject == subject && resume.driver == driver,
         "the resume state belongs to the {} driver of `{}`, not the {driver} driver of `{subject}`",
@@ -565,7 +565,7 @@ async fn resume_native_driver(
         subject,
         &format!(
             "the {driver} driver resumed in {} after its st binary was replaced; the provider kept running",
-            st_drivers::reexec::installed_binary()
+            fractal_drivers::reexec::installed_binary()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "a replacement binary".into())
         ),
@@ -600,11 +600,11 @@ async fn resume_native_driver(
 }
 
 /// The detached session a provider task returned, if it returned one.
-fn detached_session(outcome: &Result<()>) -> Option<st_drivers::provider_session::DetachedSession> {
+fn detached_session(outcome: &Result<()>) -> Option<fractal_drivers::provider_session::DetachedSession> {
     outcome
         .as_ref()
         .err()?
-        .downcast_ref::<st_drivers::provider_session::Detached>()
+        .downcast_ref::<fractal_drivers::provider_session::Detached>()
         .map(|detached| detached.session.clone())
 }
 
@@ -647,9 +647,9 @@ async fn drive_st2_native(
     }
     let mut observations = NativeObservations::start(&agent_dir, &incarnation)?.settle(settle);
     loop_state.claude_readiness_fallback.native_state_seen |= observations.native_state_seen;
-    let harness_state_path = st_drivers::harness_state::harness_state_path(&agent_dir);
-    let inbox = st_drivers::message::inbox_dir(&agent_dir);
-    let archive = st_drivers::message::archive_dir(&agent_dir);
+    let harness_state_path = fractal_drivers::harness_state::harness_state_path(&agent_dir);
+    let inbox = fractal_drivers::message::inbox_dir(&agent_dir);
+    let archive = fractal_drivers::message::archive_dir(&agent_dir);
     // This tick retries receipts and native handoffs. Push delivery reads its cached mailbox;
     // only an already-running legacy seat still polls durable history.
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -657,8 +657,8 @@ async fn drive_st2_native(
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut renewed_minute = None;
-    let mut work_retry = st3::client::DriverRetry::default();
-    let mut control_retry = st3::client::DriverRetry::default();
+    let mut work_retry = fractal_daemon::client::DriverRetry::default();
+    let mut control_retry = fractal_daemon::client::DriverRetry::default();
     let mut last_activity_fingerprint = None;
     let mut last_usage_fingerprint = None;
     let mut last_limits_fingerprint = None;
@@ -672,12 +672,12 @@ async fn drive_st2_native(
     // Claude's hooks and omp's extension keep the subagent ledger; this driver records it on the
     // seat.
     let mut subagents = matches!(driver, "claude" | "omp").then(|| {
-        st3::subagents::Publisher::start(
+        fractal_daemon::subagents::Publisher::start(
             subject,
             driver,
             &incarnation,
             &agent_dir,
-            st_drivers::subagents::now_ms(),
+            fractal_drivers::subagents::now_ms(),
         )
     });
     let mut completion_announced = false;
@@ -697,7 +697,7 @@ async fn drive_st2_native(
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
                 if env!("CARGO_BIN_NAME") == "st3-fixture"
-                    && matches!(&frame, Some(st3::mailbox::Frame::Fenced { .. }))
+                    && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
                     fs::write(PathBuf::from(root).join("fence-received"),
@@ -706,14 +706,14 @@ async fn drive_st2_native(
                 // The subscription can reopen after the provider has ended, and the daemon then
                 // fences it as terminal. With the provider's task returned there is nothing left
                 // to deliver to: stop listening and let the task arm record the exit.
-                if let Some(st3::mailbox::Frame::Fenced { reason }) = &frame
+                if let Some(fractal_daemon::mailbox::Frame::Fenced { reason }) = &frame
                     && provider_ended_refusal(reason)
                     && provider_task_settled(&task).await
                 {
                     mailbox.subscription = None;
                     continue;
                 }
-                let mail_changed = matches!(&frame, Some(st3::mailbox::Frame::Mailbox { .. }));
+                let mail_changed = matches!(&frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. }));
                 mailbox.accept(frame, &runtime_id)?;
                 if driver == "opencode" && mail_changed
                     && let Err(error) = sync_native_delivery_control(client, subject, &mut paths, &mailbox, &inbox, "opencode-server").await {
@@ -749,8 +749,8 @@ async fn drive_st2_native(
                     // A refused omp never reaches the session loop. Publish its durable named
                     // admission boundary before recording exit, retrying through daemon outages.
                     if matches!(driver, "omp" | "opencode") {
-                        let observed = st_drivers::driver_diagnostic::read(
-                            &st_drivers::driver_diagnostic::path(&agent_dir));
+                        let observed = fractal_drivers::driver_diagnostic::read(
+                            &fractal_drivers::driver_diagnostic::path(&agent_dir));
                         if let Some(input) = admission_diagnostic(subject, &incarnation, &observed) {
                             let _: ClaimRecord = retry_while_daemon_unreachable(subject, || {
                                 client.post("/v1/claims", &input)
@@ -843,7 +843,7 @@ async fn drive_st2_native(
                     current_record.as_deref(),
                 );
                 if loop_state.harness_record_started {
-                    st_drivers::harness_state::read(&harness_state_path, None)
+                    fractal_drivers::harness_state::read(&harness_state_path, None)
                         .and_then(|observed| observed.evidence_incarnation)
                 } else {
                     None
@@ -853,15 +853,15 @@ async fn drive_st2_native(
                     // Claude writes the transcript a resume needs only with its first turn.
                     "claude" => provider_incarnation
                         .as_deref()
-                        .and_then(|token| st3::hooks::claude_binding(&agent_dir, token))
+                        .and_then(|token| fractal_daemon::hooks::claude_binding(&agent_dir, token))
                         .filter(|session| {
                             let workspace = std::env::current_dir().unwrap_or_default();
-                            st3::native_resume::claude_home().is_some_and(|home| {
-                                st3::native_resume::claude_transcript(&home, &workspace, session)
+                            fractal_daemon::native_resume::claude_home().is_some_and(|home| {
+                                fractal_daemon::native_resume::claude_transcript(&home, &workspace, session)
                                     .is_file()
                             })
                         }),
-                    "opencode" => st3::native_resume::opencode_bound_session(&agent_dir),
+                    "opencode" => fractal_daemon::native_resume::opencode_bound_session(&agent_dir),
                     _ => None,
                 };
                 if let Some(session) = bound.filter(|_| settled)
@@ -893,7 +893,7 @@ async fn drive_st2_native(
                         fields: BTreeMap::from([
                             ("severity".into(), Value::String("error".into())),
                             ("status".into(), Value::String("failed".into())),
-                            ("code".into(), Value::String(st3::driver_hook::UNBOUND_CODE.into())),
+                            ("code".into(), Value::String(fractal_daemon::driver_hook::UNBOUND_CODE.into())),
                             ("reason".into(), Value::String(reason)),
                             ("incarnation_id".into(), Value::String(incarnation.clone())),
                         ]),
@@ -901,7 +901,7 @@ async fn drive_st2_native(
                         expected_subject: None,
                         idempotency_key: Some(format!(
                             "{}:{subject}:{session}",
-                            st3::driver_hook::UNBOUND_CODE
+                            fractal_daemon::driver_hook::UNBOUND_CODE
                         )),
                     }).await;
                     if let Err(error) = posted {
@@ -971,7 +971,7 @@ async fn drive_st2_native(
                     }
                     if native_file_may_override_channel(driver)
                         && loop_state.harness_record_started
-                        && let Some(observed) = st_drivers::harness_state::read(&harness_state_path, None)
+                        && let Some(observed) = fractal_drivers::harness_state::read(&harness_state_path, None)
                     {
                         // A session claim is a startup fence, not an observation. Preserve the
                         // explicit `starting` state until a native observation supplies positive
@@ -979,14 +979,14 @@ async fn drive_st2_native(
                         // publishing the derived `claimed`
                         // indeterminacy would erase the more precise lifecycle state.
                         let claim_placeholder =
-                            observed.state == st_drivers::harness_state::Activity::Unknown
+                            observed.state == fractal_drivers::harness_state::Activity::Unknown
                                 && observed.reason.as_deref() == Some("claimed");
                         if !claim_placeholder {
                             if !loop_state.ready
                                 && !matches!(
                                     observed.state,
-                                    st_drivers::harness_state::Activity::Unknown
-                                        | st_drivers::harness_state::Activity::Ended
+                                    fractal_drivers::harness_state::Activity::Unknown
+                                        | fractal_drivers::harness_state::Activity::Ended
                                 )
                             {
                                 let _: ClaimRecord = client.post("/v1/claims", &ClaimInput {
@@ -1046,8 +1046,8 @@ async fn drive_st2_native(
                             } else {
                                 last_capacity_fingerprint = None;
                             }
-                            if let Some(context) = st_drivers::harness_context::read(
-                                &st_drivers::harness_context::harness_context_path(&agent_dir)) {
+                            if let Some(context) = fractal_drivers::harness_context::read(
+                                &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
                                 &ObservationClient { client, event: None },
                                 subject,
@@ -1152,9 +1152,9 @@ async fn fixture_terminal_completion_barrier(
         return Ok(false);
     };
     if root.join("observation-drained").exists()
-        || !st_drivers::harness_state::read(
-            &st_drivers::harness_state::harness_state_path(&observations.dir), None,
-        ).is_some_and(|state| state.state == st_drivers::harness_state::Activity::Ended)
+        || !fractal_drivers::harness_state::read(
+            &fractal_drivers::harness_state::harness_state_path(&observations.dir), None,
+        ).is_some_and(|state| state.state == fractal_drivers::harness_state::Activity::Ended)
     {
         return Ok(false);
     }
@@ -1192,7 +1192,7 @@ async fn publish_harness_timeline(
     published: &mut BTreeSet<String>,
 ) -> Result<()> {
     let Some(record) =
-        st_drivers::harness_timeline::read(&st_drivers::harness_timeline::timeline_path(agent_dir))
+        fractal_drivers::harness_timeline::read(&fractal_drivers::harness_timeline::timeline_path(agent_dir))
     else {
         return Ok(());
     };
@@ -1238,7 +1238,7 @@ async fn refuse_native_resume(
     subject: &str,
     incarnation: &str,
     driver: &str,
-    refusal: st3::native_resume::Refusal,
+    refusal: fractal_daemon::native_resume::Refusal,
 ) -> anyhow::Error {
     let _ = write_driver_log(
         subject,
@@ -1253,7 +1253,7 @@ async fn refuse_native_resume(
             ("status".into(), Value::String(refusal.code.into())),
             (
                 "code".into(),
-                Value::String(st3::suspension::RESUME_UNAVAILABLE_CODE.into()),
+                Value::String(fractal_daemon::suspension::RESUME_UNAVAILABLE_CODE.into()),
             ),
             ("reason".into(), Value::String(refusal.reason.clone())),
             ("incarnation_id".into(), Value::String(incarnation.into())),
@@ -1262,7 +1262,7 @@ async fn refuse_native_resume(
         expected_subject: None,
         idempotency_key: Some(format!(
             "{}:{subject}:{incarnation}",
-            st3::suspension::RESUME_UNAVAILABLE_CODE
+            fractal_daemon::suspension::RESUME_UNAVAILABLE_CODE
         )),
     };
     if let Err(error) = retry_while_daemon_unreachable(subject, || {
@@ -1290,14 +1290,14 @@ async fn skip_native_continue(
     incarnation: &str,
     driver: &str,
     session: &str,
-    refusal: st3::native_resume::Refusal,
+    refusal: fractal_daemon::native_resume::Refusal,
 ) {
     let _ = write_driver_log(
         subject,
         &json!({"type":"native_continue_skipped","driver":driver,"session":session,"code":refusal.code,"reason":refusal.reason}).to_string(),
     );
     let selector_scope = (refusal.code == "authored-session-selection")
-        .then(|| std::env::var(st3::suspension::SELECTOR_SCOPE_ENV).ok())
+        .then(|| std::env::var(fractal_daemon::suspension::SELECTOR_SCOPE_ENV).ok())
         .flatten();
     let mut diagnostic = ClaimInput {
         subject: subject.into(),
@@ -1308,7 +1308,7 @@ async fn skip_native_continue(
             ("status".into(), Value::String(refusal.code.into())),
             (
                 "code".into(),
-                Value::String(st3::suspension::CONTINUE_UNAVAILABLE_CODE.into()),
+                Value::String(fractal_daemon::suspension::CONTINUE_UNAVAILABLE_CODE.into()),
             ),
             (
                 "reason".into(),
@@ -1322,7 +1322,7 @@ async fn skip_native_continue(
         ]),
         evidence: Vec::new(),
         expected_subject: None,
-        idempotency_key: Some(st3::suspension::typed_continue_unavailable_key(
+        idempotency_key: Some(fractal_daemon::suspension::typed_continue_unavailable_key(
             subject, session, refusal.code, selector_scope.as_deref(),
         )),
     };
@@ -1365,7 +1365,7 @@ async fn report_native_session(
                 "session_id": session,
                 "path": path.map(|path| path.to_string_lossy().into_owned()),
                 "account_ref": std::env::var("ST3_ACCOUNT").ok(),
-                "desired_token": std::env::var(st3::suspension::LAUNCH_DESIRED_TOKEN_ENV)
+                "desired_token": std::env::var(fractal_daemon::suspension::LAUNCH_DESIRED_TOKEN_ENV)
                     .ok().filter(|token| !token.is_empty()),
             }),
         )
@@ -1405,7 +1405,7 @@ async fn publish_harness_state(
     if let Some(reason) = reason {
         fields.insert("reason".into(), Value::String(reason.into()));
     }
-    st3::suspension::annotate_quiescence(&mut fields);
+    fractal_daemon::suspension::annotate_quiescence(&mut fields);
     let incarnation_key = work_incarnation_key(incarnation);
     let _: ClaimRecord = client
         .post(
@@ -1428,7 +1428,7 @@ fn activate_channel_todo_observations(
     catalog: &Path, subject: &str, state: &mut PiChannelResume,
 ) -> Result<NativeObservations> {
     let dir = prepare_channel_todo_outbox(catalog, subject, &state.incarnation)?;
-    st_drivers::harness_events::enable(&dir, &state.incarnation)?;
+    fractal_drivers::harness_events::enable(&dir, &state.incarnation)?;
     let observations = NativeObservations::start(&dir, &state.incarnation)?;
     state.todo_outbox = Some(dir);
     state.record_pending_todo()?;
@@ -1444,10 +1444,10 @@ async fn run_pi_channel(
     use tokio::io::AsyncWriteExt as _;
 
     let identity = subject.strip_prefix("agent/").unwrap_or(subject);
-    let resumed = match st_drivers::reexec::resume_path(st_drivers::reexec::CHANNEL_RESUME_ENV) {
+    let resumed = match fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV) {
         Some(path) => {
-            let state = st_drivers::reexec::read_state::<PiChannelResume>(&path);
-            st_drivers::reexec::unblock_stop_signals();
+            let state = fractal_drivers::reexec::read_state::<PiChannelResume>(&path);
+            fractal_drivers::reexec::unblock_stop_signals();
             Some(state.context("resuming the pi-family channel after a binary replacement")?)
         }
         None => None,
@@ -1496,10 +1496,10 @@ async fn run_pi_channel(
             stdout.flush().await?;
             PiChannelResume {
                 incarnation,
-                session: st_drivers::contracts::env(if driver == "omp" {
-                    st_drivers::omp_session::CHANNEL_SESSION
+                session: fractal_drivers::contracts::env(if driver == "omp" {
+                    fractal_drivers::omp_session::CHANNEL_SESSION
                 } else {
-                    st_drivers::pi_session::CHANNEL_SESSION
+                    fractal_drivers::pi_session::CHANNEL_SESSION
                 })
                 .unwrap_or_else(|| "unknown".into()),
                 ..PiChannelResume::default()
@@ -1508,31 +1508,31 @@ async fn run_pi_channel(
     };
     let incarnation = state.incarnation.clone();
     let session = state.session.clone();
-    let observation_paths = st_drivers::driver_paths::Paths::from_environment(identity, &|name| {
+    let observation_paths = fractal_drivers::driver_paths::Paths::from_environment(identity, &|name| {
         std::env::var(name).ok()
     })?;
     let mut observer = if let Some(paths) = observation_paths
-        && st_drivers::harness_events::enabled(&paths.agent_dir)
+        && fractal_drivers::harness_events::enabled(&paths.agent_dir)
     {
         let (seq_env, runtime_env, driver_name) = if driver == "omp" {
             (
-                st_drivers::omp_session::CHANNEL_SEQ,
-                st_drivers::omp_session::CHANNEL_RUNTIME_ID,
+                fractal_drivers::omp_session::CHANNEL_SEQ,
+                fractal_drivers::omp_session::CHANNEL_RUNTIME_ID,
                 "omp",
             )
         } else {
             (
-                st_drivers::pi_session::CHANNEL_SEQ,
-                st_drivers::pi_session::CHANNEL_RUNTIME_ID,
+                fractal_drivers::pi_session::CHANNEL_SEQ,
+                fractal_drivers::pi_session::CHANNEL_RUNTIME_ID,
                 "pi",
             )
         };
-        let seq = st_drivers::contracts::env(seq_env)
+        let seq = fractal_drivers::contracts::env(seq_env)
             .context("managed channel has no ownership sequence")?
             .parse()?;
-        let runtime = st_drivers::contracts::env(runtime_env)
+        let runtime = fractal_drivers::contracts::env(runtime_env)
             .context("managed channel has no provider runtime")?;
-        Some(st_drivers::pi_channel::EventObserver::new(
+        Some(fractal_drivers::pi_channel::EventObserver::new(
             &paths.agent_dir,
             identity,
             driver_name,
@@ -1557,29 +1557,29 @@ async fn run_pi_channel(
     };
     let transport = format!("{driver}-channel");
     if push_mailbox_enabled() && state.pending.fence.is_none() {
-        state.pending.fence = Some(st3::mailbox::Fence::new(subject, &incarnation, "delivery"));
+        state.pending.fence = Some(fractal_daemon::mailbox::Fence::new(subject, &incarnation, "delivery"));
     }
     if let Some(fence) = &mut state.pending.fence { fence.bind(client).await?; }
     let mut subscription = state.pending.fence.as_ref().map(|fence| {
         let mut report: Value =
             serde_json::from_str(&native_delivery_report(&transport, None)).unwrap_or_default();
         report["ready"] = json!(state.first_idle_seen && state.failed_handoffs.is_empty());
-        st3::mailbox::Subscription::start(client.clone(), fence.clone(), report)
+        fractal_daemon::mailbox::Subscription::start(client.clone(), fence.clone(), report)
     });
     let mut pushed_messages: Vec<MessageView> = Vec::new();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
-    let spawn_reader = |sender: tokio::sync::mpsc::UnboundedSender<st_drivers::reexec::StdinChunk>| {
-        st_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
+    let spawn_reader = |sender: tokio::sync::mpsc::UnboundedSender<fractal_drivers::reexec::StdinChunk>| {
+        fractal_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
     };
     let mut reader = Some(spawn_reader(input_tx.clone()));
-    let mut watch = st_drivers::reexec::ReplacementWatch::for_current_process();
+    let mut watch = fractal_drivers::reexec::ReplacementWatch::for_current_process();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_warning = None;
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut renewed_minute = None;
-    let mut work_retry = st3::client::DriverRetry::default();
+    let mut work_retry = fractal_daemon::client::DriverRetry::default();
     let mut checked_todo_minute = None;
     let mut todo_end_seen = None;
     loop {
@@ -1604,7 +1604,7 @@ async fn run_pi_channel(
                 None => std::future::pending().await,
             }} => {
                 match frame {
-                    Some(st3::mailbox::Frame::Mailbox { messages }) => {
+                    Some(fractal_daemon::mailbox::Frame::Mailbox { messages }) => {
                         let active: BTreeSet<_> = messages.iter().map(|message| message.subject.clone()).collect();
                         state.delivered.retain(|message| active.contains(message));
                         state.failed_handoffs.retain(|message, _| active.contains(message));
@@ -1612,18 +1612,18 @@ async fn run_pi_channel(
                         state.failed_diagnostics.retain(|message| active.contains(message));
                         pushed_messages = messages;
                     },
-                    Some(st3::mailbox::Frame::Replay { nonce }) => {
+                    Some(fractal_daemon::mailbox::Frame::Replay { nonce }) => {
                         if let Some(subscription) = &subscription { subscription.acknowledge_replay(nonce); }
                     },
-                    Some(st3::mailbox::Frame::Drain { operation }) => {
+                    Some(fractal_daemon::mailbox::Frame::Drain { operation }) => {
                         if let Some(subscription) = &subscription { subscription.acknowledge_drain(operation); }
                     },
-                    Some(st3::mailbox::Frame::Seat { seat }) => {
+                    Some(fractal_daemon::mailbox::Frame::Seat { seat }) => {
                         let frame = json!({"type":"seat", "seat":seat});
                         stdout.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes()).await?;
                         stdout.flush().await?;
                     },
-                    Some(st3::mailbox::Frame::Fenced { reason }) => {
+                    Some(fractal_daemon::mailbox::Frame::Fenced { reason }) => {
                         if let Some(dir) = &state.todo_outbox {
                             if let Err(error) = fs::remove_dir_all(dir) {
                                 warn_pi_channel(subject, &error.into(), &mut last_warning);
@@ -1637,7 +1637,7 @@ async fn run_pi_channel(
             chunk = input_rx.recv() => {
                 let mut publish = false;
                 match chunk {
-                    Some(st_drivers::reexec::StdinChunk::Bytes(bytes)) => {
+                    Some(fractal_drivers::reexec::StdinChunk::Bytes(bytes)) => {
                         state.lines.push(&bytes);
                         while let Some(line) = state.lines.next_line() {
                             match accept_managed_channel_frame(
@@ -1652,7 +1652,7 @@ async fn run_pi_channel(
                         }
                     }
                     // The extension ends the pipe when its session ends.
-                    Some(st_drivers::reexec::StdinChunk::Eof) | None => {
+                    Some(fractal_drivers::reexec::StdinChunk::Eof) | None => {
                         if let Some(line) = state.lines.finish()
                             && accept_managed_channel_frame(
                                 &mut state, &mut observer, &line,
@@ -1678,7 +1678,7 @@ async fn run_pi_channel(
                         }
                         return Ok(());
                     }
-                    Some(st_drivers::reexec::StdinChunk::Failed(error)) => {
+                    Some(fractal_drivers::reexec::StdinChunk::Failed(error)) => {
                         return Err(error).context("reading the pi-family channel input");
                     }
                 }
@@ -1781,7 +1781,7 @@ async fn run_pi_channel(
                     // A prior incarnation's handoff is not proof that the model consumed mail.
                     // The incarnation-local set survives channel reexec and prevents repeats here.
                     let mut items = page.items;
-                    st3::silent::release_page(&mut items, &mut pending_silent);
+                    fractal_daemon::silent::release_page(&mut items, &mut pending_silent);
                     for message in items.into_iter().filter(|message| matches!(message.status.as_str(), "sent" | "staged" | "delivered")) {
                     if state.retry_after_ms.get(&message.subject).is_some_and(|after|
                         current_unix_ms().unwrap_or_default() < u128::from(*after)) {
@@ -1814,7 +1814,7 @@ async fn run_pi_channel(
                         }
                     }
                     // Files first: a message that names an image is delivered once the image is here.
-                    let attachments = match st3::blobs::materialize_for_seat(client, subject, &catalog.join("attachments"), &message).await {
+                    let attachments = match fractal_daemon::blobs::materialize_for_seat(client, subject, &catalog.join("attachments"), &message).await {
                         Ok(attachments) => attachments,
                         Err(error) => {
                             state.delivered.remove(&message.subject);
@@ -1845,9 +1845,9 @@ async fn run_pi_channel(
                     let mut publish = false;
                     while let Ok(chunk) = input_rx.try_recv() {
                         match chunk {
-                            st_drivers::reexec::StdinChunk::Bytes(bytes) => state.lines.push(&bytes),
-                            st_drivers::reexec::StdinChunk::Eof => return Ok(()),
-                            st_drivers::reexec::StdinChunk::Failed(error) => {
+                            fractal_drivers::reexec::StdinChunk::Bytes(bytes) => state.lines.push(&bytes),
+                            fractal_drivers::reexec::StdinChunk::Eof => return Ok(()),
+                            fractal_drivers::reexec::StdinChunk::Failed(error) => {
                                 return Err(error).context("reading the pi-family channel input");
                             }
                         }
@@ -1867,7 +1867,7 @@ async fn run_pi_channel(
                             .await;
                     }
                     stdout.flush().await?;
-                    let state_root = if std::env::var_os(st_drivers::driver_paths::ROOT_ENV).is_some() { catalog } else { catalog.parent().unwrap_or(catalog) };
+                    let state_root = if std::env::var_os(fractal_drivers::driver_paths::ROOT_ENV).is_some() { catalog } else { catalog.parent().unwrap_or(catalog) };
                     let _ = write_driver_log(
                         subject,
                         &format!(
@@ -1875,11 +1875,11 @@ async fn run_pi_channel(
                             binary.display()
                         ),
                     );
-                    let failure = match st_drivers::reexec::write_state(state_root, "channel-resume", &state) {
+                    let failure = match fractal_drivers::reexec::write_state(state_root, "channel-resume", &state) {
                         Ok(path) => {
-                            let error = st_drivers::reexec::exec(
+                            let error = fractal_drivers::reexec::exec(
                                 &binary,
-                                st_drivers::reexec::CHANNEL_RESUME_ENV,
+                                fractal_drivers::reexec::CHANNEL_RESUME_ENV,
                                 &path,
                                 &[],
                             );
@@ -1956,7 +1956,7 @@ fn warn_pi_channel(
 ) {
     let now = std::time::Instant::now();
     if last_warning.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(10)) {
-        let line = match st3::client::daemon_unreachable(error) {
+        let line = match fractal_daemon::client::daemon_unreachable(error) {
             Some(outage) => format!(
                 "{}; the channel keeps running and retries every second until the daemon is back",
                 outage.summary()
@@ -1990,7 +1990,7 @@ async fn sync_native_delivery_control(
     inbox: &Path,
     transport: &str,
 ) -> Result<()> {
-    let report = |gate: &st_drivers::session_control::DeliveryGate| {
+    let report = |gate: &fractal_drivers::session_control::DeliveryGate| {
         if let Some(subscription) = &mailbox.subscription {
             subscription.report(native_delivery_control_report(transport, gate));
         }
@@ -2000,7 +2000,7 @@ async fn sync_native_delivery_control(
             matches!(message.status.as_str(), "sent" | "staged" | "delivered")
         })
     } else {
-        match st_drivers::message::list_dir(inbox) {
+        match fractal_drivers::message::list_dir(inbox) {
             Ok(messages) => !messages.is_empty(),
             Err(error) => {
                 paths.delivery_gate.unavailable();
@@ -2021,9 +2021,9 @@ async fn sync_native_delivery_control(
 fn legacy_delivery_hold(
     subject: &str,
     agent_dir: &Path,
-) -> Option<st3::delivery_hold::HoldRequest> {
-    let until_unix_ms = st_drivers::status::dnd_deadline_ms(&agent_dir.join("status"))?;
-    Some(st3::delivery_hold::HoldRequest {
+) -> Option<fractal_daemon::delivery_hold::HoldRequest> {
+    let until_unix_ms = fractal_drivers::status::dnd_deadline_ms(&agent_dir.join("status"))?;
+    Some(fractal_daemon::delivery_hold::HoldRequest {
         subject: subject.into(),
         actor: subject.into(),
         held: true,
@@ -2051,8 +2051,8 @@ async fn run_codex_native(client: &Client, subject: &str, argv: Vec<String>) -> 
         )
     })
     .await?;
-    if let Some(thread) = st3::native_resume::requested()
-        && let Err(refusal) = st3::native_resume::codex_check(&argv, &thread)
+    if let Some(thread) = fractal_daemon::native_resume::requested()
+        && let Err(refusal) = fractal_daemon::native_resume::codex_check(&argv, &thread)
     {
         return Err(refuse_native_resume(client, subject, &incarnation, "codex", refusal).await);
     }
@@ -2074,9 +2074,9 @@ async fn run_codex_native(client: &Client, subject: &str, argv: Vec<String>) -> 
 
 /// The Codex thread a relaunch continues, unless the seat declares its own thread selection.
 fn codex_continued_thread(argv: &[String]) -> Option<String> {
-    st3::native_resume::continued()
+    fractal_daemon::native_resume::continued()
         .map(|(thread, _)| thread)
-        .filter(|thread| st3::native_resume::codex_check(argv, thread).is_ok())
+        .filter(|thread| fractal_daemon::native_resume::codex_check(argv, thread).is_ok())
 }
 
 /// How the Codex driver learns its person's answer to the approval it waits on: this daemon's
@@ -2084,12 +2084,12 @@ fn codex_continued_thread(argv: &[String]) -> Option<String> {
 fn codex_prompt_answers(
     client: &Client,
     subject: &str,
-) -> st_drivers::session_control::PromptAnswers {
+) -> fractal_drivers::session_control::PromptAnswers {
     let client = client.clone();
     let runtime = tokio::runtime::Handle::current();
     let agent = urlencoding::encode(subject).into_owned();
     let publisher = (client.clone(), runtime.clone(), subject.to_owned());
-    st_drivers::session_control::PromptAnswers::new(move |ownership, transition| {
+    fractal_drivers::session_control::PromptAnswers::new(move |ownership, transition| {
         let path = format!(
             "/v1/harness-prompts/state?agent={agent}&ownership={ownership}&transition={transition}"
         );
@@ -2097,7 +2097,7 @@ fn codex_prompt_answers(
             // Bounded: the control thread reads Codex's socket between these reads.
             tokio::time::timeout(
                 Duration::from_millis(500),
-                client.get::<st_drivers::session_control::PromptAnswer>(&path),
+                client.get::<fractal_drivers::session_control::PromptAnswer>(&path),
             )
             .await
             .ok()?
@@ -2107,7 +2107,7 @@ fn codex_prompt_answers(
     // Each approval's item, so a client offers to allow only that exact call.
     .with_call_publisher(move |ownership, transition, call| {
         let (client, runtime, subject) = &publisher;
-        runtime.block_on(st3::driver_hook::publish_prompt_call(
+        runtime.block_on(fractal_daemon::driver_hook::publish_prompt_call(
             client, "codex", subject, ownership, transition, call,
         ));
     })
@@ -2135,8 +2135,8 @@ fn spawn_codex_provider(
                 _,
                 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             ) => {
-                let thread = st3::native_resume::requested().or_else(|| codex_continued_thread(&argv));
-                st_drivers::codex_app_server::run_controlled_paths(
+                let thread = fractal_daemon::native_resume::requested().or_else(|| codex_continued_thread(&argv));
+                fractal_drivers::codex_app_server::run_controlled_paths(
                     &paths.driver_root,
                     &state_dir,
                     &paths.agent_dir,
@@ -2148,14 +2148,14 @@ fn spawn_codex_provider(
                     thread,
                 )
             }
-            ProviderStart::Adopt(st_drivers::provider_session::DetachedSession::Codex {
+            ProviderStart::Adopt(fractal_drivers::provider_session::DetachedSession::Codex {
                 tui_pid,
                 server_pid,
                 watchdog_pid,
                 owner_write_fd,
                 socket_path,
                 safe_fallback,
-            }) => st_drivers::codex_app_server::adopt_controlled_paths(
+            }) => fractal_drivers::codex_app_server::adopt_controlled_paths(
                 &paths.driver_root,
                 &state_dir,
                 &paths.agent_dir,
@@ -2177,7 +2177,7 @@ fn spawn_codex_provider(
         };
         #[cfg(feature = "test-support")]
         if env!("CARGO_BIN_NAME") == "st3-fixture" {
-            st3::test_support::hold_provider_completion(&outcome)?;
+            fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
     })
@@ -2208,7 +2208,7 @@ async fn drive_codex_native(
         _,
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     )) {
-        st_drivers::harness_events::enable(&paths.agent_dir, &incarnation)?;
+        fractal_drivers::harness_events::enable(&paths.agent_dir, &incarnation)?;
     }
     loop_state.paths = Some(paths.resolved());
     let NativePaths {
@@ -2219,7 +2219,7 @@ async fn drive_codex_native(
     } = paths.clone();
     let root = paths.state_root();
     let state_dir = paths.session_dir.clone();
-    let harness_state_path = st_drivers::harness_state::harness_state_path(&agent_dir);
+    let harness_state_path = fractal_drivers::harness_state::harness_state_path(&agent_dir);
     if matches!(start, ProviderStart::Launch(
         _,
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
@@ -2234,13 +2234,13 @@ async fn drive_codex_native(
         loop_state.harness_record_started = true;
     }
     let prior_binding = std::fs::read(state_dir.join("binding.json")).ok();
-    let inbox = st_drivers::message::inbox_dir(&agent_dir);
-    let archive = st_drivers::message::archive_dir(&agent_dir);
+    let inbox = fractal_drivers::message::inbox_dir(&agent_dir);
+    let archive = fractal_drivers::message::archive_dir(&agent_dir);
     let mut mailbox =
         NativeMailbox::start(client, subject, &incarnation, "codex", &mut loop_state).await?;
     let mut observations = NativeObservations::start(&agent_dir, &incarnation)?.settle(settle);
     if push_mailbox_enabled() {
-        st_drivers::push_mailbox::register(&agent_dir);
+        fractal_drivers::push_mailbox::register(&agent_dir);
     }
     if matches!(start, ProviderStart::Adopt(_)) {
         paths.pending_hold_adoption = legacy_delivery_hold(subject, &paths.agent_dir);
@@ -2257,20 +2257,20 @@ async fn drive_codex_native(
     let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
-    let mut subagents = st3::subagents::Publisher::start(
+    let mut subagents = fractal_daemon::subagents::Publisher::start(
         subject,
         "codex",
         &incarnation,
         &agent_dir,
-        st_drivers::subagents::now_ms(),
+        fractal_drivers::subagents::now_ms(),
     );
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut renewed_minute = None;
-    let mut work_retry = st3::client::DriverRetry::default();
-    let mut control_retry = st3::client::DriverRetry::default();
+    let mut work_retry = fractal_daemon::client::DriverRetry::default();
+    let mut control_retry = fractal_daemon::client::DriverRetry::default();
     let mut last_activity_fingerprint = None;
     let mut last_usage_fingerprint = None;
     let mut last_limits_fingerprint = None;
@@ -2286,13 +2286,13 @@ async fn drive_codex_native(
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
                 if env!("CARGO_BIN_NAME") == "st3-fixture"
-                    && matches!(&frame, Some(st3::mailbox::Frame::Fenced { .. }))
+                    && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
                     fs::write(PathBuf::from(root).join("fence-received"),
                         if task.is_finished() { "finished" } else { "pending" })?;
                 }
-                let mail_changed = matches!(&frame, Some(st3::mailbox::Frame::Mailbox { .. }));
+                let mail_changed = matches!(&frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. }));
                 mailbox.accept(frame, &runtime_id)?;
                 if !completion_announced && mail_changed
                     && let Err(error) = sync_native_delivery_control(client, subject, &mut paths, &mailbox, &inbox, "app-server").await {
@@ -2329,14 +2329,14 @@ async fn drive_codex_native(
                 // A resume that ended before its thread bound was refused by Codex itself, such
                 // as a thread with no rollout. The wrapper can end cleanly and leave the reason in
                 // its harness record. The refusal goes first, so nothing after it can delay it.
-                if reported_session.is_none() && st3::native_resume::requested().is_some() {
+                if reported_session.is_none() && fractal_daemon::native_resume::requested().is_some() {
                     let reason = match &outcome {
                         Err(error) => format!("{error:#}"),
-                        Ok(()) => st_drivers::harness_state::read(&harness_state_path, None)
+                        Ok(()) => fractal_drivers::harness_state::read(&harness_state_path, None)
                             .and_then(|observed| observed.reason)
                             .unwrap_or_else(|| "Codex ended before it bound the resumed thread".into()),
                     };
-                    let refusal = st3::native_resume::Refusal {
+                    let refusal = fractal_daemon::native_resume::Refusal {
                         code: "harness-refused",
                         reason: reason.chars().take(2_000).collect(),
                     };
@@ -2347,11 +2347,11 @@ async fn drive_codex_native(
                     // The next relaunch starts a new thread instead of trying this one again.
                     let reason = match &outcome {
                         Err(error) => format!("{error:#}"),
-                        Ok(()) => st_drivers::harness_state::read(&harness_state_path, None)
+                        Ok(()) => fractal_drivers::harness_state::read(&harness_state_path, None)
                             .and_then(|observed| observed.reason)
                             .unwrap_or_else(|| "Codex ended before it bound the continued thread".into()),
                     };
-                    let refusal = st3::native_resume::Refusal {
+                    let refusal = fractal_daemon::native_resume::Refusal {
                         code: "harness-refused",
                         reason: reason.chars().take(2_000).collect(),
                     };
@@ -2481,7 +2481,7 @@ async fn drive_codex_native(
                     );
                     if let Some(observed) = loop_state
                         .harness_record_started
-                        .then(|| st_drivers::harness_state::read(&harness_state_path, None))
+                        .then(|| fractal_drivers::harness_state::read(&harness_state_path, None))
                         .flatten()
                     {
                         publish_harness_activity(
@@ -2517,8 +2517,8 @@ async fn drive_codex_native(
                             last_capacity_fingerprint = None;
                         }
                     }
-                    if let Some(context) = st_drivers::harness_context::read(
-                        &st_drivers::harness_context::harness_context_path(&agent_dir)) {
+                    if let Some(context) = fractal_drivers::harness_context::read(
+                        &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
                         &ObservationClient { client, event: None },
                         subject,
@@ -2540,7 +2540,7 @@ async fn drive_codex_native(
                     }
                     // The Codex runtime stamps its timeline with its own incarnation, which
                     // outlives st's runtime incarnation when a resident Codex is adopted.
-                    let codex_incarnation = st_drivers::codex_app_server::current_runtime_incarnation(
+                    let codex_incarnation = fractal_drivers::codex_app_server::current_runtime_incarnation(
                         &state_dir,
                         &identity,
                         &runtime_id,
@@ -2566,7 +2566,7 @@ async fn drive_codex_native(
                 }
                 }
                 subagents.set_timeline_incarnation(
-                    st_drivers::codex_app_server::current_runtime_incarnation(
+                    fractal_drivers::codex_app_server::current_runtime_incarnation(
                         &state_dir,
                         &identity,
                         &runtime_id,
@@ -2648,7 +2648,7 @@ async fn finish_native_exit_report(
     tokio::select! {
         result = &mut report => result,
         _ = async {
-            while !st_drivers::provider_session::stop_requested() {
+            while !fractal_drivers::provider_session::stop_requested() {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
         } => {
@@ -2695,7 +2695,7 @@ where
     Fut: std::future::Future<Output = Result<T>>,
 {
     let mut last_warning = None;
-    let mut retry = st3::client::DriverRetry::default();
+    let mut retry = fractal_daemon::client::DriverRetry::default();
     loop {
         match call().await {
             Ok(value) => return Ok(value),
@@ -2765,7 +2765,7 @@ mod tests {
                 let case = format!("push={push} transport={transport}");
                 let inbox = root.path().join(format!("inbox-{push}-{transport}"));
                 let mut paths = NativePaths {
-                    delivery_gate: st_drivers::session_control::DeliveryGate::default(),
+                    delivery_gate: fractal_drivers::session_control::DeliveryGate::default(),
                     pending_hold_adoption: None,
                     driver_root: root.path().into(),
                     session_dir: root.path().into(),
@@ -2773,10 +2773,10 @@ mod tests {
                     identity: subject.into(),
                     runtime_id: "runtime-1".into(),
                 };
-                let fence = st3::mailbox::Fence::new(subject, "incarnation-1", "delivery");
+                let fence = fractal_daemon::mailbox::Fence::new(subject, "incarnation-1", "delivery");
                 let mut mailbox = NativeMailbox {
                     // The stream never connects: the fake daemon serves only delivery control.
-                    subscription: push.then(|| st3::mailbox::Subscription::start(
+                    subscription: push.then(|| fractal_daemon::mailbox::Subscription::start(
                         client.clone(), fence.clone(), json!({}),
                     )),
                     fence,
@@ -2801,7 +2801,7 @@ mod tests {
                         "content": "Do the work.", "status": "sent", "created_index": 1,
                     })).unwrap());
                 } else {
-                    st_drivers::message::send_to_inbox(&inbox, "person/eval", None, None, &[], "Do the work.")
+                    fractal_drivers::message::send_to_inbox(&inbox, "person/eval", None, None, &[], "Do the work.")
                         .unwrap();
                 }
                 let before = reads.load(Ordering::SeqCst);

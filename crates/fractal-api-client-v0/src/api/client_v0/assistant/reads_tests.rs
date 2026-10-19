@@ -98,7 +98,7 @@ fn page_items<'a>(page: &'a Value, collection: &str) -> &'a Vec<Value> {
 
 /// Compare assistant reads against one retained, deterministic synthetic store.
 /// The default scale is three times the historical busy-host mission/run/message counts
-/// documented in `crates/st3/tests/daemon_bench.rs`, not a current production measurement.
+/// documented in `crates/fractal/tests/daemon_bench.rs`, not a current production measurement.
 /// Publications warm outside the measured calls; only counts and timings print.
 #[tokio::test]
 #[ignore = "assistant read timing; set ST_ASSISTANT_READ_STORE; run with --ignored --nocapture"]
@@ -785,7 +785,7 @@ async fn conversation_content_refuses_attachments_and_structured_payloads_withou
 
 const PTY_FIXTURE: &str = "assistant-reads-pty";
 
-pub(in crate::api::client_v0::assistant) struct PtyCleanup(st_runtime::PtyRuntime, &'static str);
+pub(in crate::api::client_v0::assistant) struct PtyCleanup(fractal_runtime::PtyRuntime, &'static str);
 
 impl Drop for PtyCleanup {
     fn drop(&mut self) {
@@ -797,7 +797,7 @@ impl Drop for PtyCleanup {
 pub(in crate::api::client_v0::assistant) async fn live_terminal(
     mut state: AppState,
     runtime_id: &'static str,
-) -> Option<(AppState, st_runtime::PtyRuntime, String, PtyCleanup)> {
+) -> Option<(AppState, fractal_runtime::PtyRuntime, String, PtyCleanup)> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let Some(pty) = std::env::split_paths(&path)
         .map(|directory| directory.join("pty"))
@@ -807,7 +807,7 @@ pub(in crate::api::client_v0::assistant) async fn live_terminal(
         return None;
     };
     state.pty_binary = pty.clone();
-    let runtime = st_runtime::PtyRuntime::new(state.pty_root.clone())
+    let runtime = fractal_runtime::PtyRuntime::new(state.pty_root.clone())
         .with_binary(pty.to_string_lossy());
     let cleanup = PtyCleanup(runtime.clone(), runtime_id);
     let pty_root = state.pty_root.clone();

@@ -200,7 +200,7 @@ pub enum LaunchSpec {
     Argv(Vec<String>),
 }
 
-impl From<&LaunchSpec> for st_runtime::Launch {
+impl From<&LaunchSpec> for fractal_runtime::Launch {
     fn from(value: &LaunchSpec) -> Self {
         match value {
             LaunchSpec::Shell(source) => Self::Shell(source.clone()),
@@ -255,7 +255,7 @@ pub struct MemberSpec {
     /// The size a terminal seat starts at: the configured person's `terminal.launch-geometry`,
     /// read at each launch. Never declared, so never a launch change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_size: Option<st_runtime::TerminalSize>,
+    pub terminal_size: Option<fractal_runtime::TerminalSize>,
 }
 
 impl MemberSpec {
@@ -968,7 +968,7 @@ pub struct NormalizedIntent {
     #[serde(default)]
     pub missions: BTreeMap<String, MissionSpec>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub mission_provenance: BTreeMap<String, st3_schema::provenance::Provenance>,
+    pub mission_provenance: BTreeMap<String, fractal_schema::provenance::Provenance>,
     #[serde(default)]
     pub mission_runs: BTreeMap<String, MissionRunDeclaration>,
     #[serde(default)]
@@ -1313,7 +1313,7 @@ pub struct MissionResponse {
     pub subject_tokens: BTreeMap<String, Vec<String>>,
     pub mission_revisions: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub mission_provenance: BTreeMap<String, st3_schema::provenance::Provenance>,
+    pub mission_provenance: BTreeMap<String, fractal_schema::provenance::Provenance>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2264,9 +2264,9 @@ impl MessageSendRefusal {
 impl MessageView {
     /// Verified assistant provenance for notification rendering, from stored claim fields rather
     /// than sender-authored text. `None` for every ordinary send.
-    pub fn assistant_metadata(&self) -> Option<st_drivers::ding::AssistantMessageMetadata<'_>> {
+    pub fn assistant_metadata(&self) -> Option<fractal_drivers::ding::AssistantMessageMetadata<'_>> {
         (self.sender_class.as_deref() == Some("external-assistant")).then_some(
-            st_drivers::ding::AssistantMessageMetadata {
+            fractal_drivers::ding::AssistantMessageMetadata {
                 assistant_grant_id: self.assistant_grant_id.as_deref(),
             },
         )
@@ -2374,7 +2374,7 @@ pub struct Attachment {
     pub expires_at_unix_ms: u128,
 }
 
-pub use st3_terminal_direct::LocalTerminal;
+pub use fractal_terminal_direct::LocalTerminal;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AttachRequest {
@@ -2554,7 +2554,7 @@ pub struct MissionDefinitionView {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionRunView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<st3_schema::provenance::Provenance>,
+    pub provenance: Option<fractal_schema::provenance::Provenance>,
     pub subject: String,
     pub id: String,
     pub mission: String,
@@ -3204,7 +3204,7 @@ pub struct RevisionProposalView {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RevisionSubmissionView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<st3_schema::provenance::Provenance>,
+    pub provenance: Option<fractal_schema::provenance::Provenance>,
     pub status: String,
     pub mission_run: MissionRunView,
     #[serde(default, skip_serializing_if = "Option::is_none")]

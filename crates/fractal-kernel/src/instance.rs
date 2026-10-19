@@ -44,7 +44,7 @@ const FRACTAL_ENV: &str = "FRACTAL_INSTANCE";
 
 /// Resolve once at each instance boundary, including explicit empty Fractal masking.
 fn environment_name() -> Option<String> {
-    st_drivers::contracts::env(ENV)
+    fractal_drivers::contracts::env(ENV)
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
@@ -94,7 +94,7 @@ impl Instance {
         anyhow::ensure!(home.is_absolute(), "HOME is not an absolute directory");
         Ok(Self {
             name: name.to_owned(),
-            root: st3_client::product_dirs::instance_root(home, name),
+            root: fractal_client::product_dirs::instance_root(home, name),
             legacy_root: home.join(ROOT_DIRECTORY).join(name),
         })
     }
@@ -327,8 +327,8 @@ mod tests {
         let new = home.path().join(".fractal-instance/try");
         std::fs::create_dir_all(&new).unwrap();
         std::fs::write(
-            new.join(st3_client::product_dirs::RECEIPT_FILE),
-            format!("{}\n", st3_client::product_dirs::MIGRATION_ID),
+            new.join(fractal_client::product_dirs::RECEIPT_FILE),
+            format!("{}\n", fractal_client::product_dirs::MIGRATION_ID),
         ).unwrap();
         let instance = Instance::new(home.path(), "try").unwrap();
         assert_eq!(instance.root(), new);

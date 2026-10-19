@@ -56,7 +56,7 @@ pub fn retain_noncanonical_source(store: &Store, spec: &MissionSpec, claim: &Cla
         .batched(|tx| -> Result<()> {
             assert_eq!(
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h74dd53402787 owner=st3_store::store::person_work::revision_provenance_tests_shared_missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2",
+                    /* sqlite-large-value: allow-for-now lv-hfc9942c76914 owner=fractal_store::store::person_work::revision_provenance_tests_shared_missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2",
                     params![spec.id, spec.revision, claim.id],
                 )?,
                 1

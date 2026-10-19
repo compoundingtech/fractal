@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use rusqlite::StatementStatus;
-use st3_missions::store::person_work::reconcile_candidates_tests_shared_seats::*;
-use st3_missions::store::person_work::reconcile_candidates_tests_shared_seats::{insert_retained_ask};
+use fractal_missions::store::person_work::reconcile_candidates_tests_shared_seats::*;
+use fractal_missions::store::person_work::reconcile_candidates_tests_shared_seats::{insert_retained_ask};
 
 
 #[test]
@@ -18,7 +18,7 @@ fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
             let connection = store.connection.write();
             let subject = format!("step-run/history-{n}/ask");
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hf91edf76bdfc owner=st3_seats::store::person_work::reconcile_candidates_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,
+                /* sqlite-large-value: allow-for-now lv-h1e3e5d5be065 owner=fractal_seats::store::person_work::reconcile_candidates_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,
                  attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints)
                  SELECT ?1,run_id,generation_id,?1,definition_hash,'completed',
                  attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints
@@ -36,7 +36,7 @@ fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
             let connection = store.readers.get();
             let query = canonical_sql(PERSON_ASKS_FOR_RECONCILE);
             let plan = connection
-                .prepare(/* sqlite-large-value: allow-for-now lv-h812eaef6cbdd owner=st3_seats::store::person_work::reconcile_candidates_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
+                .prepare(/* sqlite-large-value: allow-for-now lv-h16af7b337507 owner=fractal_seats::store::person_work::reconcile_candidates_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
                 .unwrap()
                 .query_map([], |row| row.get::<_, String>(3))
                 .unwrap()
@@ -45,7 +45,7 @@ fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
                 .join("; ");
             assert!(plan.contains("USING INDEX step_runs_open_index"), "{plan}");
             {
-                let statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hcc4ade7cce19 owner=st3_seats::store::person_work::reconcile_candidates_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
+                let statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h33f9eb148211 owner=fractal_seats::store::person_work::reconcile_candidates_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
                 statement.reset_status(StatementStatus::VmStep);
                 statement.reset_status(StatementStatus::FullscanStep);
             }
@@ -54,7 +54,7 @@ fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
                 candidates.iter().map(|claim| &claim.id).collect::<Vec<_>>(),
                 [&record.id]
             );
-            let statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hcdbc11b5e123 owner=st3_seats::store::person_work::reconcile_candidates_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
+            let statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h74b5d9dca93e owner=fractal_seats::store::person_work::reconcile_candidates_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
             let vm = statement.get_status(StatementStatus::VmStep);
             assert!(
                 statement.get_status(StatementStatus::FullscanStep) <= 8,

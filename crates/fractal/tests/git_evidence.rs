@@ -1,5 +1,5 @@
 //! Offline CLI contract: transporting/importing evidence needs no daemon or signing key.
-use st3::evidence::{
+use fractal_daemon::evidence::{
     self, Check, Fact, Observation, Policy, Statement, Subject, TrustTier, Verdict,
 };
 use std::{

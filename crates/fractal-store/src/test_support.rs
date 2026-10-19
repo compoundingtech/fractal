@@ -1,7 +1,7 @@
 //! Fixture tools that need the store. The process tools (temporary directories, the fixture shell,
 //! command wrappers) live in st3-secrets and are re-exported here.
 
-pub use st3_secrets::test_support::*;
+pub use fractal_secrets::test_support::*;
 
 use std::sync::OnceLock;
 

@@ -21,8 +21,8 @@ use sha2::{Digest as _, Sha256};
 use walkdir::WalkDir;
 #[cfg(test)]
 use crate::native_views::{MAX_OMP_EVENT_IDENTITY_BYTES, MAX_TIMELINE_VALUE_BYTES, bounded_value};
-pub use st3_missions::external_sessions::*;
-pub use st3_missions::external_sessions::{ExternalDriver, ExternalProcess, ExternalSession, LineTimelineFold, NativeLocator, TimelineKey, TimelineOrder, TimelineSlice, digest, timeline_key, timestamp};
+pub use fractal_missions::external_sessions::*;
+pub use fractal_missions::external_sessions::{ExternalDriver, ExternalProcess, ExternalSession, LineTimelineFold, NativeLocator, TimelineKey, TimelineOrder, TimelineSlice, digest, timeline_key, timestamp};
 
 const MAX_DISCOVERED_FILES: usize = 10_000;
 
@@ -548,7 +548,7 @@ pub fn claude_session_of_managed_driver(
     driver_token: &str,
 ) -> std::result::Result<String, String> {
     // A seat without a wrapper names Claude's own session in its evidence token.
-    if let Some(session) = driver_token.strip_prefix(st_drivers::harness_state::WRAPPERLESS_PREFIX)
+    if let Some(session) = driver_token.strip_prefix(fractal_drivers::harness_state::WRAPPERLESS_PREFIX)
     {
         return if is_uuid(session) {
             Ok(session.to_owned())
@@ -1995,7 +1995,7 @@ fn opencode_timeline_slice(
 
 fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
     let connection = open_opencode_database(&session.transcript)?;
-    let mut message_statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8948f4d50a05 owner=st3_seats::external_sessions TODO=trace-statement-and-value-representation */ OPENCODE_MESSAGE_WINDOW_SQL)?;
+    let mut message_statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb2946f54f3f2 owner=fractal_seats::external_sessions TODO=trace-statement-and-value-representation */ OPENCODE_MESSAGE_WINDOW_SQL)?;
     // Count only row identities, then stream native bytes. Never collect 4,097 payload rows.
     let message_count: usize = connection.query_row(
         "SELECT count(*) FROM (SELECT 1 FROM message WHERE session_id=?1 LIMIT ?2)",
@@ -2670,10 +2670,10 @@ pub fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::external_sessions::shared_tests_seats::*;
-    use st3_store::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, texts, transcript_session, unfurled_timeline};
+    use fractal_store::external_sessions::shared_tests_seats::*;
+    use fractal_store::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, texts, transcript_session, unfurled_timeline};
     #[cfg(target_os = "linux")]
-    use st3_store::external_sessions::shared_tests_seats::path_executable;
+    use fractal_store::external_sessions::shared_tests_seats::path_executable;
 
     #[test]
     fn timeline_send_identity_codex_includes_native_thread_at_timeline_boundary() {
@@ -3249,7 +3249,7 @@ mod tests {
             driver_for_command("/Users/example/.opencode/bin/opencode --session ses_123"),
             Some(ExternalDriver::OpenCode)
         );
-        assert_eq!(driver_for_command("rg codex crates/st3"), None);
+        assert_eq!(driver_for_command("rg codex crates/fractal"), None);
         assert_eq!(driver_for_command("bash -c echo claude"), None);
     }
 
@@ -4053,7 +4053,7 @@ mod tests {
             claude_session_of_managed_driver(
                 home.path(),
                 "agent/test",
-                &format!("{}{session}", st_drivers::harness_state::WRAPPERLESS_PREFIX)
+                &format!("{}{session}", fractal_drivers::harness_state::WRAPPERLESS_PREFIX)
             )
             .unwrap(),
             session
@@ -4146,23 +4146,23 @@ mod tests {
         let fixtures = [
             (
                 ExternalDriver::Codex,
-                include_str!("../../st3-daemon/fixtures/native-records/codex.jsonl"),
+                include_str!("../../fractal-daemon/fixtures/native-records/codex.jsonl"),
             ),
             (
                 ExternalDriver::Claude,
-                include_str!("../../st3-daemon/fixtures/native-records/claude.jsonl"),
+                include_str!("../../fractal-daemon/fixtures/native-records/claude.jsonl"),
             ),
             (
                 ExternalDriver::Omp,
-                include_str!("../../st3-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl"),
+                include_str!("../../fractal-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl"),
             ),
             (
                 ExternalDriver::Pi,
-                include_str!("../../st3-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl"),
+                include_str!("../../fractal-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl"),
             ),
             (
                 ExternalDriver::Omp,
-                include_str!("../../st3-daemon/fixtures/omp-tool-results.jsonl"),
+                include_str!("../../fractal-daemon/fixtures/omp-tool-results.jsonl"),
             ),
         ];
         for (driver, fixture) in fixtures {
@@ -4200,7 +4200,7 @@ mod tests {
         }
         // Real OpenCode capture: test the native row objects, not the SSE envelope.
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../st-drivers/tests/fixtures/harness-admission/opencode-1.18.34.json"
+            "../../fractal-drivers/tests/fixtures/harness-admission/opencode-1.18.34.json"
         ))
         .unwrap();
         let mut part_types = BTreeSet::new();

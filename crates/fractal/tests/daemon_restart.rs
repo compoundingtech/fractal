@@ -5,7 +5,7 @@
 //! terminal, so they must wait the outage out silently, never exit for it, and resume from the
 //! graph once the daemon is back. Each test here owns its daemon, socket, and state directories.
 
-use st3::SeatsStore;
+use fractal_daemon::SeatsStore;
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::process::CommandExt as _;
@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 /// One isolated daemon whose API can stop and start again over the same durable graph.
@@ -66,7 +66,7 @@ impl Daemon {
     /// Protocol/receipt controls with fabricated incarnations and bare channel children.
     /// Actual physical ownership controls always use the production bound API.
     async fn start_admitted_protocol(&mut self) {
-        let app = st3::test_support::admitted_mailbox_protocol_router(self.state());
+        let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(self.state());
         self.start_isolated_app(app).await;
     }
 
@@ -84,7 +84,7 @@ impl Daemon {
             configured_peers: Vec::new(),
             client_relay: None,
             native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
         }
     }
 
@@ -101,7 +101,7 @@ impl Daemon {
                 .unwrap();
             runtime.block_on(async {
                 tokio::select! {
-                    result = st3::api::serve_unix_bound(&socket, &socket, app) => {
+                    result = fractal_daemon::api::serve_unix_bound(&socket, &socket, app) => {
                         result.unwrap();
                     }
                     _ = stopped => {}
@@ -121,11 +121,11 @@ impl Daemon {
         let state = self.state();
         let socket = self.socket.clone();
         self.server = Some(tokio::spawn(async move {
-            let app = st3::api::router(state);
+            let app = fractal_daemon::api::router(state);
             if native {
-                let _ = st3::api::serve_unix_bound(&socket, &socket, app).await;
+                let _ = fractal_daemon::api::serve_unix_bound(&socket, &socket, app).await;
             } else {
-                let _ = st3::api::serve_unix(&socket, app).await;
+                let _ = fractal_daemon::api::serve_unix(&socket, app).await;
             }
         }));
         wait_until(
@@ -268,7 +268,7 @@ async fn wait_until_for(limit: Duration, mut condition: impl FnMut() -> bool) ->
 /// A seat process launched with the environment the reconciler gives it, but with every home
 /// and state directory inside the test root.
 fn seat_command(root: &Path, socket: &Path) -> Command {
-    let mut command = st3::test_support::command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
     // Its own process group, so stopping the seat also stops the stand-in provider.
     command
         .process_group(0)
@@ -468,12 +468,12 @@ async fn native_exit_finishes(root: &Path, driver: &mut TestSeat, limit: Duratio
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_exit_stops_provider_and_driver_with_daemon_down() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     // Exercise both transient Unix-socket errors that previously retried forever.
     for missing_socket in [false, true] {
-        let root = st3::test_support::evidence_tempdir();
+        let root = fractal_daemon::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -522,10 +522,10 @@ async fn native_exit_stops_provider_and_driver_with_daemon_down() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_exit_retries_past_stop_budget_without_signal_and_reports_on_recovery() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -570,10 +570,10 @@ async fn native_exit_retries_past_stop_budget_without_signal_and_reports_on_reco
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_exit_signal_after_provider_end_bounds_an_in_flight_request() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -582,7 +582,7 @@ async fn native_exit_signal_after_provider_end_bounds_an_in_flight_request() {
     // This proves the budget cancels an in-flight report even when SIGTERM arrives later.
     let posting_exit = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = posting_exit.clone();
-    let app = st3::api::router(daemon.state()).layer(axum::middleware::from_fn(
+    let app = fractal_daemon::api::router(daemon.state()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let observed = observed.clone();
             async move {
@@ -633,12 +633,12 @@ fn declare_claude(daemon: &Daemon, seat: &str) {
         seat.trim_start_matches("agent/"),
         daemon.root.join("workspace"),
     );
-    let intent = st3::parse_intent(&source, "restart-node").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "restart-node").unwrap();
     let preview = daemon
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: None,
             },
@@ -658,9 +658,9 @@ fn declare_claude(daemon: &Daemon, seat: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_restart() {
     use sha2::{Digest as _, Sha256};
-    use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    use fractal_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
 
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/quiet-cedar";
     let incarnation = "quiet-cedar:one";
@@ -700,17 +700,17 @@ time.sleep(300)
         .join("drivers")
         .join(&hex::encode(Sha256::digest(seat.as_bytes()))[..24])
         .join("observations");
-    let record = st_drivers::harness_state::harness_state_path(&agent_dir);
+    let record = fractal_drivers::harness_state::harness_state_path(&agent_dir);
     wait_until(
         "the wrapper claims its harness record",
         Duration::from_secs(10),
         || {
-            st_drivers::harness_state::read(&record, None)
+            fractal_drivers::harness_state::read(&record, None)
                 .is_some_and(|state| state.evidence_incarnation.is_some())
         },
     )
     .await;
-    let owned = st_drivers::harness_state::read(&record, None).unwrap();
+    let owned = fractal_drivers::harness_state::read(&record, None).unwrap();
     wait_until("the quiet seat's channel attaches", Duration::from_secs(10), || {
         daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
     })
@@ -740,7 +740,7 @@ time.sleep(300)
     })
     .await;
 
-    let client = st3::client::Client::unix(&daemon.socket);
+    let client = fractal_daemon::client::Client::unix(&daemon.socket);
     let before: Value = client.get("/v1/client/agents?fresh=true").await.unwrap();
     let before = before["items"]
         .as_array()
@@ -754,7 +754,7 @@ time.sleep(300)
     // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
     // test-only shortened timeout and not by sleeping through it. Open a fresh Store too: the
     // driver's spool and mailbox fence must survive real cache loss.
-    st3::test_support::skew_client_clock(95_000);
+    fractal_daemon::test_support::skew_client_clock(95_000);
     assert_alive(&mut driver, "the quiet driver");
     daemon.store = Arc::new(Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap());
     daemon.start_admitted_protocol().await;
@@ -768,7 +768,7 @@ time.sleep(300)
     assert_alive(&mut driver, "the same quiet driver after daemon restart");
     assert_eq!(driver.id(), original_pid);
     // New reports carry the real clock again: stop skewing before the transition below.
-    st3::test_support::skew_client_clock(0);
+    fractal_daemon::test_support::skew_client_clock(0);
     // A provider transition bypasses the five-minute unchanged-evidence guard. Require the
     // fresh idle record to recover through the restarted daemon without restarting the seat.
     writer.observe(Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Empty)).unwrap();
@@ -815,7 +815,7 @@ async fn title_fallback_converts_a_slash_seat_id_to_its_dot_pty_id() {
 async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/title-cedar";
     let mut daemon = Daemon::new(root);
@@ -898,10 +898,10 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-claude";
     let incarnation = "4242:2026-09-27T12:00:00.000Z";
@@ -1026,10 +1026,10 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-omp";
     let incarnation = "4343:2026-09-27T12:00:00.000Z";
@@ -1120,10 +1120,10 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_after_catchup() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-todo";
     let mut daemon = Daemon::new(root);
@@ -1148,11 +1148,11 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
             {"content":"Preserved through graph lag","status":"in_progress"}
         ]}], "totals":{"pending":0,"in_progress":1,"completed":0,"blocked":0},
         "truncated":false});
-    st_drivers::harness_events::enable(&dir, &incarnation).unwrap();
-    let mut fields = st_drivers::pi_channel::todo_observation(&todo, "omp", Some("native"), &incarnation).unwrap();
+    fractal_drivers::harness_events::enable(&dir, &incarnation).unwrap();
+    let mut fields = fractal_drivers::pi_channel::todo_observation(&todo, "omp", Some("native"), &incarnation).unwrap();
     fields.get_mut("phases").unwrap()[0]["tasks"][0]["content"] = "Older rejected hydration".into();
-    st_drivers::harness_events::write_channel_todo(&dir, &incarnation, &json!(fields)).unwrap();
-    let event = st_drivers::harness_events::pending(&dir, 10).unwrap().remove(0);
+    fractal_drivers::harness_events::write_channel_todo(&dir, &incarnation, &json!(fields)).unwrap();
+    let event = fractal_drivers::harness_events::pending(&dir, 10).unwrap().remove(0);
     let mut bad_fields: BTreeMap<String, Value> = serde_json::from_value(event.payload).unwrap();
     bad_fields.remove("incarnation");
     let rejected = ClaimInput {
@@ -1160,7 +1160,7 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
         fields: bad_fields, evidence: vec![], expected_subject: None,
         idempotency_key: Some(format!("harness-todo:{seat}:{incarnation}:{}", event.sequence)),
     };
-    st_drivers::harness_events::prepare_publication(&dir, event.sequence,
+    fractal_drivers::harness_events::prepare_publication(&dir, event.sequence,
         "harness.todo.observed:", &serde_json::to_value(rejected).unwrap()).unwrap();
     let mut channel = seat_command(root, &daemon.socket)
         .env("PTY_ROOT", &registry)
@@ -1214,9 +1214,9 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
     }
     assert_alive(&mut channel, "the caught-up channel");
     wait_until("the repaired retry is acknowledged", Duration::from_secs(5), || {
-        st_drivers::harness_events::pending(&dir, 10).unwrap().is_empty()
+        fractal_drivers::harness_events::pending(&dir, 10).unwrap().is_empty()
     }).await;
-    let connection = rusqlite::Connection::open(st_drivers::harness_events::database_path(&dir)).unwrap();
+    let connection = rusqlite::Connection::open(fractal_drivers::harness_events::database_path(&dir)).unwrap();
     let old_slots: u64 = connection.query_row(
         "SELECT COUNT(*) FROM prepared WHERE slot='harness.todo.observed:'", [], |row| row.get(0),
     ).unwrap();
@@ -1229,11 +1229,11 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribution() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use sha2::Digest as _;
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/drain-accounts";
     let incarnation = "account-runtime";
@@ -1251,19 +1251,19 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
         .join(hex::encode(sha2::Sha256::digest(seat.as_bytes())))
         .join(hex::encode(sha2::Sha256::digest(incarnation.as_bytes())));
     wait_until("the native drain binds its spool", Duration::from_secs(10), || {
-        st_drivers::harness_events::enabled(&dir) && st_drivers::harness_events::pending(&dir, 1).is_ok()
+        fractal_drivers::harness_events::enabled(&dir) && fractal_drivers::harness_events::pending(&dir, 1).is_ok()
     }).await;
-    st_drivers::harness_state::claim(&dir, "drain-accounts", "omp", "account-producer").unwrap();
-    let now = st_drivers::message::now_ms();
-    st_drivers::harness_events::write_snapshot(&dir, "harness-context", &serde_json::to_vec(&json!({
+    fractal_drivers::harness_state::claim(&dir, "drain-accounts", "omp", "account-producer").unwrap();
+    let now = fractal_drivers::message::now_ms();
+    fractal_drivers::harness_events::write_snapshot(&dir, "harness-context", &serde_json::to_vec(&json!({
         "schema":"st.harness-context.v1", "agent":"drain-accounts", "harness":"omp",
         "incarnation":"account-producer", "observedAtMs":now, "writtenAtMs":now,
         "sessionTotalTokens":123, "account":"omp/provider-account",
         "rateLimits":{"fiveHour":37,"sevenDay":41,"observedAtMs":now - 120_000},
     })).unwrap()).unwrap();
-    let mut timeline = st_drivers::harness_timeline::Writer::new(&dir, "omp", "account-producer");
-    timeline.append("account-response", st_drivers::harness_timeline::Role::System,
-        st_drivers::harness_timeline::EntryType::Usage, json!({
+    let mut timeline = fractal_drivers::harness_timeline::Writer::new(&dir, "omp", "account-producer");
+    timeline.append("account-response", fractal_drivers::harness_timeline::Role::System,
+        fractal_drivers::harness_timeline::EntryType::Usage, json!({
             "semantics":"response", "model":"example", "account":"omp/provider-account",
             "input_tokens":10,"output_tokens":2,"total_tokens":12,
         }), true).unwrap();
@@ -1281,7 +1281,7 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
     let timeline = daemon.store.observations_for(seat, "harness.timeline").unwrap().pop().unwrap();
     let captured = std::env::var("ST3_ACCOUNT").ok().filter(|account| !account.is_empty());
     let account = captured.as_ref().map(|account| {
-        st_drivers::account::account_label("omp", &format!("declared:{account}"))
+        fractal_drivers::account::account_label("omp", &format!("declared:{account}"))
     }).unwrap_or_else(|| "omp/provider-account".into());
     assert_eq!(limits.body.pointer("/fields/account").and_then(Value::as_str), Some(account.as_str()));
     assert_eq!(limits.body.pointer("/fields/account_ref").and_then(Value::as_str), captured.as_deref());
@@ -1298,10 +1298,10 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_omp_ask_clears_without_poisoning_the_next_incarnation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/human-omp";
     let incarnation = "human-1";
@@ -1310,15 +1310,15 @@ async fn an_omp_ask_clears_without_poisoning_the_next_incarnation() {
 version 2
 agent "human-omp" { workspace "/tmp"; harness "omp" {} }
 "#;
-    let intent = st3::parse_intent(source, "restart-node").unwrap();
-    let plan = daemon.store.mission(&intent, st3::model::IntentInput {
+    let intent = fractal_daemon::parse_intent(source, "restart-node").unwrap();
+    let plan = daemon.store.mission(&intent, fractal_daemon::model::IntentInput {
         kdl: source.into(),
         source_name: None,
     }).unwrap();
     daemon.store.apply(&intent, &plan.subject_tokens, "human-omp-source").unwrap();
     daemon.observe_running(seat, incarnation);
     daemon.start().await;
-    let client = st3::client::Client::unix(&daemon.socket);
+    let client = fractal_daemon::client::Client::unix(&daemon.socket);
     let mut channel = seat_command(root, &daemon.socket)
         .arg("--catalog").arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "human-omp"])
@@ -1334,7 +1334,7 @@ agent "human-omp" { workspace "/tmp"; harness "omp" {} }
     wait_until("the channel publishes the ask", Duration::from_secs(10), || {
         daemon.harness_states(seat, incarnation) == ["working"]
     }).await;
-    let status: st3::model::StatusResponse =
+    let status: fractal_daemon::model::StatusResponse =
         client.get(&format!("/v1/status?subject={seat}")).await.unwrap();
     let blocked = status.subjects.into_iter().find(|status| status.subject == seat)
         .unwrap().harness.unwrap();
@@ -1353,7 +1353,7 @@ agent "human-omp" { workspace "/tmp"; harness "omp" {} }
     wait_until("the channel publishes the answered state", Duration::from_secs(10), || {
         daemon.harness_states(seat, incarnation) == ["working", "working"]
     }).await;
-    let status: st3::model::StatusResponse =
+    let status: fractal_daemon::model::StatusResponse =
         client.get(&format!("/v1/status?subject={seat}")).await.unwrap();
     let answered = status.subjects.into_iter().find(|status| status.subject == seat)
         .unwrap().harness.unwrap();
@@ -1373,7 +1373,7 @@ agent "human-omp" { workspace "/tmp"; harness "omp" {} }
         "state": "working", "driver": "omp", "incarnation_id": incarnation,
         "blocked_on": "human", "ask": "question", "reason": "An obsolete question",
     }));
-    let status: st3::model::StatusResponse =
+    let status: fractal_daemon::model::StatusResponse =
         client.get(&format!("/v1/status?subject={seat}")).await.unwrap();
     let resumed = status.subjects.into_iter().find(|status| status.subject == seat)
         .unwrap().harness.unwrap();
@@ -1386,10 +1386,10 @@ agent "human-omp" { workspace "/tmp"; harness "omp" {} }
 
 #[test]
 fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let socket = root.path().join("st3.sock");
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     let started = Instant::now();
@@ -1414,15 +1414,15 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cli_command_waits_out_a_daemon_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.start().await;
     daemon.stop().await;
-    let startup = st3::startup::Startup::begin(&daemon.socket).unwrap();
+    let startup = fractal_daemon::startup::Startup::begin(&daemon.socket).unwrap();
     startup.phase("open-store");
     let mut command = seat_command(root, &daemon.socket);
     command.env("ST3_DAEMON_WAIT", "20").args([
@@ -1453,13 +1453,13 @@ async fn a_cli_command_waits_out_a_daemon_restart() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cli_command_tries_a_bound_listener_before_refusing_startup() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
-    let startup = st3::startup::Startup::begin(&daemon.socket).unwrap();
+    let startup = fractal_daemon::startup::Startup::begin(&daemon.socket).unwrap();
     startup.phase("full-replay/flush");
     daemon.start().await;
     // Deliberately leave the record at starting: the API has bound, while a second listener
@@ -1482,7 +1482,7 @@ async fn a_cli_command_tries_a_bound_listener_before_refusing_startup() {
     );
     let _: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        st3::startup::read(&daemon.socket).unwrap().status,
+        fractal_daemon::startup::read(&daemon.socket).unwrap().status,
         "starting"
     );
 }
@@ -1490,14 +1490,14 @@ async fn a_cli_command_tries_a_bound_listener_before_refusing_startup() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_reports_starting_without_failing_an_answering_api() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
-    fn response(value: Value) -> axum::Json<st3::model::ApiResponse<Value>> {
-        axum::Json(st3::model::ApiResponse {
+    fn response(value: Value) -> axum::Json<fractal_daemon::model::ApiResponse<Value>> {
+        axum::Json(fractal_daemon::model::ApiResponse {
             api_version: "st3.v1".into(),
             request_id: "fixture-doctor-request".into(),
             snapshot_host: "restart-node".into(),
@@ -1505,7 +1505,7 @@ async fn doctor_reports_starting_without_failing_an_answering_api() {
             value,
         })
     }
-    let startup = st3::startup::Startup::begin(&daemon.socket).unwrap();
+    let startup = fractal_daemon::startup::Startup::begin(&daemon.socket).unwrap();
     startup.phase("bind");
     daemon
         .start_isolated_app(
@@ -1567,12 +1567,12 @@ async fn doctor_reports_starting_without_failing_an_answering_api() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for driver in ["omp", "pi"] {
         for transport in ["poll", "push"] {
-            let root = st3::test_support::evidence_tempdir();
+            let root = fractal_daemon::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/receipt-worker";
             let graph = root.join("graph.db");
@@ -1624,7 +1624,7 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
                 );
                 writeln!(input, "{}", json!({"type":"state", "state":"idle"})).unwrap();
                 input.flush().unwrap();
-                let client = st3::client::Client::new(st3::client::Endpoint::Unix(socket.clone()));
+                let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket.clone()));
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
                     let status: Value = client.get("/v1/messages/delivery/ready-probe").await.unwrap();
@@ -1727,12 +1727,12 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for driver in ["omp", "pi"] {
         for transport in ["push", "poll"] {
-            let root = st3::test_support::evidence_tempdir();
+            let root = fractal_daemon::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/replay-worker";
             let mut daemon = Daemon::new(root);
@@ -1768,8 +1768,8 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
             let mut channel = seat_command(root, &daemon.socket)
                 .env("ST_AGENT", seat)
                 .env("ST3_MAILBOX_TRANSPORT", transport)
-                .env(st_drivers::omp_session::CHANNEL_SESSION, "same-native-parent")
-                .env(st_drivers::pi_session::CHANNEL_SESSION, "same-native-parent")
+                .env(fractal_drivers::omp_session::CHANNEL_SESSION, "same-native-parent")
+                .env(fractal_drivers::pi_session::CHANNEL_SESSION, "same-native-parent")
                 .arg("--catalog").arg(root.join("catalog"))
                 .args(["driver", &format!("{driver}-channel"), "--identity", "replay-worker"])
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -1807,12 +1807,12 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
 // Claude can create its transcript after SessionStart. Its channel must recover the
 // exact hook-bound session, and consumption need not run UserPromptSubmit.
 struct ClaudeChannelFixture {
-    paths: st_drivers::driver_paths::Paths,
+    paths: fractal_drivers::driver_paths::Paths,
     transcript: PathBuf,
 }
 impl ClaudeChannelFixture {
     fn new(root: &Path, daemon: &Daemon, wrapper: &str) -> Self {
-        let paths = st_drivers::driver_paths::Paths {
+        let paths = fractal_drivers::driver_paths::Paths {
             root: root.join("claude-driver"),
             agent_dir: root.join("claude-driver/observations"),
             session_dir: root.join("claude-driver/sessions/claude"),
@@ -1938,7 +1938,7 @@ impl ClaudeChannelFixture {
         std::sync::mpsc::Receiver<Value>,
     ) {
         let (channel, input, received) = self.open_protocol(root, daemon, wrapper);
-        let client = st3::client::Client::new(st3::client::Endpoint::Unix(daemon.socket.clone()));
+        let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(daemon.socket.clone()));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let view: Value = client.get("/v1/messages/delivery/quartz-ready").await.unwrap();
@@ -1968,7 +1968,7 @@ impl ClaudeChannelFixture {
 /// Force a native activity publication to commit while the real channel's startup
 /// claim is in flight. This is a publisher/Store ordering control, not a hook eval.
 async fn delayed_channel_initialization_preserves_activity(activity: &str, legacy: bool) {
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -1979,7 +1979,7 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
     let captured = requests.clone();
     let release_request = release.clone();
     let recorded = committed.clone();
-    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
+    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let captured = captured.clone();
             let release = release_request.clone();
@@ -2042,7 +2042,7 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
             ("transport".into(), json!("claude-channel")),
             ("incarnation_id".into(), json!("wrapper-activity")),
         ]);
-        st3::suspension::annotate_quiescence(&mut fields);
+        fractal_daemon::suspension::annotate_quiescence(&mut fields);
         Some(
             daemon
                 .store
@@ -2170,8 +2170,8 @@ const HOOKLESS_GRACE_MS: u64 = 5_000;
 
 async fn channel_readiness_without_start_hook(native_activity: Option<bool>, late: bool) {
     use sha2::{Digest as _, Sha256};
-    use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
-    let root = st3::test_support::evidence_tempdir();
+    use fractal_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/hookless-cedar";
     let incarnation = "hookless-cedar:one";
@@ -2223,7 +2223,7 @@ time.sleep(300)
         .join(&hex::encode(Sha256::digest(seat.as_bytes()))[..24])
         .join("observations");
     let owned =
-        st_drivers::harness_state::read(&st_drivers::harness_state::harness_state_path(&dir), None)
+        fractal_drivers::harness_state::read(&fractal_drivers::harness_state::harness_state_path(&dir), None)
             .unwrap();
     let mut writer = Writer::new(
         &dir,
@@ -2307,7 +2307,7 @@ time.sleep(300)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_hookless_claude_seat_becomes_ready() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     channel_readiness_without_start_hook(None, false).await;
@@ -2315,7 +2315,7 @@ async fn initialized_hookless_claude_seat_becomes_ready() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_claude_readiness_does_not_displace_late_idle() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     channel_readiness_without_start_hook(Some(false), true).await;
@@ -2323,7 +2323,7 @@ async fn initialized_claude_readiness_does_not_displace_late_idle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_claude_readiness_preserves_early_idle() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     channel_readiness_without_start_hook(Some(false), false).await;
@@ -2331,7 +2331,7 @@ async fn initialized_claude_readiness_preserves_early_idle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_claude_readiness_preserves_early_working() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     channel_readiness_without_start_hook(Some(true), false).await;
@@ -2339,7 +2339,7 @@ async fn initialized_claude_readiness_preserves_early_working() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_claude_channel_initialization_preserves_idle() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     delayed_channel_initialization_preserves_activity("idle", false).await;
@@ -2347,7 +2347,7 @@ async fn delayed_claude_channel_initialization_preserves_idle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_claude_channel_initialization_preserves_working() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     delayed_channel_initialization_preserves_activity("working", false).await;
@@ -2355,14 +2355,14 @@ async fn delayed_claude_channel_initialization_preserves_working() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_claude_channel_preserves_legacy_readiness_key() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     delayed_channel_initialization_preserves_activity("idle", true).await;
 }
 
 async fn initialized_channel_still_rejects_a_foreign_binding(replace_token: bool) {
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2412,7 +2412,7 @@ async fn initialized_channel_still_rejects_a_foreign_binding(replace_token: bool
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_claude_channel_rejects_a_successor_incarnation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     initialized_channel_still_rejects_a_foreign_binding(false).await;
@@ -2420,7 +2420,7 @@ async fn initialized_claude_channel_rejects_a_successor_incarnation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_claude_channel_rejects_a_replacement_token() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     initialized_channel_still_rejects_a_foreign_binding(true).await;
@@ -2428,11 +2428,11 @@ async fn initialized_claude_channel_rejects_a_replacement_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::sync::atomic::{AtomicBool, Ordering};
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2440,7 +2440,7 @@ async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
     let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-current");
     let bind_seen = Arc::new(AtomicBool::new(false));
     let seen = bind_seen.clone();
-    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
+    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
         axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let seen = seen.clone();
@@ -2454,21 +2454,21 @@ async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
         ),
     );
     daemon.start_isolated_app(app).await;
-    let resume = st_drivers::reexec::write_state(
+    let resume = fractal_drivers::reexec::write_state(
         root,
         "mismatched-channel",
         &json!({
             "initialized":true,
-            "fence":st3::mailbox::Fence::new("agent/quartz", "wrapper-retired", "delivery"),
+            "fence":fractal_daemon::mailbox::Fence::new("agent/quartz", "wrapper-retired", "delivery"),
             "attempted":[], "confirmed":[], "accepted":[],
-            "lines":st_drivers::reexec::LineBuffer::default(),
+            "lines":fractal_drivers::reexec::LineBuffer::default(),
         }),
     )
     .unwrap();
     let mut channel = fixture
         .command(root, &daemon, "wrapper-current")
         .args(["driver", "claude-mcp", "--subject", "agent/quartz"])
-        .env(st_drivers::reexec::CHANNEL_RESUME_ENV, resume)
+        .env(fractal_drivers::reexec::CHANNEL_RESUME_ENV, resume)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2499,10 +2499,10 @@ async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_restarting() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2649,18 +2649,18 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_mcp_answers_during_binding_retries_and_eof_cancels_attachment() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     use std::sync::atomic::{AtomicBool, Ordering};
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
     daemon.observe_running("agent/quartz", "wrapper-binding");
     let binding_seen = Arc::new(AtomicBool::new(false));
     let seen = binding_seen.clone();
-    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
+    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let seen = seen.clone();
             async move {
@@ -2739,20 +2739,20 @@ async fn claude_mcp_answers_during_binding_retries_and_eof_cancels_attachment() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     // The second POST either succeeds, or remains pending until EOF cancels the child.
     // Exercise the actual channel loop, rather than manually calling the POST twice.
     for recover in [true, false] {
-        let root = st3::test_support::evidence_tempdir();
+        let root = fractal_daemon::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         declare_claude(&daemon, "agent/quartz");
         daemon.observe_running("agent/quartz", "wrapper-initialization");
         let attempts = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let captured = attempts.clone();
-        let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
+        let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let captured = captured.clone();
                 async move {
@@ -2874,11 +2874,11 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_idle_staged_mail_recovers_startup_binding_and_both_native_receipt_forms() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for mid_turn in [false, true] {
-        let root = st3::test_support::evidence_tempdir();
+        let root = fractal_daemon::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         daemon.observe_running("agent/quartz", "first");
@@ -2966,10 +2966,10 @@ async fn claude_idle_staged_mail_recovers_startup_binding_and_both_native_receip
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_staged_mail_receipted_after_restart_is_not_injected_on_second_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "first");
@@ -3037,10 +3037,10 @@ async fn claude_staged_mail_receipted_after_restart_is_not_injected_on_second_re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "previous");
@@ -3121,10 +3121,10 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_delivered_unread_mail_from_an_old_ledger_is_held_in_a_fresh_session() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let root = st3::test_support::evidence_tempdir();
+    let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "replacement");

@@ -1,7 +1,7 @@
 //! Fresh fences and unique action keys for terminal viewers.
 
 use anyhow::Result;
-use st3_client::{Client, Fence};
+use fractal_client::{Client, Fence};
 
 /// A unique action ID and matching idempotency key for one terminal operation.
 pub fn action_pair() -> (String, String) {
@@ -19,7 +19,7 @@ pub async fn terminal_fence(
 }
 /// Build a fence from the owner's screen sequence, including when the screen was relayed.
 pub fn terminal_screen_fence(
-    screen: &st3_client::Envelope<st3_client::TerminalScreen>,
+    screen: &fractal_client::Envelope<fractal_client::TerminalScreen>,
     incarnation: &str,
 ) -> Result<Fence> {
     anyhow::ensure!(

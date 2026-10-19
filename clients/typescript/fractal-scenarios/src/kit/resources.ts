@@ -1,4 +1,4 @@
-import type { Attention, Capabilities, Machine, Message, Mission, Work, WorkState } from '@smalltalk/st3-client'
+import type { Attention, Capabilities, Machine, Message, Mission, Work, WorkState } from '@fractal/client'
 
 import type { CastAgent, CastHost, CastMission, CastPerson } from './cast.ts'
 import type { FactoryContext } from './context.ts'

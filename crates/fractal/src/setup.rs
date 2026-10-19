@@ -13,8 +13,8 @@ use clap::Args;
 
 mod screen;
 
-use st3::client::{Client, Endpoint};
-use st3::config::Config;
+use fractal_daemon::client::{Client, Endpoint};
+use fractal_daemon::config::Config;
 
 pub(crate) use crate::onboarding::{capture, said};
 
@@ -86,7 +86,7 @@ fn require_person_process() -> Result<()> {
 pub fn prepare_plain_ui() -> Result<Option<String>> {
     require_person_process()?;
     anyhow::ensure!(interactive(), "interactive setup needs a terminal");
-    if st3_client::device::Profile::load(&st3_client::device::profile_path()?)?.is_some() {
+    if fractal_client::device::Profile::load(&fractal_client::device::profile_path()?)?.is_some() {
         return Ok(None);
     }
     tokio::runtime::Builder::new_current_thread()
@@ -94,7 +94,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
         .build()?
         .block_on(async {
             let mut config = Config::load_with_fleet(None)?;
-            st3::node_identity::resolve(&mut config)?;
+            fractal_daemon::node_identity::resolve(&mut config)?;
             if config.person.is_none() {
                 return Ok(run(SetupArgs::default()).await?.initial_subject);
             } else if !daemon_ready(&config).await
@@ -130,13 +130,13 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         Config::load_unvalidated(Some(&path))?
     } else {
         Config {
-            access_mode: Some(st_drivers::access::AccessMode::Auto),
+            access_mode: Some(fractal_drivers::access::AccessMode::Auto),
             seat_priority: None,
             ..Config::default()
         }
     };
     config.apply_fleet_file()?;
-    st3::node_identity::resolve(&mut config)?;
+    fractal_daemon::node_identity::resolve(&mut config)?;
     let first_run = config.person.is_none();
     let previous_node = config.node.clone();
     let existing_store = config.state_dir.join("node-identity.json").exists()
@@ -211,7 +211,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
             true,
         )?
     };
-    st3::service::preflight(service && start)?;
+    fractal_daemon::service::preflight(service && start)?;
     // Validate every answer before writing, including the persisted machine identity.
     merge_config(&path, &config)?;
     say!("Saved {}", path.display());
@@ -222,7 +222,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         "Work folder: {}. Agents work in folders inside it, so none of them has to look through your home folder.",
         work_root.display()
     );
-    if let Some(kib) = st3::read_cache::override_kib() {
+    if let Some(kib) = fractal_daemon::read_cache::override_kib() {
         say!("Read cache: {kib} KiB per reader.");
     }
     let current_exe = std::env::current_exe()?;
@@ -300,15 +300,15 @@ async fn prepare_harness(
             Ok(found) => found,
             // A running daemon from before this route cannot answer; read the login PATH here.
             Err(error)
-                if st3::client::is_missing_route(&error) || st3::client::is_not_found(&error) =>
+                if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
                 println!("The running daemon is older than this st; checking the login PATH from here.");
-                st3::environment::available_harnesses()?
+                fractal_daemon::environment::available_harnesses()?
             }
             Err(error) => return Err(error),
         }
     } else {
-        st3::environment::available_harnesses()?
+        fractal_daemon::environment::available_harnesses()?
     };
     if let Some(requested) = &args.harness {
         anyhow::ensure!(
@@ -378,7 +378,7 @@ async fn prepare_harness(
             say!("Claude channel installation failed: {error}");
             return Ok(fallback_harness(&found));
         }
-        if st_drivers::claude_channel::st3_policy_available() {
+        if fractal_drivers::claude_channel::st3_policy_available() {
             say!(
                 "Claude channel policy is present; seats use --channels plugin:st-channel@st."
             );
@@ -395,7 +395,7 @@ async fn prepare_harness(
 /// Make sure the st Claude channel is installed for this account; the error is the install
 /// command's own stderr, whole.
 pub(crate) fn ensure_claude_channel(executable: &Path) -> std::result::Result<(), String> {
-    let environment = st3::environment::snapshot().map_err(|error| format!("{error:#}"))?;
+    let environment = fractal_daemon::environment::snapshot().map_err(|error| format!("{error:#}"))?;
     let status = Command::new(executable)
         .args(["claude-channel", "status"])
         .envs(&environment)
@@ -466,7 +466,7 @@ fn print_assistant_summary(config: &Config, harness: &str) -> Result<()> {
 
 /// Say what the install's access mode does, as it will apply to agents the daemon starts.
 fn print_access_mode(config: &Config) {
-    use st_drivers::access::AccessMode;
+    use fractal_drivers::access::AccessMode;
     match config.active_access_mode() {
         AccessMode::Auto => println!(
             "Access mode: auto. Agents use their provider's managed permission checks. Auto reduces accidents; it is not a security boundary."
@@ -671,19 +671,19 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
     if sibling.is_file() {
         return Ok(sibling);
     }
-    let environment = st3::environment::snapshot()?;
-    st_runtime::resolve_executable("pty", &environment)
+    let environment = fractal_daemon::environment::snapshot()?;
+    fractal_runtime::resolve_executable("pty", &environment)
         .context("pty is missing; unpack the complete st archive (st3, st and pty) before setup")
 }
 
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
     // An instance always gets its own copies, below its own directory, so removing the
     // directory removes them and the default install is never the one that runs.
-    let instance = st3::instance::current();
+    let instance = fractal_daemon::instance::current();
     // Keep managed installations (including the signed macOS app bundle) in place.
     if instance.is_none()
-        && let Ok(environment) = st3::environment::snapshot()
-        && st_runtime::resolve_executable("st", &environment)
+        && let Ok(environment) = fractal_daemon::environment::snapshot()
+        && fractal_runtime::resolve_executable("st", &environment)
             .ok()
             .is_some_and(|st| same_file(&st, executable))
     {
@@ -760,7 +760,7 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
 
 fn check_login_path(executable: &Path) {
     // An instance is run by name from its own directory; nothing belongs on the login PATH.
-    if let Some(instance) = st3::instance::current() {
+    if let Some(instance) = fractal_daemon::instance::current() {
         println!(
             "This instance's commands are in {}. Run them with: {} --instance {}",
             instance.bin_dir().display(),
@@ -769,9 +769,9 @@ fn check_login_path(executable: &Path) {
         );
         return;
     }
-    match st3::environment::snapshot() {
+    match fractal_daemon::environment::snapshot() {
         Ok(environment) => {
-            if st_runtime::resolve_executable("st", &environment)
+            if fractal_runtime::resolve_executable("st", &environment)
                 .ok()
                 .is_some_and(|st| same_file(&st, executable))
             {
@@ -802,7 +802,7 @@ fn try_linger() {
     let user = std::env::var("USER").ok().filter(|user| !user.is_empty());
     // Never allow a polkit/password conversation to open in setup.
     // Lingering belongs to the real user session, never to an instance's environment.
-    let mut command = st3::service::host_command("loginctl");
+    let mut command = fractal_daemon::service::host_command("loginctl");
     command.args(["--no-ask-password", "enable-linger"]);
     if let Some(user) = &user {
         command.arg(user);
@@ -830,7 +830,7 @@ async fn start_daemon(
     service: bool,
     linger: bool,
 ) -> Result<()> {
-    st3::service::preflight(service)?;
+    fractal_daemon::service::preflight(service)?;
     if daemon_ready(config).await {
         return Ok(());
     }
@@ -886,7 +886,7 @@ async fn start_daemon(
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    if let Some(kib) = st3::read_cache::override_kib() {
+    if let Some(kib) = fractal_daemon::read_cache::override_kib() {
         command.env("SMALLCLAIMS_READ_CACHE_KIB", kib.to_string());
     }
     // SAFETY: setsid is async-signal-safe; no allocation or environment changes after fork.

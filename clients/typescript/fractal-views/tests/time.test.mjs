@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ago } from '@smalltalk/st3-views/time';
+import { ago } from '@fractal/views/time';
 
 const now = Date.parse('2026-09-25T08:25:00Z');
 assert.equal(ago('2026-09-25T08:24:30Z', now), '30s');

@@ -160,7 +160,7 @@ fn a_version_one_build_still_folds_into_these_tables() {
     let connection = store.connection.write();
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hf75b445854b3 owner=st3_store::store::limits_purity_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
+            /* sqlite-large-value: allow-for-now lv-h216d67c8ab86 owner=fractal_store::store::limits_purity_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
              (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body)
              VALUES ('claude','claude/one','',1,1,?1,1,'alder','{}')",
             [READING_SEAT],
@@ -168,7 +168,7 @@ fn a_version_one_build_still_folds_into_these_tables() {
         .unwrap();
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-he26d4471dc5e owner=st3_store::store::limits_purity_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
+            /* sqlite-large-value: allow-for-now lv-hd38e7cfc3d89 owner=fractal_store::store::limits_purity_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
              (subject, driver, account, account_ref, accepted_at_unix_ms, store_index)
              VALUES (?1,'claude','claude/one','',1,1)
              ON CONFLICT(subject) DO UPDATE SET driver=excluded.driver,

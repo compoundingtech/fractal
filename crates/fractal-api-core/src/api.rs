@@ -819,7 +819,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
 }
 
 async fn schema() -> Json<Value> {
-    let registry = st3_schema::registry();
+    let registry = fractal_schema::registry();
     Json(json!({
         "schema": registry.name,
         "digest": registry.digest(),
@@ -2268,7 +2268,7 @@ pub async fn client_capabilities(
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
         "kind": "capabilities",
-        "machine_version": st_drivers::version::machine_version(),
+        "machine_version": fractal_drivers::version::machine_version(),
         "session_actor": session.actor,
         "transport": session.transport,
         "capabilities": capabilities,
@@ -2280,18 +2280,18 @@ pub async fn client_capabilities(
             "max_response_bytes": CLIENT_MAX_RESPONSE_BYTES,
             "max_wait_ms": 30_000,
             "max_message_bytes": max_message_bytes,
-            "max_glass_body_bytes": st3_schema::glasses::MAX_BODY_BYTES,
-            "max_glasses": st3_schema::glasses::MAX_GLASSES,
-            "max_glass_depth": st3_schema::glasses::MAX_DEPTH,
-            "max_glass_nodes": st3_schema::glasses::MAX_NODES,
-            "max_arrangement_body_bytes": st3_schema::arrangements::MAX_BODY_BYTES,
-            "max_arrangement_resource_bytes": st3_schema::arrangements::MAX_RESOURCE_BYTES,
-            "max_arrangements": st3_schema::arrangements::MAX_ARRANGEMENTS,
-            "max_arrangement_name_bytes": st3_schema::arrangements::MAX_NAME_BYTES,
-            "max_arrangement_key_bytes": st3_schema::arrangements::MAX_KEY_BYTES,
-            "max_arrangement_operations": st3_schema::arrangements::MAX_OPERATIONS,
-            "max_arrangement_folders": st3_schema::arrangements::MAX_FOLDERS,
-            "max_arrangement_placements": st3_schema::arrangements::MAX_PLACEMENTS
+            "max_glass_body_bytes": fractal_schema::glasses::MAX_BODY_BYTES,
+            "max_glasses": fractal_schema::glasses::MAX_GLASSES,
+            "max_glass_depth": fractal_schema::glasses::MAX_DEPTH,
+            "max_glass_nodes": fractal_schema::glasses::MAX_NODES,
+            "max_arrangement_body_bytes": fractal_schema::arrangements::MAX_BODY_BYTES,
+            "max_arrangement_resource_bytes": fractal_schema::arrangements::MAX_RESOURCE_BYTES,
+            "max_arrangements": fractal_schema::arrangements::MAX_ARRANGEMENTS,
+            "max_arrangement_name_bytes": fractal_schema::arrangements::MAX_NAME_BYTES,
+            "max_arrangement_key_bytes": fractal_schema::arrangements::MAX_KEY_BYTES,
+            "max_arrangement_operations": fractal_schema::arrangements::MAX_OPERATIONS,
+            "max_arrangement_folders": fractal_schema::arrangements::MAX_FOLDERS,
+            "max_arrangement_placements": fractal_schema::arrangements::MAX_PLACEMENTS
         },
         "event_cursor": cursor,
         "oldest_event_cursor": format!("event-cursor/{}/{oldest}", state.node),
@@ -2722,7 +2722,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
     let connection = store.readers.get();
     let (subjects, desired) = crate::otel::roster_phase("membership", || -> anyhow::Result<_> {
         let mut subjects = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbed160f928fc owner=st3_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2e85f6b23389 owner=fractal_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
             .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
                 row.get::<_, String>(0)
             })?
@@ -2943,9 +2943,9 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
             overlay_delivery_presence(item, &local_host);
             // The presentation reads the facts settled just above, so it is settled with them. A
             // row it cannot read goes without one; it never fails the read for every client.
-            match st3_ui_model::agents::Facts::deserialize(&*item) {
+            match fractal_ui_model::agents::Facts::deserialize(&*item) {
                 Ok(facts) => {
-                    item["presentation"] = serde_json::to_value(st3_ui_model::agents::present(&facts))?;
+                    item["presentation"] = serde_json::to_value(fractal_ui_model::agents::present(&facts))?;
                 }
                 Err(error) => eprintln!("st3: WARN agent {} has no presentation: {error}", item["id"]),
             }
@@ -5094,7 +5094,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
         let connection = store.readers.get();
         crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
             Ok(connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4650ec45caf4 owner=st3_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2154055540e0 owner=fractal_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
                 .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?)
         })
@@ -6202,7 +6202,7 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
         });
         // A masked/conflicting child identity must not inherit an ancestor's authority.
         if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
-            return st_drivers::contracts::env_with("ST_AGENT", &lookup)
+            return fractal_drivers::contracts::env_with("ST_AGENT", &lookup)
                 .filter(|value| value.starts_with("agent/"));
         }
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -6256,7 +6256,7 @@ fn native_delivery_identity(
         }
     })?;
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
-    let agent = st_drivers::contracts::env_with("ST_AGENT", &|name| {
+    let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
         env.iter().find_map(|entry| {
             let (key, value) = entry.split_once('=')?;
             (key == name).then(|| value.to_owned())
@@ -6503,19 +6503,19 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "status": "ready",
         "node": state.node,
         "version": env!("CARGO_PKG_VERSION"),
-        "build": {"commit": st_drivers::version::build_commit()},
-        "isolation": isolation_name(st_runtime::isolation_mode()),
+        "build": {"commit": fractal_drivers::version::build_commit()},
+        "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
     })))
 }
 
-fn isolation_name(mode: st_runtime::Isolation) -> &'static str {
+fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
     match mode {
-        st_runtime::Isolation::Scope => "scope",
-        st_runtime::Isolation::Detached => "detached",
-        st_runtime::Isolation::DegradedDetached => "degraded-detached",
+        fractal_runtime::Isolation::Scope => "scope",
+        fractal_runtime::Isolation::Detached => "detached",
+        fractal_runtime::Isolation::DegradedDetached => "degraded-detached",
     }
 }
 
@@ -6773,8 +6773,8 @@ fn stale_attention_check(items: &[crate::model::AttentionItemView], now: u128) -
     }
 }
 
-fn daemon_pty(state: &AppState) -> anyhow::Result<st_runtime::PtyRuntime> {
-    Ok(st_runtime::PtyRuntime::new(state.pty_root.clone())
+fn daemon_pty(state: &AppState) -> anyhow::Result<fractal_runtime::PtyRuntime> {
+    Ok(fractal_runtime::PtyRuntime::new(state.pty_root.clone())
         .with_binary(state.pty_binary.to_string_lossy())
         .with_environment(crate::environment::snapshot()?))
 }
@@ -6820,7 +6820,7 @@ fn claude_hooks_check(
         ));
     }
     let drivers = state.state_dir.join("drivers");
-    let host = st_drivers::run::detect_host();
+    let host = fractal_drivers::run::detect_host();
     let mut bound = 0;
     for subject in &seats {
         let Some(observed) = state
@@ -6867,7 +6867,7 @@ fn claude_usage_check(
     desired: &[crate::model::DesiredSubject],
 ) -> Result<DoctorCheck, ApiError> {
     let mut faults = Vec::new();
-    let host = st_drivers::run::detect_host();
+    let host = fractal_drivers::run::detect_host();
     for seat in desired.iter().filter(|seat| {
         seat.member.as_ref().is_some_and(|member| {
             member.host == state.store.origin() && member.driver.as_deref() == Some("claude")
@@ -6890,7 +6890,7 @@ fn claude_usage_check(
         let agent_dir =
             crate::hooks::claude_agent_dir(&state.state_dir.join("drivers"), &seat.subject, &host);
         if let Some(warning) =
-            st_drivers::claude_session::usage_observation_warning(&agent_dir, incarnation)
+            fractal_drivers::claude_session::usage_observation_warning(&agent_dir, incarnation)
         {
             faults.push(format!("{}: {warning}", seat.subject));
         }
@@ -7292,21 +7292,21 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    let isolation = st_runtime::isolation_mode();
+    let isolation = fractal_runtime::isolation_mode();
     checks.push(DoctorCheck {
         name: "process-isolation".into(),
-        status: if isolation == st_runtime::Isolation::DegradedDetached {
+        status: if isolation == fractal_runtime::Isolation::DegradedDetached {
             "warn"
         } else {
             "pass"
         }
         .into(),
         message: match isolation {
-            st_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
-            st_runtime::Isolation::Detached => {
+            fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
+            fractal_runtime::Isolation::Detached => {
                 "tasks use detached process groups on this platform".into()
             }
-            st_runtime::Isolation::DegradedDetached => {
+            fractal_runtime::Isolation::DegradedDetached => {
                 "systemd user scopes are unavailable; a daemon restart can stop tasks".into()
             }
         },
@@ -7340,7 +7340,7 @@ fn doctor_report_with_operation_drift(
         })
         .unwrap_or_default();
     let exec_runtime =
-        st_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+        fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
     for subject in &desired {
         let Some(member) = subject
             .member
@@ -7354,7 +7354,7 @@ fn doctor_report_with_operation_drift(
         } else {
             matches!(
                 exec_runtime.observe(&member.runtime_id),
-                Ok(Some(st_runtime::ExecObservation::Running(_)))
+                Ok(Some(fractal_runtime::ExecObservation::Running(_)))
             )
         };
         if local_live {
@@ -7430,7 +7430,7 @@ fn doctor_report_with_operation_drift(
         .unwrap_or_default();
     let exec_directory = state.state_dir.join("exec");
     let exec_runtime =
-        st_runtime::ExecRuntime::new(exec_directory.clone(), state.state_dir.join("logs"));
+        fractal_runtime::ExecRuntime::new(exec_directory.clone(), state.state_dir.join("logs"));
     if let Ok(entries) = fs::read_dir(&exec_directory) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -7444,13 +7444,13 @@ fn doctor_report_with_operation_drift(
                 continue;
             }
             match exec_runtime.observe(runtime_id) {
-                Ok(Some(st_runtime::ExecObservation::Running(_))) => {
+                Ok(Some(fractal_runtime::ExecObservation::Running(_))) => {
                     unowned.push(format!("exec {runtime_id}"));
                 }
-                Ok(Some(st_runtime::ExecObservation::Indeterminate(reason))) => {
+                Ok(Some(fractal_runtime::ExecObservation::Indeterminate(reason))) => {
                     unowned.push(format!("exec {runtime_id} ({reason})"));
                 }
-                Ok(Some(st_runtime::ExecObservation::Exited(_)) | None) => {}
+                Ok(Some(fractal_runtime::ExecObservation::Exited(_)) | None) => {}
                 Err(error) => unowned.push(format!("exec {runtime_id} ({error})")),
             }
         }
@@ -7917,7 +7917,7 @@ fn doctor_report_with_operation_drift(
         "pass"
     };
     Ok(Json(DoctorReport {
-        machine_version: Some(st_drivers::version::machine_version()),
+        machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),
         checks,
         performance: crate::performance::snapshot(),
@@ -8715,7 +8715,7 @@ async fn get_delivery_hold(
     State(state): State<AppState>,
     Query(query): Query<DeliveryHoldQuery>,
 ) -> Result<Json<crate::delivery_hold::HoldView>, ApiError> {
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_subject(&query.subject)
         .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
     let store = state.store.clone();
@@ -10210,7 +10210,7 @@ pub async fn signal_session_as(
             runtime.signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
         })
     } else {
-        st_runtime::ExecRuntime::new(effect_state.state_dir.join("exec"), effect_state.state_dir.join("logs"))
+        fractal_runtime::ExecRuntime::new(effect_state.state_dir.join("exec"), effect_state.state_dir.join("logs"))
             .signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
     }).await?;
     finish_session_control(

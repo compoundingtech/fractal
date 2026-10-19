@@ -40,7 +40,7 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
         assert_eq!(explicit.actor, "person/explicit");
         if case == "instance" {
             let arguments = vec![std::ffi::OsString::from("st")];
-            assert_eq!(st3::instance::requested(&arguments).as_deref(), Some("alias-test"));
+            assert_eq!(fractal_daemon::instance::requested(&arguments).as_deref(), Some("alias-test"));
             let matches = cli_command().try_get_matches_from([
                 "st", "--instance", "flag-test", "work", "start", "task", "--as", "person/explicit",
             ]).unwrap();
@@ -62,7 +62,7 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
             .env(CHILD, case);
         for (name, new) in CLI_ENVIRONMENT_NAMES {
             command.env_remove(name).env_remove(new);
-            if let Some(legacy) = st_drivers::contracts::legacy_env_name(name) {
+            if let Some(legacy) = fractal_drivers::contracts::legacy_env_name(name) {
                 command.env_remove(legacy);
             }
         }
@@ -155,7 +155,7 @@ fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
 
 #[test]
 fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
-    let status = st3::store::CheckpointStatusView {
+    let status = fractal_daemon::store::CheckpointStatusView {
         node: "alder".into(),
         newest_stable: None,
         trimmed: None,
@@ -237,7 +237,7 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z")
         .unwrap()
         .timestamp_millis() as u128;
-    let found: st3_client::ClientConnections = serde_json::from_value(serde_json::json!({
+    let found: fractal_client::ClientConnections = serde_json::from_value(serde_json::json!({
         "kind": "client-connections", "member": "host/example",
         "items": [
             {"actor": "person/avery/session/0011", "person": "person/avery", "client": "smalltalk-ios 1.0 (42)",
@@ -264,7 +264,7 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
 #[test]
 fn harness_todo_graph_channel_rehydrates_and_spools_only_current_binding() {
     let root = tempfile::tempdir().unwrap();
-    st_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
+    fractal_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
     let mut state = PiChannelResume {
         incarnation: "runtime-a".into(),
         todo_outbox: Some(root.path().into()),
@@ -279,34 +279,34 @@ fn harness_todo_graph_channel_rehydrates_and_spools_only_current_binding() {
     assert!(!state.accept_frame(&frame));
     assert!(state.accept_frame(r#"{"type":"ready","sessionId":"native-a"}"#));
     assert!(state.accept_frame(&frame));
-    let events = st_drivers::harness_events::pending(root.path(), 100).unwrap();
+    let events = fractal_drivers::harness_events::pending(root.path(), 100).unwrap();
     assert_eq!(events[0].payload["source_op"], "hydrate");
     assert_eq!(events[0].payload["phases"], json!([]));
     let mut resumed: PiChannelResume =
         serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert!(resumed.accept_frame(r#"{"type":"session","sessionId":"native-b"}"#));
     assert!(!resumed.accept_frame(&frame));
-    assert_eq!(st_drivers::harness_events::pending(root.path(), 100).unwrap().len(), 1);
+    assert_eq!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().len(), 1);
 }
 
 #[test]
 fn harness_todo_spool_reconnect_preserves_sequence_and_next_incarnation_cleans_only_its_seat() {
     let root = tempfile::tempdir().unwrap();
     let current = prepare_channel_todo_outbox(root.path(), "agent/one", "runtime-a").unwrap();
-    st_drivers::harness_events::enable(&current, "runtime-a").unwrap();
+    fractal_drivers::harness_events::enable(&current, "runtime-a").unwrap();
     let fields = json!({
         "harness":"omp", "incarnation_id":"runtime-a", "session_id":"native",
         "observed_at":"2026-10-03T15:00:00Z", "source_op":"hydrate", "phases":[],
         "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
     });
-    st_drivers::harness_events::write_channel_todo(&current, "runtime-a", &fields).unwrap();
-    let sequence = st_drivers::harness_events::pending(&current, 10).unwrap()[0].sequence;
+    fractal_drivers::harness_events::write_channel_todo(&current, "runtime-a", &fields).unwrap();
+    let sequence = fractal_drivers::harness_events::pending(&current, 10).unwrap()[0].sequence;
     let resumed = prepare_channel_todo_outbox(root.path(), "agent/one", "runtime-a").unwrap();
     assert_eq!(resumed, current);
-    st_drivers::harness_events::write_channel_todo(&resumed, "runtime-a", &fields).unwrap();
-    assert!(st_drivers::harness_events::pending(&resumed, 10).unwrap()[1].sequence > sequence);
+    fractal_drivers::harness_events::write_channel_todo(&resumed, "runtime-a", &fields).unwrap();
+    assert!(fractal_drivers::harness_events::pending(&resumed, 10).unwrap()[1].sequence > sequence);
     let unrelated = prepare_channel_todo_outbox(root.path(), "agent/two", "runtime-b").unwrap();
-    st_drivers::harness_events::enable(&unrelated, "runtime-b").unwrap();
+    fractal_drivers::harness_events::enable(&unrelated, "runtime-b").unwrap();
     prepare_channel_todo_outbox(root.path(), "agent/one", "runtime-c").unwrap();
     assert!(!current.exists());
     assert!(unrelated.exists());
@@ -332,7 +332,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
     };
-    let state = st3::api::AppState {
+    let state = fractal_daemon::api::AppState {
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
@@ -344,7 +344,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
     let path = root.path().join("api.sock");
     let socket = path.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&socket, st3::api::router(state)).await.unwrap();
+        fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state)).await.unwrap();
     });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !path.exists() { tokio::task::yield_now().await; }
@@ -422,14 +422,14 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
 
 #[test]
 fn client_api_errors_print_in_plain_words_with_their_code() {
-    let api = st3_client::ClientError::Api(
-        st3_client::ErrorCode::StaleFence,
+    let api = fractal_client::ClientError::Api(
+        fractal_client::ErrorCode::StaleFence,
         "the client snapshot changed before the action was submitted".into(),
-        Box::new(st3_client::ErrorEnvelope {
+        Box::new(fractal_client::ErrorEnvelope {
             api_version: "st3.client.v0".into(),
             error_version: "st3.client.error.v0".into(),
             request_id: "request/test".into(),
-            code: st3_client::ErrorCode::StaleFence,
+            code: fractal_client::ErrorCode::StaleFence,
             message: "the client snapshot changed before the action was submitted".into(),
             retryable: false,
             retry_after_ms: None,
@@ -460,7 +460,7 @@ fn a_claude_session_without_a_binding_is_reported_once_after_the_grace() {
     // A new wrapper session gets its own grace, and a bound one is never reported.
     assert_eq!(watch.overdue(dir.path(), Some("wrapper-2"), late), None);
     fs::write(
-        dir.path().join(st3::hooks::CLAUDE_BINDING_FILE),
+        dir.path().join(fractal_daemon::hooks::CLAUDE_BINDING_FILE),
         r#"{"incarnation":"wrapper-2","native_session_id":"native-2"}"#,
     )
     .unwrap();
@@ -471,8 +471,8 @@ fn a_claude_session_without_a_binding_is_reported_once_after_the_grace() {
 }
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn peer_status(peer: &str, digest: Option<&str>) -> st3::model::ReplicationPeerStatus {
-    st3::model::ReplicationPeerStatus {
+fn peer_status(peer: &str, digest: Option<&str>) -> fractal_daemon::model::ReplicationPeerStatus {
+    fractal_daemon::model::ReplicationPeerStatus {
         last_successful_exchange: None,
         last_failed_exchange: None,
         worker: None,
@@ -504,7 +504,7 @@ fn a_wait_counts_only_exchanges_since_it_began() {
     let with = |name: &str, status: &str, measured: Option<(u128, u64)>| {
         let mut peer = peer_status(name, None);
         peer.status = status.into();
-        peer.sync = measured.map(|(at, peer_only)| st3::model::ReplicationPeerSync {
+        peer.sync = measured.map(|(at, peer_only)| fractal_daemon::model::ReplicationPeerSync {
             peer_only_envelopes: peer_only,
             measured_at_unix_ms: at,
             ..Default::default()
@@ -564,7 +564,7 @@ fn fleet_wait_refuses_only_on_admissions_the_fleet_fenced() {
 
 #[test]
 fn mixed_build_status_reports_log_verification_and_waiting_projections() {
-    let first = st3::model::ReplicationFirstSync {
+    let first = fractal_daemon::model::ReplicationFirstSync {
         state: "verified".into(),
         authority_digest: Some("log-digest".into()),
         envelopes: Some(3),
@@ -619,7 +619,7 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
     assert!(leave_peer_summary(&status).contains("a up (different digest)"));
 
     // A member that admitted the leave refuses this node and never reports its digest.
-    let left = st3::config::FleetRemoval {
+    let left = fractal_daemon::config::FleetRemoval {
         reported_by: "a".into(),
         code: "member-left".into(),
     };
@@ -629,7 +629,7 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
     );
 
     // A removal is no confirmation: writes after it do not replicate.
-    let removed = st3::config::FleetRemoval {
+    let removed = fractal_daemon::config::FleetRemoval {
         reported_by: "c".into(),
         code: "member-removed".into(),
     };
@@ -643,11 +643,11 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
 #[test]
 fn missions_tree_fixture_renders_all_sections() {
     let fixture: Value =
-        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h52c3278e9ae1 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.json"))
+        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h5c4f751108a0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.json"))
             .expect("valid missions tree fixture");
     assert_eq!(
         render_missions_tree(&fixture),
-        /* sqlite-large-value: allow-for-now lv-h42e40a77235e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.txt")
+        /* sqlite-large-value: allow-for-now lv-h936ef40a4b1a owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.txt")
     );
     let cli = Cli::try_parse_from(["st", "missions", "tree", "--json"])
         .expect("missions tree --json parses");
@@ -662,7 +662,7 @@ fn missions_tree_fixture_renders_all_sections() {
 
 #[test]
 fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
-    let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h109bba6945fe owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h55886ab30a77 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude.json"
     ))
     .unwrap();
@@ -671,7 +671,7 @@ fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
         &items,
         80,
         false,
-        st3_conversation_ui::Density::Full,
+        fractal_conversation_ui::Density::Full,
     );
     assert!(pretty.starts_with("CONVERSATION  session/example"), "{pretty}");
     assert!(pretty.contains("Please check why the n"), "{pretty}");
@@ -696,13 +696,13 @@ fn documents_get_renders_markdown_on_a_terminal_and_leaves_data_alone() {
 
 #[test]
 fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
-    let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h225f8728714b owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-he34895523d83 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude-skill.json"
     ))
     .unwrap();
     for density in [
-        st3_conversation_ui::Density::Full,
-        st3_conversation_ui::Density::Simple,
+        fractal_conversation_ui::Density::Full,
+        fractal_conversation_ui::Density::Simple,
     ] {
         let pretty = conversation_text("session/example", &items, 100, false, density);
         assert!(pretty.contains("Skill st"), "{pretty}");
@@ -722,7 +722,7 @@ fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
         &items[2..3],
         100,
         false,
-        st3_conversation_ui::Density::Full,
+        fractal_conversation_ui::Density::Full,
     );
     assert!(orphan.lines().any(|line| line.trim() == "## Messages"), "{orphan}");
     assert!(
@@ -1077,7 +1077,7 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
 
 #[test]
 fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
-    let message = st3::model::MessageView {
+    let message = fractal_daemon::model::MessageView {
         subject: "message/0123456789abcdef".into(),
         from: "agent/run-1/wake.claude".into(),
         to: "agent/run-1/wake.omp-2".into(),
@@ -1102,7 +1102,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
             "<smalltalk-message id=\"0123456789abcdef\" from=\"agent/run-1/wake.claude\" \
                  to=\"agent/run-1/wake.omp-2\" subject=\"Cross-harness consensus: idle\" \
                  sha256=\"{}\" graph=\"message/0123456789abcdef\">\nFACT QUARTZ\n</smalltalk-message>",
-            st_drivers::ding::st3_body_sha256("FACT QUARTZ")
+            fractal_drivers::ding::st3_body_sha256("FACT QUARTZ")
         )
     );
     assert_eq!(omp["meta"]["messageId"], "message/0123456789abcdef");
@@ -1119,9 +1119,9 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
         title: None,
         in_reply_to: None,
         tags: vec![
-            st3::silent::SILENT_TAG.into(),
+            fractal_daemon::silent::SILENT_TAG.into(),
             "dictated".into(),
-            format!("{}12", st3::silent::REMAINING_PREFIX),
+            format!("{}12", fractal_daemon::silent::REMAINING_PREFIX),
         ],
         attachments: vec![],
         body_ref: None,
@@ -1132,16 +1132,16 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
         created_index: 1,
     };
     let queued = native_queued_message(&view, "body".into(), &[]);
-    let rendered = st_drivers::ding::with_tag_notices("body".into(), &queued.tags);
+    let rendered = fractal_drivers::ding::with_tag_notices("body".into(), &queued.tags);
     assert!(rendered.contains("silent: held"));
     assert!(rendered.contains("12 older silent held; st conversations ls"));
     assert!(rendered.contains("dictated by voice"));
     assert_eq!(queued.body, "body");
     view.from = "person/operator".into();
     let queued = native_queued_message(&view, "body".into(), &[]);
-    assert!(!queued.tags.iter().any(|tag| tag == st3::silent::SILENT_TAG));
+    assert!(!queued.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG));
     assert!(
-        view.tags.iter().any(|tag| tag == st3::silent::SILENT_TAG),
+        view.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG),
         "signed durable tags are unchanged"
     );
 }
@@ -1382,7 +1382,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
         let root = tempfile::tempdir().unwrap();
         let agent_dir = root.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        st_drivers::push_mailbox::register(&agent_dir);
+        fractal_drivers::push_mailbox::register(&agent_dir);
         let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
         let mut view = MessageView {
             subject: "message/legacy".into(),
@@ -1403,7 +1403,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
         };
         let mut mailbox = NativeMailbox {
             subscription: None,
-            fence: st3::mailbox::Fence::new(&view.to, "new-incarnation", "delivery"),
+            fence: fractal_daemon::mailbox::Fence::new(&view.to, "new-incarnation", "delivery"),
             messages: vec![view.clone()],
             queued: BTreeMap::new(),
             replayed: true,
@@ -1435,7 +1435,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
             };
             // Replay requires no backward staging or invented consumption receipt.
             mailbox.pump(&client, &agent_dir, receipts).await.unwrap();
-            let queued = st_drivers::push_mailbox::messages(
+            let queued = fractal_drivers::push_mailbox::messages(
                 &agent_dir,
                 &agent_dir.join("resources/inbox"),
             )
@@ -1454,8 +1454,8 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
     for fenced in [true, false] {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("daemon.sock");
-        let client = Client::new(st3::client::Endpoint::Unix(path.clone()));
-        let mut fence = st3::mailbox::Fence::new("agent/eval.worker", "session-1", "delivery");
+        let client = Client::new(fractal_daemon::client::Endpoint::Unix(path.clone()));
+        let mut fence = fractal_daemon::mailbox::Fence::new("agent/eval.worker", "session-1", "delivery");
         fence.epoch = 7; // The daemon's already-allocated binding, carried through exec.
         let mut state = PiChannelResume {
             incarnation: "session-1".into(),
@@ -1483,8 +1483,8 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
         assert!(state.pending.reads.contains("message/native"));
         assert!(state.pending.acknowledgements.contains("message/native"));
         let resume_path =
-            st_drivers::reexec::write_state(root.path(), "channel-resume", &state).unwrap();
-        let mut resumed: PiChannelResume = st_drivers::reexec::read_state(&resume_path).unwrap();
+            fractal_drivers::reexec::write_state(root.path(), "channel-resume", &state).unwrap();
+        let mut resumed: PiChannelResume = fractal_drivers::reexec::read_state(&resume_path).unwrap();
         assert_eq!(
             serde_json::to_value(&resumed.pending.fence).unwrap(),
             serde_json::to_value(fenced.then_some(&fence)).unwrap()
@@ -1493,7 +1493,7 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
         let captured = received.clone();
         let expected = serde_json::to_value(&fence).unwrap();
         let store = std::sync::Arc::new(
-            st3::store::Store::open(&root.path().join("graph.db"), "node").unwrap(),
+            fractal_daemon::store::Store::open(&root.path().join("graph.db"), "node").unwrap(),
         );
         store
             .append_claim(&ClaimInput {
@@ -1519,7 +1519,7 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
             async move {
                 let lifecycle = receipt["lifecycle"].as_str().unwrap().to_owned();
                 let (message, actor) = if fenced {
-                    let receipt: st3::mailbox::Receipt = serde_json::from_value(receipt).unwrap();
+                    let receipt: fractal_daemon::mailbox::Receipt = serde_json::from_value(receipt).unwrap();
                     assert_eq!(serde_json::to_value(&receipt.fence).unwrap(), expected);
                     (receipt.message, receipt.fence.subject)
                 } else {
@@ -1546,7 +1546,7 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
             .route("/v1/messages/{message_id}/claims", handler);
         let server_path = path.clone();
         let server = tokio::spawn(async move {
-            st3::api::serve_unix(&server_path, app).await.unwrap();
+            fractal_daemon::api::serve_unix(&server_path, app).await.unwrap();
         });
         for _ in 0..100 {
             if path.exists() {
@@ -1626,7 +1626,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
         driver: "claude".into(),
         subject: "agent/example/worker".into(),
         incarnation: "1:one".into(),
-        session: st_drivers::provider_session::DetachedSession::Provider {
+        session: fractal_drivers::provider_session::DetachedSession::Provider {
             pid: 42,
             session: "token".into(),
             seq: 3,
@@ -1683,7 +1683,7 @@ fn a_delivery_report_names_the_process_and_its_channel() {
 
 #[test]
 fn agent_card_todo_preserves_snapshot_and_reports_active_blocked_empty_truncated_stale() {
-    let mut agent: st3_client::Agent = serde_json::from_value(serde_json::json!({
+    let mut agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
         "kind":"agent", "id":"agent/worker", "revision":"one",
         "updated_at":"2026-10-03T09:00:00Z", "name":"Worker",
         "state":"running", "reachability":"local", "runtime_ids":[],
@@ -1719,7 +1719,7 @@ fn agent_card_todo_preserves_snapshot_and_reports_active_blocked_empty_truncated
     todo.stale = true;
     todo.snapshot.phases.clear();
     todo.snapshot.truncated = false;
-    todo.snapshot.totals = st3_client::HarnessTodoTotals {
+    todo.snapshot.totals = fractal_client::HarnessTodoTotals {
         pending: 0, in_progress: 0, completed: 0, blocked: 0, abandoned: 0,
     };
     assert!(render_client_agent(&agent, &[], 0).contains("Todo         0/0 done · 0 blocked · stale\n"));
@@ -1730,7 +1730,7 @@ fn agent_card_todo_preserves_snapshot_and_reports_active_blocked_empty_truncated
 
 #[test]
 fn agent_card_shows_the_member_reconcile_fault() {
-    let agent: st3_client::Agent = serde_json::from_value(serde_json::json!({
+    let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/bad", "revision": "one",
         "updated_at": "2026-09-27T20:04:00Z", "name": "Bad",
         "state": "failed", "reachability": "local", "runtime_ids": [],
@@ -1746,7 +1746,7 @@ fn agent_card_shows_the_member_reconcile_fault() {
 
 #[test]
 fn agent_card_names_a_pending_codex_approval() {
-    let agent: st3_client::Agent = serde_json::from_value(serde_json::json!({
+    let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/approval", "revision": "one",
         "updated_at": "2026-10-06T12:00:00Z", "name": "Approval",
         "state": "running", "reachability": "local", "runtime_ids": [],
@@ -1778,7 +1778,7 @@ fn subagent_worker() -> serde_json::Value {
 
 #[test]
 fn agent_card_lists_the_subagents_its_harness_runs() {
-    let st3_client::Resource::Agent(agent) = serde_json::from_value(subagent_worker()).unwrap()
+    let fractal_client::Resource::Agent(agent) = serde_json::from_value(subagent_worker()).unwrap()
     else {
         panic!("agent resource")
     };
@@ -1792,7 +1792,7 @@ fn agent_card_lists_the_subagents_its_harness_runs() {
     );
     // An agent without subagents prints no subagent line.
     let quiet = render_client_agent(
-        &st3_client::Agent {
+        &fractal_client::Agent {
             subagents: Vec::new(),
             ..agent
         },
@@ -1824,7 +1824,7 @@ fn agent_tree_nests_running_subagents_under_their_agent() {
 
 #[test]
 fn agent_card_shows_current_and_next_work_ids() {
-    let resource: st3_client::Resource = serde_json::from_value(serde_json::json!({
+    let resource: fractal_client::Resource = serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/worker", "revision": "one",
         "updated_at": "2026-09-24T09:00:00Z", "name": "Worker",
         "state": "running", "reachability": "local", "runtime_ids": [],
@@ -1833,7 +1833,7 @@ fn agent_card_shows_current_and_next_work_ids() {
         "upcoming_work_ids": ["step-run/newer/review"], "queued_work_count": 1
     }))
     .unwrap();
-    let st3_client::Resource::Agent(agent) = resource else {
+    let fractal_client::Resource::Agent(agent) = resource else {
         panic!("agent resource")
     };
     let card = render_client_agent(&agent, &[], 0);
@@ -1847,7 +1847,7 @@ fn agent_card_shows_current_and_next_work_ids() {
 
 #[test]
 fn agent_card_shows_the_current_step_and_its_last_progress() {
-    let resource: st3_client::Resource = serde_json::from_value(serde_json::json!({
+    let resource: fractal_client::Resource = serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/worker", "revision": "one",
         "updated_at": "2026-09-24T09:00:00Z", "name": "Worker",
         "state": "running", "reachability": "local", "runtime_ids": [],
@@ -1855,7 +1855,7 @@ fn agent_card_shows_the_current_step_and_its_last_progress() {
         "active_work_count": 3
     }))
     .unwrap();
-    let st3_client::Resource::Agent(agent) = resource else {
+    let fractal_client::Resource::Agent(agent) = resource else {
         panic!("agent resource")
     };
     let step = |subject: &str, title: &str, progress: Option<(&str, u128)>| {
@@ -1908,7 +1908,7 @@ fn agent_card_shows_the_current_step_and_its_last_progress() {
 
 #[test]
 fn a_down_agent_card_says_since_when_and_marks_the_step_its_holder_cannot_work() {
-    let resource: st3_client::Resource = serde_json::from_value(serde_json::json!({
+    let resource: fractal_client::Resource = serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/worker", "revision": "one",
         "updated_at": "2026-09-24T09:00:00Z", "name": "Worker",
         "state": "down", "down_since": "2026-09-23T21:00:00.000Z",
@@ -1922,7 +1922,7 @@ fn a_down_agent_card_says_since_when_and_marks_the_step_its_holder_cannot_work()
         }]
     }))
     .unwrap();
-    let st3_client::Resource::Agent(agent) = resource else {
+    let fractal_client::Resource::Agent(agent) = resource else {
         panic!("agent resource")
     };
     let step = serde_json::from_value::<StepRunView>(serde_json::json!({
@@ -1947,7 +1947,7 @@ fn a_down_agent_card_says_since_when_and_marks_the_step_its_holder_cannot_work()
 
 #[test]
 fn agent_queue_view_lists_the_claim_then_runs_in_order_and_moves() {
-    let queue: st3_client::AgentQueue = serde_json::from_value(serde_json::json!({
+    let queue: fractal_client::AgentQueue = serde_json::from_value(serde_json::json!({
         "kind": "agent-queue", "agent_id": "agent/example/worker",
         "current_work_ids": ["step-run/held/build"],
         "next_work_id": "step-run/second/review",
@@ -2369,7 +2369,7 @@ fn every_cli_command_has_a_valid_help_surface() {
 
 #[test]
 fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
-    let contract: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-ha2a0ed5a3f01 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let contract: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h386966f4e028 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/operational-state/cli-commands.json"
     ))
     .unwrap();
@@ -2432,21 +2432,21 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
-        ("agents", /* sqlite-large-value: allow-for-now lv-h64e7bce424cc owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
-        ("attention", /* sqlite-large-value: allow-for-now lv-h894830f2da6e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
-        ("change", /* sqlite-large-value: allow-for-now lv-hf9512b75213b owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
-        ("conversations", /* sqlite-large-value: allow-for-now lv-hce9b519c20da owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
-        ("doctor", /* sqlite-large-value: allow-for-now lv-h4ef68d330bf0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
-        ("driver", /* sqlite-large-value: allow-for-now lv-h6901be108db9 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
-        ("fleet", /* sqlite-large-value: allow-for-now lv-hc13e13e1dcef owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
-        ("launch", /* sqlite-large-value: allow-for-now lv-h65740c83118e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
-        ("migrate", /* sqlite-large-value: allow-for-now lv-h3dc022adaedc owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
-        ("replication", /* sqlite-large-value: allow-for-now lv-ha35371b1cf0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
-        ("terminals", /* sqlite-large-value: allow-for-now lv-hc9c07b4d9f7f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
-        ("uninstall", /* sqlite-large-value: allow-for-now lv-haa99fd7b7bb0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
-        ("work", /* sqlite-large-value: allow-for-now lv-h76caa29e91f6 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
+        ("agents", /* sqlite-large-value: allow-for-now lv-h98e4919fbef1 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
+        ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
+        ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
+        ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
+        ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
+        ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
+        ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
+        ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
+        ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
+        ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
+        ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
-    let main_source = /* sqlite-large-value: allow-for-now lv-h4403a9330a0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
+    let main_source = /* sqlite-large-value: allow-for-now lv-h47a0a723f1b0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
     let declared: BTreeSet<&str> = main_source
         .lines()
         .filter_map(|line| line.strip_prefix("mod ")?.strip_suffix("_cli;"))
@@ -2499,7 +2499,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         );
     }
 
-    let server_source = /* sqlite-large-value: allow-for-now lv-hf139810ef8b7 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../st3-api-core/src/api.rs");
+    let server_source = /* sqlite-large-value: allow-for-now lv-h62a14b16df0b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../fractal-api-core/src/api.rs");
     for handler in [
         "watch_resource",
         "unwatch_resource",
@@ -2517,7 +2517,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
 }
 
 fn fixture_product_page(kinds: &[&str], has_more: bool) -> ClientPage {
-    let resources: Vec<Value> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hbfc205208eb4 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let resources: Vec<Value> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h630f641a74eb owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/client-v0/fixtures/resources.json"
     ))
     .unwrap();
@@ -2535,7 +2535,7 @@ fn fixture_product_page(kinds: &[&str], has_more: bool) -> ClientPage {
         collection: "fixture".into(),
         filters: BTreeMap::new(),
         items,
-        page: st3_client::PageInfo {
+        page: fractal_client::PageInfo {
             limit: 100,
             has_more,
             next_cursor: has_more.then(|| "cursor/next".into()),
@@ -2595,7 +2595,7 @@ fn replication_status_names_fallback_and_preferred_retry_deadline() {
 #[test]
 fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
     let now = 1_000_000;
-    let peer = |sync: st3::model::ReplicationPeerSync| ReplicationPeerStatus {
+    let peer = |sync: fractal_daemon::model::ReplicationPeerSync| ReplicationPeerStatus {
         last_successful_exchange: None,
         last_failed_exchange: None,
         worker: None,
@@ -2620,7 +2620,7 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
         sync: Some(sync),
     };
     let behind = |receive: Option<f64>, catch_up: Option<f64>, eta: Option<u64>| {
-        st3::model::ReplicationPeerSync {
+        fractal_daemon::model::ReplicationPeerSync {
             peer_only_envelopes: 14_652,
             measured_at_unix_ms: now - 2_000,
             receive_rate_per_second: receive,
@@ -2651,7 +2651,7 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
         assert!(!output.contains("closing at"), "{output}");
     }
     // Stale: view() returns no rates or forecast for a measurement gone quiet.
-    let output = render(st3::model::ReplicationPeerSync {
+    let output = render(fractal_daemon::model::ReplicationPeerSync {
         stale: true,
         ..behind(None, None, None)
     });
@@ -2673,7 +2673,7 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
         "{output}"
     );
     // Nothing missing: no catching-up summary and no promise of a time.
-    let nothing_missing = st3::model::ReplicationPeerSync {
+    let nothing_missing = fractal_daemon::model::ReplicationPeerSync {
         peer_only_envelopes: 0,
         local_only_envelopes: 3,
         catching_up: false,
@@ -2688,7 +2688,7 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
     // the status says only what the last measurement found, whether or not this node held
     // envelopes the peer lacked. The graph comparison lines are unchanged.
     for local_only in [3, 0] {
-        let output = render(st3::model::ReplicationPeerSync {
+        let output = render(fractal_daemon::model::ReplicationPeerSync {
             stale: true,
             local_only_envelopes: local_only,
             receive_rate_per_second: None,
@@ -2719,7 +2719,7 @@ fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes(
     let now = 1_000_000;
     let local = "1111111111111111aaaa";
     let peer =
-        |name: &str, graph: Option<&str>, sync: Option<st3::model::ReplicationPeerSync>| {
+        |name: &str, graph: Option<&str>, sync: Option<fractal_daemon::model::ReplicationPeerSync>| {
             ReplicationPeerStatus {
                 last_successful_exchange: None,
                 last_failed_exchange: None,
@@ -2746,7 +2746,7 @@ fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes(
             }
         };
     let same_envelopes = |compared: Option<u128>, differs: Option<u128>, diverged| {
-        Some(st3::model::ReplicationPeerSync {
+        Some(fractal_daemon::model::ReplicationPeerSync {
             measured_at_unix_ms: now,
             graph_compared_at_unix_ms: compared,
             graph_differs_since_unix_ms: differs,
@@ -2759,7 +2759,7 @@ fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes(
             peer(
                 "ExampleMac",
                 Some("3333333333333333"),
-                Some(st3::model::ReplicationPeerSync {
+                Some(fractal_daemon::model::ReplicationPeerSync {
                     peer_only_envelopes: 124_384,
                     local_only_envelopes: 3,
                     measured_at_unix_ms: now - 2_000,
@@ -2829,9 +2829,9 @@ fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes(
 #[test]
 fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
     let mut page = fixture_product_page(&["attention"], false);
-    page.sync = Some(st3_client::SyncNotice {
+    page.sync = Some(fractal_client::SyncNotice {
         state: "catching-up".into(),
-        peers: vec![st3_client::SyncPeer {
+        peers: vec![fractal_client::SyncPeer {
             last_successful_exchange: None,
             last_failed_exchange: None,
             host_id: "host/ExampleMac".into(),
@@ -2968,7 +2968,7 @@ fn attention_from_a_retired_requester_says_who_can_close_it() {
     let ClientResource::Attention(attention) = &mut page.items[0] else {
         panic!("expected attention fixture");
     };
-    attention.header.operational = Some(st3_client::Operational {
+    attention.header.operational = Some(fractal_client::Operational {
         layer: "current".into(),
         actionable: true,
         reasons: vec!["requester-retired".into()],
@@ -3045,7 +3045,7 @@ fn an_attention_item_names_its_kind_sender_and_age() {
     );
     item.priority = "normal".into();
     item.requester_id = Some("agent/example/worker".into());
-    item.update = Some(st3_client::PersonUpdate {
+    item.update = Some(fractal_client::PersonUpdate {
         version: 1,
         entry_type: "update".into(),
         about: "message/abc".into(),
@@ -3111,7 +3111,7 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let ClientResource::Attention(update) = &mut updates.items[0] else {
         panic!("expected attention fixture");
     };
-    update.update = Some(st3_client::PersonUpdate {
+    update.update = Some(fractal_client::PersonUpdate {
         version: 1,
         entry_type: "update".into(),
         about: "message/abc".into(),
@@ -3322,7 +3322,7 @@ fn retry_lease_step(status: &str, claimant: &str, expiry: Option<u128>) -> StepR
     .unwrap()
 }
 
-fn repeated_timeout_pause(retry: &mut st3::client::DriverRetry) -> Duration {
+fn repeated_timeout_pause(retry: &mut fractal_daemon::client::DriverRetry) -> Duration {
     let error = anyhow::anyhow!("daemon response exceeded its deadline");
     let mut pause = Duration::ZERO;
     for _ in 0..6 {
@@ -3333,7 +3333,7 @@ fn repeated_timeout_pause(retry: &mut st3::client::DriverRetry) -> Duration {
 
 #[tokio::test(start_paused = true)]
 async fn renewal_retry_empty_selection_retires_an_expired_lease_bound() {
-    let mut retry = st3::client::DriverRetry::default();
+    let mut retry = fractal_daemon::client::DriverRetry::default();
     retry.lease_margin(Duration::from_secs(1));
     tokio::time::advance(Duration::from_secs(2)).await;
     assert!(repeated_timeout_pause(&mut retry) <= Duration::from_secs(1));
@@ -3348,7 +3348,7 @@ async fn renewal_retry_empty_selection_retires_an_expired_lease_bound() {
 async fn renewal_retry_failed_work_read_preserves_the_known_lease_bound() {
     let root = tempfile::tempdir().unwrap();
     let client = Client::unix(root.path().join("missing.sock"));
-    let mut retry = st3::client::DriverRetry::default();
+    let mut retry = fractal_daemon::client::DriverRetry::default();
     retry.lease_margin(Duration::from_secs(2));
     // Exercise the real request/selection boundary: an error is not an empty response.
     assert!(
@@ -3361,7 +3361,7 @@ async fn renewal_retry_failed_work_read_preserves_the_known_lease_bound() {
 
 #[tokio::test(start_paused = true)]
 async fn renewal_retry_selects_live_leases_and_replaces_the_old_bound() {
-    let mut retry = st3::client::DriverRetry::default();
+    let mut retry = fractal_daemon::client::DriverRetry::default();
     retry.lease_margin(Duration::ZERO);
     let work = [
         retry_lease_step("working", "agent/worker", Some(21_000)),
@@ -3382,7 +3382,7 @@ async fn renewal_retry_selects_live_leases_and_replaces_the_old_bound() {
 
 #[tokio::test(start_paused = true)]
 async fn renewal_retry_unknown_expiry_and_success_do_not_retire_a_known_bound() {
-    let mut retry = st3::client::DriverRetry::default();
+    let mut retry = fractal_daemon::client::DriverRetry::default();
     retry.lease_margin(Duration::from_secs(20));
     let work = [retry_lease_step("claimed", "agent/worker", None)];
     update_renewal_retry_lease(&mut retry, &work, "agent/worker", 1_000);
@@ -3417,7 +3417,7 @@ fn machines_help_and_contract_include_configured_failures_by_default() {
         "Include historical and discovered hosts beyond the current configured fleet"
     );
 
-    let contract: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc4ec7d1cf50b owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let contract: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9d136cca4c72 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/operational-state/cli-commands.json"
     ))
     .unwrap();
@@ -3478,7 +3478,7 @@ fn machine_and_device_renderers_have_exact_operational_output() {
 
 #[test]
 fn activity_renderer_uses_exact_contract_labels_and_cursors() {
-    let events: ClientEnvelope<ClientEventPage> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9f2400142fd2 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let events: ClientEnvelope<ClientEventPage> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hb721d709d069 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/client-v0/fixtures/events.json"
     ))
     .unwrap();
@@ -3565,7 +3565,7 @@ fn terminal_screen_accepts_a_remote_owner_subject_and_person() {
 
 #[test]
 fn terminal_screen_renderer_preserves_each_terminal_row() {
-    let response: ClientEnvelope<ClientTerminalScreen> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h877df9dd7077 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let response: ClientEnvelope<ClientTerminalScreen> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hb2029a38909b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/client-v0/fixtures/terminal-screen.json"
     ))
     .unwrap();
@@ -3676,7 +3676,7 @@ fn terminal_stream_accepts_capabilities_beginning_with_hyphens() {
 
 #[test]
 fn admission_failure_projection_names_boundary_and_driver_policy() {
-    use st_drivers::driver_diagnostic::{
+    use fractal_drivers::driver_diagnostic::{
         Driver, Observed, Publisher, Reason, Source, Stage, Support,
     };
     for (driver, severity, status) in [
@@ -3695,8 +3695,8 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
             Reason::AdmissionNativeConsumption,
             Source::AdmissionProbe,
         );
-        let observed = st_drivers::driver_diagnostic::read(
-            &st_drivers::driver_diagnostic::path(directory.path()),
+        let observed = fractal_drivers::driver_diagnostic::read(
+            &fractal_drivers::driver_diagnostic::path(directory.path()),
         );
         let claim = admission_diagnostic("agent/node.fixture", "first", &observed).unwrap();
         assert_eq!(claim.fields["code"], "harness-admission-failed");
@@ -3885,7 +3885,7 @@ fn every_offered_cli_command_has_an_action_coverage_row() {
     let mut offered = std::collections::BTreeSet::new();
     walk(&command, "st", &mut offered);
     let inventory: serde_json::Value =
-        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc7a5f3b26311 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../../docs/st3/action-coverage.json")).unwrap();
+        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h99a31cb9538c owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../../docs/st3/action-coverage.json")).unwrap();
     let documented = inventory["cli"]
         .as_array()
         .unwrap()
@@ -3920,7 +3920,7 @@ fn machine_read_inventory_comes_from_the_live_clap_graph() {
         .iter()
         .map(|command| command.as_str().unwrap().to_owned())
         .collect::<BTreeSet<_>>();
-    let visible: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h04c6b5b87989 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let visible: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-he01b7c259cc5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/action-coverage.json"
     ))
     .unwrap();
@@ -3998,7 +3998,7 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                 None,
                 false,
             );
-            let intent = st3::graph::parse_intent(&kdl, "node").unwrap();
+            let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
             assert!(
                 intent
                     .mission_runs
@@ -4083,7 +4083,7 @@ fn mission_start_after_names_the_run_to_wait_for() {
         kdl.contains("after \"mission-run/release/build/1\""),
         "{kdl}"
     );
-    let intent = st3::graph::parse_intent(&kdl, "node").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
     let creation = intent.mission_runs["mission-run/release/demo/2"]
         .creation
         .as_ref()
@@ -4128,7 +4128,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         args.report_to.as_deref(),
         args.report_completed,
     );
-    let intent = st3::graph::parse_intent(&kdl, "node").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
     let creation = intent.mission_runs["mission-run/release/demo/3"]
         .creation
         .as_ref()
@@ -4162,7 +4162,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         false,
     );
     assert_eq!(
-        st3::graph::parse_intent(&person, "node").unwrap_err().code,
+        fractal_daemon::graph::parse_intent(&person, "node").unwrap_err().code,
         "invalid-report-to"
     );
 }
@@ -4488,13 +4488,13 @@ fn wait_reads_resource_status_from_observed_facts() {
         "kind": "filesystem.file"
     });
     assert_eq!(
-        st3::model::projected_actual_status(Some(&resource)),
+        fractal_daemon::model::projected_actual_status(Some(&resource)),
         Some("ready")
     );
 
     let runtime = json!({"fields": {"status": "running"}});
     assert_eq!(
-        st3::model::projected_actual_status(Some(&runtime)),
+        fractal_daemon::model::projected_actual_status(Some(&runtime)),
         Some("running")
     );
 }
@@ -4504,7 +4504,7 @@ fn wait_accepts_message_delivery() {
     validate_wait_condition("delivered").unwrap();
     let message = serde_json::json!({ "status": "delivered" });
     assert_eq!(
-        st3::model::projected_actual_status(Some(&message)),
+        fractal_daemon::model::projected_actual_status(Some(&message)),
         Some("delivered")
     );
 }
@@ -4514,14 +4514,14 @@ fn wait_accepts_a_standing_mission_run() {
     validate_wait_condition("standing").unwrap();
     let run = serde_json::json!({ "status": "standing" });
     assert_eq!(
-        st3::model::projected_actual_status(Some(&run)),
+        fractal_daemon::model::projected_actual_status(Some(&run)),
         Some("standing")
     );
 }
 
 #[test]
 fn native_driver_binds_the_local_pty_incarnation_instead_of_a_stale_graph_value() {
-    let observations = vec![st_runtime::PtyObservation {
+    let observations = vec![fractal_runtime::PtyObservation {
         name: "run.worker".into(),
         status: "running".into(),
         exit_code: None,
@@ -4586,12 +4586,12 @@ async fn an_incarnation_wait_retries_an_outage_after_a_spread_pause() {
 
 #[test]
 fn native_driver_binds_the_terminal_tag_only_under_its_declared_invocation() {
-    let binding = st3::model::TerminalBinding {
+    let binding = fractal_daemon::model::TerminalBinding {
         subject: "pty/person/avery/019a0000-0000-7000-8000-000000000001".into(),
         incarnation: "42:created".into(),
         id: "019a0000-0000-7000-8000-000000000002".into(),
     };
-    let mut observation = st_runtime::PtyObservation {
+    let mut observation = fractal_runtime::PtyObservation {
         name: "fixture".into(),
         status: "running".into(),
         exit_code: None,
@@ -4619,10 +4619,10 @@ fn native_driver_binds_the_terminal_tag_only_under_its_declared_invocation() {
 #[test]
 fn an_ended_harness_uses_the_registered_state() {
     assert_eq!(
-        harness_activity_state(st_drivers::harness_state::Activity::Ended),
+        harness_activity_state(fractal_drivers::harness_state::Activity::Ended),
         "ended"
     );
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_claim(
             "agent/run/worker",
             "harness.observed",
@@ -4660,12 +4660,12 @@ fn typed_claude_accepts_tui_options_and_rejects_headless_protocol_options() {
 #[test]
 fn claude_delivery_requires_the_exact_incarnations_prompt_submit_receipt() {
     let root = tempfile::tempdir().unwrap();
-    let mut writer = st_drivers::harness_timeline::Writer::new(root.path(), "claude", "inc-2");
+    let mut writer = fractal_drivers::harness_timeline::Writer::new(root.path(), "claude", "inc-2");
     writer
         .append(
             "prompt-1",
-            st_drivers::harness_timeline::Role::User,
-            st_drivers::harness_timeline::EntryType::Content,
+            fractal_drivers::harness_timeline::Role::User,
+            fractal_drivers::harness_timeline::EntryType::Content,
             serde_json::json!({
                 "text": "[st3-delivery:1784649988123-abc23z.md]\nhello"
             }),
@@ -4700,12 +4700,12 @@ fn native_exit_claims_are_unique_per_incarnation() {
 fn claude_receipts_use_provider_session_not_runtime_incarnation() {
     let root = tempfile::tempdir().unwrap();
     let mut writer =
-        st_drivers::harness_timeline::Writer::new(root.path(), "claude", "provider-current");
+        fractal_drivers::harness_timeline::Writer::new(root.path(), "claude", "provider-current");
     writer
         .append(
             "prompt-1",
-            st_drivers::harness_timeline::Role::User,
-            st_drivers::harness_timeline::EntryType::Content,
+            fractal_drivers::harness_timeline::Role::User,
+            fractal_drivers::harness_timeline::EntryType::Content,
             serde_json::json!({"text": "[st3-delivery:1784649988123-abc23z.md] hello"}),
             true,
         )
@@ -4921,7 +4921,7 @@ fn a_derived_message_key_names_one_message_in_one_hour() {
             4 => changed.content = "The merge train is paused.".into(),
             5 => changed.tags = vec!["work".into()],
             6 => {
-                changed.attachments = vec![st3::model::AttachmentInput {
+                changed.attachments = vec![fractal_daemon::model::AttachmentInput {
                     blob: format!("blob/{}", "a".repeat(64)),
                     media_type: "image/png".into(),
                     name: None,
@@ -5253,7 +5253,7 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
         panic!("agents start did not parse");
     };
     let kdl = agent_start_document(&args, None).unwrap();
-    let intent = st3::parse_intent(&kdl, "node").unwrap();
+    let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
         intent.subjects["agent/example/cos/standing/cos"]
@@ -5338,7 +5338,7 @@ fn agent_new_cli_declares_checkout_and_preserves_plain_workspace() {
     assert!(body.get("workspace").unwrap().get("create").is_none());
     let args = agent_new_args(&["parser", "--workspace", "/work/plain"]);
     let source = agent_new_document(&args, "/work/plain", true);
-    let intent = st3::graph::parse_intent(&source, "example").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&source, "example").unwrap();
     assert_eq!(
         intent
             .subjects
@@ -5385,7 +5385,7 @@ fn creation_cli_accepts_a_literal_first_message_and_plain_shell_options() {
         "agent/test.worker"
     );
     let source = agent_new_document(&args, "/tmp", false);
-    let intent = st3::graph::parse_intent(&source, "test").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&source, "test").unwrap();
     assert!(intent.subjects.values().next().unwrap().member.is_some());
     let cli = Cli::try_parse_from([
         "st3",
@@ -5442,7 +5442,7 @@ fn a_new_claude_agent_is_the_fleet_claude_seat() {
     assert!(args.attach && args.actor.is_none() && args.workspace.is_none());
     let kdl = agent_new_document(&args, "/home/example/st/agents/site", true);
     assert!(kdl.contains(r#"workspace "/home/example/st/agents/site" create=#true"#));
-    let intent = st3::parse_intent(&kdl, "laptop").unwrap();
+    let intent = fractal_daemon::parse_intent(&kdl, "laptop").unwrap();
     let seat = &intent.subjects["agent/builder.site"];
     assert!(seat.owner_run.is_none());
     let member = seat.member.as_ref().unwrap();
@@ -5450,9 +5450,9 @@ fn a_new_claude_agent_is_the_fleet_claude_seat() {
     assert_eq!(member.workspace, "/home/example/st/agents/site");
     assert!(member.workspace_create);
     assert_eq!(member.driver.as_deref(), Some("claude"));
-    assert_eq!(member.restart, st3::model::RestartType::Always);
+    assert_eq!(member.restart, fractal_daemon::model::RestartType::Always);
     assert_eq!(member.environment["CLAUDE_CODE_CHILD_SESSION"], "0");
-    let st3::model::LaunchSpec::Argv(argv) = &member.launch else {
+    let fractal_daemon::model::LaunchSpec::Argv(argv) = &member.launch else {
         panic!("a harness seat launches an argv");
     };
     let joined = argv.join(" ");
@@ -5500,7 +5500,7 @@ fn a_new_codex_agent_is_the_fleet_codex_seat() {
     let kdl = agent_new_document(&args, "/srv/example", false);
     assert!(!kdl.contains("create="));
     assert!(!kdl.contains("host "));
-    let intent = st3::parse_intent(&kdl, "laptop").unwrap();
+    let intent = fractal_daemon::parse_intent(&kdl, "laptop").unwrap();
     let member = intent.subjects["agent/example/codex"]
         .member
         .as_ref()
@@ -5508,7 +5508,7 @@ fn a_new_codex_agent_is_the_fleet_codex_seat() {
     assert_eq!(member.host, "laptop");
     assert!(!member.workspace_create);
     assert!(member.environment.is_empty());
-    let st3::model::LaunchSpec::Argv(argv) = &member.launch else {
+    let fractal_daemon::model::LaunchSpec::Argv(argv) = &member.launch else {
         panic!("a harness seat launches an argv");
     };
     let joined = argv.join(" ");
@@ -5834,7 +5834,7 @@ fn canonical_intent_helpers_print_current_direct_kdl() {
         None,
         &["example".into()],
     );
-    let message = st3::parse_intent(&message, "node").unwrap();
+    let message = fractal_daemon::parse_intent(&message, "node").unwrap();
     assert!(message.missions.contains_key("message/test"));
 
     let planning = planning_session_intent(
@@ -5846,7 +5846,7 @@ fn canonical_intent_helpers_print_current_direct_kdl() {
         &PlannerSpec::default(),
         None,
     );
-    let planning = st3::parse_intent(&planning, "node").unwrap();
+    let planning = fractal_daemon::parse_intent(&planning, "node").unwrap();
     assert_eq!(planning.planning_sessions.len(), 1);
 }
 
@@ -5940,10 +5940,10 @@ mission "review" state="ready" {
   }
 }
 "#;
-    let parsed = st3::parse_intent(source, "local").unwrap();
+    let parsed = fractal_daemon::parse_intent(source, "local").unwrap();
     assert!(parsed.missions.len() > 1);
     assert_eq!(
-        st3::mission::top_level_mission_ids(&parsed.missions),
+        fractal_daemon::mission::top_level_mission_ids(&parsed.missions),
         std::collections::BTreeSet::from(["review".to_owned()])
     );
 }
@@ -6151,7 +6151,7 @@ fn predecessor_layout_survives_resume_without_rewriting_catalogs() {
 
 #[test]
 fn native_timeline_fences_provider_session_but_claims_runtime_session() {
-    let record = st_drivers::harness_timeline::Record {
+    let record = fractal_drivers::harness_timeline::Record {
         schema: "st2.harness-timeline.v1".into(),
         driver: "claude".into(),
         incarnation_id: "provider-current".into(),
@@ -6174,7 +6174,7 @@ fn native_timeline_fences_provider_session_but_claims_runtime_session() {
         Some("provider-current")
     ));
     let fields = timeline_claim_fields(
-        st_drivers::harness_timeline::Operation {
+        fractal_drivers::harness_timeline::Operation {
             operation: "append".into(),
             entry_id: "timeline-entry/test".into(),
             sequence: 1,
@@ -6200,7 +6200,7 @@ fn an_unread_native_message_is_ready_for_a_delivery_claim() {
     let root = tempfile::tempdir().unwrap();
     let inbox = root.path().join("inbox");
     let archive = root.path().join("archive");
-    st_drivers::message::send_to_inbox(
+    fractal_drivers::message::send_to_inbox(
         &inbox,
         "requester",
         Some("Start"),
@@ -6233,7 +6233,7 @@ fn a_graph_archive_moves_the_native_delivery_file() {
     let root = tempfile::tempdir().unwrap();
     let inbox = root.path().join("inbox");
     let archive = root.path().join("archive");
-    let filename = st_drivers::message::send_to_inbox(
+    let filename = fractal_drivers::message::send_to_inbox(
         &inbox,
         "requester",
         Some("Start"),
@@ -6251,7 +6251,7 @@ fn a_graph_archive_moves_the_native_delivery_file() {
 
 #[test]
 fn graph_delivery_idle_and_deliberate_hold_keep_mailbox_ready() {
-    let gate = st_drivers::session_control::DeliveryGate::default();
+    let gate = fractal_drivers::session_control::DeliveryGate::default();
     gate.unavailable();
     for transport in ["app-server", "opencode-server"] {
         assert_eq!(
@@ -6282,7 +6282,7 @@ fn graph_delivery_idle_and_deliberate_hold_keep_mailbox_ready() {
 async fn graph_delivery_control_retries_once_and_keeps_late_reads_closed() {
     use axum::{Json, Router, routing::get};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use st_drivers::session_control::{DeliveryBlockReason, DeliveryGate};
+    use fractal_drivers::session_control::{DeliveryBlockReason, DeliveryGate};
 
     for delayed_reads in [1, usize::MAX] {
         let root = tempfile::tempdir().unwrap();
@@ -6358,7 +6358,7 @@ async fn graph_delivery_gate_closes_on_hold_outage_and_mismatched_subject() {
             let wrong = handler_wrong.clone();
             async move {
                 Json(
-                    json!({"api_version": "st3.v1", "value": st3::delivery_hold::HoldView {
+                    json!({"api_version": "st3.v1", "value": fractal_daemon::delivery_hold::HoldView {
                         subject: if wrong.load(std::sync::atomic::Ordering::SeqCst) {
                             "agent/eval/other"
                         } else {
@@ -6381,7 +6381,7 @@ async fn graph_delivery_gate_closes_on_hold_outage_and_mismatched_subject() {
         axum::serve(listener, app).await.unwrap();
     });
     let client = Client::new(Endpoint::Http(format!("http://{address}")));
-    let gate = st_drivers::session_control::DeliveryGate::default();
+    let gate = fractal_drivers::session_control::DeliveryGate::default();
     assert!(gate.held());
     refresh_graph_delivery_gate(&client, "agent/eval/gated", &gate)
         .await
@@ -6406,7 +6406,7 @@ async fn graph_delivery_gate_closes_on_hold_outage_and_mismatched_subject() {
         .unwrap();
     assert!(!gate.held());
     let root = tempfile::tempdir().unwrap();
-    let request = st3::delivery_hold::HoldRequest {
+    let request = fractal_daemon::delivery_hold::HoldRequest {
         subject: "agent/eval/gated".into(),
         actor: "agent/eval/gated".into(),
         held: true,
@@ -6455,7 +6455,7 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
     let root = tempfile::tempdir().unwrap();
     let inbox = root.path().join("inbox");
     let archive = root.path().join("archive");
-    let old = st_drivers::message::send_to_inbox(
+    let old = fractal_drivers::message::send_to_inbox(
         &inbox,
         "requester",
         Some("Already read"),
@@ -6464,7 +6464,7 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
         "The recipient read this through the graph.",
     )
     .unwrap();
-    let next = st_drivers::message::send_to_inbox(
+    let next = fractal_drivers::message::send_to_inbox(
         &inbox,
         "requester",
         Some("Still staged"),
@@ -6481,7 +6481,7 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
     assert!(!inbox.join(&old).exists());
     assert!(archive.join(old).is_file());
     assert!(inbox.join(next).is_file());
-    assert_eq!(st_drivers::message::list_dir(&archive).unwrap().len(), 1);
+    assert_eq!(fractal_drivers::message::list_dir(&archive).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -6517,7 +6517,7 @@ async fn a_closed_message_missing_from_the_active_page_archives_its_projected_fi
     let root = tempfile::tempdir().unwrap();
     let inbox = root.path().join("inbox");
     let archive = root.path().join("archive");
-    let filename = st_drivers::message::send_to_inbox(
+    let filename = fractal_drivers::message::send_to_inbox(
         &inbox,
         "agent/sender",
         Some("done"),
@@ -6604,7 +6604,7 @@ async fn legacy_native_mailbox_replays_delivered_unread_once_and_keeps_read_clos
         )
         .await
         .unwrap();
-        let messages = st_drivers::message::list_dir(&inbox).unwrap();
+        let messages = fractal_drivers::message::list_dir(&inbox).unwrap();
         let subjects = messages
             .iter()
             .flat_map(|message| &message.tags)
@@ -6673,9 +6673,9 @@ async fn consumed_delivered_unread_mail_posts_no_lifecycle_claim_on_any_poll() {
     let root = tempfile::tempdir().unwrap();
     let inbox = root.path().join("inbox");
     let archive = root.path().join("archive");
-    let mut writer = st_drivers::harness_timeline::Writer::new(root.path(), "claude", "one");
+    let mut writer = fractal_drivers::harness_timeline::Writer::new(root.path(), "claude", "one");
     for subject in ["message/delivered", "message/staged"] {
-        let filename = st_drivers::message::send_to_inbox(
+        let filename = fractal_drivers::message::send_to_inbox(
             &inbox,
             "agent/sender",
             None,
@@ -6687,8 +6687,8 @@ async fn consumed_delivered_unread_mail_posts_no_lifecycle_claim_on_any_poll() {
         writer
             .append(
                 subject,
-                st_drivers::harness_timeline::Role::User,
-                st_drivers::harness_timeline::EntryType::Content,
+                fractal_drivers::harness_timeline::Role::User,
+                fractal_drivers::harness_timeline::EntryType::Content,
                 json!({"text": format!("[st3-delivery:{filename}]\nSignal")}),
                 true,
             )
@@ -6760,18 +6760,18 @@ async fn a_projected_message_envelope_names_the_graph_recipient_and_exact_body_h
     .unwrap();
     server.abort();
 
-    let projected = st_drivers::message::list_inbox(&inbox).unwrap();
+    let projected = fractal_drivers::message::list_inbox(&inbox).unwrap();
     assert_eq!(projected.len(), 1);
     // The inbox file appends a newline, so the hash must come from the graph content.
     assert_eq!(projected[0].body, "FACT <b>QUARTZ</b>\n");
     let catalog = tempfile::tempdir().unwrap();
     assert_eq!(
-        st_drivers::ding::poke_text(catalog.path(), "h", "run-1/wake.right", &projected[0]),
+        fractal_drivers::ding::poke_text(catalog.path(), "h", "run-1/wake.right", &projected[0]),
         format!(
             "<smalltalk-message id=\"fact\" from=\"agent/run-1/wake.left\" \
                  to=\"agent/run-1/wake.right\" subject=\"Fact\" sha256=\"{}\" \
                  graph=\"message/fact\">\nFACT &lt;b&gt;QUARTZ&lt;/b&gt;\n</smalltalk-message>",
-            st_drivers::ding::st3_body_sha256("FACT <b>QUARTZ</b>")
+            fractal_drivers::ding::st3_body_sha256("FACT <b>QUARTZ</b>")
         )
     );
 }
@@ -6887,7 +6887,7 @@ async fn one_message_that_cannot_be_forwarded_does_not_hold_back_the_next() {
             .collect::<Vec<_>>(),
         ["message/missing"]
     );
-    let projected = st_drivers::message::list_inbox(&inbox).unwrap();
+    let projected = fractal_drivers::message::list_inbox(&inbox).unwrap();
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].body, "the next message\n");
 }
@@ -7193,7 +7193,7 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
             let exchange = publisher
                 .export_replication_exchange(
                     FLEET,
-                    &st3::model::ReplicationInventory::default(),
+                    &fractal_daemon::model::ReplicationInventory::default(),
                 )
                 .unwrap();
             starter
@@ -7317,11 +7317,11 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
         atomic::{AtomicBool, Ordering},
     };
     let root = tempfile::tempdir().unwrap();
-    st_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
+    fractal_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
     let seq =
-        st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
+        fractal_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
             .unwrap();
-    let mut writer = st_drivers::harness_state::Writer::new(
+    let mut writer = fractal_drivers::harness_state::Writer::new(
         root.path(),
         "example/seat",
         "claude",
@@ -7329,16 +7329,16 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
     )
     .with_ownership("provider-a", seq);
     writer
-        .observe(st_drivers::harness_state::Observation::new(
-            st_drivers::harness_state::Activity::Active,
-            st_drivers::harness_state::BlockedOn::None,
-            st_drivers::harness_state::InputBuffer::Unknown,
+        .observe(fractal_drivers::harness_state::Observation::new(
+            fractal_drivers::harness_state::Activity::Active,
+            fractal_drivers::harness_state::BlockedOn::None,
+            fractal_drivers::harness_state::InputBuffer::Unknown,
         ))
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let client = Client::new(st3::client::Endpoint::Http(format!("http://{address}")));
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
     let mut observations = NativeObservations::start(root.path(), "runtime-a").unwrap();
     let mut ready = false;
     assert!(
@@ -7348,7 +7348,7 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
             .is_err()
     );
     assert_eq!(
-        st_drivers::harness_events::pending(root.path(), 100)
+        fractal_drivers::harness_events::pending(root.path(), 100)
             .unwrap()
             .len(),
         1
@@ -7361,7 +7361,7 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
         post({
             let captured = captured.clone();
             let store = store.clone();
-            move |Json(request): Json<st3::harness_events::Publication>| {
+            move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
                 let captured = captured.clone();
                 let store = store.clone();
                 let refuse_once = refuse_once.clone();
@@ -7393,7 +7393,7 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
             .is_err()
     );
     assert_eq!(
-        st_drivers::harness_events::pending(root.path(), 100)
+        fractal_drivers::harness_events::pending(root.path(), 100)
             .unwrap()
             .len(),
         1
@@ -7406,7 +7406,7 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
         .unwrap();
     assert!(ready);
     assert!(
-        st_drivers::harness_events::pending(root.path(), 100)
+        fractal_drivers::harness_events::pending(root.path(), 100)
             .unwrap()
             .is_empty()
     );
@@ -7420,8 +7420,8 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
 async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() {
     let started = tokio::time::Instant::now();
     let settle = ResumeSettle::after(Duration::from_secs(30));
-    let mut control = st3::client::DriverRetry::default();
-    let mut work = st3::client::DriverRetry::default();
+    let mut control = fractal_daemon::client::DriverRetry::default();
+    let mut work = fractal_daemon::client::DriverRetry::default();
     let mut control_interval = tokio::time::interval(Duration::from_secs(10));
     let mut work_interval = tokio::time::interval(Duration::from_secs(1));
     control_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -7469,7 +7469,7 @@ async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() 
 #[tokio::test(start_paused = true)]
 async fn resumed_driver_settle_does_not_fire_or_reset_an_existing_retry() {
     let settle = ResumeSettle::after(Duration::from_secs(30));
-    let mut retry = st3::client::DriverRetry::default();
+    let mut retry = fractal_daemon::client::DriverRetry::default();
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
@@ -7497,11 +7497,11 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
     let root = tempfile::tempdir().unwrap();
-    st_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
+    fractal_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
     let seq =
-        st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
+        fractal_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
             .unwrap();
-    let mut writer = st_drivers::harness_state::Writer::new(
+    let mut writer = fractal_drivers::harness_state::Writer::new(
         root.path(),
         "example/seat",
         "claude",
@@ -7509,10 +7509,10 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
     )
     .with_ownership("provider-a", seq);
     let active = || {
-        st_drivers::harness_state::Observation::new(
-            st_drivers::harness_state::Activity::Active,
-            st_drivers::harness_state::BlockedOn::None,
-            st_drivers::harness_state::InputBuffer::Unknown,
+        fractal_drivers::harness_state::Observation::new(
+            fractal_drivers::harness_state::Activity::Active,
+            fractal_drivers::harness_state::BlockedOn::None,
+            fractal_drivers::harness_state::InputBuffer::Unknown,
         )
     };
     writer.observe(active()).unwrap();
@@ -7522,7 +7522,7 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
         "/v1/harness-events",
         post({
             let posted = posted.clone();
-            move |Json(request): Json<st3::harness_events::Publication>| {
+            move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
                 let posted = posted.clone();
                 let store = store.clone();
                 async move {
@@ -7534,7 +7534,7 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = Client::new(st3::client::Endpoint::Http(format!(
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!(
         "http://{}",
         listener.local_addr().unwrap()
     )));
@@ -7549,10 +7549,10 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
     assert!(!observations.retry_due());
     // A hook writes while the driver settles; its wake does not end the wait.
     writer
-        .observe(st_drivers::harness_state::Observation::new(
-            st_drivers::harness_state::Activity::Idle,
-            st_drivers::harness_state::BlockedOn::None,
-            st_drivers::harness_state::InputBuffer::Unknown,
+        .observe(fractal_drivers::harness_state::Observation::new(
+            fractal_drivers::harness_state::Activity::Idle,
+            fractal_drivers::harness_state::BlockedOn::None,
+            fractal_drivers::harness_state::InputBuffer::Unknown,
         ))
         .unwrap();
     assert!(
@@ -7573,7 +7573,7 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
     let first = posted.lock().unwrap().first().copied().unwrap();
     assert!(first >= until, "an event went before the settle passed");
     assert!(
-        st_drivers::harness_events::pending(root.path(), 100)
+        fractal_drivers::harness_events::pending(root.path(), 100)
             .unwrap()
             .is_empty()
     );
@@ -7590,9 +7590,9 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
 #[tokio::test]
 async fn initial_snapshot_requires_the_providers_runtime_binding() {
     let root = tempfile::tempdir().unwrap();
-    st_drivers::harness_events::enable(root.path(), "runtime-old").unwrap();
+    fractal_drivers::harness_events::enable(root.path(), "runtime-old").unwrap();
     let seq =
-        st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-old")
+        fractal_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-old")
             .unwrap();
     let observations = NativeObservations::start(root.path(), "runtime-old").unwrap();
     assert_eq!(
@@ -7604,18 +7604,18 @@ async fn initial_snapshot_requires_the_providers_runtime_binding() {
 
     // Enabling the successor changes the runtime metadata, not the snapshot's producer.
     // Even a delayed write by the predecessor belongs to its original runtime.
-    st_drivers::harness_events::enable(root.path(), "runtime-new").unwrap();
-    st_drivers::harness_state::Writer::new(
+    fractal_drivers::harness_events::enable(root.path(), "runtime-new").unwrap();
+    fractal_drivers::harness_state::Writer::new(
         root.path(),
         "example/seat",
         "claude",
         Some("pty".into()),
     )
     .with_ownership("provider-old", seq)
-    .observe(st_drivers::harness_state::Observation::new(
-        st_drivers::harness_state::Activity::Active,
-        st_drivers::harness_state::BlockedOn::None,
-        st_drivers::harness_state::InputBuffer::Unknown,
+    .observe(fractal_drivers::harness_state::Observation::new(
+        fractal_drivers::harness_state::Activity::Active,
+        fractal_drivers::harness_state::BlockedOn::None,
+        fractal_drivers::harness_state::InputBuffer::Unknown,
     ))
     .unwrap();
     let observations = NativeObservations::start(root.path(), "runtime-new").unwrap();
@@ -7623,16 +7623,16 @@ async fn initial_snapshot_requires_the_providers_runtime_binding() {
     assert_eq!(observations.evidence_deadline, None);
     drop(observations);
     assert!(
-        st_drivers::harness_events::read_snapshot(root.path(), "harness-state")
+        fractal_drivers::harness_events::read_snapshot(root.path(), "harness-state")
             .unwrap()
             .is_some()
     );
     assert_eq!(
-        st_drivers::harness_events::pending(root.path(), 100).unwrap()[0].runtime_incarnation,
+        fractal_drivers::harness_events::pending(root.path(), 100).unwrap()[0].runtime_incarnation,
         "runtime-old"
     );
 
-    st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-new")
+    fractal_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-new")
         .unwrap();
     let observations = NativeObservations::start(root.path(), "runtime-new").unwrap();
     assert_eq!(
@@ -7645,14 +7645,14 @@ async fn initial_snapshot_requires_the_providers_runtime_binding() {
 #[tokio::test]
 async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publication() {
     use axum::{Json, Router, routing::post};
-    use st_drivers::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
+    use fractal_drivers::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
     use std::sync::{Arc, Mutex};
 
     let root = tempfile::tempdir().unwrap();
-    st_drivers::harness_events::enable(root.path(), "old-runtime").unwrap();
-    st_drivers::harness_state::claim(root.path(), "example/seat", "opencode", "old-provider")
+    fractal_drivers::harness_events::enable(root.path(), "old-runtime").unwrap();
+    fractal_drivers::harness_state::claim(root.path(), "example/seat", "opencode", "old-provider")
         .unwrap();
-    st_drivers::harness_events::enable(root.path(), "current-runtime").unwrap();
+    fractal_drivers::harness_events::enable(root.path(), "current-runtime").unwrap();
     let mut publisher = Publisher::new(
         root.path(),
         Driver::OpenCode,
@@ -7668,7 +7668,7 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let client = Client::new(st3::client::Endpoint::Http(format!("http://{address}")));
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
     let mut observations = NativeObservations::start(root.path(), "current-runtime").unwrap();
     let mut ready = false;
     // A predecessor's claim must neither publish the diagnostic nor require the daemon.
@@ -7676,7 +7676,7 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
         .drain(&client, "agent/example/seat", "opencode", &mut ready)
         .await
         .unwrap();
-    st_drivers::harness_state::claim(root.path(), "example/seat", "opencode", "current-provider")
+    fractal_drivers::harness_state::claim(root.path(), "example/seat", "opencode", "current-provider")
         .unwrap();
     assert!(
         observations
@@ -7685,7 +7685,7 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
             .is_err()
     );
     assert_eq!(
-        st_drivers::harness_events::pending(root.path(), 10)
+        fractal_drivers::harness_events::pending(root.path(), 10)
             .unwrap()
             .len(),
         1
@@ -7711,7 +7711,7 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
         .await
         .unwrap();
     assert!(
-        st_drivers::harness_events::pending(root.path(), 10)
+        fractal_drivers::harness_events::pending(root.path(), 10)
             .unwrap()
             .is_empty()
     );
@@ -7732,11 +7732,11 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
 #[tokio::test]
 async fn reading_the_outbox_does_not_wake_an_idle_driver() {
     let root = tempfile::tempdir().unwrap();
-    st_drivers::harness_events::enable(root.path(), "runtime").unwrap();
+    fractal_drivers::harness_events::enable(root.path(), "runtime").unwrap();
     let mut observations = NativeObservations::start(root.path(), "runtime").unwrap();
     observations.recv().await.unwrap();
     assert!(
-        st_drivers::harness_events::pending(root.path(), 100)
+        fractal_drivers::harness_events::pending(root.path(), 100)
             .unwrap()
             .is_empty()
     );
@@ -7745,7 +7745,7 @@ async fn reading_the_outbox_does_not_wake_an_idle_driver() {
             .await
             .is_err()
     );
-    st_drivers::harness_events::write_channel_todo(root.path(), "runtime", &json!({
+    fractal_drivers::harness_events::write_channel_todo(root.path(), "runtime", &json!({
         "harness":"omp", "session_id":"native", "incarnation_id":"runtime",
         "observed_at":"2026-10-03T15:00:00Z", "source_op":"hydrate", "phases":[],
         "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,

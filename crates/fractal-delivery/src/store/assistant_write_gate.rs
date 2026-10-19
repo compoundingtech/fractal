@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::{path::{Path, PathBuf}, sync::OnceLock, time::{Duration, Instant}};
 use crate::model::St3Error;
-pub use st3_store::store::assistant_write_gate::*;
-pub use st3_store::store::assistant_write_gate::{Gate, install};
+pub use fractal_store::store::assistant_write_gate::*;
+pub use fractal_store::store::assistant_write_gate::{Gate, install};
 
 pub struct Completion(&'static Path);
 

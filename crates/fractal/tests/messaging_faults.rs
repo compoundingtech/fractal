@@ -4,11 +4,11 @@
 
 #[test]
 fn controller_death_cleanup() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let repo = std::path::PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = st3::test_support::command("python3")
+    let output = fractal_daemon::test_support::command("python3")
         .args(["-m", "unittest", "discover", "-s"])
         .arg(repo.join("scripts/st3-messaging-faults-eval"))
         .args(["-p", "test_*.py"])
@@ -53,7 +53,7 @@ fn run_case_at(case: &str, real_grace: bool) {
         Some(path) => PathBuf::from(path),
         None => {
             // Run the actual previous release, not a current process pretending to be old.
-            let output = st3::test_support::command("bash")
+            let output = fractal_daemon::test_support::command("bash")
                 .arg(repo.join("scripts/messaging-compat-binary"))
                 .output()
                 .expect("download the pinned release channel (or set ST3_MESSAGING_COMPAT_BIN)");
@@ -97,7 +97,7 @@ fn run_case_at(case: &str, real_grace: bool) {
         .unwrap();
     // Double-fork out of the CI seat's ancestry. A sender is person/eval; an st harness
     // must never impersonate that sender. Captured pipes stay open until the eval exits.
-    let mut eval = st3::test_support::command("setsid");
+    let mut eval = fractal_daemon::test_support::command("setsid");
     eval.args(["-f", "env", "-u", "ST_AGENT", "python3"])
         .arg(repo.join("scripts/st3-messaging-faults-eval/run"))
         .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
@@ -152,7 +152,7 @@ fn run_case_at(case: &str, real_grace: bool) {
 
 #[test]
 fn baseline() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("baseline");
@@ -160,7 +160,7 @@ fn baseline() {
 
 #[test]
 fn daemon_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     // The control: the real 20 s grace and the 25 s observation, across a daemon restart.
@@ -169,7 +169,7 @@ fn daemon_restart() {
 
 #[test]
 fn binary_swap() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("binary-swap");
@@ -177,7 +177,7 @@ fn binary_swap() {
 
 #[test]
 fn path_deploy() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("path-deploy");
@@ -185,7 +185,7 @@ fn path_deploy() {
 
 #[test]
 fn link_seconds() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("link-seconds");
@@ -193,7 +193,7 @@ fn link_seconds() {
 
 #[test]
 fn link_minutes() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case_at_real_grace("link-minutes");
@@ -201,7 +201,7 @@ fn link_minutes() {
 
 #[test]
 fn receiver_down() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("receiver-down");
@@ -209,7 +209,7 @@ fn receiver_down() {
 
 #[test]
 fn harness_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("harness-restart");
@@ -217,7 +217,7 @@ fn harness_restart() {
 
 #[test]
 fn channel_killed() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("channel-killed");
@@ -225,7 +225,7 @@ fn channel_killed() {
 
 #[test]
 fn old_channel() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case("old-channel");
@@ -233,7 +233,7 @@ fn old_channel() {
 
 #[test]
 fn handoff_failed() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     run_case_at_real_grace("handoff-failed");

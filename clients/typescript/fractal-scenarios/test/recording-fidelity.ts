@@ -1,5 +1,5 @@
 import { expect } from 'vitest'
-import type { CollectionSocket } from '@smalltalk/st3-client'
+import type { CollectionSocket } from '@fractal/client'
 import { ANCHOR_MS } from '../src/kit/time.ts'
 import { createReplay, manualClock } from '../src/replay/index.ts'
 import { normalizeRecording, type JsonObject, type JsonValue, type RecordingRow } from '../scripts/recordings.ts'

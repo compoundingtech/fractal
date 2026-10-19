@@ -3,9 +3,9 @@
 
 use super::*;
 use smallclaims::ivm::{Definition, LocalChange, Readiness, View, Views, source_cut};
-pub use st3_delivery::store::mission_ivm::*;
-pub use st3_delivery::store::mission_ivm::SCHEMA;
-pub use st3_delivery::store::mission_ivm::{SOURCE, VIEW, flush, ready, row, rows};
+pub use fractal_delivery::store::mission_ivm::*;
+pub use fractal_delivery::store::mission_ivm::SCHEMA;
+pub use fractal_delivery::store::mission_ivm::{SOURCE, VIEW, flush, ready, row, rows};
 
 pub fn definitions() -> Vec<Box<dyn View>> {
     vec![Box::new(MissionSelection)]
@@ -24,7 +24,7 @@ impl View for MissionSelection {
         }
     }
     fn create_schema(&self, connection: &Connection) -> Result<()> {
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hef66e7d7c981 owner=st3_missions::store::mission_ivm TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h242812352607 owner=fractal_missions::store::mission_ivm TODO=trace-statement-and-value-representation */ SCHEMA)?;
         Ok(())
     }
     fn maintain_local_key(
@@ -73,7 +73,7 @@ fn maintain(tx: &Transaction<'_>, key: &str, at: u128) -> Result<bool> {
         .optional()?;
     if definition.is_none() && latest.is_none() {
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h796cfc9ac355 owner=st3_missions::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mission_selection WHERE mission_id=?1",
+            /* sqlite-large-value: allow-for-now lv-he2a7550701ab owner=fractal_missions::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mission_selection WHERE mission_id=?1",
             [mission],
         )?;
         return Ok(old.is_some());
@@ -127,7 +127,7 @@ fn maintain(tx: &Transaction<'_>, key: &str, at: u128) -> Result<bool> {
         return Ok(false);
     }
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h305d8adc86c5 owner=st3_missions::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mission_selection VALUES(?1,?2,?3,?4,?5,?6)
+        /* sqlite-large-value: allow-for-now lv-h8bfd7b8e1f8b owner=fractal_missions::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mission_selection VALUES(?1,?2,?3,?4,?5,?6)
         ON CONFLICT(mission_id) DO UPDATE SET updated_ms=excluded.updated_ms,state=excluded.state,
           grace_until_ms=excluded.grace_until_ms,visible=excluded.visible,body=excluded.body",
         params![mission, updated, state, grace, visible, body],
@@ -182,7 +182,7 @@ pub fn clock_page(
         );
     }
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-hb3a262720a92 owner=st3_missions::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mission_clock SET through_ms=?1 WHERE singleton=1 AND through_ms<?1",
+        /* sqlite-large-value: allow-for-now lv-h7fb3c232ab25 owner=fractal_missions::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mission_clock SET through_ms=?1 WHERE singleton=1 AND through_ms<?1",
         [at_ms],
     )?;
     Ok(keys.len())
@@ -222,7 +222,7 @@ pub fn window(
         ORDER BY updated_ms DESC,mission_id ASC LIMIT ?5"
     );
     connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3d28913d440b owner=st3_missions::store::mission_ivm TODO=trace-statement-and-value-representation */ &sql)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h497417b7ca37 owner=fractal_missions::store::mission_ivm TODO=trace-statement-and-value-representation */ &sql)?
         .query_map(
             params![
                 history,

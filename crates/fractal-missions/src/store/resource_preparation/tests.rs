@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_store::store::resource_preparation::tests_shared_seats::*;
+pub use fractal_store::store::resource_preparation::tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_store::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
+pub use fractal_store::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
 use super::*;
 
 
@@ -15,7 +15,7 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
         .connection
         .write()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h2acfb7234297 owner=st3_missions::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE invented_input(id INTEGER PRIMARY KEY,value TEXT);
+            /* sqlite-large-value: allow-for-now lv-hce7090013b32 owner=fractal_missions::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE invented_input(id INTEGER PRIMARY KEY,value TEXT);
          CREATE TABLE invented_output(id INTEGER PRIMARY KEY,value TEXT) WITHOUT ROWID;
          CREATE TABLE invented_child(id INTEGER PRIMARY KEY REFERENCES invented_input(id) ON DELETE CASCADE);
          CREATE TABLE invented_truncate(value TEXT);
@@ -28,13 +28,13 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
         )
         .unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h69af57ac3ae9 owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h3bc5b1a5a473 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     assert!(fence.current(&store, &transaction, &prepared));
     let count = transaction.total_changes();
     transaction
-        .execute(/* sqlite-large-value: allow-for-now lv-hb1ebf81c52b2 owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_visible VALUES(1,'first')", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h7f801e64b648 owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_visible VALUES(1,'first')", [])
         .unwrap();
     assert!(
         transaction.total_changes() >= count + 2,
@@ -51,15 +51,15 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h27d0206afb3d owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_input VALUES(1,'first')", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h75a1ca7b5ff0 owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_input VALUES(1,'first')", [])
         .unwrap();
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hb42c1328e1fa owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h52813697cfa2 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     let count = transaction.total_changes();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hc92db0d6cf23 owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO invented_input VALUES(1,'replacement')",
+            /* sqlite-large-value: allow-for-now lv-h619595e3d75e owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO invented_input VALUES(1,'replacement')",
             [],
         )
         .unwrap();
@@ -74,14 +74,14 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h37bc2a7cbf37 owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_child VALUES(1)", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-he337946add73 owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_child VALUES(1)", [])
         .unwrap();
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hb071e9117a3c owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h01c86721e28a owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     let before_delete = transaction.total_changes();
     transaction
-        .execute(/* sqlite-large-value: allow-for-now lv-h514e2ed24f3a owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM invented_input", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hf772fd405c55 owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM invented_input", [])
         .unwrap();
     assert!(
         transaction.total_changes() >= before_delete + 2,
@@ -93,12 +93,12 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
     );
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-he713a1d4df56 owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hf02160169cc7 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     let count = transaction.total_changes();
     transaction
-        .execute(/* sqlite-large-value: allow-for-now lv-h047d4e1653aa owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM invented_truncate", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h1fc00fda0eed owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM invented_truncate", [])
         .unwrap();
     assert!(transaction.total_changes() >= count + 2);
     assert!(
@@ -113,21 +113,21 @@ fn tokens_do_not_cross_store_or_fence_incarnations_and_nested_pins_are_unavailab
     let (_store_directory, store, _) = fixture();
     let (_other_directory, other, _) = fixture();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hd4688780e9ec owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
-    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h7affbcffe3ce owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &other, |_| ()).value.is_none());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-he2e1b76ab1b7 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h1650bf6a58bc owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &other, |_| ()).value.is_none());
     assert!(!Fence::new(&other).current(&other, &other.connection.write(), &prepared));
     assert!(!Fence::new(&store).current(&store, &store.connection.write(), &prepared));
     store
         .read_snapshot(|_| {
-            assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-ha9d09c7653fb owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none());
+            assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-hf2ee35959168 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none());
             Ok(())
         })
         .unwrap();
     // Unknown/read-failed publication never authorizes an effect.
-    let mut unavailable = fence.prepare(/* sqlite-large-value: allow-for-now lv-h1d02e1711126 owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let mut unavailable = fence.prepare(/* sqlite-large-value: allow-for-now lv-hb651b4929ca7 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     unavailable.cut = None;
     assert!(!fence.current(&store, &store.connection.write(), &unavailable));
-    let mut wrapped = fence.prepare(/* sqlite-large-value: allow-for-now lv-h379316ee1efc owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let mut wrapped = fence.prepare(/* sqlite-large-value: allow-for-now lv-hfe9c6bf35233 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     wrapped.cut.as_mut().unwrap().changes = u64::MAX;
     assert!(!fence.current(&store, &store.connection.write(), &wrapped));
 }
@@ -139,12 +139,12 @@ fn preparation_reads_the_post_seed_cut_and_refuses_a_foreign_reader_file() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h78f342cb6275 owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-fresh-cut','new')",
+            /* sqlite-large-value: allow-for-now lv-h26f1ece353b6 owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-fresh-cut','new')",
             [],
         )
         .unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h13551bbe1555 owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |reader| {
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h0ee836d9bd3f owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |reader| {
         assert!(
             !reader.is_autocommit(),
             "the canonical inputs share a real read transaction"
@@ -158,17 +158,17 @@ fn preparation_reads_the_post_seed_cut_and_refuses_a_foreign_reader_file() {
             .unwrap()
     });
     assert_eq!(prepared.value.as_deref(), Some("new"));
-    let mut foreign = fence.prepare(/* sqlite-large-value: allow-for-now lv-h5917353ea5a7 owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let mut foreign = fence.prepare(/* sqlite-large-value: allow-for-now lv-h9d88320be3bd owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     foreign.cut.as_mut().unwrap().file = "invented-other-file".into();
     assert!(!fence.current(&store, &store.connection.write(), &foreign));
 
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-hd0811f73c21f owner=st3_missions::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE invented_shadow(value TEXT)")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h2cde553fd1a4 owner=fractal_missions::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE invented_shadow(value TEXT)")
         .unwrap();
     assert!(
-        fence.prepare(/* sqlite-large-value: allow-for-now lv-h8e6997015091 owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-h9e58fda6723a owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "a preexisting writer TEMP schema cannot silently change name resolution"
     );
 }
@@ -179,7 +179,7 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
     let (_store_directory, store, _) = fixture();
     let store = Arc::new(store);
     let fence = Arc::new(Fence::new(&store));
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-ha7590e83029a owner=st3_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-ha0dce1e45fb7 owner=fractal_missions::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let commits = Arc::new(AtomicUsize::new(0));
     let seen = commits.clone();
     let _observer = store.observe_commits(move |_| {
@@ -196,7 +196,7 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
     store.connection.send(WriterJob::Batched {
         run: Box::new(|tx| {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h23ece28a4306 owner=st3_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-same-batch','1')",
+                /* sqlite-large-value: allow-for-now lv-h0e569540b40b owner=fractal_missions::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-same-batch','1')",
                 [],
             )
             .is_ok()

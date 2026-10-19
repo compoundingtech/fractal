@@ -24,10 +24,10 @@ pub fn observed_sql() -> &'static str {
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-h33d4b95679a9 owner=st3_store::store::usage_period TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS {INDEX} ON claims({}, {}) WHERE {PREDICATE}",
+        /* sqlite-large-value: allow-for-now lv-h46ee499352b7 owner=fractal_store::store::usage_period TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS {INDEX} ON claims({}, {}) WHERE {PREDICATE}",
         series_sql(), observed_sql()
     ))?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf0d509c12c63 owner=st3_store::store::usage_period TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX IF EXISTS claims_usage_rollup_index")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3686c9ce2155 owner=fractal_store::store::usage_period TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX IF EXISTS claims_usage_rollup_index")?;
     Ok(())
 }
 

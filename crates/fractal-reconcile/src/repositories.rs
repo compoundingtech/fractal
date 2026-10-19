@@ -2,7 +2,7 @@
 use crate::MissionsStore;
 use crate::GithubStore;
 use anyhow::Result;
-use st3_client::{AgentRepository, HostRepositories};
+use fractal_client::{AgentRepository, HostRepositories};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A graph-only read: paths belong to the selected host, even through another member.

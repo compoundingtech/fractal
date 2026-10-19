@@ -2,8 +2,8 @@
 //! reconciler's runtime.running claim. No model or credentials are used in this proof.
 #![cfg(target_os = "linux")]
 
-use st3::MissionsStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use serde_json::{Value, json};
-use st_runtime::PtyRuntime;
-use st3::api::AppState;
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_runtime::PtyRuntime;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const SUBJECT: &str = "agent/eval.codex-bootstrap";
@@ -57,7 +57,7 @@ impl Drop for Cleanup {
 /// The provider speaks the real app-server protocol, but never calls a model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delayed_delivery_control_holds_visible_native_input_and_recovers_once() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     delivery_recovery_control(false, false, None).await;
@@ -65,7 +65,7 @@ async fn delayed_delivery_control_holds_visible_native_input_and_recovers_once()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mailbox_reconnect_preserves_provider_and_consumes_queued_mail_once() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     delivery_recovery_control(true, false, None).await;
@@ -73,7 +73,7 @@ async fn mailbox_reconnect_preserves_provider_and_consumes_queued_mail_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bound_cold_codex_promotes_custody_delivers_once_and_returns_to_its_shell() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     delivery_recovery_control(true, true, Some(CompletionControl { order: "before", failure: false, rejection: None })).await;
@@ -90,7 +90,7 @@ macro_rules! codex_completion_control {
     ($name:ident, $order:literal, $failure:literal, $rejection:expr) => {
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn $name() {
-            if st3::test_support::supervise_test() { return; }
+            if fractal_daemon::test_support::supervise_test() { return; }
             delivery_recovery_control(true, true, Some(CompletionControl {
                 order: $order, failure: $failure, rejection: $rejection,
             })).await;
@@ -165,11 +165,11 @@ async fn delivery_recovery_control(
     if mailbox_loss {
         source.push_str(&format!("\nmission \"mailbox-recovery\" state=\"ready\" {{ goal \"Keep queued work while a real native mailbox is deaf.\"; step \"queued\" {{ assigned-to \"{SUBJECT}\" }} }}\n"));
     }
-    let intent = st3::graph::parse_intent(&source, "bootstrap").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&source, "bootstrap").unwrap();
     let plan = store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: None,
             },
@@ -185,7 +185,7 @@ async fn delivery_recovery_control(
         .unwrap();
     let queued = mailbox_loss.then(|| {
         let run = store
-            .create_mission_run(&st3::model::MissionRunRequest {
+            .create_mission_run(&fractal_daemon::model::MissionRunRequest {
                 mission: "mailbox-recovery".into(),
                 revision: None,
                 workspace: root.to_string_lossy().into_owned(),
@@ -222,7 +222,7 @@ async fn delivery_recovery_control(
     let bootstrap_custody = Arc::new(std::sync::Mutex::new(None));
     let capture = bootstrap_custody.clone();
     let capture_root = root_path.clone();
-    let app = st3::api::router(state).layer(axum::middleware::from_fn(
+    let app = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let delay = delay.clone();
             let read_count = read_count.clone();
@@ -257,7 +257,7 @@ async fn delivery_recovery_control(
     ));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix_bound(&server_socket, &state_socket, app)
+        fractal_daemon::api::serve_unix_bound(&server_socket, &state_socket, app)
             .await
             .unwrap();
     });
@@ -379,17 +379,17 @@ async fn delivery_recovery_control(
     } else {
         observation.pid.unwrap()
     };
-    let shell_generation = st_runtime::process_start_token(shell_pid).unwrap();
+    let shell_generation = fractal_runtime::process_start_token(shell_pid).unwrap();
     let incarnation = if bound_shell {
         let invocation = "019a0000-0000-7000-8000-000000000004";
         let source = format!(
             "version 2\nagent \"eval.codex-bootstrap\" {{ harness \"codex\" {{}}; bind-terminal {TERMINAL:?} incarnation={physical_incarnation:?} id={invocation:?}; }}"
         );
-        let intent = st3::graph::parse_intent(&source, "bootstrap").unwrap();
+        let intent = fractal_daemon::graph::parse_intent(&source, "bootstrap").unwrap();
         let plan = store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl: source,
                     source_name: None,
                 },
@@ -411,7 +411,7 @@ async fn delivery_recovery_control(
     if bound_shell {
         std::fs::write(root.join("launch-bound-codex"), b"launch").unwrap();
     }
-    let client = st3::client::Client::unix(&socket);
+    let client = fractal_daemon::client::Client::unix(&socket);
     // The in-process API and fixture driver have different executable inodes. Establish
     // the healthy assessment first, so recovery must restore it exactly, including that
     // independent binary-version assessment.
@@ -459,7 +459,7 @@ async fn delivery_recovery_control(
         assert_eq!(lease[field], bootstrap[field], "promotion changed {field}");
     }
     if mailbox_loss {
-        st3::test_support::hold_fixture_mailbox(&store, SUBJECT, true);
+        fractal_daemon::test_support::hold_fixture_mailbox(&store, SUBJECT, true);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let agent: Value = client
@@ -492,10 +492,10 @@ async fn delivery_recovery_control(
         delayed.store(true, Ordering::SeqCst);
     }
     // Idle drivers do not poll control. Unread native mail must make the failed read visible.
-    let receipt: st3::model::MessageSendReceipt = client
+    let receipt: fractal_daemon::model::MessageSendReceipt = client
         .post(
             "/v1/messages",
-            &st3::model::MessageSendRequest {
+            &fractal_daemon::model::MessageSendRequest {
                 idempotency_key: "delayed-handoff".into(),
                 from: "person/eval".into(),
                 to: SUBJECT.into(),
@@ -602,7 +602,7 @@ async fn delivery_recovery_control(
             agent["fault"].is_string(),
             "superficial readiness erased the loss"
         );
-        st3::test_support::hold_fixture_mailbox(&store, SUBJECT, false);
+        fractal_daemon::test_support::hold_fixture_mailbox(&store, SUBJECT, false);
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -743,8 +743,8 @@ async fn delivery_recovery_control(
             assert_eq!(retained, lease, "completion does not reissue custody");
             match control.rejection {
                 Some("token") => {
-                    let request = st3::mailbox::Fence::new(SUBJECT, &incarnation, "delivery");
-                    st3::test_support::bind_fixture_mailbox(&store, &request).unwrap();
+                    let request = fractal_daemon::mailbox::Fence::new(SUBJECT, &incarnation, "delivery");
+                    fractal_daemon::test_support::bind_fixture_mailbox(&store, &request).unwrap();
                 }
                 Some("runtime") => {
                     store.append_claim(&ClaimInput {
@@ -755,8 +755,8 @@ async fn delivery_recovery_control(
                 }
                 Some("invocation") => {
                     let source = format!("version 2\nagent \"eval.codex-bootstrap\" {{ harness \"codex\" {{}}; bind-terminal {TERMINAL:?} incarnation={physical_incarnation:?} id=\"019a0000-0000-7000-8000-000000000005\"; }}");
-                    let intent = st3::graph::parse_intent(&source, "bootstrap").unwrap();
-                    let plan = store.mission(&intent, st3::model::IntentInput { kdl: source, source_name: None }).unwrap();
+                    let intent = fractal_daemon::graph::parse_intent(&source, "bootstrap").unwrap();
+                    let plan = store.mission(&intent, fractal_daemon::model::IntentInput { kdl: source, source_name: None }).unwrap();
                     store.apply_as(&intent, &plan.subject_tokens, "replace-codex-invocation", Some("person/eval")).unwrap();
                 }
                 None => {},
@@ -797,7 +797,7 @@ async fn delivery_recovery_control(
             })).unwrap()).unwrap();
         }
         assert_eq!(
-            st_runtime::process_start_token(shell_pid).unwrap(),
+            fractal_runtime::process_start_token(shell_pid).unwrap(),
             shell_generation
         );
         assert_eq!(
@@ -828,7 +828,7 @@ async fn until(mut predicate: impl FnMut() -> bool, description: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fresh_codex_driver_waits_for_reconciliation_before_binding_its_mailbox() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     bootstrap_waits_for_reconciliation("starting", None).await;
@@ -836,7 +836,7 @@ async fn a_fresh_codex_driver_waits_for_reconciliation_before_binding_its_mailbo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replacement_driver_waits_while_the_previous_runtime_is_vanished() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     bootstrap_waits_for_reconciliation("vanished", Some("previous-incarnation")).await;
@@ -863,7 +863,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         "version 2\nagent \"eval.codex-bootstrap\" {{ host \"bootstrap\"; workspace {:?}; harness \"codex\" {{}} }}",
         root.path()
     );
-    let intent = st3::graph::parse_intent(&source, "bootstrap").unwrap();
+    let intent = fractal_daemon::graph::parse_intent(&source, "bootstrap").unwrap();
     store
         .apply_internal(&intent, "bootstrap-declared-seat")
         .unwrap();
@@ -887,7 +887,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     };
     let pending_count = pending.clone();
     let bound_count = bound.clone();
-    let app = st3::api::router(state).layer(axum::middleware::from_fn(
+    let app = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let pending = pending_count.clone();
             let bound = bound_count.clone();
@@ -920,7 +920,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let server_socket = socket.clone();
     let server_state_socket = state_socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix_bound(&server_socket, &server_state_socket, app)
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_state_socket, app)
             .await
             .unwrap();
     });

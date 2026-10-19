@@ -3,7 +3,7 @@
 //! that runs it. It counts, and never times, so it gives the same answer on every runner.
 //!
 //! ```sh
-//! TMPDIR=/var/tmp cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads 1
+//! TMPDIR=/var/tmp cargo test -p fractal --test integration daemon_cost:: -- --nocapture --test-threads 1
 //! ```
 //!
 //! The counts are the whole process's, so no other test may run beside it.
@@ -39,14 +39,14 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
-use st3::ConversationReadsStore;
-use st3::CustomStore;
-use st3::AdhocWorkStore;
-use st3::CoordinationStore;
-use st3::MissionsStore;
-use st3::SeatsStore;
-use st3::SeatsStoreCore;
-use st3::{GitChangesStore, WatchesStore};
+use fractal_daemon::ConversationReadsStore;
+use fractal_daemon::CustomStore;
+use fractal_daemon::AdhocWorkStore;
+use fractal_daemon::CoordinationStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStore;
+use fractal_daemon::SeatsStoreCore;
+use fractal_daemon::{GitChangesStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -62,12 +62,12 @@ use axum::Router;
 use serde_json::{Value, json};
 use smallclaims::sqlite::work::{self, SqliteWork};
 use smallclaims::sync::PeerResponse;
-use st3::api::AppState;
-use st3::client::Client;
-use st3::config::{Config, PeerConfig};
-use st3::model::ClaimInput;
-use st3::peer::{ClientReadOperation, ClientReadRequest, ClientRelay, FleetAuth};
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::client::Client;
+use fractal_daemon::config::{Config, PeerConfig};
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::peer::{ClientReadOperation, ClientReadRequest, ClientRelay, FleetAuth};
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 use crate::daemon_bench::{
@@ -504,7 +504,7 @@ const PROBES: &[Probe] = &[
     ),
     post(
         "POST /v1/internal/client-read/forward",
-        st3::peer::CLIENT_READ_FORWARD_PATH,
+        fractal_daemon::peer::CLIENT_READ_FORWARD_PATH,
         |_, _| json!({
             "authority_actor": "person/bench-operator",
             "request": {"operation": "messages", "actor": "agent/bench/cost/reader", "history": false, "limit": 20, "cursor": null},
@@ -569,7 +569,7 @@ const PROBES: &[Probe] = &[
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
-        let thread = st3::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 10))
+        let thread = fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 10))
             .map_err(|error| error.message)?;
         let agent = &fixture.subjects.seats[0];
         let id = attempt as u64 + 100;
@@ -593,7 +593,7 @@ const PROBES: &[Probe] = &[
     }),
     direct("POST /v1/github/own", |store, fixture, attempt| {
         let thread =
-            st3::github_watch::ThreadRef::parse("acme/garden#12").map_err(|error| error.message)?;
+            fractal_daemon::github_watch::ThreadRef::parse("acme/garden#12").map_err(|error| error.message)?;
         let id = attempt as u64 + 200;
         store
             .record_github_post(
@@ -610,7 +610,7 @@ const PROBES: &[Probe] = &[
     // cost check needs neither network access nor a live seat process. Each attempt declares a
     // new watch, and the ending probe ends a different one rather than measuring a replay.
     direct("POST /v1/github/watch", |store, fixture, attempt| {
-        let thread = st3::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
+        let thread = fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
             .map_err(|error| error.message)?;
         store
             .declare_watch(&thread, &fixture.subjects.seats[0], None)
@@ -623,7 +623,7 @@ const PROBES: &[Probe] = &[
             .map_err(|error| error.message)
     }),
     direct("POST /v1/github/unwatch", |store, fixture, attempt| {
-        let thread = st3::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
+        let thread = fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
             .map_err(|error| error.message)?;
         store
             .end_watch(&thread.watch(&fixture.subjects.seats[0]), "unwatched", None)
@@ -949,7 +949,7 @@ const PROBES: &[Probe] = &[
         "POST /v1/work/{action}/{*subject}",
         |store, fixture, attempt| {
             let (agent, step, incarnation) = &fixture.subjects.held[0];
-            let request = st3::model::WorkRequest {
+            let request = fractal_daemon::model::WorkRequest {
                 wait_ms: None,
                 actor: Some(agent.clone()),
                 incarnation: Some(incarnation.clone()),
@@ -984,7 +984,7 @@ const PROBES: &[Probe] = &[
             store
                 .handoff_work(
                     step,
-                    &st3::model::WorkHandoffRequest {
+                    &fractal_daemon::model::WorkHandoffRequest {
                         actor: agent.clone(),
                         incarnation: Some(incarnation.clone()),
                         to: "person/bench-operator".into(),
@@ -1073,7 +1073,7 @@ const PROBES: &[Probe] = &[
         claim
             .fields
             .insert("incarnation_id".into(), json!(SEAT_RUNTIME));
-        let publication = st3::harness_events::Publication {
+        let publication = fractal_daemon::harness_events::Publication {
             runtime_incarnation: SEAT_RUNTIME.into(),
             sequence: attempt as u64 + 1,
             claim,
@@ -1405,13 +1405,13 @@ mission "cost/history" state="ready" {
   goal "Bound enrichment of historical runs."
   step "work" { assigned-to "agent/cost-worker" }
 }"#;
-    let intent = st3::graph::parse_intent(source, NODE).unwrap();
-    let planned = store.mission(&intent, st3::model::IntentInput {
+    let intent = fractal_daemon::graph::parse_intent(source, NODE).unwrap();
+    let planned = store.mission(&intent, fractal_daemon::model::IntentInput {
         kdl: source.into(), source_name: None,
     }).unwrap();
     store.apply(&intent, &planned.subject_tokens, "cost-history-definition").unwrap();
     for message in 0..500 {
-        store.append_claim(&st3::model::ClaimInput {
+        store.append_claim(&fractal_daemon::model::ClaimInput {
             subject: format!("message/cost-history-{message}"),
             kind: "message.sent".into(),
             actor: Some("person/bench-operator".into()),
@@ -1424,7 +1424,7 @@ mission "cost/history" state="ready" {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = st3::api::router(AppState {
+    let app = fractal_daemon::api::router(AppState {
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -1435,11 +1435,11 @@ mission "cost/history" state="ready" {
         pty_binary: stub_pty(root.path()),
         fleet_id: None, configured_peers: Vec::new(), client_relay: None,
         native_session_home: Some(root.path().join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     });
     let mut measurements = Vec::new();
     for run in 0..100 {
-        let view = store.create_mission_run(&st3::model::MissionRunRequest {
+        let view = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
             mission: "cost/history".into(), revision: None,
             workspace: root.path().display().to_string(),
             requester: Some("person/bench-operator".into()), mode: None,
@@ -1705,12 +1705,12 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
 /// Every route `api.rs` and the route families above it declare is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let mut declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
+    let mut declared = declared_routes(include_str!("../../fractal-api-core/src/api.rs"));
     declared.extend(family_routes(include_str!(
-        "../../st3-api-mailbox/src/api/mailbox.rs"
+        "../../fractal-api-mailbox/src/api/mailbox.rs"
     )));
     declared.extend(family_routes(include_str!(
-        "../../st3-api-client-v0/src/api/client_v0.rs"
+        "../../fractal-api-client-v0/src/api/client_v0.rs"
     )));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
@@ -1969,7 +1969,7 @@ fn routes_in(router: &str) -> BTreeSet<String> {
             .split_once(',')
             .expect("a .route call has a path and a handler");
         let path = match path_argument.trim() {
-            "crate::peer::CLIENT_READ_FORWARD_PATH" => st3::peer::CLIENT_READ_FORWARD_PATH,
+            "crate::peer::CLIENT_READ_FORWARD_PATH" => fractal_daemon::peer::CLIENT_READ_FORWARD_PATH,
             literal if literal.starts_with('"') && literal.ends_with('"') => {
                 literal.trim_matches('"')
             }
@@ -2007,7 +2007,7 @@ fn routes_in(router: &str) -> BTreeSet<String> {
 
 #[test]
 fn the_cost_route_inventory_resolves_the_client_read_forward_constant() {
-    let declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
+    let declared = declared_routes(include_str!("../../fractal-api-core/src/api.rs"));
     assert!(declared.contains("POST /v1/internal/client-read/forward"));
 }
 
@@ -2131,7 +2131,7 @@ async fn invented_cost_owner_refuses_foreign_relays_but_serves_its_direct_probe(
         "relay": {"target": target, "path": ["cost-source"], "hops_left": 3},
     })).unwrap();
     let error = relay.forward(&request("host/unreachable-owner")).await.unwrap_err();
-    let rejected = error.downcast_ref::<st3::peer::ClientReadRejected>().unwrap();
+    let rejected = error.downcast_ref::<fractal_daemon::peer::ClientReadRejected>().unwrap();
     assert_eq!(rejected.code, "remote-unavailable");
     assert_eq!(rejected.reason(), Some("no-route"));
     let answer = relay.forward(&request("host/cost-owner")).await.unwrap();
@@ -2189,9 +2189,9 @@ where
 }
 
 fn seed_git_change_reads(store: &Store, scale: f64) {
-    use st3::changes::{Record, Revision, State, TrailerStatus};
-    use st3::changes::config::{Config, Repository};
-    store.install_git_change_registry(Arc::new(st3::changes::service::Registry::new(
+    use fractal_daemon::changes::{Record, Revision, State, TrailerStatus};
+    use fractal_daemon::changes::config::{Config, Repository};
+    store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(
         &Config { enabled: true, repositories: vec![Repository {
             name: "cost/garden".into(), reader_node: "cost-other".into(),
             transport_directory: PathBuf::from("/missing/cost/transport"),
@@ -2237,8 +2237,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     store.bind_fleet(FLEET).ok();
     let peer = Arc::new(Store::open(&peer_database, PEER).unwrap());
     // Notes publish only after the real fleet admission/advertisement barrier.
-    let anchor = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
-    let peer_key = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+    let anchor = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    let peer_key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
     store.pin_fleet_anchor(anchor.public()).unwrap();
     store.set_member_key(Some(anchor.clone())).unwrap();
     store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
@@ -2310,17 +2310,17 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         configured_peers: vec![PEER.into()],
         client_relay: relay,
         native_session_home: Some(root.join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let seeded_cut = store.index().unwrap();
-    st3::api::start_published_lists(&state);
+    fractal_daemon::api::start_published_lists(&state);
     tokio::time::timeout(Duration::from_secs(120),
-        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        fractal_daemon::api::wait_published_lists_at_least(&store, seeded_cut))
         .await.expect("cost census lists publish the seeded store cut").unwrap();
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
-            async move { st3::api::serve_unix(&server_socket, st3::api::router(state)).await },
+            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
         );
     while UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2375,8 +2375,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         "version 2\nagent \"bench/cost/adapter\" {{ workspace {:?}; argv \"/usr/bin/true\"; restart \"never\"; tags st3.adapter.source=\"external/discord/user/404\" st3.adapter.target={:?} }}\n",
         root.to_str().unwrap(), fixture.subjects.seats[0],
     );
-    let intent = st3::parse_intent(&adapter_kdl, NODE).unwrap();
-    let preview = store.mission(&intent, st3::model::IntentInput {
+    let intent = fractal_daemon::parse_intent(&adapter_kdl, NODE).unwrap();
+    let preview = store.mission(&intent, fractal_daemon::model::IntentInput {
         kdl: adapter_kdl, source_name: None,
     }).unwrap();
     store.apply_as(&intent, &preview.subject_tokens, "cost-adapter-enrollment", Some("person/bench-operator")).unwrap();
@@ -2411,7 +2411,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             "version 2\nagent \"bench/cost/mover\" {{\n host \"{host}\"\n workspace {:?}\n command \"sleep 1000\"\n restart always\n}}\n",
             root.to_str().unwrap()
         );
-        let intent = st3::parse_intent(&kdl, NODE).unwrap();
+        let intent = fractal_daemon::parse_intent(&kdl, NODE).unwrap();
         if host == "cobalt" {
             expected_publication = Some(
                 serde_json::to_value(intent.subjects.get("agent/bench/cost/mover").unwrap())
@@ -2421,7 +2421,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let preview = store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl,
                     source_name: None,
                 },
@@ -2587,7 +2587,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                 );
                             }
                             if probe.route == "POST /v1/internal/client-read/forward"
-                                && (serde_json::from_value::<st3::model::ClientResourcePage>(
+                                && (serde_json::from_value::<fractal_daemon::model::ClientResourcePage>(
                                     value.clone(),
                                 )
                                 .is_err()
@@ -2696,8 +2696,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     Measured { claims, costs }
 }
 
-fn custom_manifest(version: u32) -> st3_schema::custom::Manifest {
-    let mut manifest: st3_schema::custom::Manifest =
+fn custom_manifest(version: u32) -> fractal_schema::custom::Manifest {
+    let mut manifest: fractal_schema::custom::Manifest =
         serde_json::from_str(include_str!("../../../examples/st3/custom-review.json")).unwrap();
     manifest.version = version;
     manifest.subject_prefix = format!("custom/garden/review/v{version}/");
@@ -2705,7 +2705,7 @@ fn custom_manifest(version: u32) -> st3_schema::custom::Manifest {
 }
 
 fn prepare_custom_fixture(store: &Store, fixture: &mut Fixture, scale: f64) {
-    use st3::store::custom::{RegistrationRequest, ReplyRequest};
+    use fractal_daemon::store::custom::{RegistrationRequest, ReplyRequest};
     let manifest = custom_manifest(1);
     store
         .register_custom_kind(&RegistrationRequest {
@@ -2720,7 +2720,7 @@ fn prepare_custom_fixture(store: &Store, fixture: &mut Fixture, scale: f64) {
     {
         let subject = format!("{}{}", manifest.subject_prefix, name);
         store
-            .append_claim(&st3::model::ClaimInput {
+            .append_claim(&fractal_daemon::model::ClaimInput {
                 subject: subject.clone(),
                 kind: manifest.creation_kind.clone(),
                 actor: Some("person/bench-operator".into()),
@@ -2836,7 +2836,7 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
     items.insert("record", urlencoding::encode(&record).into_owned());
 
     let sent = client
-        .post::<_, st3::model::MessageSendReceipt>(
+        .post::<_, fractal_daemon::model::MessageSendReceipt>(
             "/v1/messages",
             &json!({
                 "idempotency_key": "cost-fixture-message",
@@ -2911,14 +2911,14 @@ fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
             "agent \"bench/cost/handoff-{attempt}\" {{ workspace \"/tmp\"; command \"true\" }}\n"
         ))
         .collect::<String>();
-    let intent = st3::parse_intent(&format!("version 2\n{kdl}"), NODE).unwrap();
+    let intent = fractal_daemon::parse_intent(&format!("version 2\n{kdl}"), NODE).unwrap();
     store.apply_internal(&intent, "cost-handoff-seats").unwrap();
     for attempt in 0..4 {
         let actor = format!("agent/bench/cost/handoff-{attempt}");
         let incarnation = format!("cost-handoff-incarnation-{attempt}");
         for purpose in ["acknowledge", "transfer"] {
             let work = store
-                .start_work(&st3::model::WorkStartRequest {
+                .start_work(&fractal_daemon::model::WorkStartRequest {
                     actor: actor.clone(),
                     title: format!("Invented {purpose} task {attempt}"),
                     idempotency_key: format!("cost-{purpose}-start-{attempt}"),
@@ -2928,7 +2928,7 @@ fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
                 .work_action(
                     &work.subject,
                     "claim",
-                    &st3::model::WorkRequest {
+                    &fractal_daemon::model::WorkRequest {
                         wait_ms: None,
                         actor: Some(actor.clone()),
                         incarnation: Some(incarnation.clone()),
@@ -2943,7 +2943,7 @@ fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
                 store
                     .handoff_work(
                         &work.subject,
-                        &st3::model::WorkHandoffRequest {
+                        &fractal_daemon::model::WorkHandoffRequest {
                             actor: actor.clone(),
                             incarnation: Some(incarnation.clone()),
                             to: "person/bench-operator".into(),
@@ -3072,7 +3072,7 @@ async fn trim_cost(store: &Arc<Store>) -> Cost {
         // Pacing only sleeps between chunks; the counts are the whole process's, so a rest would
         // count whatever else runs meanwhile, and a larger store has more chunks to rest after.
         store.set_trim_pause(Duration::ZERO);
-        let plan = st3::store::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
+        let plan = fractal_daemon::store::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
         let rows = (plan.claims.len() + plan.envelopes.len()) as u64;
         let before = work::total();
         let mut actions = Vec::new();

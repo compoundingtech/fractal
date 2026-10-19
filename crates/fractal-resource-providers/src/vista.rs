@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use parking_lot::Mutex;
-use st2_resource_wasip2::{
+use fractal_resource_wasip2::{
     CapabilityContext, CapabilityModule, CapabilityPhase, InterruptionReason,
     InvocationControl as ExecutorInvocationControl, InvocationStore,
 };

@@ -174,7 +174,7 @@ fn claim_input(receipt: Receipt) -> Result<ClaimInput> {
     if let Some(run) = receipt.mission_run {
         facts.insert("opened_by_run".into(), Value::String(format!("mission-run/{run}")));
     }
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_resource_facts(kind, &facts)
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     Ok(ClaimInput {

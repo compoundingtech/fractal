@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use crate::store::Store;
-pub use st3_store::maintenance::*;
-pub use st3_store::maintenance::{DIVERGENCE_CHECK_ENV, EventMigrationReport, divergence_check_interval, migrate_event_payloads};
+pub use fractal_store::maintenance::*;
+pub use fractal_store::maintenance::{DIVERGENCE_CHECK_ENV, EventMigrationReport, divergence_check_interval, migrate_event_payloads};
 
 /// The first wait while the daemon is busy; it doubles until the next check is due.
 const DIVERGENCE_BUSY_BACKOFF: Duration = Duration::from_secs(60);

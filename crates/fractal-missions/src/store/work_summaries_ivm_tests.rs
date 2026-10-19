@@ -6,8 +6,8 @@ pub use crate::store::work_summaries_ivm::tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::work_summaries_ivm::tests_shared_seats::{ResetClock, append, append_at, capture, freeze};
 use super::*;
-use st3_store::store::work_summaries_ivm::tests_shared_missions::*;
-use st3_store::store::work_summaries_ivm::tests_shared_missions::{change, synthetic};
+use fractal_store::store::work_summaries_ivm::tests_shared_missions::*;
+use fractal_store::store::work_summaries_ivm::tests_shared_missions::{change, synthetic};
 
 
 #[test]
@@ -174,7 +174,7 @@ fn irrelevant_older_and_identical_claims_do_not_rewrite_public_rows() {
         json!({"attempt":1,"summary":"current"}),
     );
     change(&tx, &views, None, Some(&latest), "cedar", 1, 0);
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h61c8c3c4690a owner=st3_missions::store::work_summaries_ivm_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE summary_writes(key TEXT); CREATE TEMP TRIGGER summary_insert AFTER INSERT ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_update AFTER UPDATE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_delete AFTER DELETE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(OLD.key); END;").unwrap();
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h468284965bf5 owner=fractal_missions::store::work_summaries_ivm_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE summary_writes(key TEXT); CREATE TEMP TRIGGER summary_insert AFTER INSERT ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_update AFTER UPDATE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(NEW.key); END; CREATE TEMP TRIGGER summary_delete AFTER DELETE ON local_work_summaries BEGIN INSERT INTO summary_writes VALUES(OLD.key); END;").unwrap();
     let older = synthetic(
         "older",
         &latest.subject,
@@ -263,7 +263,7 @@ fn full_u128_clock_and_real_maintenance_query_plans() {
     for query in [WINNER, NEXT] {
         let sql = format!("EXPLAIN QUERY PLAN {query}");
         let plan = tx
-            .prepare(/* sqlite-large-value: allow-for-now lv-h6996186cdda8 owner=st3_missions::store::work_summaries_ivm_tests TODO=trace-statement-and-value-representation */ &sql)
+            .prepare(/* sqlite-large-value: allow-for-now lv-h3e591421c1da owner=fractal_missions::store::work_summaries_ivm_tests TODO=trace-statement-and-value-representation */ &sql)
             .unwrap()
             .query_map(
                 params![
@@ -283,7 +283,7 @@ fn full_u128_clock_and_real_maintenance_query_plans() {
     }
     let sql = format!("EXPLAIN QUERY PLAN {DUE}");
     let plan = tx
-        .prepare(/* sqlite-large-value: allow-for-now lv-hda05a42248ef owner=st3_missions::store::work_summaries_ivm_tests TODO=trace-statement-and-value-representation */ &sql)
+        .prepare(/* sqlite-large-value: allow-for-now lv-h4c6c2ac4de06 owner=fractal_missions::store::work_summaries_ivm_tests TODO=trace-statement-and-value-representation */ &sql)
         .unwrap()
         .query_map(params![u128::MAX.to_be_bytes().as_slice(), 1], |r| {
             r.get::<_, String>(3)

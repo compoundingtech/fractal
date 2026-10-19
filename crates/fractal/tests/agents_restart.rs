@@ -1,11 +1,11 @@
 #![cfg(unix)]
 
-use st3::AttentionStore;
-use st3::MissionsStore;
-use st3::SeatsStore;
-use st3::SeatsStoreCore;
-use st3::OwnedSetsStore;
-use st3::WatchesStore;
+use fractal_daemon::AttentionStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStore;
+use fractal_daemon::SeatsStoreCore;
+use fractal_daemon::OwnedSetsStore;
+use fractal_daemon::WatchesStore;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::model::{ClaimInput, ClaimRecord, MemberSpec, MissionRunRequest};
-use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::{ClaimInput, ClaimRecord, MemberSpec, MissionRunRequest};
+use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 /// How long a planned restart waits for a handoff in this process. The deadline tests keep it short;
@@ -170,7 +170,7 @@ impl Fixture {
     }
 
     async fn launching(shape: Shape, launch: &str, restart: &str) -> (Self, String) {
-        Self::launching_with_router(shape, launch, restart, st3::api::router).await
+        Self::launching_with_router(shape, launch, restart, fractal_daemon::api::router).await
     }
 
     async fn launching_with_router(
@@ -180,7 +180,7 @@ impl Fixture {
         make_router: impl FnOnce(AppState) -> axum::Router,
     ) -> (Self, String) {
         let mission = matches!(shape, Shape::Mission | Shape::Step);
-        let root = st3::test_support::canonical_tempdir();
+        let root = fractal_daemon::test_support::canonical_tempdir();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "restart-test").unwrap());
         let notify = Arc::new(Notify::new());
         let runtime = Arc::new(Runtime::default());
@@ -221,11 +221,11 @@ impl Fixture {
             ),
             Shape::TopLevel | Shape::Owned => format!("version 2\n{member}"),
         };
-        let intent = st3::parse_intent(&source, "restart-test").unwrap();
+        let intent = fractal_daemon::parse_intent(&source, "restart-test").unwrap();
         let preview = store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl: source.clone(),
                     source_name: None,
                 },
@@ -240,7 +240,7 @@ impl Fixture {
             )
             .unwrap();
         if shape == Shape::Owned {
-            use st3::store::owned_sets::{Options, Source};
+            use fractal_daemon::store::owned_sets::{Options, Source};
             let mut options = Options {
                 set: "example/runtime".into(),
                 source: Source { repository: "acme/example".into(), r#ref: "refs/heads/main".into(), sha: "a".repeat(40), sequence: 1 },
@@ -287,7 +287,7 @@ impl Fixture {
         };
         let socket = root.path().join("st3.sock");
         let router = make_router(state.clone());
-        let server = tokio::spawn(async move { st3::api::serve_unix(&socket, router).await });
+        let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });
         for _ in 0..100 {
             if root.path().join("st3.sock").exists() {
                 break;
@@ -306,8 +306,8 @@ impl Fixture {
             subject,
         )
     }
-    fn client(&self) -> st3::client::Client {
-        st3::client::Client::unix(self.root.path().join("st3.sock"))
+    fn client(&self) -> fractal_daemon::client::Client {
+        fractal_daemon::client::Client::unix(self.root.path().join("st3.sock"))
     }
     fn drive(&self) -> tokio::task::JoinHandle<()> {
         let reconciler = self.reconciler.clone();
@@ -340,7 +340,7 @@ async fn st(socket: &Path, args: &[&str]) -> std::process::Output {
     let socket = socket.to_owned();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args(["--endpoint", socket.to_str().unwrap()])
             .args(args)
@@ -356,7 +356,7 @@ async fn cli(socket: &Path, subject: &str, actor: &str, timeout: &str) -> std::p
     let actor = actor.to_owned();
     let timeout = timeout.to_owned();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args([
                 "--endpoint",
@@ -441,14 +441,14 @@ async fn restarts_preserving_declaration(mission: bool) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restarts_top_level_seat_on_a_new_incarnation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     restarts_preserving_declaration(false).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restarts_mission_seat_without_redeclaring_it() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     restarts_preserving_declaration(true).await;
@@ -456,7 +456,7 @@ async fn restarts_mission_seat_without_redeclaring_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_waits_for_replacement_after_mailbox_disconnect() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let old_card_read = Arc::new(Notify::new());
@@ -468,7 +468,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
         r#"command "sleep 1000""#,
         "never",
         move |state| {
-            st3::test_support::synthetic_mailbox_protocol_router(state, "agent/example/worker")
+            fractal_daemon::test_support::synthetic_mailbox_protocol_router(state, "agent/example/worker")
                 .layer(axum::middleware::from_fn(
                     move |request: axum::extract::Request, next: axum::middleware::Next| {
                         let observed = observed.clone();
@@ -496,9 +496,9 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
     )
     .await;
     let token = fixture.store.selected_desired_token(&subject).unwrap();
-    let fence = st3::test_support::bind_fixture_mailbox(
+    let fence = fractal_daemon::test_support::bind_fixture_mailbox(
         &fixture.store,
-        &st3::mailbox::Fence::new(&subject, "fixture:1", "delivery"),
+        &fractal_daemon::mailbox::Fence::new(&subject, "fixture:1", "delivery"),
     )
     .unwrap();
     let mut socket = fixture.client().open_mailbox(&fence).await.unwrap();
@@ -507,8 +507,8 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
             let frame = socket.next().await.unwrap().unwrap();
             if let tokio_tungstenite::tungstenite::Message::Text(raw) = frame
                 && matches!(
-                    serde_json::from_str::<st3::mailbox::Frame>(&raw).unwrap(),
-                    st3::mailbox::Frame::Mailbox { .. }
+                    serde_json::from_str::<fractal_daemon::mailbox::Frame>(&raw).unwrap(),
+                    fractal_daemon::mailbox::Frame::Mailbox { .. }
                 )
             {
                 break;
@@ -521,7 +521,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
     drop(socket);
     // The synthetic transport has no physical provider authority to publish a loss.
     // Install the same durable loss observation after disconnecting its real socket.
-    let failure = fixture.store.append_claim(&st3::model::ClaimInput {
+    let failure = fixture.store.append_claim(&fractal_daemon::model::ClaimInput {
         subject: subject.clone(), kind: "operational.failure".into(),
         actor: Some("daemon/runtime".into()),
         fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
@@ -529,7 +529,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
             "reviewer":"person/avery", "title":"Mailbox lost", "severity":"error", "targets":[subject]})).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
-    st3::test_support::check_fixture_mailbox(&fixture.store, &fence).unwrap();
+    fractal_daemon::test_support::check_fixture_mailbox(&fixture.store, &fence).unwrap();
 
     let socket_path = fixture.root.path().join("st3.sock");
     let command = cli(
@@ -552,7 +552,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
         // An unrelated restart outcome must not settle this accepted request.
         fixture
             .store
-            .append_claim(&st3::model::ClaimInput {
+            .append_claim(&fractal_daemon::model::ClaimInput {
                 subject: subject.clone(),
                 kind: "runtime.action.failed".into(),
                 actor: Some("agent/example/operator".into()),
@@ -589,7 +589,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
         token,
         fixture.store.selected_desired_token(&subject).unwrap()
     );
-    assert!(st3::test_support::check_fixture_mailbox(&fixture.store, &fence).is_err());
+    assert!(fractal_daemon::test_support::check_fixture_mailbox(&fixture.store, &fence).is_err());
     let events = fixture
         .store
         .events_after(failure.store_index, Some(&subject))
@@ -604,7 +604,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_reports_timeout_and_launch_failure() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(false).await;
@@ -639,7 +639,7 @@ async fn restart_reports_timeout_and_launch_failure() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_is_idempotent_and_cannot_revive_a_later_stop() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(false).await;
@@ -655,12 +655,12 @@ async fn restart_is_idempotent_and_cannot_revive_a_later_stop() {
         "request must replicate to the owner"
     );
     let intent =
-        st3::parse_intent(&format!("version 2\nstop {subject:?}"), "restart-test").unwrap();
+        fractal_daemon::parse_intent(&format!("version 2\nstop {subject:?}"), "restart-test").unwrap();
     let preview = fixture
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: format!("version 2\nstop {subject:?}"),
                 source_name: None,
             },
@@ -696,7 +696,7 @@ async fn restart_is_idempotent_and_cannot_revive_a_later_stop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delayed_restart_does_not_stop_a_newer_incarnation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(false).await;
@@ -713,10 +713,10 @@ async fn a_delayed_restart_does_not_stop_a_newer_incarnation() {
 
 #[test]
 fn restart_help_explains_seats_and_the_new_incarnation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let output = st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .args(["agents", "--help"])
         .output()
         .unwrap();
@@ -761,7 +761,7 @@ fn restarted_daemon(fixture: &Fixture) -> Reconciler<Runtime> {
 /// database, workspace and runtime all belong to this fixture.
 #[tokio::test]
 async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for (shape, status, exit_code) in [
@@ -859,7 +859,7 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
 
 #[tokio::test]
 async fn one_shot_exit_found_after_daemon_restart_retires_without_a_pty_record() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::launching(
@@ -885,7 +885,7 @@ async fn one_shot_exit_found_after_daemon_restart_retires_without_a_pty_record()
 
 #[tokio::test]
 async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::launching(
@@ -900,11 +900,11 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
         .unwrap()
         .unwrap()
         .0;
-    let node = st3::graph::render_desired_node(&original.desired).unwrap();
-    let intent = st3::parse_intent(&format!("version 2\n{node}\n"), "restart-test").unwrap();
-    let mut options = st3::store::owned_sets::Options {
+    let node = fractal_daemon::graph::render_desired_node(&original.desired).unwrap();
+    let intent = fractal_daemon::parse_intent(&format!("version 2\n{node}\n"), "restart-test").unwrap();
+    let mut options = fractal_daemon::store::owned_sets::Options {
         set: "garden".into(),
-        source: st3::store::owned_sets::Source {
+        source: fractal_daemon::store::owned_sets::Source {
             repository: "acme/garden".into(),
             r#ref: "refs/heads/main".into(),
             sha: "0123456789abcdef0123456789abcdef01234567".into(),
@@ -968,7 +968,7 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
 
 #[tokio::test]
 async fn one_shot_unknown_snapshot_keeps_the_seat_live_until_exit_is_known() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::launching(
@@ -1016,7 +1016,7 @@ async fn one_shot_unknown_snapshot_keeps_the_seat_live_until_exit_is_known() {
 
 #[tokio::test]
 async fn seats_without_one_shot_keep_their_exit_and_restart_behaviour() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for restart in ["never", "always", "on-failure"] {
@@ -1054,7 +1054,7 @@ async fn seats_without_one_shot_keep_their_exit_and_restart_behaviour() {
 
 #[tokio::test]
 async fn explicit_restart_of_one_shot_replaces_the_process_without_retiring_the_seat() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::launching(
@@ -1079,7 +1079,7 @@ async fn explicit_restart_of_one_shot_replaces_the_process_without_retiring_the_
 
 #[tokio::test]
 async fn one_shot_start_after_retirement_continues_the_same_native_session() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::launching(
@@ -1152,7 +1152,7 @@ async fn stopped_mission_seat_stays_stopped(shape: Shape) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_mission_seat_stays_stopped_when_the_daemon_restarts() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     stopped_mission_seat_stays_stopped(Shape::Mission).await;
@@ -1160,7 +1160,7 @@ async fn a_stopped_mission_seat_stays_stopped_when_the_daemon_restarts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_step_seat_stays_stopped() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     stopped_mission_seat_stays_stopped(Shape::Step).await;
@@ -1259,13 +1259,13 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
             assert_eq!(
                 environment.get("FRACTAL_LAUNCH_DESIRED_TOKEN"),
-                environment.get(st3::suspension::LAUNCH_DESIRED_TOKEN_ENV),
+                environment.get(fractal_daemon::suspension::LAUNCH_DESIRED_TOKEN_ENV),
                 "both environment spellings must report the same launch declaration"
             );
             environment.remove("FRACTAL_LAUNCH_DESIRED_TOKEN");
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
             assert_eq!(
-                environment.remove(st3::suspension::LAUNCH_DESIRED_TOKEN_ENV).as_ref(),
+                environment.remove(fractal_daemon::suspension::LAUNCH_DESIRED_TOKEN_ENV).as_ref(),
                 Some(token),
                 "each launch must report the declaration that actually started it"
             );
@@ -1287,7 +1287,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starting_a_stopped_mission_seat_restores_its_declaration_and_creates_nothing_else() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     starts_a_stopped_mission_seat_on_its_own_declaration(Shape::Mission).await;
@@ -1295,15 +1295,15 @@ async fn starting_a_stopped_mission_seat_restores_its_declaration_and_creates_no
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starting_a_stopped_step_seat_restores_its_declaration() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     starts_a_stopped_mission_seat_on_its_own_declaration(Shape::Step).await;
 }
 
-fn github_observer_running(store: &Store, thread: &st3::github_watch::ThreadRef) -> bool {
+fn github_observer_running(store: &Store, thread: &fractal_daemon::github_watch::ThreadRef) -> bool {
     store.desired_subjects_named(&[thread.observer()]).unwrap().into_iter().next()
-        .and_then(|desired| st3::graph::observer_spec(&desired.desired))
+        .and_then(|desired| fractal_daemon::graph::observer_spec(&desired.desired))
         .is_some_and(|spec| !spec.stopped)
 }
 
@@ -1311,12 +1311,12 @@ fn github_observer_running(store: &Store, thread: &st3::github_watch::ThreadRef)
 /// The native mailbox stream proof lives beside its authenticated API in api/mailbox.rs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     // A mission seat also exercises restoring its original owning declaration.
     let (fixture, subject) = Fixture::new(true).await;
-    let thread = st3::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    let thread = fractal_daemon::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
     let watch = thread.watch(&subject);
     fixture
         .store
@@ -1330,7 +1330,7 @@ async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
             .unwrap()
             .into_iter()
             .filter_map(|desired| {
-                st3::graph::subscription_spec(&desired.desired)
+                fractal_daemon::graph::subscription_spec(&desired.desired)
                     .filter(|spec| !spec.stopped)
                     .map(|spec| (desired.subject, spec))
             })
@@ -1406,11 +1406,11 @@ async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_a_retired_seats_declaration_ends_its_watch_and_stops_the_last_observer() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(true).await;
-    let thread = st3::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    let thread = fractal_daemon::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
     fixture
         .store
         .declare_watch(&thread, &subject, None)
@@ -1464,7 +1464,7 @@ async fn removing_a_retired_seats_declaration_ends_its_watch_and_stops_the_last_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_finished_run_cannot_start_its_seat_again() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(true).await;
@@ -1503,7 +1503,7 @@ async fn a_finished_run_cannot_start_its_seat_again() {
 /// selected declaration.
 async fn client_action(fixture: &Fixture, kind: &str, agent: &str, key: &str) -> Value {
     use tower::ServiceExt as _;
-    let app = st3::api::router(fixture.state.clone());
+    let app = fractal_daemon::api::router(fixture.state.clone());
     let read = app
         .clone()
         .oneshot(
@@ -1559,7 +1559,7 @@ async fn client_action(fixture: &Fixture, kind: &str, agent: &str, key: &str) ->
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_stops_and_starts_a_mission_seat_on_its_own_declaration() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(true).await;
@@ -1635,8 +1635,8 @@ fn continued(member: &MemberSpec) -> Option<&str> {
 
 fn launch(member: &MemberSpec) -> Vec<String> {
     match &member.launch {
-        st3::model::LaunchSpec::Argv(argv) => argv.clone(),
-        st3::model::LaunchSpec::Shell(source) => vec![source.clone()],
+        fractal_daemon::model::LaunchSpec::Argv(argv) => argv.clone(),
+        fractal_daemon::model::LaunchSpec::Shell(source) => vec![source.clone()],
     }
 }
 
@@ -1656,7 +1656,7 @@ fn hang_up(fixture: &Fixture) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_workspace_change_restarts_a_running_seat() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(false).await;
@@ -1681,7 +1681,7 @@ async fn a_declared_workspace_change_restarts_a_running_seat() {
         )
         .await,
     );
-    let preview: st3::model::MissionResponse = fixture
+    let preview: fractal_daemon::model::MissionResponse = fixture
         .client()
         .post("/v1/intent/mission", &json!({"intent": {"kdl": kdl}}))
         .await
@@ -1750,7 +1750,7 @@ async fn a_declared_workspace_change_restarts_a_running_seat() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_restart_continues_the_seats_last_native_session() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
@@ -1847,7 +1847,7 @@ async fn every_restart_continues_the_seats_last_native_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_the_driver_could_not_continue_is_not_tried_again() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
@@ -1898,7 +1898,7 @@ fn park(fixture: &Fixture, subject: &str, driver: &str) {
     };
     fixture
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: subject.into(),
             kind: "runtime.reconcile-decision".into(),
             actor: None,
@@ -1949,7 +1949,7 @@ fn reconcile_ready(fixture: &Fixture, daemon: &Reconciler<Runtime>, subject: &st
         {
             fixture
                 .store
-                .append_claim(&st3::model::ClaimInput {
+                .append_claim(&fractal_daemon::model::ClaimInput {
                     subject: subject.into(),
                     kind: "harness.observed".into(),
                     actor: Some(subject.into()),
@@ -2260,7 +2260,7 @@ async fn an_interrupted_explicit_attempt_is_not_launched_again_after_daemon_rest
     let request = fixture.request(&subject, "interrupted").await;
     fixture
         .store
-        .append_claim(&st3::model::ClaimInput {
+        .append_claim(&fractal_daemon::model::ClaimInput {
             subject: subject.clone(),
             kind: "runtime.action.requested".into(),
             actor: request.actor.clone(),
@@ -2380,11 +2380,11 @@ agent "example/worker" {{
     );
     let store = fixture.store.clone();
     *fixture.runtime.before_start.lock().unwrap() = Some(Box::new(move || {
-        let intent = st3::parse_intent(&source, "restart-test").unwrap();
+        let intent = fractal_daemon::parse_intent(&source, "restart-test").unwrap();
         let preview = store
             .mission(
                 &intent,
-                st3::model::IntentInput {
+                fractal_daemon::model::IntentInput {
                     kdl: source,
                     source_name: None,
                 },
@@ -2456,7 +2456,7 @@ async fn terminal_retirement_stops_running_root_and_mission_seats_without_remate
 /// first version stays in the document's history.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seat_writes_and_reads_its_handoff_through_the_cli() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(false).await;
@@ -2525,7 +2525,7 @@ fn pass(fixture: &Fixture, passes: usize) {
     }
 }
 
-fn prepare_messages(fixture: &Fixture, subject: &str) -> Vec<st3::model::MessageView> {
+fn prepare_messages(fixture: &Fixture, subject: &str) -> Vec<fractal_daemon::model::MessageView> {
     fixture
         .store
         .messages(Some(subject), true)
@@ -2535,7 +2535,7 @@ fn prepare_messages(fixture: &Fixture, subject: &str) -> Vec<st3::model::Message
             message
                 .tags
                 .iter()
-                .any(|tag| tag.starts_with(st3::handoff::PREPARE_TAG_PREFIX))
+                .any(|tag| tag.starts_with(fractal_daemon::handoff::PREPARE_TAG_PREFIX))
         })
         .collect()
 }
@@ -2553,12 +2553,12 @@ fn prepare_decisions(fixture: &Fixture, subject: &str) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_requested_restart_waits_for_the_seats_handoff() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     PREPARE_DEADLINE_MS.store(600_000, std::sync::atomic::Ordering::SeqCst);
     let (fixture, subject) = Fixture::new(false).await;
-    let handoff = st3::handoff::document_name(&subject).unwrap();
+    let handoff = fractal_daemon::handoff::document_name(&subject).unwrap();
     // A handoff from before the request does not acknowledge it.
     fixture
         .store
@@ -2574,7 +2574,7 @@ async fn a_requested_restart_waits_for_the_seats_handoff() {
     assert_eq!(messages[0].from, "daemon/runtime");
     assert_eq!(messages[0].title.as_deref(), Some("Prepare for restart"));
     assert!(messages[0].content.contains("st agents handoff write"));
-    assert!(st3::silent::always_wakes(&messages[0].from, &messages[0].tags));
+    assert!(fractal_daemon::silent::always_wakes(&messages[0].from, &messages[0].tags));
 
     // Writing the handoff acknowledges it, and the seat is restarted.
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2597,7 +2597,7 @@ async fn a_requested_restart_waits_for_the_seats_handoff() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seat_that_never_answers_is_restarted_at_the_deadline() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(false).await;
@@ -2617,7 +2617,7 @@ async fn a_seat_that_never_answers_is_restarted_at_the_deadline() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_acknowledges_a_handoff_that_is_already_current() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     PREPARE_DEADLINE_MS.store(600_000, std::sync::atomic::Ordering::SeqCst);
@@ -2630,8 +2630,8 @@ async fn ready_acknowledges_a_handoff_that_is_already_current() {
     fixture
         .store
         .append_claim(&ClaimInput {
-            subject: st3::handoff::ready_subject(&subject),
-            kind: st3::handoff::READY_KIND.into(),
+            subject: fractal_daemon::handoff::ready_subject(&subject),
+            kind: fractal_daemon::handoff::READY_KIND.into(),
             actor: Some("agent/example/other".into()),
             fields: std::collections::BTreeMap::from([("agent".into(), json!(subject))]),
             evidence: vec![],
@@ -2656,7 +2656,7 @@ async fn ready_acknowledges_a_handoff_that_is_already_current() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declaration_change_prepares_a_running_seat_before_restarting_it() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::new(false).await;
@@ -2738,7 +2738,7 @@ async fn work_in_progress(fixture: &Fixture, subject: &str, incarnation: &str) -
 }
 
 fn write_handoff(fixture: &Fixture, subject: &str, text: &str, key: &str) {
-    let name = st3::handoff::document_name(subject).unwrap();
+    let name = fractal_daemon::handoff::document_name(subject).unwrap();
     let current = fixture
         .store
         .list_documents(Some(&name), false, 1)
@@ -2753,8 +2753,8 @@ fn write_handoff(fixture: &Fixture, subject: &str, text: &str, key: &str) {
 
 /// The first message the session after a restart sees, and what it must hold for the session to
 /// carry on without anyone pointing it at its work.
-fn session_start(fixture: &Fixture, subject: &str, incarnation: &str) -> st3::model::MessageView {
-    let tag = format!("{}{incarnation}", st3::handoff::SESSION_START_TAG_PREFIX);
+fn session_start(fixture: &Fixture, subject: &str, incarnation: &str) -> fractal_daemon::model::MessageView {
+    let tag = format!("{}{incarnation}", fractal_daemon::handoff::SESSION_START_TAG_PREFIX);
     let mut found = fixture
         .store
         .messages(Some(subject), true)
@@ -2765,7 +2765,7 @@ fn session_start(fixture: &Fixture, subject: &str, incarnation: &str) -> st3::mo
     assert_eq!(found.len(), 1, "one session-start message for {incarnation}: {found:?}");
     let message = found.remove(0);
     assert_eq!(message.from, "daemon/runtime");
-    assert!(st3::silent::always_wakes(&message.from, &message.tags));
+    assert!(fractal_daemon::silent::always_wakes(&message.from, &message.tags));
     message
 }
 
@@ -2773,7 +2773,7 @@ fn session_start(fixture: &Fixture, subject: &str, incarnation: &str) -> st3::mo
 /// starts with the handoff and the step it was in the middle of.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seat_moved_to_another_model_mid_step_resumes_from_its_handoff() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     PREPARE_DEADLINE_MS.store(600_000, std::sync::atomic::Ordering::SeqCst);
@@ -2826,7 +2826,7 @@ async fn a_seat_moved_to_another_model_mid_step_resumes_from_its_handoff() {
 /// handoff it wrote and the step as the graph holds it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seat_killed_without_warning_resumes_from_what_it_wrote_before() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;

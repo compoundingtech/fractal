@@ -28,7 +28,7 @@ let reader = store.readers.get();
     .map(|table| {
         let columns = projection_digest::columns(&reader, table, &[]).unwrap();
         let sql = format!("SELECT {} FROM {table} ORDER BY id", columns.join(","));
-        let mut statement = reader.prepare(/* sqlite-large-value: allow-for-now lv-h9817a2c09208 owner=st3_daemon::store_tests::terminal_projection_date TODO=trace-statement-and-value-representation */ &sql).unwrap();
+        let mut statement = reader.prepare(/* sqlite-large-value: allow-for-now lv-h3406587d8f68 owner=fractal_daemon::store_tests::terminal_projection_date TODO=trace-statement-and-value-representation */ &sql).unwrap();
         let rows = statement
             .query_map([], |row| {
                 (0..columns.len())

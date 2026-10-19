@@ -1,17 +1,17 @@
 #![allow(unused_imports)]
 use crate::DeliveryStore;
-use st3_store::store::message_point_qualification_shared_delivery::*;
+use fractal_store::store::message_point_qualification_shared_delivery::*;
 use super::*;
 use smallclaims::read_budget::{ReadBudget, with};
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
 use std::time::Duration;
-use st3_store::store::message_point_qualification_shared_delivery::*;
-use st3_store::store::message_point_qualification_shared_delivery::{AUX_PER_KEY, AUX_ROWS, Accounting, CLAIM_FIELDS, CORE_BYTES, Cause, ClaimEdge, CoreSize, DESIRED_FIELDS, Domains};
-use st3_store::store::message_point_qualification_shared_delivery::{Header, KEY_BYTES, METADATA_BYTES, OWN_ROWS, Point, PointCore, Qualified, REMINDER_BYTES, SOURCE_BYTES, Stage};
-use st3_store::store::message_point_qualification_shared_delivery::{admit_batch, admit_desired, admit_fields, admit_global, admit_replica_and_repair, admitted_core_bytes, charge, check, domains, metadata_sql};
-use st3_store::store::message_point_qualification_shared_delivery::{own_headers_sql, wide};
-use st3_store::store::message_point_qualification_tests_shared_delivery::*;
-use st3_store::store::message_point_qualification_tests_shared_delivery::{batch, claim, compare_core_with_real_oracles, fixture, replica, sent};
+use fractal_store::store::message_point_qualification_shared_delivery::*;
+use fractal_store::store::message_point_qualification_shared_delivery::{AUX_PER_KEY, AUX_ROWS, Accounting, CLAIM_FIELDS, CORE_BYTES, Cause, ClaimEdge, CoreSize, DESIRED_FIELDS, Domains};
+use fractal_store::store::message_point_qualification_shared_delivery::{Header, KEY_BYTES, METADATA_BYTES, OWN_ROWS, Point, PointCore, Qualified, REMINDER_BYTES, SOURCE_BYTES, Stage};
+use fractal_store::store::message_point_qualification_shared_delivery::{admit_batch, admit_desired, admit_fields, admit_global, admit_replica_and_repair, admitted_core_bytes, charge, check, domains, metadata_sql};
+use fractal_store::store::message_point_qualification_shared_delivery::{own_headers_sql, wide};
+use fractal_store::store::message_point_qualification_tests_shared_delivery::*;
+use fractal_store::store::message_point_qualification_tests_shared_delivery::{batch, claim, compare_core_with_real_oracles, fixture, replica, sent};
 
 
 #[test]
@@ -48,7 +48,7 @@ fn point_core_reuses_real_canonical_fold_and_claim_edges_with_sparse_null_and_re
             "40",
         );
         db.execute(
-            /* sqlite-large-value: allow-for-now lv-h8dc5ba1f6209 owner=st3_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES('repaired')",
+            /* sqlite-large-value: allow-for-now lv-h83d11ff37191 owner=fractal_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES('repaired')",
             [],
         )
         .unwrap();
@@ -160,7 +160,7 @@ fn point_domains_match_actual_page_candidates_without_requiring_the_global_prefi
                 json!({"fixture":"canonical seed"}),
                 "13",
             );
-            db.execute(/* sqlite-large-value: allow-for-now lv-hae5487274c90 owner=st3_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES(?1,?2,'fixture',?3,?4)",
+            db.execute(/* sqlite-large-value: allow-for-now lv-h269f60dbbc67 owner=fractal_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES(?1,?2,'fixture',?3,?4)",
                 params![subject, kind, id, declaration.to_string()]).unwrap();
         }
     }
@@ -199,7 +199,7 @@ fn subject_eligibility_is_not_a_reminder_winner_or_superseded_proof() {
     {
         let db = store.connection.write();
         db.execute(
-            /* sqlite-large-value: allow-for-now lv-hc419ef1ade58 owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
+            /* sqlite-large-value: allow-for-now lv-hc1293b92b582 owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
             [sent("worker", "first", &["reminder:shared", "version:+1"]).to_string()],
         )
         .unwrap();
@@ -515,7 +515,7 @@ fn auxiliary_cap_is_cumulative_across_distinct_keys_and_repaired_membership() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h5dd2690f2eb2 owner=st3_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES('claim-0')",
+            /* sqlite-large-value: allow-for-now lv-h9b2f6d53a9b4 owner=fractal_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES('claim-0')",
             [],
         )
         .unwrap();
@@ -531,17 +531,17 @@ fn auxiliary_cap_is_cumulative_across_distinct_keys_and_repaired_membership() {
 #[test]
 fn malformed_types_encoding_and_payload_errors_keep_their_causes_without_a_point() {
     for (column, sql) in [
-        ("kind", /* sqlite-large-value: allow-for-now lv-h886fdb4e9719 owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=X'00' WHERE id='sent'"),
-        ("body", /* sqlite-large-value: allow-for-now lv-ha5ee09bb2ab1 owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=X'7B7D' WHERE id='sent'"),
+        ("kind", /* sqlite-large-value: allow-for-now lv-haa555901de27 owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=X'00' WHERE id='sent'"),
+        ("body", /* sqlite-large-value: allow-for-now lv-h048d467f71fc owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=X'7B7D' WHERE id='sent'"),
         (
             "encoding",
             // Unlike body, predecessors has no JSON expression index. Invalid UTF-8
             // can reach the canonical history reader without changing the schema.
-            /* sqlite-large-value: allow-for-now lv-hfb26f2a239f1 owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET predecessors=CAST(X'FF' AS TEXT) WHERE id='sent'",
+            /* sqlite-large-value: allow-for-now lv-h9c77f2f5e4fc owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET predecessors=CAST(X'FF' AS TEXT) WHERE id='sent'",
         ),
     ] {
         let store = fixture();
-        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hf0b6f0a1e9b2 owner=st3_delivery::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h8153ca0f9561 owner=fractal_delivery::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
         let error = capture_point(&store, "message/selected").unwrap_err();
         match column {
             "kind" | "body" => assert!(matches!(error, Cause::InvalidSource("text column type"))),
@@ -557,11 +557,11 @@ fn malformed_types_encoding_and_payload_errors_keep_their_causes_without_a_point
     // JSON expression indexes reject them during UPDATE, before capture can run.
     // Do not drop indexes or claim to have exercised a corrupt body in capture.
     for sql in [
-        /* sqlite-large-value: allow-for-now lv-h1c3d52003d69 owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=CAST(X'FF' AS TEXT) WHERE id='sent'",
-        /* sqlite-large-value: allow-for-now lv-ha8a95c916f4f owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{' WHERE id='sent'",
+        /* sqlite-large-value: allow-for-now lv-h9da009167b6a owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=CAST(X'FF' AS TEXT) WHERE id='sent'",
+        /* sqlite-large-value: allow-for-now lv-h09de28a4f1ff owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{' WHERE id='sent'",
     ] {
         let store = fixture();
-        let error = store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-haa3d9919479e owner=st3_delivery::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap_err();
+        let error = store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hda34b1a9d465 owner=fractal_delivery::store::message_point_qualification::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap_err();
         assert!(matches!(
             error,
             rusqlite::Error::SqliteFailure(_, Some(ref message))
@@ -582,20 +582,20 @@ fn too_wide_source_kind_desired_and_body_refuse_before_canonical_materialization
             match column {
                 "kind" => {
                     db.execute(
-                        /* sqlite-large-value: allow-for-now lv-h2b45f8e8476a owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=?1 WHERE id='sent'",
+                        /* sqlite-large-value: allow-for-now lv-hcfb62adaa00a owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=?1 WHERE id='sent'",
                         ["k".repeat(KEY_BYTES + 1)],
                     )
                     .unwrap();
                 }
                 "body" => {
                     db.execute(
-                        /* sqlite-large-value: allow-for-now lv-h5315b67c475b owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
+                        /* sqlite-large-value: allow-for-now lv-h8b0bfb0402e4 owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
                         [sent("worker", &"x".repeat(100 * 1024), &[]).to_string()],
                     )
                     .unwrap();
                 }
                 _ => {
-                    db.execute(/* sqlite-large-value: allow-for-now lv-h5df2a4326707 owner=st3_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('message/selected','message','r','sent',?1)", [" ".repeat(SOURCE_BYTES + 1)]).unwrap();
+                    db.execute(/* sqlite-large-value: allow-for-now lv-h2eace97aaa95 owner=fractal_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body) VALUES('message/selected','message','r','sent',?1)", [" ".repeat(SOURCE_BYTES + 1)]).unwrap();
                 }
             }
         }
@@ -617,20 +617,20 @@ fn malformed_auxiliary_types_and_oversized_desired_owner_refuse_before_the_fold(
             let db = store.connection.write();
             match column {
                 "batch-origin" => {
-                    db.execute(/* sqlite-large-value: allow-for-now lv-h85e52de81254 owner=st3_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin=X'FF' WHERE id='selected'", [])
+                    db.execute(/* sqlite-large-value: allow-for-now lv-h646d14c3d162 owner=fractal_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin=X'FF' WHERE id='selected'", [])
                         .unwrap();
                 }
                 "replica-position" => {
                     replica(&db, "sent", 0);
                     db.execute(
-                        /* sqlite-large-value: allow-for-now lv-h11e1c5c9d002 owner=st3_delivery::store::message_point_qualification::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET position=X'FF' WHERE claim_id='sent'",
+                        /* sqlite-large-value: allow-for-now lv-hcdd4e6ded9ce owner=fractal_delivery::store::message_point_qualification::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET position=X'FF' WHERE claim_id='sent'",
                         [],
                     )
                     .unwrap();
                 }
                 _ => {
                     db.execute(
-                        /* sqlite-large-value: allow-for-now lv-h3cc0b89db611 owner=st3_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run)
+                        /* sqlite-large-value: allow-for-now lv-h393f3464e93e owner=fractal_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run)
                         VALUES('message/selected','message','r','sent','{}',?1)",
                         ["x".repeat(KEY_BYTES + 1)],
                     )
@@ -663,7 +663,7 @@ fn missing_required_index_retains_sql_error_and_never_switches_to_a_scan() {
         store
             .connection
             .write()
-            .execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-he70f2e49653c owner=st3_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX {index}"))
+            .execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h6aae027e4394 owner=fractal_delivery::store::message_point_qualification::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX {index}"))
             .unwrap();
         let error = capture_point(&store, "message/selected").unwrap_err();
         assert!(error.to_string().contains(index), "{index}: {error}");
@@ -734,7 +734,7 @@ fn same_snapshot_survives_a_wal_commit_but_is_not_an_owner_lifetime_certificate(
                         db.busy_timeout(Duration::ZERO).unwrap();
                         let changed = db
                             .execute(
-                                /* sqlite-large-value: allow-for-now lv-hfe301fd02fbd owner=st3_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
+                                /* sqlite-large-value: allow-for-now lv-h88860f123024 owner=fractal_delivery::store::message_point_qualification::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='sent'",
                                 [sent("worker", "new", &[]).to_string()],
                             )
                             .expect("the independent WAL write must not wait for the reader");

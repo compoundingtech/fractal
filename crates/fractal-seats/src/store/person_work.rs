@@ -4,17 +4,17 @@ use crate::MissionsStore;
 use super::*;
 use crate::model::{MessageAttachment, PersonAskRequest, PersonStepResponse};
 use crate::person_request::{StructuredRequest, answer_summary};
-pub use st3_missions::store::person_work::*;
-pub use st3_missions::store::person_work::{AskImages, current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
+pub use fractal_missions::store::person_work::*;
+pub use fractal_missions::store::person_work::{AskImages, current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod reconcile_candidates_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
     use super::*;
-    use st3_missions::store::person_work_tests_shared_seats::*;
-    use st3_missions::store::person_work_tests_shared_seats::{TEST_FLEET, gateway_decision, receive_exchange};
-    pub use st3_missions::store::person_work::tests::*;
+    use fractal_missions::store::person_work_tests_shared_seats::*;
+    use fractal_missions::store::person_work_tests_shared_seats::{TEST_FLEET, gateway_decision, receive_exchange};
+    pub use fractal_missions::store::person_work::tests::*;
 
     pub fn fixture() -> (Store, StepRunView, PersonAskRequest) {
         let store = Store::open_memory("alder").unwrap();
@@ -202,7 +202,7 @@ schedule "intake" {
                 }
                 "stale-generation" => {
                     store.connection.batched(|tx| -> Result<()> {
-                        tx.execute(/* sqlite-large-value: allow-for-now lv-h941280992955 owner=st3_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_generation='run-generation/old' WHERE subject='subscription/intake'", [])?;
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h67888f2c1780 owner=fractal_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_generation='run-generation/old' WHERE subject='subscription/intake'", [])?;
                         Ok(())
                     }).unwrap().unwrap();
                 }
@@ -216,7 +216,7 @@ schedule "intake" {
                         .connection
                         .batched(|tx| -> Result<()> {
                             tx.execute(
-                                /* sqlite-large-value: allow-for-now lv-h7f86d64acfa2 owner=st3_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET parent_step_run=?1 WHERE id=?2",
+                                /* sqlite-large-value: allow-for-now lv-hd90855b784ec owner=fractal_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET parent_step_run=?1 WHERE id=?2",
                                 params![parent, origin.run.trim_start_matches("mission-run/")],
                             )?;
                             Ok(())
@@ -579,7 +579,7 @@ mission "person-work" state="ready" {{
             .find(|message| message.assistant_grant_id.as_deref() == Some(grant_id)).unwrap();
         let claim = store.latest_claim(&notification.subject, Some("message.sent")).unwrap().unwrap();
         super::super::assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), &claim.body["fields"]).unwrap();
-        assert!(matches!(classify_replicated_claim_with_registry(&claim, st3_schema::registry()).unwrap(),
+        assert!(matches!(classify_replicated_claim_with_registry(&claim, fractal_schema::registry()).unwrap(),
             ReplicatedClaimAdmission::Valid));
     }
 

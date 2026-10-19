@@ -1,4 +1,4 @@
-import type { ConversationContentChunk, ConversationContentRef } from '@smalltalk/st3-client';
+import type { ConversationContentChunk, ConversationContentRef } from '@fractal/client';
 
 /** References can name a payload, metadata/view subtree, or entire body. Never merge by guessing. */
 export const contentReferences = (value: unknown): ConversationContentRef[] => {

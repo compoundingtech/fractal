@@ -1,4 +1,4 @@
-use st3_client::{TimelineBody, TimelineEntry};
+use fractal_client::{TimelineBody, TimelineEntry};
 
 fn is_projection_notice(entry: &TimelineEntry) -> bool {
     matches!(&entry.body, TimelineBody::Error(error)

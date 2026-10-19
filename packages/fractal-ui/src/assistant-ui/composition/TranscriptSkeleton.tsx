@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex'
-import { SyncLine } from '../st3-views/SyncLine'
-import type { SyncStatus } from '../st3-views/sync-status'
+import { SyncLine } from '../fractal-views/SyncLine'
+import type { SyncStatus } from '../fractal-views/sync-status'
 import { surfaceVars as surface, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 
 export interface TranscriptSkeletonProps {

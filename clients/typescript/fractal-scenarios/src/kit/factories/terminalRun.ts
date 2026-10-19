@@ -1,4 +1,4 @@
-import type { TerminalScreen } from '@smalltalk/st3-client'
+import type { TerminalScreen } from '@fractal/client'
 
 import type { Asciicast } from '../asciicast.ts'
 import type { CastAgent } from '../cast.ts'

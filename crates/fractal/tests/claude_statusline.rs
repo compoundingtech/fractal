@@ -12,18 +12,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const PAYLOAD: &str = include_str!(
-    "../../st-drivers/tests/fixtures/harness-context/claude-statusline-mid-session.json"
+    "../../fractal-drivers/tests/fixtures/harness-context/claude-statusline-mid-session.json"
 );
 const IDENTITY: &str = "example/statusline-seat";
 
 fn script() -> PathBuf {
-    Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../st3-daemon/hooks/claude-statusline.sh")
+    Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../fractal-daemon/hooks/claude-statusline.sh")
 }
 
 struct Seat {
     _tmp: tempfile::TempDir,
     home: PathBuf,
-    paths: st_drivers::driver_paths::Paths,
+    paths: fractal_drivers::driver_paths::Paths,
 }
 
 impl Seat {
@@ -31,7 +31,7 @@ impl Seat {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir_all(home.join(".claude")).unwrap();
-        let paths = st_drivers::driver_paths::Paths {
+        let paths = fractal_drivers::driver_paths::Paths {
             root: tmp.path().join("driver"),
             agent_dir: tmp.path().join("observations"),
             session_dir: tmp.path().join("sessions"),
@@ -39,14 +39,14 @@ impl Seat {
         for path in [&paths.root, &paths.agent_dir, &paths.session_dir] {
             fs::create_dir_all(path).unwrap();
         }
-        st_drivers::harness_events::enable(&paths.agent_dir, "statusline-runtime").unwrap();
+        fractal_drivers::harness_events::enable(&paths.agent_dir, "statusline-runtime").unwrap();
         let payload: serde_json::Value = serde_json::from_str(PAYLOAD).unwrap();
         let token = format!(
             "{}{}",
-            st_drivers::harness_state::WRAPPERLESS_PREFIX,
+            fractal_drivers::harness_state::WRAPPERLESS_PREFIX,
             payload["session_id"].as_str().unwrap()
         );
-        st_drivers::harness_state::claim(&paths.agent_dir, IDENTITY, "claude", &token).unwrap();
+        fractal_drivers::harness_state::claim(&paths.agent_dir, IDENTITY, "claude", &token).unwrap();
         Self {
             _tmp: tmp,
             home,
@@ -80,7 +80,7 @@ impl Seat {
         let connection = rusqlite::Connection::open(
             self.paths
                 .agent_dir
-                .join(st_drivers::harness_events::DATABASE),
+                .join(fractal_drivers::harness_events::DATABASE),
         )
         .unwrap();
         connection
@@ -124,10 +124,10 @@ impl Seat {
     }
 
     fn record(&self) -> Option<serde_json::Value> {
-        assert!(st_drivers::harness_events::enabled(&self.paths.agent_dir));
+        assert!(fractal_drivers::harness_events::enabled(&self.paths.agent_dir));
         assert!(!self.paths.agent_dir.join("harness-context").exists());
         let raw =
-            st_drivers::harness_events::read_snapshot(&self.paths.agent_dir, "harness-context")
+            fractal_drivers::harness_events::read_snapshot(&self.paths.agent_dir, "harness-context")
                 .expect("native observation outbox must remain readable")?;
         Some(serde_json::from_slice(&raw).unwrap())
     }
@@ -150,7 +150,7 @@ fn stderr_of(output: &Output) -> String {
 
 #[test]
 fn the_tee_records_the_reading_and_hands_the_same_payload_to_the_env_renderer() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -182,7 +182,7 @@ fn the_tee_records_the_reading_and_hands_the_same_payload_to_the_env_renderer() 
 
 #[test]
 fn the_operator_file_supplies_the_renderer_when_no_variable_does() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -201,7 +201,7 @@ fn the_operator_file_supplies_the_renderer_when_no_variable_does() {
 
 #[test]
 fn the_variable_wins_over_the_file_and_the_file_is_never_also_run() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -221,7 +221,7 @@ fn the_variable_wins_over_the_file_and_the_file_is_never_also_run() {
 
 #[test]
 fn with_no_renderer_the_tee_renders_nothing_rather_than_the_raw_payload() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -259,7 +259,7 @@ fn with_no_renderer_the_tee_renders_nothing_rather_than_the_raw_payload() {
 
 #[test]
 fn a_recording_failure_still_renders_the_status_line() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -280,7 +280,7 @@ fn a_recording_failure_still_renders_the_status_line() {
 
 #[test]
 fn a_recording_failure_with_no_renderer_still_renders_nothing() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -302,7 +302,7 @@ fn a_recording_failure_with_no_renderer_still_renders_nothing() {
 
 #[test]
 fn a_renderer_that_exits_non_zero_leaves_stdout_empty() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -326,7 +326,7 @@ fn a_renderer_that_exits_non_zero_leaves_stdout_empty() {
 
 #[test]
 fn a_renderer_file_that_is_not_executable_leaves_stdout_empty() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -358,7 +358,7 @@ fn a_renderer_file_that_is_not_executable_leaves_stdout_empty() {
 
 #[test]
 fn without_the_seat_binary_the_script_drains_stdin_and_renders_the_fault() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -423,7 +423,7 @@ fn unreachable_collector() -> (TcpListener, String) {
 /// The fail-open path warns, and that warning is what the log bridge would ship.
 #[test]
 fn the_tee_never_reaches_for_a_collector_even_when_it_has_something_to_report() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -459,7 +459,7 @@ fn the_tee_never_reaches_for_a_collector_even_when_it_has_something_to_report() 
 
 #[test]
 fn push_with_an_unavailable_daemon_still_records_and_renders() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -479,7 +479,7 @@ fn push_with_an_unavailable_daemon_still_records_and_renders() {
 
 #[test]
 fn push_with_an_unresponsive_daemon_keeps_the_render_budget() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
@@ -511,13 +511,13 @@ fn push_with_an_unresponsive_daemon_keeps_the_render_budget() {
 
 #[test]
 fn the_managed_incarnation_wins_over_the_payload_session() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();
     let renderer = seat.renderer("ENVMARK");
     let incarnation = "claude-managed-example";
-    st_drivers::harness_state::claim(&seat.paths.agent_dir, IDENTITY, "claude", incarnation)
+    fractal_drivers::harness_state::claim(&seat.paths.agent_dir, IDENTITY, "claude", incarnation)
         .unwrap();
     let output = seat.tee(&[
         ("ST_CLAUDE_SESSION", incarnation),
@@ -536,7 +536,7 @@ fn the_managed_incarnation_wins_over_the_payload_session() {
 /// not only the failing one.
 #[test]
 fn a_recording_render_is_also_free_of_the_collector() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let seat = Seat::new();

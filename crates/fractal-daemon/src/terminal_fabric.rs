@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use pty_client::{ClientIo, Reconnect, RouteRefusedError};
 
-pub use st3_terminal_direct::{
+pub use fractal_terminal_direct::{
     FabricTarget, ROUTE_LINE_LIMIT, ROUTE_TIMEOUT, RouteAnswer, RouteError, RouteRequest,
     open_route, owner_peer, protocol,
 };

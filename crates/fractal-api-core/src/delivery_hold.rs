@@ -49,7 +49,7 @@ pub fn view(store: &Store, subject: &str, now: u64) -> anyhow::Result<HoldView> 
 }
 
 pub fn input(request: HoldRequest, now: u64) -> Result<ClaimInput, St3Error> {
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_subject(&request.subject)
         .map_err(|error| St3Error::new(error.code, error.message))?;
     let own = request.actor == request.subject;
@@ -62,7 +62,7 @@ pub fn input(request: HoldRequest, now: u64) -> Result<ClaimInput, St3Error> {
             "a delivery hold requires the seat's actor or a person; legacy adoption requires the seat",
         ));
     }
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_subject(&request.actor)
         .map_err(|error| St3Error::new(error.code, error.message))?;
     if request.reason.trim().is_empty()

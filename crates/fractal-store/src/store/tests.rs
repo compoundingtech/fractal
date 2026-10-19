@@ -47,7 +47,7 @@ mod mission_deadline_probe {
 
 mod stopped_seat_declaration_controls {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-h2157629ebcfc owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("stopped_seat_declaration_controls.rs");
+    /* sqlite-large-value: allow-for-now lv-hb3cc9adf2362 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("stopped_seat_declaration_controls.rs");
 }
 
 mod mission_deadline_tests {
@@ -95,7 +95,7 @@ fn projection_times_at_seeks_the_claim_index_once_per_cut() {
 
 mod mailbox_fence_tests {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-h8ae9713ac6e2 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("mailbox_fence_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-hd43f90378c92 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("mailbox_fence_tests.rs");
 }
 
 mod canonical_audit {
@@ -109,7 +109,7 @@ mod declarative_revision_timestamp_tests {
 
 mod subagents_purity_tests {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-h8182d4400c47 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("subagents_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h268b21b0f384 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subagents_purity_tests.rs");
 }
 
 mod actual_purity_tests {
@@ -118,12 +118,12 @@ mod actual_purity_tests {
 
 mod activity_purity_tests {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-h88bb05ebde34 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("activity_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h2c081374795f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("activity_purity_tests.rs");
 }
 
 mod limits_purity_tests {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-hfa68506eaf53 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("limits_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h5244785b99be owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("limits_purity_tests.rs");
 }
 
 
@@ -189,7 +189,7 @@ fn subject_claim_pages_seek_the_subject_index() {
     for descending in [false, true] {
         let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(true, descending));
         let plan = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-h126c08dbc527 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &query)
+            .prepare(/* sqlite-large-value: allow-for-now lv-h8911c1538a9c owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &query)
             .unwrap()
             .query_map(params![0, None::<u64>, "agent/target", 2], |row| {
                 row.get::<_, String>(3)
@@ -427,7 +427,7 @@ fn recent_up_observation_prevents_a_transport_timeout_flap() {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h60d499c775d9 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h5f3a84b52036 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
                  VALUES ('target', 'up', ?1, ?2)",
             params![
                 now_ms().saturating_sub(91_000).to_string(),
@@ -456,7 +456,7 @@ fn a_failed_attempt_after_a_missed_exchange_ends_up() {
             .lock()
             .unwrap()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h263ced410104 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h11eed7b84d0c owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO replication_peers(peer, status, last_success_at_unix_ms, updated_at_unix_ms)
                      VALUES ('cobalt', 'up', ?1, ?1)",
                 [now_ms().saturating_sub(ago).to_string()],
             )
@@ -609,16 +609,16 @@ fn an_operation_drift_repair_rewrites_only_the_drifted_rows() {
         let connection = store.connection.lock().unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h96e6b0a9b83a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h16b065f401e1 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id=?1",
                 [&ids[0]],
             )
             .unwrap();
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-he9490a70c6d5 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1", [&ids[1]])
+            .execute(/* sqlite-large-value: allow-for-now lv-hea5945cd6dbb owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1", [&ids[1]])
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h8da24dd0cc6b owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
+                /* sqlite-large-value: allow-for-now lv-hf5e4151a8ff2 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
                      SELECT 'op/invented-stray', 'digest', canonical_claim_id, 'active'
                      FROM operations WHERE id=?1",
                 [&ids[0]],
@@ -655,7 +655,7 @@ fn the_operation_audit_walks_the_partial_operation_index() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.readers.get();
     let plan = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-hc27ad51dbec3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h306b2a3e7dec owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             smallclaims::store::EXPECTED_OPERATIONS_QUERY
         ))
@@ -702,7 +702,7 @@ fn replication_projection_retries_missing_and_stale_health_only() {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h3306c8c5399e owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+            /* sqlite-large-value: allow-for-now lv-h596defbbc0eb owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
             [],
         )
         .unwrap();
@@ -919,7 +919,7 @@ fn a_failed_batched_write_undoes_only_itself() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let insert = |transaction: &Transaction<'_>, key: &str| {
         transaction
-            .execute(/* sqlite-large-value: allow-for-now lv-h6ce132fffbac owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, 'written')", [key])
+            .execute(/* sqlite-large-value: allow-for-now lv-h0842fb52bbb7 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, 'written')", [key])
             .map(drop)
     };
     // Hold the writer so the three writes queue behind it and share the next batch.
@@ -980,21 +980,21 @@ fn a_batch_that_cannot_begin_answers_its_writes_with_the_error() {
         .execute_batch("PRAGMA busy_timeout = 50")
         .unwrap();
     let other = Connection::open(&path).unwrap();
-    other.execute_batch(/* sqlite-large-value: allow-for-now lv-h13af1f1d012b owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-hab9c96c5ee3a owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
     let refused = store.connection.batched(|transaction| {
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hc1714c15b629 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('refused', 'written')",
+            /* sqlite-large-value: allow-for-now lv-h26cd1e644d89 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('refused', 'written')",
             [],
         )
     });
     let error = refused.expect_err("the batch could not begin");
     assert!(error.contains("locked"), "{error}");
-    other.execute_batch(/* sqlite-large-value: allow-for-now lv-he9d999cce7c3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5738141bc7b owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     store
         .connection
         .batched(|transaction| {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hfa16b95d1493 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('after', 'written')",
+                /* sqlite-large-value: allow-for-now lv-hcd414f6eb87d owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('after', 'written')",
                 [],
             )
         })
@@ -1064,14 +1064,14 @@ fn one_claim_that_cannot_be_projected_is_quarantined_while_the_rest_project() {
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h2cb081887812 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h9dc5b78dba6b owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
                 [&bad_claim],
             )
             .unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h4ba03eafe4ac owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired", []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h1dd8fac6de93 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired", []).unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h72cdda070ad8 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                /* sqlite-large-value: allow-for-now lv-hbff5fa02c357 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                 [],
             )
             .unwrap();
@@ -1105,11 +1105,11 @@ fn one_claim_that_cannot_be_projected_is_quarantined_while_the_rest_project() {
     {
         let connection = store.connection.lock().unwrap();
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-he867311b8f53 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&bad_claim])
+            .execute(/* sqlite-large-value: allow-for-now lv-h4b37c84f1ea4 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&bad_claim])
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h51b120e40c28 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                /* sqlite-large-value: allow-for-now lv-h2eccd4ddae86 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                 [],
             )
             .unwrap();
@@ -1174,7 +1174,7 @@ fn one_repair_that_cannot_be_applied_is_named_and_the_rest_apply() {
             .id;
             transaction
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h16479799d47a owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                    /* sqlite-large-value: allow-for-now lv-h49d8c4c59659 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
                             position, raw, state, claim_id, updated_at_unix_ms)
                          VALUES (?1, 'peer', 1, 'envelope', ?2, x'00', 'valid', ?3, '0')",
                     params![format!("record/{agent}"), position as i64, repaired],
@@ -1203,7 +1203,7 @@ fn one_repair_that_cannot_be_applied_is_named_and_the_rest_apply() {
         // The first replacement names a desired body that this build cannot read.
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h48e9fc925dd9 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h07f33c1fd3d6 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{\"from\":\"another build\"}' WHERE id=?1",
                 [&repairs[0].0],
             )
             .unwrap();
@@ -1257,7 +1257,7 @@ fn structural_replication_advances_from_healthy_frontier() {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h289a16d6b077 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1' WHERE kind='harness.observed'",
+            /* sqlite-large-value: allow-for-now lv-hb85fcc64bc20 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1' WHERE kind='harness.observed'",
             [],
         )
         .unwrap();
@@ -1266,7 +1266,7 @@ fn structural_replication_advances_from_healthy_frontier() {
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h961ee86638eb owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO blobs(hash, bytes, size) VALUES ('sha256:abc', x'01', 1)",
+                /* sqlite-large-value: allow-for-now lv-h2464b2b78923 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO blobs(hash, bytes, size) VALUES ('sha256:abc', x'01', 1)",
                 [],
             )
             .unwrap();
@@ -1405,7 +1405,7 @@ fn replay_progress_reports_work_without_advancing_an_uncommitted_frontier() {
         }
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h945816a76218 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                /* sqlite-large-value: allow-for-now lv-h802c6caf7c77 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                 [],
             )
             .unwrap();
@@ -1490,7 +1490,7 @@ fn base_replay_batches_selected_bodies_and_preserves_event_and_quarantine_answer
         None,
     )
     .unwrap();
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h3dc8f0dc78ef owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h52765d8ed64f owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
             VALUES ('record/repaired','node',1,'test',0,X'','repaired',?1,'1')", [&repaired.id]).unwrap();
     for number in 0..1500 {
         append_claim_record_tx(
@@ -1519,7 +1519,7 @@ fn base_replay_batches_selected_bodies_and_preserves_event_and_quarantine_answer
         .unwrap();
     }
     // Numeric time and batch/position ties cross more than one decode page.
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hae5dc73f4237 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1'", [])
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hbc878ec34d4d owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1'", [])
         .unwrap();
     let expected = tx.prepare("SELECT claims.store_index, claims.subject FROM claims JOIN batches ON batches.id=claims.batch_id
             WHERE substr(claims.subject,1,6)<>'glass/' COLLATE BINARY
@@ -1577,7 +1577,7 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
     tx.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h4b07067ee642 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
+        /* sqlite-large-value: allow-for-now lv-hdf54adb9112e owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
             ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)",
     )
     .unwrap();
@@ -1597,12 +1597,12 @@ fn base_replay_body_page_work_does_not_grow_with_selected_order_size() {
             )
             .unwrap();
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h99bda2940044 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.heal_replay_base_order(claim_id) VALUES (?1)",
+                /* sqlite-large-value: allow-for-now lv-h499587b8ff13 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.heal_replay_base_order(claim_id) VALUES (?1)",
                 [&claim.id],
             )
             .unwrap();
         }
-        let mut statement = tx.prepare(/* sqlite-large-value: allow-for-now lv-ha16694f64fdf owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ BASE_REPLAY_PAGE_SQL).unwrap();
+        let mut statement = tx.prepare(/* sqlite-large-value: allow-for-now lv-h6ab472a6b75d owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ BASE_REPLAY_PAGE_SQL).unwrap();
         let page = statement
             .query_map(params![0, 256], claim_from_row)
             .unwrap()
@@ -1678,24 +1678,24 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
             )
             .unwrap();
             if reason == "operation-conflict" {
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-hbefd6cbbda5a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state) VALUES ('op/replay-test', 'digest-b', ?1, 'active')", [&claim.id]).unwrap();
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h5c80b3d61773 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state) VALUES ('op/replay-test', 'digest-b', ?1, 'active')", [&claim.id]).unwrap();
             }
             match reason {
                 "missing-health" => {
                     transaction
-                        .execute(/* sqlite-large-value: allow-for-now lv-h6564335f8184 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
+                        .execute(/* sqlite-large-value: allow-for-now lv-h789522dbacf2 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
                         .unwrap();
                 }
                 "unhealthy-projection" => {
                     transaction
                         .execute(
-                            /* sqlite-large-value: allow-for-now lv-he93a1a561cff owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
+                            /* sqlite-large-value: allow-for-now lv-h74360fa29d0f owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'",
                             [],
                         )
                         .unwrap();
                 }
                 "frontier-ahead" => {
-                    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5de39b31b1db owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", []).unwrap();
+                    transaction.execute(/* sqlite-large-value: allow-for-now lv-h8beb67dd4555 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", []).unwrap();
                 }
                 _ => {}
             }
@@ -2432,7 +2432,7 @@ fn replication_frontier_checks_seek_instead_of_scanning() {
         ] {
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-hdb6715fb0757 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
+                    /* sqlite-large-value: allow-for-now lv-h472ae4c7b78f owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
                                             predecessors, accepted_at_unix_ms)
                          VALUES (?1, ?2, ?3, 'harness.observed', 'node', NULL, '{}', '[]', ?4)",
                     params![Uuid::now_v7().to_string(), batch, subject, accepted],
@@ -2456,7 +2456,7 @@ fn replication_frontier_checks_seek_instead_of_scanning() {
         store
             .readers
             .get()
-            .query_row(/* sqlite-large-value: allow-for-now lv-hf0ae3a5451ee owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql, params, |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hc63c381fa4ab owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ sql, params, |row| row.get(0))
             .unwrap()
     };
     for &snapshot in &snapshots {
@@ -2958,7 +2958,7 @@ fn harness_reports_neither_select_nor_hide_a_runtime_observation() {
     // The selecting reads seek past the harness reports instead of reading them.
     let connection = left.readers.get();
     let plan = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-h6c14e54c6ca3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h38eff0d38ab8 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN SELECT claims.id FROM claims
                  INDEXED BY claims_subject_kind_index
                  JOIN batches ON batches.id=claims.batch_id
@@ -3559,12 +3559,12 @@ fn work_nudged_incremental_guards_and_rollback_preserve_the_committed_frontier()
             WORK_NUDGED_KIND, Some("daemon/runtime"), &body, &[], None).unwrap();
         if refusal == "operation-conflict" {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h9cd4eb1f24fa owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+                /* sqlite-large-value: allow-for-now lv-h130c10b1685b owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
                      VALUES ('op/nudge-guard','digest-b',?1,'active')", [&claim.id],
             ).unwrap();
         }
         if refusal == "unhealthy-projection" {
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h97353fe93386 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h7ba1308bc642 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
         }
         let result = try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index).unwrap();
         match result {
@@ -3901,16 +3901,16 @@ fn one_invalid_or_unknown_claim_does_not_block_its_valid_sibling_or_later_envelo
 
 #[test]
 fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
-    for kind in std::iter::once("gate.requested").chain(st3_schema::review::KINDS) {
+    for kind in std::iter::once("gate.requested").chain(fractal_schema::review::KINDS) {
         let current = Store::open_memory("ada").unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("review.sqlite");
         let older = Store::open(&path, "tester").unwrap();
-        let mut registry = st3_schema::registry().clone();
-        for new_kind in st3_schema::review::KINDS {
+        let mut registry = fractal_schema::registry().clone();
+        for new_kind in fractal_schema::review::KINDS {
             registry.claims.remove(new_kind);
         }
-        for name in st3_schema::review::REQUEST_FIELDS {
+        for name in fractal_schema::review::REQUEST_FIELDS {
             registry
                 .claims
                 .get_mut("gate.requested")
@@ -3918,7 +3918,7 @@ fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
                 .fields
                 .remove(name);
         }
-        assert_ne!(registry.digest(), st3_schema::registry().digest());
+        assert_ne!(registry.digest(), fractal_schema::registry().digest());
         older.set_claim_registry(registry);
         let observe = |store: &Store, subject: &str, status: &str| {
             store
@@ -3949,15 +3949,15 @@ fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
         current
             .set_write_clock_at(bootstrap.accepted_at_unix_ms + DAY_MS)
             .unwrap();
-        let spec = st3_schema::registry().claim(kind).unwrap();
+        let spec = fractal_schema::registry().claim(kind).unwrap();
         let mut fields = BTreeMap::new();
         for (name, field) in &spec.fields {
             if !field.required { continue; }
             let value = match field.value_type {
-                st3_schema::ValueType::Integer => json!(1),
-                st3_schema::ValueType::Array => json!([]),
-                st3_schema::ValueType::Object => json!({}),
-                st3_schema::ValueType::SubjectReference => json!(format!("{}/tester", field.reference_families.first().map_or("mission-run", String::as_str))),
+                fractal_schema::ValueType::Integer => json!(1),
+                fractal_schema::ValueType::Array => json!([]),
+                fractal_schema::ValueType::Object => json!({}),
+                fractal_schema::ValueType::SubjectReference => json!(format!("{}/tester", field.reference_families.first().map_or("mission-run", String::as_str))),
                 _ => json!(field.values.first().map_or("receipt", String::as_str)),
             };
             fields.insert(name.clone(), value);
@@ -4101,13 +4101,13 @@ fn an_unknown_field_is_retryable_and_an_old_schema_rejection_is_readmitted() {
         let connection = target.connection.lock().unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h0676b72a5ee8 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='degraded'\n                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                /* sqlite-large-value: allow-for-now lv-h86ed99698958 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='degraded'\n                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                 params![envelope.writer, envelope.sequence, envelope.hash],
             )
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h3d909ebf1e9d owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(\n                         record_ref, writer, sequence, envelope_hash, position, raw, state,\n                         claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms\n                     ) VALUES (?1, ?2, ?3, ?4, 0, X'', 'invalid', ?5, ?6, ?7,\n                               'invalid-replicated-claim', ?8, '1')",
+                /* sqlite-large-value: allow-for-now lv-h15e9cb0e46e3 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(\n                         record_ref, writer, sequence, envelope_hash, position, raw, state,\n                         claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms\n                     ) VALUES (?1, ?2, ?3, ?4, 0, X'', 'invalid', ?5, ?6, ?7,\n                               'invalid-replicated-claim', ?8, '1')",
                 params![
                     record_ref,
                     envelope.writer,
@@ -4256,7 +4256,7 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
-        schema_digest: runtime::compatibility_digest(&st3_schema::registry().digest()),
+        schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
         authority_digest: String::new(),
@@ -4330,7 +4330,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
-        schema_digest: runtime::compatibility_digest(&st3_schema::registry().digest()),
+        schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
         authority_digest: String::new(),
@@ -4534,7 +4534,7 @@ fn the_same_envelopes_projecting_different_graphs_diverge() {
         let connection = right.connection.lock().unwrap();
         connection
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h217c0f2d917b owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE dropped_claims AS
+                /* sqlite-large-value: allow-for-now lv-hfb8131659b25 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE dropped_claims AS
                          SELECT * FROM claims WHERE subject='exec/work' AND kind='intent.desired';
                      CREATE TEMP TABLE dropped_desired AS
                          SELECT * FROM desired WHERE subject='exec/work';
@@ -4607,7 +4607,7 @@ fn the_same_envelopes_projecting_different_graphs_diverge() {
         let connection = right.connection.lock().unwrap();
         connection
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-ha93989c28941 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "PRAGMA foreign_keys=OFF;
+                /* sqlite-large-value: allow-for-now lv-hb7696ce642f6 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "PRAGMA foreign_keys=OFF;
                      INSERT INTO claims SELECT * FROM dropped_claims;
                      INSERT INTO desired SELECT * FROM dropped_desired;
                      PRAGMA foreign_keys=ON;",
@@ -4811,7 +4811,7 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
             .unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hb96969b599f0 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
+                /* sqlite-large-value: allow-for-now lv-he3371a6eb157 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
                 [&record_ref],
             )
             .unwrap();
@@ -4836,7 +4836,7 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
         .connection
         .lock()
         .unwrap()
-        .execute(/* sqlite-large-value: allow-for-now lv-h4136493746ff owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&repaired_claim])
+        .execute(/* sqlite-large-value: allow-for-now lv-h2f237fd3f1aa owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&repaired_claim])
         .unwrap();
 
     receive_and_project(
@@ -5408,7 +5408,7 @@ fn the_message_index_follows_the_message_claims() {
         let connection = store.readers.get();
         let rows = |sql: &str| {
             connection
-                .prepare(/* sqlite-large-value: allow-for-now lv-h08c12985c774 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql)
+                .prepare(/* sqlite-large-value: allow-for-now lv-h9eb319f5de00 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ sql)
                 .unwrap()
                 .query_map([], |row| {
                     Ok((
@@ -5446,7 +5446,7 @@ fn the_message_index_follows_the_message_claims() {
         .connection
         .write()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h17981ff3ed00 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "PRAGMA foreign_keys = OFF;
+            /* sqlite-large-value: allow-for-now lv-h8fe114b2ad5c owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "PRAGMA foreign_keys = OFF;
                  DELETE FROM claims WHERE subject='message/index-0' AND kind='message.closed';
                  PRAGMA foreign_keys = ON;",
         )
@@ -5459,7 +5459,7 @@ fn the_message_index_follows_the_message_claims() {
         let connection = store.connection.write();
         connection
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h38fc79858ea7 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM message_index; DELETE FROM meta WHERE key='message_index';",
+                /* sqlite-large-value: allow-for-now lv-hb345d2d573cd owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM message_index; DELETE FROM meta WHERE key='message_index';",
             )
             .unwrap();
         backfill_message_index(&connection).unwrap();
@@ -5649,7 +5649,7 @@ fn an_old_nonempty_database_is_rejected() {
     let path = directory.path().join("state.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-h68c176f65ea6 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE desired(subject TEXT PRIMARY KEY)", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h634aebf81624 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE desired(subject TEXT PRIMARY KEY)", [])
         .unwrap();
     drop(connection);
 
@@ -5665,7 +5665,7 @@ fn schema_version_nine_requires_fresh_state_for_version_ten() {
     let path = directory.path().join("state.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-h5b16d750e988 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE marker(value TEXT)", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hb2b8598e33bd owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE marker(value TEXT)", [])
         .unwrap();
     connection.pragma_update(None, "user_version", 9).unwrap();
     drop(connection);
@@ -5684,7 +5684,7 @@ fn schema_version_ten_upgrades_additively_for_mission_deadlines() {
 
     let connection = Connection::open(&path).unwrap();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-h81648c5b13e6 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE mission_run_deadlines", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h31e6b9a5b373 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE mission_run_deadlines", [])
         .unwrap();
     connection.pragma_update(None, "user_version", 10).unwrap();
     drop(connection);
@@ -5695,7 +5695,7 @@ fn schema_version_ten_upgrades_additively_for_mission_deadlines() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        st3_schema::STORAGE_VERSION
+        fractal_schema::STORAGE_VERSION
     );
     assert_eq!(
         connection
@@ -5716,7 +5716,7 @@ fn schema_version_eleven_removes_writer_sequence_and_pending_proposal_indexes() 
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h2f997c205d1a owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "PRAGMA foreign_keys=ON;
+            /* sqlite-large-value: allow-for-now lv-h49bd0f5926e3 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "PRAGMA foreign_keys=ON;
                  CREATE TABLE batches (
                    id TEXT PRIMARY KEY,
                    origin TEXT NOT NULL,
@@ -5747,13 +5747,13 @@ fn schema_version_eleven_removes_writer_sequence_and_pending_proposal_indexes() 
     let connection = store.connection.lock().unwrap();
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hb4e8163c2582 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('a','writer',1,NULL,'a','1')",
+            /* sqlite-large-value: allow-for-now lv-h662fba43a1a8 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('a','writer',1,NULL,'a','1')",
             [],
         )
         .unwrap();
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h833e4cf7889a owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('b','writer',1,NULL,'b','1')",
+            /* sqlite-large-value: allow-for-now lv-h96d94e7ed715 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('b','writer',1,NULL,'b','1')",
             [],
         )
         .unwrap();
@@ -5769,7 +5769,7 @@ fn schema_version_eleven_removes_writer_sequence_and_pending_proposal_indexes() 
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        st3_schema::STORAGE_VERSION
+        fractal_schema::STORAGE_VERSION
     );
 }
 
@@ -5781,7 +5781,7 @@ fn schema_version_twelve_adds_durable_planner_configuration() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h5b88ec40de88 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER projection_digest_planning_sessions_insert;
+            /* sqlite-large-value: allow-for-now lv-hee99517b937f owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER projection_digest_planning_sessions_insert;
                  DROP TRIGGER projection_digest_planning_sessions_update;
                  DROP TRIGGER projection_digest_planning_sessions_delete;
                  ALTER TABLE planning_sessions DROP COLUMN planner_spec_json;
@@ -5856,11 +5856,11 @@ fn latest_predecessor_seeks_the_newest_time_block_and_preserves_ties() {
         ("late-arrival-old-time", "99", "z", 10, "older-time"),
     ] {
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h981bc13c6046 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hb7bee44be324 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,?2,?3,?1,?4)", params![batch, writer, sequence, time],
         ).unwrap();
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hd8ebabeb163b owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h761ca6be608d owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?2,'daemon/alder','daemon.diagnostic',?3,'{}','[]',?4)",
             params![id, batch, writer, time],
         ).unwrap();
@@ -5875,7 +5875,7 @@ fn latest_predecessor_seeks_the_newest_time_block_and_preserves_ties() {
         None
     );
     let plan = transaction
-        .prepare(/* sqlite-large-value: allow-for-now lv-he085b180d19a owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-hcd1c481d5eb2 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             canonical_sql(LATEST_CLAIM_QUERY)
         ))
@@ -5900,7 +5900,7 @@ fn claims_of_one_kind_use_the_subject_kind_index() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.connection.lock().unwrap();
     let mut statement = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-h0e5990005935 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h417aa229a9e1 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             claims_for_subject_query(true)
         ))
@@ -5971,13 +5971,13 @@ fn mailbox_state_read_preserves_ended_diagnostic_work_and_legacy_semantics() {
         let time = sequence.to_string();
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h37cb8eaadcfc owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h3235673ff0ac owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'alder',?2,?1,?3)",
                 params![id, sequence, time],
             )
             .unwrap();
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h0b96ef00afed owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hec4e1414873d owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?1,?2,?3,'alder',?2,?4,'[]',?5)",
             params![id, subject, kind, json!({"fields": fields}).to_string(), time],
         ).unwrap();
@@ -6048,26 +6048,26 @@ fn subscription_run_lookup_cost_does_not_grow_with_unrelated_deliveries() {
         let id = format!("started-{n}");
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h6390d0aa7f17 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h2e6ddfef3611 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'orchid',1,?1,'1')",
                 [&id],
             )
             .unwrap();
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hbc993a2e7ffc owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h0702121b0c5d owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?1,'subscription/reviews','subscription.mission-started','orchid',?2,'[]','1')",
             params![id, json!({"fields":{"mission_run":format!("mission-run/{n}")}}).to_string()],
         ).unwrap();
         if n == 100 || n == 10_000 {
             transaction
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6eaf2eccafb8 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-he29db82d26e6 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)
                 .unwrap()
                 .reset_status(rusqlite::StatementStatus::VmStep);
             assert!(subscription_started_run_tx(&transaction, "mission-run/1").unwrap());
             assert!(!subscription_started_run_tx(&transaction, "mission-run/authored").unwrap());
             costs.push(
                 transaction
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-he9b8021ff819 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h31cbd87efccc owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)
                     .unwrap()
                     .get_status(rusqlite::StatementStatus::VmStep),
             );
@@ -6087,13 +6087,13 @@ fn mailbox_fence_cost_does_not_grow_with_sparse_prior_incarnations() {
     let insert = |id: &str, kind: &str, fields: Value, time: &str| {
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hcd62c5db7381 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hb90d9adc1d7c owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                  VALUES(?1,'alder',1,?1,?2)",
                 params![id, time],
             )
             .unwrap();
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h2620a3c27ccc owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h8c192c7dff13 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES(?1,?1,'agent/example',?2,'alder',?3,'[]',?4)",
             params![id, kind, json!({"fields": fields}).to_string(), time],
         ).unwrap();
@@ -6132,7 +6132,7 @@ fn mailbox_fence_cost_does_not_grow_with_sparse_prior_incarnations() {
         if n == 100 || n == 10_000 {
             for query in &queries {
                 transaction
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1f8d1f33efad owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ query)
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hdd535e1fd134 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ query)
                     .unwrap()
                     .reset_status(rusqlite::StatementStatus::VmStep);
             }
@@ -6141,7 +6141,7 @@ fn mailbox_fence_cost_does_not_grow_with_sparse_prior_incarnations() {
                 .iter()
                 .map(|query| {
                     transaction
-                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf54233f5085d owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ query)
+                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4eafaa7fe1d3 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ query)
                         .unwrap()
                         .get_status(rusqlite::StatementStatus::VmStep)
                 })
@@ -6198,7 +6198,7 @@ fn every_foreign_key_column_leads_an_index() {
     let mut unindexed = Vec::new();
     for table in tables {
         let references = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-h0bd36c9cdea3 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA foreign_key_list(\"{table}\")"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h9c42de773e5d owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA foreign_key_list(\"{table}\")"))
             .unwrap()
             .query_map([], |row| {
                 Ok((
@@ -6211,7 +6211,7 @@ fn every_foreign_key_column_leads_an_index() {
             .unwrap();
         for (column, parent) in references {
             let leading = connection
-                .prepare(/* sqlite-large-value: allow-for-now lv-ha70ebb27e260 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA index_list(\"{table}\")"))
+                .prepare(/* sqlite-large-value: allow-for-now lv-h018f6e9cebf9 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA index_list(\"{table}\")"))
                 .unwrap()
                 .query_map([], |row| row.get::<_, String>("name"))
                 .unwrap()
@@ -6221,7 +6221,7 @@ fn every_foreign_key_column_leads_an_index() {
                 .any(|index| {
                     connection
                         .query_row(
-                            /* sqlite-large-value: allow-for-now lv-h526b92ae6c85 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
+                            /* sqlite-large-value: allow-for-now lv-hfe331bf497fc owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!(
                                 "SELECT name FROM pragma_index_info('{index}') WHERE seqno=0"
                             ),
                             [],
@@ -6263,9 +6263,9 @@ fn claude_attachment_lookup_cost_ignores_hook_runtime_and_predecessor_history() 
     append("harness.diagnostic", "current", "claude-channel-unattached", "attach");
     let work = || {
         let connection = store.connection.lock().unwrap();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4d407f31171e owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &claude_attachment_query()).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf687fbbd30ec owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &claude_attachment_query()).unwrap();
         let claim: String = statement.query_row(
-            /* sqlite-large-value: allow-for-now lv-h1cb3fc7e4dd1 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ params!["agent/grove/cedar", i64::MAX, "current"], |row| row.get(0),
+            /* sqlite-large-value: allow-for-now lv-h007497d73c53 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ params!["agent/grove/cedar", i64::MAX, "current"], |row| row.get(0),
         ).unwrap();
         (claim, statement.get_status(rusqlite::StatementStatus::VmStep))
     };
@@ -6292,7 +6292,7 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     let transaction = connection.transaction().unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hdb57c260f187 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-ha175ed71501d owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
              VALUES ('legacy-batch','legacy-seek',1,'synthetic','1')",
             [],
         )
@@ -6311,7 +6311,7 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     for (position, body) in bodies.iter().enumerate() {
         let index = position + 1;
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h230f6896a26c owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h3964e2fa19ae owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  VALUES (?1,?2,'legacy-batch','agent/legacy-seek','harness.observed','legacy-seek',?3,'[]',?4)",
             params![index as i64,format!("legacy-{index}"),body.to_string(),index.to_string()],
         ).unwrap();
@@ -6319,7 +6319,7 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     transaction.commit().unwrap();
     let read = |sql: &str, cut: i64, since: &str| {
         connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-h64d2cdb4129e owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql)
+            .prepare(/* sqlite-large-value: allow-for-now lv-hdce7deac19c1 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ sql)
             .unwrap()
             .query_map(params!["agent/legacy-seek", cut, since], |row| {
                 row.get::<_, String>(0)
@@ -6351,10 +6351,10 @@ fn unnamed_harness_seek_preserves_legacy_candidates_and_snapshot_cut() {
     }
     // The partial index also follows updates/deletes; repaired observation bodies cannot
     // leave a stale legacy candidate, and becoming unnamed must make a new candidate.
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h41964a9fed94 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.incarnation_id','current') WHERE id='legacy-3'",[]).unwrap();
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h58de0e6f17fa owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.incarnation_id') WHERE id='legacy-5'",[]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h5e3e82607ef0 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.incarnation_id','current') WHERE id='legacy-3'",[]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h607728b48402 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.incarnation_id') WHERE id='legacy-5'",[]).unwrap();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-h3144d3a60b63 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id='legacy-2'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hf5f690296101 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id='legacy-2'", [])
         .unwrap();
     assert_eq!(
         read(&query, 9, "1"),
@@ -6371,31 +6371,31 @@ fn unnamed_harness_seek_cost_ignores_named_heartbeat_growth() {
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hfefc175b060d owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h45face962b63 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
                 VALUES ('cost-batch','legacy-cost',1,'synthetic','1')",
                 [],
             )
             .unwrap();
         for index in 1..=named {
             let body = json!({"fields":{"incarnation_id":"current","state":"idle","status_transition":false}});
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h3df0efeb573d owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h49207ad0162b owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                     VALUES (?1,?2,'cost-batch','agent/legacy-cost','harness.observed','legacy-cost',?3,'[]',?4)",
                 params![index as i64,format!("named-{index}"),body.to_string(),index.to_string()]).unwrap();
         }
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h83edf8c86440 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h218c3c3c1c0e owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                 VALUES (100000,'legacy-tail','cost-batch','agent/legacy-cost','harness.observed','legacy-cost',?1,'[]','100000')",[json!({"fields":{"state":"idle"}}).to_string()]).unwrap();
         // Native claims have a recorded canonical position. Without it, the unchanged
         // legacy-position fallback counts this synthetic batch's preceding rows, a
         // separate ordering cost from selecting unnamed candidates.
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h54f4dd5078e1 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h5e41ec81b6ee owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
                  VALUES ('cost-record','legacy-cost',1,'synthetic',0,X'', 'valid','legacy-tail','1')",
             [],
         ).unwrap();
         transaction.commit().unwrap();
         let query = harness_observations_without_incarnation_query();
         let plans = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-he1e3ac7dd6f6 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h7d81d766ec47 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap()
             .query_map(params!["agent/legacy-cost", 100000, "1"], |row| {
                 row.get::<_, String>(3)
@@ -6410,7 +6410,7 @@ fn unnamed_harness_seek_cost_ignores_named_heartbeat_growth() {
             "{plans:?}"
         );
         let work = |sql: &str| {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc0271e91f987 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-had2334359419 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
             let ids = statement
                 .query_map(params!["agent/legacy-cost", 100000, "1"], |row| {
                     row.get::<_, String>(0)
@@ -6465,7 +6465,7 @@ fn the_incarnation_index_reads_a_claim_as_a_view_does() {
             .map(str::to_owned);
         let indexed = connection
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-h6319f38b7077 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("SELECT {INCARNATION_OF_CLAIM} FROM (SELECT ?1 AS body)"),
+                /* sqlite-large-value: allow-for-now lv-ha1163b9d4ef7 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!("SELECT {INCARNATION_OF_CLAIM} FROM (SELECT ?1 AS body)"),
                 [body.to_string()],
                 |row| row.get::<_, rusqlite::types::Value>(0),
             )
@@ -6483,7 +6483,7 @@ fn replication_inventory_uses_the_batch_indexes() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.connection.lock().unwrap();
     let plan = |query: &str| {
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hccb8de258f25 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ query).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7f43c43d37a1 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ query).unwrap();
         statement
             .query_map([], |row| row.get::<_, String>(3))
             .unwrap()
@@ -6651,12 +6651,12 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
     let generation =
         |store: &Store| graph_generation(&store.connection.lock().unwrap()).unwrap();
     let execute = |store: &Store, sql: &str| {
-        store.connection.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h113d0353a75c owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
+        store.connection.lock().unwrap().execute(/* sqlite-large-value: allow-for-now lv-h310a23130ecb owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ sql, []).unwrap();
     };
     let before = generation(&store);
     execute(
         &store,
-        /* sqlite-large-value: allow-for-now lv-h5d0fcc50fba9 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id,
+        /* sqlite-large-value: allow-for-now lv-h74b5be50ed01 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id,
                  root_revision, root_run_id, workspace, requester, inputs, mode, status, phase,
                  created_at_unix_ms, updated_at_unix_ms)
              VALUES ('run-example', 'mission/example', 'revision', 'generation', 'revision',
@@ -6666,7 +6666,7 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
     assert_eq!(generation(&store), before + 1);
     execute(
         &store,
-        /* sqlite-large-value: allow-for-now lv-h1015c661ef45 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='2' WHERE id='run-example'",
+        /* sqlite-large-value: allow-for-now lv-he39c47fbf8df owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms='2' WHERE id='run-example'",
     );
     assert_eq!(
         generation(&store),
@@ -6675,12 +6675,12 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
     );
     execute(
         &store,
-        /* sqlite-large-value: allow-for-now lv-h2d0d08793eb5 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running' WHERE id='run-example'",
+        /* sqlite-large-value: allow-for-now lv-h1e09917472a1 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='running' WHERE id='run-example'",
     );
     assert_eq!(generation(&store), before + 1);
     execute(
         &store,
-        /* sqlite-large-value: allow-for-now lv-h8665a676a4bd owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='completed' WHERE id='run-example'",
+        /* sqlite-large-value: allow-for-now lv-h580eec954622 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='completed' WHERE id='run-example'",
     );
     assert_eq!(generation(&store), before + 2);
 
@@ -6692,7 +6692,7 @@ fn replication_reuses_legacy_digest_while_complete_source_digest_changes() {
         third.graph_digest,
         graph_digest(&store.connection.lock().unwrap()).unwrap()
     );
-    execute(&store, /* sqlite-large-value: allow-for-now lv-hbd60cca4b3fb owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='run-example'");
+    execute(&store, /* sqlite-large-value: allow-for-now lv-ha73927e89741 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='run-example'");
     assert_eq!(generation(&store), before + 3);
 }
 
@@ -6720,7 +6720,7 @@ fn operation_projection_drift_is_detected_and_repaired() {
         .connection
         .lock()
         .unwrap()
-        .execute(/* sqlite-large-value: allow-for-now lv-h2a1b2de2fdff owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hfb5739c87232 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict'", [])
         .unwrap();
     assert_eq!(store.operation_projection_drift().unwrap().len(), 1);
     drop(store);
@@ -7176,7 +7176,7 @@ fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .unwrap();
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h8a7c856d0f10 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt,
+            /* sqlite-large-value: allow-for-now lv-h0c020fd54d91 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt,
                     goals, lease_owner, lease_incarnation, lease_expires_at_unix_ms, activated_at_unix_ms,
                     created_at_unix_ms, updated_at_unix_ms)
                  VALUES ('step-run/example/build', 'example', 'example', 'build', 'hash', 'working', 1,
@@ -7324,7 +7324,7 @@ fn trimming_local_observations_keeps_the_newest_of_each_subject_and_kind() {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h9c77dc6f9aa2 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_observations SET observed_at_unix_ms=1000 WHERE id <= 12",
+            /* sqlite-large-value: allow-for-now lv-hfc7b7df88745 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_observations SET observed_at_unix_ms=1000 WHERE id <= 12",
             [],
         )
         .unwrap();
@@ -7375,7 +7375,7 @@ fn local_observation_floor_seeks_the_claim_frontier() {
         let connection = store.connection.write();
         connection
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h435f8a769cbf owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_observations(id,after_store_index,subject,kind,body,observed_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hc2b2cb3648c6 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_observations(id,after_store_index,subject,kind,body,observed_at_unix_ms)
                      VALUES(3,10,'agent/node.a','harness.timeline','{}',1),
                            (7,30,'agent/node.a','harness.timeline','{}',1),
                            (12,20,'agent/node.a','harness.timeline','{}',1);
@@ -7393,7 +7393,7 @@ fn local_observation_floor_seeks_the_claim_frontier() {
     assert_eq!(store.local_observation_floor_after_claim(31).unwrap(), 12);
     let connection = store.readers.get();
     let plan = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-h1070917c4a15 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {LOCAL_OBSERVATION_FLOOR_QUERY}"))
+        .prepare(/* sqlite-large-value: allow-for-now lv-h61ffbc9870f4 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {LOCAL_OBSERVATION_FLOOR_QUERY}"))
         .unwrap()
         .query_map([30], |row| row.get::<_, String>(3))
         .unwrap()
@@ -7758,21 +7758,21 @@ fn retention_event_tail_work_is_bounded_during_and_after_migration() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hdcb2f76d0aef owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,kind TEXT,body TEXT);
+            /* sqlite-large-value: allow-for-now lv-h830751fcf154 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,kind TEXT,body TEXT);
              CREATE TABLE event_positions(store_index INTEGER PRIMARY KEY,subject TEXT);
              CREATE TABLE local_event_payloads(store_index INTEGER PRIMARY KEY,subject TEXT);",
         )
         .unwrap();
     for count in [1_000, 10_000, 100_000] {
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-h8d65d6f51756 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims; DELETE FROM event_positions; DELETE FROM local_event_payloads;
+            /* sqlite-large-value: allow-for-now lv-hccb926f560be owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims; DELETE FROM event_positions; DELETE FROM local_event_payloads;
                  WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<{count})
                  INSERT INTO claims SELECT n,'custom.test.recorded','{{}}' FROM numbers;
                  INSERT INTO event_positions SELECT store_index,'custom/test/tail' FROM claims WHERE store_index%2=0;
                  INSERT INTO local_event_payloads SELECT store_index,'custom/test/tail' FROM claims WHERE store_index%2=1;"
         )).unwrap();
         for migrating in [true, false] {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha53ea38b4654 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ event_tail_sql(migrating)).unwrap();
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfb3818e1a39a owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ event_tail_sql(migrating)).unwrap();
             let indices = statement
                 .query_map([3], |row| row.get::<_, u64>(0))
                 .unwrap()
@@ -7825,7 +7825,7 @@ fn retention_event_publication_bodies_match_the_old_payload_contract() {
         // the old insert_event, independently of the new join's payload results.
         connection
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-hd103e891ff4b owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "DROP VIEW events; DROP TABLE event_positions;
+                /* sqlite-large-value: allow-for-now lv-h4f4d21fb29b9 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "DROP VIEW events; DROP TABLE event_positions;
                  CREATE TABLE events (
                      store_index INTEGER PRIMARY KEY, kind TEXT NOT NULL,
                      subject TEXT NOT NULL, body TEXT NOT NULL
@@ -7854,7 +7854,7 @@ fn retention_event_publication_bodies_match_the_old_payload_contract() {
             // This is schema-16 insert_event's INSERT and canonicalization, rather than
             // an INSERT SELECT from claims or the new view.
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hbb59f2659dc7 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO events(store_index, kind, subject, body) VALUES (?1, ?2, ?3, ?4)",
+                /* sqlite-large-value: allow-for-now lv-h414036e9cfed owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO events(store_index, kind, subject, body) VALUES (?1, ?2, ?3, ?4)",
                 params![event.store_index, kind, subject, canonical_json_text(&old_body).unwrap()],
             ).unwrap();
         }
@@ -9859,13 +9859,13 @@ fn batched_usage_preserves_canonical_ties_and_snapshot_bound() {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h38e5404f5b9c owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(1000000-(store_index/8) AS TEXT)
+            /* sqlite-large-value: allow-for-now lv-h7976f7c9b118 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(1000000-(store_index/8) AS TEXT)
                         WHERE kind='harness.usage'",
             [],
         )
         .unwrap();
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h2d3929793db7 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=10000-(SELECT MIN(store_index)
+            /* sqlite-large-value: allow-for-now lv-h18dd59167769 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=10000-(SELECT MIN(store_index)
                         FROM claims WHERE claims.batch_id=batches.id)",
             [],
         )
@@ -9899,7 +9899,7 @@ fn batched_usage_preserves_canonical_ties_and_snapshot_bound() {
 fn claim_id_order_fixture(connection: &Connection) {
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hfbcb4c9bf5f6 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+            /* sqlite-large-value: allow-for-now lv-hb3647d01a418 owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
@@ -9956,7 +9956,7 @@ fn claim_ids_stream_preserves_full_order_historical_bounds_and_transaction_owner
     assert!(connection.is_autocommit());
     let tx = connection.transaction().unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-hbaed1abecc21 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET position=0 WHERE claim_id='record-a'",
+        /* sqlite-large-value: allow-for-now lv-hbcf472355ed4 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET position=0 WHERE claim_id='record-a'",
         [],
     )
     .unwrap();
@@ -9982,10 +9982,10 @@ fn claim_ids_stream_preserves_full_order_historical_bounds_and_transaction_owner
         "the caller retains its read transaction"
     );
     connection
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h2c3050ef14de owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hb25e08689142 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
         .unwrap();
     connection
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h51c4f2ae44c4 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "DROP TABLE replica_records")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h195617ffd7cc owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "DROP TABLE replica_records")
         .unwrap();
     assert!(claim_ids_at(&connection, "agent/target", None).is_err());
     assert!(
@@ -10008,7 +10008,7 @@ fn claim_ids_stream_preserves_full_order_historical_bounds_and_transaction_owner
         "a failed read must not close its caller"
     );
     connection
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h7992437fc712 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h07a636fe8088 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
         .unwrap();
 }
 
@@ -10024,7 +10024,7 @@ fn claim_ids_stream_pins_tie_lookups_across_a_wal_writer_and_unwind() {
         let writer = Connection::open(&path).unwrap();
         writer
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h8e103cfef115 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "BEGIN IMMEDIATE;
+                /* sqlite-large-value: allow-for-now lv-h2be3c50dbcff owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "BEGIN IMMEDIATE;
                  UPDATE replica_records SET position=0 WHERE claim_id='record-a';
                  UPDATE replica_records SET position=99 WHERE claim_id='record-b';
                  COMMIT;",
@@ -10110,7 +10110,7 @@ fn claim_ids_stream_keeps_real_store_status_claims_at_current_and_historical_cut
 /// canonical tie groups appear everywhere, including across the session-dating window.
 fn seeded_claim_summary_fixture(connection: &Connection, seed: u64, count: usize) {
     let mut create = String::from(
-        /* sqlite-large-value: allow-for-now lv-h2a565e032286 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-h78aa93c4fbad owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
@@ -10119,7 +10119,7 @@ fn seeded_claim_summary_fixture(connection: &Connection, seed: u64, count: usize
     );
     for writer in 0..3 {
         create.push_str(&format!(
-            /* sqlite-large-value: allow-for-now lv-h86e77c25b990 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('batch-{writer}','writer-{writer}',{writer});"
+            /* sqlite-large-value: allow-for-now lv-h433788055431 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES ('batch-{writer}','writer-{writer}',{writer});"
         ));
     }
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -10137,21 +10137,21 @@ fn seeded_claim_summary_fixture(connection: &Connection, seed: u64, count: usize
         let time = times[(next() % times.len() as u64) as usize];
         let batch = format!("batch-{}", next() % 3);
         create.push_str(&format!(
-            /* sqlite-large-value: allow-for-now lv-h2a7bd82793e5 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');",
+            /* sqlite-large-value: allow-for-now lv-h523a4524bd5b owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');",
             index + 1
         ));
         if next() % 2 == 0 {
             create.push_str(&format!(
-                /* sqlite-large-value: allow-for-now lv-h2c313e2e70e7 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records VALUES ('claim-{index:06}',{});",
+                /* sqlite-large-value: allow-for-now lv-h94cfc5e51e8c owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records VALUES ('claim-{index:06}',{});",
                 next() % 7
             ));
         }
     }
     // Claims of other subjects must never leak into the subject's answers.
     create.push_str(
-        /* sqlite-large-value: allow-for-now lv-hf80b5973d7f5 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES ('elsewhere','agent/other','runtime.observed','batch-0',0,'10');",
+        /* sqlite-large-value: allow-for-now lv-h5b19d7ca2c85 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES ('elsewhere','agent/other','runtime.observed','batch-0',0,'10');",
     );
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h60f949466464 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &create).unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h10f5d4269a59 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &create).unwrap();
 }
 
 #[test]
@@ -10210,7 +10210,7 @@ fn claims_summary_resolves_the_real_session_window_inside_a_crossing_tie() {
     // The window edge lands inside a wide tie group: only canonical ordering decides the
     // boundary, exactly what the full vector resolves claim by claim.
     let mut fixture = String::from(
-        /* sqlite-large-value: allow-for-now lv-h3f5c237cdd0c owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-ha71a57e6ad3f owner=fractal_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
@@ -10228,13 +10228,13 @@ fn claims_summary_resolves_the_real_session_window_inside_a_crossing_tie() {
             ("340282366920938463463374607431768211455", "a")
         };
         fixture.push_str(&format!(
-            /* sqlite-large-value: allow-for-now lv-h6ef397d07d61 owner=st3_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');
+            /* sqlite-large-value: allow-for-now lv-ha5f57e1148f4 owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO claims VALUES ('claim-{index:06}','agent/target','runtime.observed','{batch}',{},'{time}');
                  INSERT INTO replica_records VALUES ('claim-{index:06}',{});",
             index + 1,
             (index % 5) as u64
         ));
     }
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fdf6f51b9e6 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ &fixture).unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4ed31e2a3f89 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &fixture).unwrap();
     let full = full_canonical_claim_id_oracle(&connection, "agent/target", None);
     assert_eq!(full.len(), SESSION_CLAIMS + 4);
     let summary = claims_summary_at(&connection, "agent/target", None).unwrap();
@@ -10322,7 +10322,7 @@ fn summary_status_matches_full_status_for_every_internal_decision() {
 
 
 /// Run against a reflink-copied live store only:
-/// `CLAIM_SUMMARY_BENCH=/path/to/copy.sqlite3 cargo test -p st3-daemon --lib claim_summary -- --ignored --nocapture`.
+/// `CLAIM_SUMMARY_BENCH=/path/to/copy.sqlite3 cargo test -p fractal-daemon --lib claim_summary -- --ignored --nocapture`.
 /// Alternates full and summary reductions of the same subject at the same cut so both
 /// answers measure one store, one index and one page cache.
 #[test]

@@ -7,7 +7,7 @@ use crate::voice::{self, Event, Listening};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 use ratatui::text::{Line, Span};
-use st3_conversation_ui::text as wrap;
+use fractal_conversation_ui::text as wrap;
 
 /// What becomes of the words once the helper has them all.
 #[derive(Clone, Copy, Debug, PartialEq)]

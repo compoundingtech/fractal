@@ -114,7 +114,7 @@ fn healing_command(
 }
 
 pub async fn heal(binary: &str, sessions: &Path, id: &str) -> Result<String> {
-    st_drivers::omp_session::verify_admission_for_heal(binary)?;
+    fractal_drivers::omp_session::verify_admission_for_heal(binary)?;
     let stdout = tempfile::NamedTempFile::new()?;
     let stderr = tempfile::NamedTempFile::new()?;
     let mut child = healing_command(binary, sessions, id, std::env::vars_os().map(|(key, _)| key))
@@ -279,7 +279,7 @@ if '--resume' in sys.argv and 'ST_ADMISSION_TRACE' not in os.environ:
     print('\n'.join(sys.argv[1:]))
     print('stdin-eof', file=sys.stderr)
     sys.exit(0)
-"#, include_str!("../../st-drivers/tests/fixtures/harness-admission/fake-omp.py"))).unwrap();
+"#, include_str!("../../fractal-drivers/tests/fixtures/harness-admission/fake-omp.py"))).unwrap();
         assert!(std::process::Command::new("install")
             .args(["-m", "755"])
             .arg(&source)
@@ -288,9 +288,9 @@ if '--resume' in sys.argv and 'ST_ADMISSION_TRACE' not in os.environ:
             .unwrap()
             .success());
         fs::write(root.path().join("capture.json"),
-            include_bytes!("../../st-drivers/tests/fixtures/harness-admission/omp-18.1.22.json")).unwrap();
+            include_bytes!("../../fractal-drivers/tests/fixtures/harness-admission/omp-18.1.22.json")).unwrap();
         let hooks = root.path().join("hooks");
-        st_drivers::hooks::install_at(&hooks, false).unwrap();
+        fractal_drivers::hooks::install_at(&hooks, false).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--nocapture"])
             .env(variable, root.path())

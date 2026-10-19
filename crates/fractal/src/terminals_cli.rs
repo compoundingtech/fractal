@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 pub(super) async fn run_pty(
     client: &Client,
@@ -52,7 +52,7 @@ pub(super) async fn run_pty(
                         snapshot_id: capabilities.snapshot.id,
                         ..ClientFence::default()
                     },
-                    st3_client::TerminalCreateParameters {
+                    fractal_client::TerminalCreateParameters {
                         name: args
                             .name
                             .unwrap_or_else(|| format!("shell-{}", &nonce[24..])),

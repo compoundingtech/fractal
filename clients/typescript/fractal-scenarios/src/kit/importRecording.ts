@@ -1,5 +1,5 @@
 import clientSchema from '../../../../../docs/st3/client-v0/schemas/client-v0.schema.json' with { type: 'json' }
-import type { Agent, Machine, Resource, Runtime, Snapshot, TerminalAttachment, TerminalScreen, TimelineEntry } from '@smalltalk/st3-client'
+import type { Agent, Machine, Resource, Runtime, Snapshot, TerminalAttachment, TerminalScreen, TimelineEntry } from '@fractal/client'
 import type { RecordedFrame, RecordedHttp, RecordedTransport } from './recording.ts'
 import type { ChangesEvent, ConversationEvent, ConversationThread, TerminalEvent, TerminalRecord } from './slice.ts'
 import type { Slices } from './world.ts'

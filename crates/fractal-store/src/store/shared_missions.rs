@@ -61,8 +61,8 @@ pub use crate::store::runtime::SmalltalkRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
-use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
-pub use st3_kernel::model::local_observation_position;
+use fractal_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
+pub use fractal_kernel::model::local_observation_position;
 pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
 use crate::store::*;

@@ -1,16 +1,16 @@
 [package]
-name = "st3-github-base"
+name = "fractal-github-base"
 version = "0.1.0"
 edition = "2024"
 description = "the GitHub leaf modules: authenticated transport, repository resources, watch subjects and checkouts, which name no store code"
 license = "MIT"
 
 [features]
-# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-secrets/test-support"]
+# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
+test-support = ["fractal-secrets/test-support"]
 
 [dependencies]
-st3-secrets = { path = "../st3-secrets" }
+fractal-secrets = { path = "../fractal-secrets" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
@@ -23,8 +23,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
-st-drivers = { path = "../st-drivers" }
-st-runtime = { path = "../st-runtime" }
+fractal-drivers = { path = "../fractal-drivers" }
+fractal-runtime = { path = "../fractal-runtime" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -32,7 +32,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
-st3_github_self = { package = "st3-github-base", path = ".", features = ["test-support"] }
+fractal_github_self = { package = "fractal-github-base", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 parking_lot = "0.12"
 tokio = { version = "1", features = ["test-util"] }

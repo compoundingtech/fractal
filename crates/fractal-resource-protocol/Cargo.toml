@@ -1,5 +1,5 @@
 [package]
-name = "st-resource-protocol"
+name = "fractal-resource-protocol"
 version = "0.1.0"
 edition = "2024"
 description = "Shared resource runtime wire types, framing, and codecs."

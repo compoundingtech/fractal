@@ -33,8 +33,8 @@ const eagerGraph = (entry: string) => {
       dependencies.add(specifier)
       let local: string | undefined
       if (specifier.startsWith('.')) local = resolve(dirname(file), specifier)
-      else if (specifier === '@smalltalk/fractal-ui' || specifier.startsWith('@smalltalk/fractal-ui/')) {
-        const key = specifier === '@smalltalk/fractal-ui' ? '.' : `.${specifier.slice('@smalltalk/fractal-ui'.length)}`
+      else if (specifier === '@fractal/ui' || specifier.startsWith('@fractal/ui/')) {
+        const key = specifier === '@fractal/ui' ? '.' : `.${specifier.slice('@fractal/ui'.length)}`
         const target = kitPackage.exports[key]
         if (target === undefined) throw new Error(`Missing kit export ${specifier}`)
         local = resolve(kit, target)

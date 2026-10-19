@@ -322,7 +322,7 @@ impl Store {
         }
         let connection = self.readers.get();
         let asks = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbc896345ef86 owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ ASKS_BY_REQUESTERS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4589fc125163 owner=fractal_store::store::published_list TODO=trace-statement-and-value-representation */ ASKS_BY_REQUESTERS)?
             .query_map([serde_json::to_string(requesters)?], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })?
@@ -335,8 +335,8 @@ impl Store {
     pub fn ask_origin_and_run(&self, ask: &str) -> Result<(Option<String>, Option<String>)> {
         let connection = self.readers.get();
         let found = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbec7b29ebd24 owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ ASK_ORIGIN_AND_RUN)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h442c16159acb owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ [ask], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b2e0673a18e owner=fractal_store::store::published_list TODO=trace-statement-and-value-representation */ ASK_ORIGIN_AND_RUN)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h0d7940fcc7d1 owner=fractal_store::store::published_list TODO=trace-statement-and-value-representation */ [ask], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))
             .optional()?;
         Ok(found.unwrap_or_default())
     }
@@ -360,8 +360,8 @@ impl Store {
     /// current. Walks the run and parent-step indexes, never the whole table.
     pub fn runs_under(&self, runs: &BTreeSet<String>) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let mut steps_of = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf5c6b345cf3f owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ RUN_STEPS)?;
-        let mut children_of = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hde63a26c122a owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ CHILD_RUNS)?;
+        let mut steps_of = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h416789f54c75 owner=fractal_store::store::published_list TODO=trace-statement-and-value-representation */ RUN_STEPS)?;
+        let mut children_of = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h20b4ce3791b8 owner=fractal_store::store::published_list TODO=trace-statement-and-value-representation */ CHILD_RUNS)?;
         let mut found = BTreeSet::new();
         let mut queue = runs.iter().cloned().collect::<Vec<_>>();
         while let Some(run) = queue.pop() {
@@ -388,7 +388,7 @@ impl Store {
         }
         let connection = self.readers.get();
         let asks = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hefc88ddd846e owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ ASKS_FROM_STEPS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h108b744f45d1 owner=fractal_store::store::published_list TODO=trace-statement-and-value-representation */ ASKS_FROM_STEPS)?
             .query_map([serde_json::to_string(steps)?], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(asks)
@@ -399,7 +399,7 @@ impl Store {
         let connection = self.readers.get();
         let run = connection
             .prepare_cached("SELECT run_id FROM revision_proposals WHERE id=?1")?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h521c3ae345d9 owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ [proposal], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h440ba3f1084b owner=fractal_store::store::published_list TODO=trace-statement-and-value-representation */ [proposal], |row| row.get::<_, String>(0))
             .optional()?;
         Ok(run)
     }

@@ -2,15 +2,15 @@
 //! A real, isolated daemon pauses inside canonical replay. Observation must work while SQLite
 //! holds its write transaction, then advance to serving only after both listeners bind.
 
-use st3::MissionsStore;
+use fractal_daemon::MissionsStore;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 
 struct Daemon(Child);
 impl Drop for Daemon {
@@ -21,7 +21,7 @@ impl Drop for Daemon {
 }
 
 fn command(root: &Path) -> Command {
-    let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -37,7 +37,7 @@ fn command(root: &Path) -> Command {
 
 #[test]
 fn private_runtime_socket_refuses_shared_gateway_before_creating_state() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -70,7 +70,7 @@ fn private_runtime_socket_refuses_shared_gateway_before_creating_state() {
 #[test]
 fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_missing_runtime_directory()
 {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -102,7 +102,7 @@ fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_miss
 #[test]
 fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_missing_parent_traversal()
 {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for above_ancestor in [false, true] {
@@ -146,7 +146,7 @@ fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_miss
 
 #[test]
 fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -210,7 +210,7 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let readiness = st3::startup::read(&socket).unwrap();
+    let readiness = fractal_daemon::startup::read(&socket).unwrap();
     assert_eq!(readiness.status, "starting");
     assert_eq!(readiness.phase, "full-replay/base-claims");
     assert_eq!(readiness.frontier, Some(0));
@@ -308,7 +308,7 @@ fi
         );
     }
     std::fs::write(root.join("barrier/release"), b"resume").unwrap();
-    while st3::startup::read(&socket).is_none_or(|state| state.status != "serving") {
+    while fractal_daemon::startup::read(&socket).is_none_or(|state| state.status != "serving") {
         assert!(
             daemon.0.try_wait().unwrap().is_none(),
             "daemon exited: {}",
@@ -323,7 +323,7 @@ fi
     }
     assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
     assert!(std::os::unix::net::UnixStream::connect(root.join("run/client.sock")).is_ok());
-    let readiness = st3::startup::read(&socket).unwrap();
+    let readiness = fractal_daemon::startup::read(&socket).unwrap();
     assert_eq!(readiness.phase, "ready");
     assert_eq!(readiness.frontier, readiness.target);
     let doctor = command(root).args(["doctor", "--json"]).output().unwrap();
@@ -390,7 +390,7 @@ fi
     daemon.0.wait().unwrap();
     assert!(socket.with_file_name("api.sock.readiness.json").exists());
     assert!(
-        st3::startup::read(&socket).is_none(),
+        fractal_daemon::startup::read(&socket).is_none(),
         "a killed daemon's file is not readiness"
     );
 }

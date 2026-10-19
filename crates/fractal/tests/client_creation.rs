@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
-use st3::{api::AppState, store::Store};
+use fractal_daemon::{api::AppState, store::Store};
 use std::{path::Path, sync::Arc};
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
@@ -81,7 +81,7 @@ async fn action(
 async fn personal_shell_creation_retry_and_end_use_person_ownership() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (status, result) = action(
         app.clone(),
         "person/ada",
@@ -101,7 +101,7 @@ async fn personal_shell_creation_retry_and_end_use_person_ownership() {
     let member = desired[0].member.as_ref().unwrap();
     assert_eq!(member.driver, None);
     assert_eq!(member.display_name.as_deref(), Some("A shell"));
-    assert_eq!(member.restart, st3::model::RestartType::Never);
+    assert_eq!(member.restart, fractal_daemon::model::RestartType::Never);
     assert_eq!(member.cwd, "/tmp");
     // A retry with a refreshed fence returns its durable action receipt.
     let (_, caps) = request(
@@ -201,7 +201,7 @@ async fn personal_shell_creation_retry_and_end_use_person_ownership() {
 async fn agent_creation_has_typed_parameters_and_native_first_message() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (status, result) = action(
         app.clone(),
         "person/ada",
@@ -216,7 +216,7 @@ async fn agent_creation_has_typed_parameters_and_native_first_message() {
         "agent/creation-test.worker"
     );
     let members = state.store.desired_subjects().unwrap();
-    let st3::model::LaunchSpec::Argv(argv) = &members[0].member.as_ref().unwrap().launch else {
+    let fractal_daemon::model::LaunchSpec::Argv(argv) = &members[0].member.as_ref().unwrap().launch else {
         panic!()
     };
     assert!(
@@ -319,33 +319,33 @@ async fn first_message_receipt_survives_reopen_and_replication() {
     let mut original = state(root.path());
     original.store = Arc::new(Store::open(&database, "creation-test").unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = st3::client::Client::new(st3::client::Endpoint::Http(format!(
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Http(format!(
         "http://{}",
         listener.local_addr().unwrap()
     )));
     let server_state = original.clone();
     let server = tokio::spawn(async move {
-        axum::serve(listener, st3::api::router(server_state))
+        axum::serve(listener, fractal_daemon::api::router(server_state))
             .await
             .unwrap();
     });
     assert!(
-        st3::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i1")
+        fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i1")
             .await
             .unwrap()
     );
     assert!(
-        !st3::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i1")
+        !fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i1")
             .await
             .unwrap()
     );
     assert!(
-        !st3::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i2")
+        !fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i2")
             .await
             .unwrap()
     );
     assert!(
-        st3::creation::claim_initial_message(&client, "agent/test/worker", "launch-2", "i2")
+        fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-2", "i2")
             .await
             .unwrap()
     );
@@ -358,17 +358,17 @@ async fn first_message_receipt_survives_reopen_and_replication() {
     second.store = Arc::new(Store::open_memory("replica-test").unwrap());
     replicate(&reopened, &second.store);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = st3::client::Client::new(st3::client::Endpoint::Http(format!(
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Http(format!(
         "http://{}",
         listener.local_addr().unwrap()
     )));
     let server = tokio::spawn(async move {
-        axum::serve(listener, st3::api::router(second))
+        axum::serve(listener, fractal_daemon::api::router(second))
             .await
             .unwrap();
     });
     assert!(
-        !st3::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i3")
+        !fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i3")
             .await
             .unwrap()
     );
@@ -380,7 +380,7 @@ async fn first_message_receipt_survives_reopen_and_replication() {
 async fn terminal_declaration_survives_replication_and_rejects_another_claim_actor() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let (status, result) = action(
         app,
         "person/ada",
@@ -404,7 +404,7 @@ async fn terminal_declaration_survives_replication_and_rejects_another_claim_act
         ("revision".into(), json!("forged")),
         ("desired".into(), claim.body["desired"].clone()),
     ]);
-    let forged = st3::model::ClaimInput {
+    let forged = fractal_daemon::model::ClaimInput {
         subject: desired.subject,
         kind: "intent.desired".into(),
         actor: Some("person/alex".into()),

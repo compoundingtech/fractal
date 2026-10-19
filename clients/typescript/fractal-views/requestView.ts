@@ -1,4 +1,4 @@
-// A request card as stui shows one (crates/stui/src/ui/screens.rs, `report` and the Request
+// A request card as stui shows one (crates/fractal-tui/src/ui/screens.rs, `report` and the Request
 // card): a JSON report reads as its telling fields, a yes-or-no question gets Yes and No, and
 // every answer (Nothing to do included) completes the waiting step with a short reason.
 

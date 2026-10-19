@@ -10,7 +10,7 @@
 //! remains at the worker. The identical digest joins these phases without a wire addition.
 //! Peer: ST3_RELAY_TRACE_DIGEST (existing authenticated body SHA256) + ST3_RELAY_TRACE_PEER.
 //! Each process consumes its selector once, including on refusal/cancellation. Configure only
-//! one mode. Adding st3::relay_diagnostic=debug to the existing RUST_LOG filter enables
+//! one mode. Adding fractal_daemon::relay_diagnostic=debug to the existing RUST_LOG filter enables
 //! the existing private stderr sink;
 //! the existing INFO+ OTLP filter excludes these DEBUG events. No exporter is installed here.
 //! Activation is a separate operational decision. Identical authenticated bodies have identical
@@ -175,7 +175,7 @@ pub fn gateway(
         return None;
     }
     (unix_get && selector.gateway(path, actor, caller)).then(|| {
-        let trace = Trace::new(format!("request/{}", st3_kernel::model::new_request_id()));
+        let trace = Trace::new(format!("request/{}", fractal_kernel::model::new_request_id()));
         if let Some(connection) = connection {
             connection.record(&trace);
         }

@@ -137,12 +137,12 @@ fn declare(daemon: &Daemon, driver: &str) {
         daemon.root.join("workspace"),
         driver,
     );
-    let intent = st3::parse_intent(&source, "restart-node").unwrap();
+    let intent = fractal_daemon::parse_intent(&source, "restart-node").unwrap();
     let preview = daemon
         .store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source,
                 source_name: None,
             },
@@ -270,7 +270,7 @@ async fn stop_and_reap(
 fn assert_record(root: &Path, record: &Path, harness: &str, expected_exit: &str) {
     let agent_dir = record.parent().unwrap();
     assert!(
-        st_drivers::harness_events::enabled(agent_dir),
+        fractal_drivers::harness_events::enabled(agent_dir),
         "native observation outbox must be enabled; stderr: {}",
         driver_stderr(root)
     );
@@ -279,7 +279,7 @@ fn assert_record(root: &Path, record: &Path, harness: &str, expected_exit: &str)
         "native teardown must not create a legacy record file; stderr: {}",
         driver_stderr(root)
     );
-    let raw = st_drivers::harness_events::read_snapshot(agent_dir, "harness-state")
+    let raw = fractal_drivers::harness_events::read_snapshot(agent_dir, "harness-state")
         .unwrap_or_else(|error| {
             panic!(
                 "cannot read durable terminal snapshot: {error}; stderr: {}",
@@ -339,10 +339,10 @@ fn assert_record(root: &Path, record: &Path, harness: &str, expected_exit: &str)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_stop_escalation_records_ended_before_its_group_sigkill() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let tmp = st3::test_support::evidence_tempdir();
+    let tmp = fractal_daemon::test_support::evidence_tempdir();
     let mut daemon = Daemon::new(tmp.path());
     let (mut child, wrapper, provider, record) =
         spawn_driver(tmp.path(), &mut daemon, "claude", true).await;
@@ -359,10 +359,10 @@ async fn claude_stop_escalation_records_ended_before_its_group_sigkill() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn opencode_stop_escalation_records_cover_before_its_group_sigkill() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let tmp = st3::test_support::evidence_tempdir();
+    let tmp = fractal_daemon::test_support::evidence_tempdir();
     let mut daemon = Daemon::new(tmp.path());
     let (mut child, wrapper, provider, record) =
         spawn_driver(tmp.path(), &mut daemon, "opencode", true).await;
@@ -379,10 +379,10 @@ async fn opencode_stop_escalation_records_cover_before_its_group_sigkill() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn opencode_graceful_stop_rewrites_cover_with_the_reaped_signal() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    let tmp = st3::test_support::evidence_tempdir();
+    let tmp = fractal_daemon::test_support::evidence_tempdir();
     let mut daemon = Daemon::new(tmp.path());
     let (mut child, wrapper, provider, record) =
         spawn_driver(tmp.path(), &mut daemon, "opencode", false).await;

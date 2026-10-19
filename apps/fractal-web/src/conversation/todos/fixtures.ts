@@ -1,4 +1,4 @@
-import { Agent, decodeUnknownSync, type AgentEncoded } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
 
 /** Synthetic agent identity shared by the native todo projection tests. */
 export const todoAgentRef = 'agent/example/example'

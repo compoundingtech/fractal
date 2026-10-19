@@ -18,6 +18,6 @@ The todo snapshot uses the five native OMP statuses: `completed`, `pending`,
 The coverage test also reads the existing redacted OMP native resume/tool-result
 captures (Pi shares that JSONL session format), and extracts actual message `info`
 and native `part` objects from the installed OpenCode 1.18.34 admission capture in
-`crates/st-drivers/tests/fixtures/harness-admission/opencode-1.18.34.json`.
+`crates/fractal-drivers/tests/fixtures/harness-admission/opencode-1.18.34.json`.
 Those objects are the data stored in OpenCode's message/part rows, not its outer
 SSE notification envelope. Unknown future types are separate constructed probes.

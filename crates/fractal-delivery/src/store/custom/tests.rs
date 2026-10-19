@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_store::store::custom::tests_shared_delivery::*;
-use st3_store::store::custom::tests_shared_delivery::{DECIDER, FLEET, RAW_KINDS, SEAT, TREE, decision_tree, empty_input, example, legacy_sync, registration};
-use st3_store::store::custom::tests_shared_delivery::{request, signed_pair, signed_sync, tree_claim, tree_document, tree_status};
+use fractal_store::store::custom::tests_shared_delivery::*;
+use fractal_store::store::custom::tests_shared_delivery::{DECIDER, FLEET, RAW_KINDS, SEAT, TREE, decision_tree, empty_input, example, legacy_sync, registration};
+use fractal_store::store::custom::tests_shared_delivery::{request, signed_pair, signed_sync, tree_claim, tree_document, tree_status};
 
 
 fn reply(store: &Store, id: &str) -> ReplyRequest {
@@ -143,7 +143,7 @@ fn custom_basis_invalidation_guard_revival_and_reframe_are_graph_facts() {
         .fields
         .get_mut("selection")
         .unwrap();
-    selection.value_type = st3_schema::ValueType::Array;
+    selection.value_type = fractal_schema::ValueType::Array;
     m.attention
         .as_mut()
         .unwrap()
@@ -151,7 +151,7 @@ fn custom_basis_invalidation_guard_revival_and_reframe_are_graph_facts() {
         .fields
         .get_mut("selection")
         .unwrap()
-        .value_type = st3_schema::ValueType::Array;
+        .value_type = fractal_schema::ValueType::Array;
     a.register_custom_kind(&RegistrationRequest {
         manifest: m,
         actor: "agent/garden/seed".into(),

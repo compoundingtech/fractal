@@ -12,7 +12,7 @@ pub fn capture_bounds(store: &Store) -> i64 {
     let frontier = smallclaims::store::max_envelope_rowid(&tx).unwrap();
     let cut = i64::try_from(now_ms() + 1_000).unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h0e542d00986d owner=st3_store::store::checkpoint_capture_epoch_tests_shared_attention_tests TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch
+        /* sqlite-large-value: allow-for-now lv-h623a73805679 owner=fractal_store::store::checkpoint_capture_epoch_tests_shared_attention_tests TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch
          SET envelope_frontier=MAX(envelope_frontier,?1),cut_unix_ms=MAX(cut_unix_ms,?2)
          WHERE id=1 AND (envelope_frontier<?1 OR cut_unix_ms<?2)",
         [frontier, cut],
@@ -43,7 +43,7 @@ pub fn projected_store() -> Store {
             .get()
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .unwrap(),
-        st3_schema::STORAGE_VERSION,
+        fractal_schema::STORAGE_VERSION,
         "the storage registry must name the initialized SQLite version"
     );
     publish(

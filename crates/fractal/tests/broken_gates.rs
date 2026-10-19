@@ -34,7 +34,7 @@ impl Daemon {
             executable(&bin.join(name), source);
         }
         let log = File::create(root.join("daemon.log")).unwrap();
-        let child = st3::test_support::command(test_bin!("st3-fixture"))
+        let child = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
             .env_clear()
             .env("HOME", root)
             .env(
@@ -90,7 +90,7 @@ impl Daemon {
             .build()
             .unwrap();
         let response = runtime.block_on(async {
-            st3_client::Client::unix(self.root.join("daemon.sock"))
+            fractal_client::Client::unix(self.root.join("daemon.sock"))
                 .agents_list_after(None, Some(200), true, cut)
                 .await
                 .expect("the fixture must publish the requested host-local roster cut")
@@ -103,7 +103,7 @@ impl Daemon {
     }
 
     fn run_cli_format(&self, args: &[&str], json: bool) -> std::process::Output {
-        let mut command = st3::test_support::command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
         command
             .env_clear()
             .env("HOME", &self.root)
@@ -221,7 +221,7 @@ fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
 
 #[test]
 fn mission_publish_dry_run_prints_the_preview_without_gates_or_publication() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -273,7 +273,7 @@ mission "example/preview" state="ready" {
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
         let preview = daemon.command(&args);
         let resolved = preview["resolved_intent"]["kdl"].as_str().unwrap();
-        let intent = st3::graph::parse_intent(resolved, "orchid").unwrap();
+        let intent = fractal_daemon::graph::parse_intent(resolved, "orchid").unwrap();
         assert!(resolved.contains("Inspect publication without running commands."));
         assert!(preview["normalized"].is_object(), "{preview:#}");
         let revision = preview["mission_revisions"]["mission/example/preview"]
@@ -325,7 +325,7 @@ mission "example/preview" state="ready" {
 
 #[test]
 fn mission_publish_dry_run_prints_blockers_before_refusing_publication() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -370,7 +370,7 @@ fn mission_publish_dry_run_prints_blockers_before_refusing_publication() {
 
 #[test]
 fn apply_bundles_seats_missions_and_schedules_and_refuses_partial_publication() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -476,7 +476,7 @@ fn apply_bundles_seats_missions_and_schedules_and_refuses_partial_publication() 
 
 #[test]
 fn apply_can_check_exec_gates_during_plain_and_owned_dry_runs() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for owned in [false, true] {
@@ -589,7 +589,7 @@ mission "example/check" state="ready" {
 
 #[test]
 fn a_terminal_exec_fails_its_unsatisfied_field_gate() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -658,7 +658,7 @@ mission "orchid/replay" state="ready" {
 
 #[test]
 fn missions_and_doctor_surface_a_terminal_field_gate_behind_a_pending_gate() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -738,7 +738,7 @@ mission "orchid/replay" state="ready" {
         health["message"].as_str().unwrap().contains(stuck),
         "{health}"
     );
-    let output = st3::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
         .env_clear()
         .env("HOME", root.path())
         .env("ST3_DAEMON_WAIT", "0")
@@ -843,7 +843,7 @@ fn replay_host(root: &Path) -> Daemon {
     std::fs::create_dir_all(root.join("linker")).unwrap();
     // Supply only the gate tools: mold must stay absent until the revision adds it.
     for name in ["awk", "cat", "grep", "sh", "env"] {
-        let tool = st_runtime::resolve_executable(name, &std::env::vars().collect()).unwrap();
+        let tool = fractal_runtime::resolve_executable(name, &std::env::vars().collect()).unwrap();
         std::os::unix::fs::symlink(tool, root.join("tools").join(name)).unwrap();
     }
     executable(
@@ -878,7 +878,7 @@ fn replay_host(root: &Path) -> Daemon {
 
 #[test]
 fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -987,7 +987,7 @@ fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
 
 #[test]
 fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -1193,7 +1193,7 @@ mission "orchid/inputs" state="ready" {
 
 #[test]
 fn until_scripts_wait_for_round_outputs_in_preflight_and_still_run_each_round() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();

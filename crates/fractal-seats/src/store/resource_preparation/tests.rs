@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 use crate::MissionsStore;
 use super::*;
-use st3_missions::store::resource_preparation_shared_seats::*;
-use st3_missions::store::resource_preparation_shared_seats::{BEFORE_VALIDATE};
-use st3_missions::store::resource_preparation::tests_shared_seats::*;
-use st3_missions::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
+use fractal_missions::store::resource_preparation_shared_seats::*;
+use fractal_missions::store::resource_preparation_shared_seats::{BEFORE_VALIDATE};
+use fractal_missions::store::resource_preparation::tests_shared_seats::*;
+use fractal_missions::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
 
 
 fn observe(store: &Store, revision: &str, next: u128) -> ResourceObservationOutcome {
@@ -42,7 +42,7 @@ fn quiet_preparation_and_two_stale_attempts_report_separate_writer_work() {
     let _reset = ResetHook;
     BEFORE_VALIDATE.with(|hook| *hook.borrow_mut() = Some(Box::new(|store, pass| {
         store.connection.batched(|tx| -> Result<()> {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h3769edd512a6 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hfeac6b2814a0 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
                 [pass.to_string()])?;
             Ok(())
         }).unwrap().unwrap();
@@ -96,7 +96,7 @@ fn the_write_flag_follows_the_fast_path_the_stale_retries_and_the_fallback() {
     let _reset = ResetHook;
     BEFORE_VALIDATE.with(|hook| *hook.borrow_mut() = Some(Box::new(|store, pass| {
         store.connection.batched(|tx| -> Result<()> {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h6e3ad753b68c owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h810b1410be6a owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
                 [pass.to_string()])?;
             Ok(())
         }).unwrap().unwrap();
@@ -129,47 +129,47 @@ fn native_validation_fences_repair_order_pending_and_schema_changes() {
         .pop()
         .unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h8a380e472e7a owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h6e2c2c6005a2 owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hbe7f04954e05 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
+            /* sqlite-large-value: allow-for-now lv-h99ac5cf0bbed owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
             [&health.id],
         )
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hcdee682cda37 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h989af05e3fcb owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hf49fafe3a857 owner=st3_seats::store::resource_preparation::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=replica_sequence+1 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hc7ca4850cd78 owner=fractal_seats::store::resource_preparation::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=replica_sequence+1 WHERE id=?1",
             [&health.batch_id],
         )
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hd3c3b4b1ce7c owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h9b34dc483f39 owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-he6d11bf548bb owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending VALUES('resource/fixture')",
+            /* sqlite-large-value: allow-for-now lv-h8815fe513f47 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending VALUES('resource/fixture')",
             [],
         )
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h2a71c536849e owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hf4ca190db7bf owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-hda6f4e521c41 owner=st3_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE invented_ddl(value TEXT)")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h1d33e113f99a owner=fractal_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE invented_ddl(value TEXT)")
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
@@ -185,7 +185,7 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
         [], |row| row.get::<_, bool>(0),
     ).unwrap(), "file-backed open must exercise the retained replay scratch table");
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hbd3fa65f7433 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h6a4b5765a63b owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     assert!(
         prepared.value.is_some(),
         "known replay scratch must not disable preparation"
@@ -225,28 +225,28 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h3dcd75f28e78 owner=st3_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE invented_shadow(value TEXT)")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hf14e4bdaf54f owner=fractal_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE invented_shadow(value TEXT)")
         .unwrap();
-    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h61f44c601b97 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h2d79b35acdbe owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none());
     assert_unchanged_fallback();
     store
         .connection
         .write()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hd1ee7cc0233e owner=st3_seats::store::resource_preparation::tests TODO=prepare-body-and-predecessor-values */ "DROP TABLE temp.invented_shadow;
+            /* sqlite-large-value: allow-for-now lv-h5d89c0655116 owner=fractal_seats::store::resource_preparation::tests TODO=prepare-body-and-predecessor-values */ "DROP TABLE temp.invented_shadow;
          CREATE TEMP VIEW claims AS SELECT * FROM main.claims;",
         )
         .unwrap();
     assert!(
-        fence.prepare(/* sqlite-large-value: allow-for-now lv-h36584b52b193 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-h4d9343dd017a owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "a TEMP view shadowing an actual input is refused"
     );
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h9d308a7e7b17 owner=st3_seats::store::resource_preparation::tests TODO=prepare-body-and-predecessor-values */ "DROP VIEW temp.claims;
+        /* sqlite-large-value: allow-for-now lv-he971517b6456 owner=fractal_seats::store::resource_preparation::tests TODO=prepare-body-and-predecessor-values */ "DROP VIEW temp.claims;
          CREATE TEMP TRIGGER invented_replay_trigger AFTER INSERT ON heal_replay_base_order BEGIN SELECT 1; END;",
     ).unwrap();
     assert!(
-        fence.prepare(/* sqlite-large-value: allow-for-now lv-hedb8b970bc25 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-h394b74dae3bd owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "a TEMP trigger on an admitted scratch table is still refused"
     );
     assert_unchanged_fallback();
@@ -254,55 +254,55 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
         .connection
         .write()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h91c275d7abbb owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER temp.invented_replay_trigger;
+            /* sqlite-large-value: allow-for-now lv-hb9f5d34f4adc owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER temp.invented_replay_trigger;
          INSERT INTO temp.heal_replay_base_order(claim_id) VALUES ('invented-pending-replay');",
         )
         .unwrap();
     assert!(
-        fence.prepare(/* sqlite-large-value: allow-for-now lv-h5934c5fe6072 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-heccf986ad193 owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "nonempty replay scratch is ineligible"
     );
     assert_unchanged_fallback();
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h9f39e02935a7 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM temp.heal_replay_base_order")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h7ec943e58bd1 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM temp.heal_replay_base_order")
         .unwrap();
-    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-hca843e7d7e56 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_some());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h1beb36252742 owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_some());
     for definition in [
-        /* sqlite-large-value: allow-for-now lv-h136326fba33d owner=st3_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(ordinal TEXT PRIMARY KEY, claim_id TEXT NOT NULL)",
-        /* sqlite-large-value: allow-for-now lv-he3bde616427b owner=st3_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL, extra TEXT)",
-        /* sqlite-large-value: allow-for-now lv-h12dca3204a73 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP VIEW heal_replay_base_order AS SELECT 1 AS ordinal, 'invented' AS claim_id",
+        /* sqlite-large-value: allow-for-now lv-ha42a6825a9d8 owner=fractal_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(ordinal TEXT PRIMARY KEY, claim_id TEXT NOT NULL)",
+        /* sqlite-large-value: allow-for-now lv-h6cdba10baed9 owner=fractal_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL, extra TEXT)",
+        /* sqlite-large-value: allow-for-now lv-h7c99f09efc3c owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP VIEW heal_replay_base_order AS SELECT 1 AS ordinal, 'invented' AS claim_id",
     ] {
         store
             .connection
             .write()
-            .execute_batch(/* sqlite-large-value: allow-for-now lv-h5e5850f0dc71 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE temp.heal_replay_base_order")
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-h8cc58bcee9d7 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE temp.heal_replay_base_order")
             .unwrap();
-        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h4358b33b0995 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ definition).unwrap();
+        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h51e94c47c4dc owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ definition).unwrap();
         assert!(
-            fence.prepare(/* sqlite-large-value: allow-for-now lv-h5fc47b0ef7a4 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
+            fence.prepare(/* sqlite-large-value: allow-for-now lv-h98a6f6205cbb owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
             "mismatched TEMP definition was admitted: {definition}"
         );
         assert_unchanged_fallback();
-        if definition.starts_with(/* sqlite-large-value: allow-for-now lv-hfd858001be67 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP VIEW") {
+        if definition.starts_with(/* sqlite-large-value: allow-for-now lv-h127af3ce1c01 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP VIEW") {
             store
                 .connection
                 .write()
-                .execute_batch(/* sqlite-large-value: allow-for-now lv-hda1f51c46c3a owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP VIEW temp.heal_replay_base_order")
+                .execute_batch(/* sqlite-large-value: allow-for-now lv-h78ac0d45c327 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP VIEW temp.heal_replay_base_order")
                 .unwrap();
         } else {
             store
                 .connection
                 .write()
-                .execute_batch(/* sqlite-large-value: allow-for-now lv-hbd26ef293614 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE temp.heal_replay_base_order")
+                .execute_batch(/* sqlite-large-value: allow-for-now lv-h9390cf1dede3 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE temp.heal_replay_base_order")
                 .unwrap();
         }
         store
             .connection
             .write()
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-hab50bb58f61d owner=st3_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
+                /* sqlite-large-value: allow-for-now lv-h61928bdfd108 owner=fractal_seats::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
              ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)",
             )
             .unwrap();
@@ -310,13 +310,13 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
     drop(store);
     let reopened = Store::open(&path, "prepared-reopen").unwrap();
     let reopened_fence = Fence::new(&reopened);
-    let fresh = reopened_fence.prepare(/* sqlite-large-value: allow-for-now lv-hca5bdf32fb9d owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &reopened, |_| ());
+    let fresh = reopened_fence.prepare(/* sqlite-large-value: allow-for-now lv-h1f24e28a5c36 owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &reopened, |_| ());
     assert!(
         fresh.value.is_some(),
         "a fresh file-backed incarnation can prepare"
     );
     assert!(reopened_fence.current(&reopened, &reopened.connection.write(), &fresh));
-    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h4fa3062ef2a4 owner=st3_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &reopened, |_| ()).value.is_none());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h06fa7830a738 owner=fractal_seats::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &reopened, |_| ()).value.is_none());
     assert!(!fence.current(&reopened, &reopened.connection.write(), &prepared));
     // The retained Arc allocation prevents an address-reused native handle from making a
     // newly opened Store the old incarnation. Neither the path nor cookie proves identity.
@@ -586,7 +586,7 @@ fn an_observer_repair_reprepares_instead_of_consuming_stale_health() {
                     .connection
                     .write()
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-hb59e64b013c6 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
+                        /* sqlite-large-value: allow-for-now lv-hc98701ace522 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
                         [&health.id],
                     )
                     .unwrap();
@@ -664,7 +664,7 @@ fn an_observer_revision_change_keeps_the_existing_refusal_without_partial_effect
         .unwrap();
     let _reset = ResetHook;
     BEFORE_VALIDATE.with(|hook| *hook.borrow_mut() = Some(Box::new(|store, _| {
-        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h198137882947 owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision='invented-new-revision' WHERE subject='observer/fixture'", []).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hdce0bf9ddc53 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision='invented-new-revision' WHERE subject='observer/fixture'", []).unwrap();
     })));
     let error = store
         .record_resource_observation(
@@ -808,7 +808,7 @@ subscription "fixture" {
                     .connection
                     .write()
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-h39ecd60094fd owner=st3_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='agent/prepared-recipient.receiver'",
+                        /* sqlite-large-value: allow-for-now lv-h07143314b6c2 owner=fractal_seats::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='agent/prepared-recipient.receiver'",
                         [],
                     )
                     .unwrap();

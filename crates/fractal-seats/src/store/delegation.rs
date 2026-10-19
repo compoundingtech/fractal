@@ -3,15 +3,15 @@
 use crate::PersonWorkStore;
 use super::*;
 use crate::model::{DelegationPolicyRequest, DelegationProof};
-pub use st3_missions::store::delegation::*;
-pub use st3_missions::store::delegation::{ACTIONS, add_evidence, add_fields, policy_actions, validate_write};
+pub use fractal_missions::store::delegation::*;
+pub use fractal_missions::store::delegation::{ACTIONS, add_evidence, add_fields, policy_actions, validate_write};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::PersonStepResponse;
-    use st3_missions::store::delegation_tests_shared_seats::*;
-    use st3_missions::store::delegation_tests_shared_seats::{policy, proof, sent};
+    use fractal_missions::store::delegation_tests_shared_seats::*;
+    use fractal_missions::store::delegation_tests_shared_seats::{policy, proof, sent};
 
     #[test]
     fn delegated_ask_records_actor_person_instruction_and_replays() {

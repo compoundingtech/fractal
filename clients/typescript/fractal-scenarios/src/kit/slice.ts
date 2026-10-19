@@ -14,7 +14,7 @@ import type {
   TerminalScreen,
   TimelineEntry,
   Work,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 
 import type { Asciicast } from './asciicast.ts'
 import type { SyncStatus } from './syncStatus.ts'

@@ -10,7 +10,7 @@ use crate::store::message_point_qualification_shared_delivery::*;
 
 pub fn batch(db: &Connection, id: &str, sequence: u64) {
     db.execute(
-        /* sqlite-large-value: allow-for-now lv-h345728a359dd owner=st3_store::store::message_point_qualification_tests_shared_delivery TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hc20ac1d796a5 owner=fractal_store::store::message_point_qualification_tests_shared_delivery TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
          VALUES(?1,'host/fixture',?2,'fixture-hash','1')",
         params![id, sequence],
     )
@@ -27,7 +27,7 @@ pub fn claim(
     time: &str,
 ) {
     db.execute(
-        /* sqlite-large-value: allow-for-now lv-h6e728f791702 owner=st3_store::store::message_point_qualification_tests_shared_delivery TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h2de007f2a038 owner=fractal_store::store::message_point_qualification_tests_shared_delivery TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
          VALUES(?1,?2,?3,?4,'host/fixture',NULL,?5,'[]',?6)",
         params![id, batch, subject, kind, body.to_string(), time],
     ).unwrap();
@@ -56,7 +56,7 @@ pub fn fixture() -> Store {
 
 pub fn replica(db: &Connection, claim: &str, ordinal: usize) {
     db.execute(
-        /* sqlite-large-value: allow-for-now lv-hd0cde5c16dba owner=st3_store::store::message_point_qualification_tests_shared_delivery TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hc864b9983a4c owner=fractal_store::store::message_point_qualification_tests_shared_delivery TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
          VALUES(?1,'host/writer',1,?2,?3,X'00','valid',?4,'1')",
         params![format!("{claim}/record/{ordinal}"), format!("{claim}/envelope"), ordinal, claim],
     ).unwrap();

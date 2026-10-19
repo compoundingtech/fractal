@@ -1,5 +1,5 @@
 [package]
-name = "st-wire"
+name = "fractal-wire"
 version = "0.1.0"
 edition = "2024"
 description = "Shared JSON shapes for driver and CLI readers."

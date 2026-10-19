@@ -10,8 +10,8 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt as _;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
-use st3_missions::store::native_resume_tests_shared_seats::*;
-use st3_missions::store::native_resume_tests_shared_seats::{argv};
+use fractal_missions::store::native_resume_tests_shared_seats::*;
+use fractal_missions::store::native_resume_tests_shared_seats::{argv};
 
 
 #[cfg(unix)]

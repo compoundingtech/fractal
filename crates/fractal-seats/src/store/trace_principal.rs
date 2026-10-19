@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::MissionsStore;
 use super::*;
-pub use st3_missions::store::trace_principal::*;
+pub use fractal_missions::store::trace_principal::*;
 
 pub trait TracePrincipalStore {
     /// The accountable person declared once by a fleet root. This does not answer whose
@@ -39,7 +39,7 @@ impl TracePrincipalStore for Store {
                 }
                 if let Some(person) = &desired.accountable {
                     // Admission enforces this; also verify the selected root at the read cut.
-                    st3_schema::accountable::validate_claim(
+                    fractal_schema::accountable::validate_claim(
                         &actor,
                         "intent.desired",
                         &serde_json::to_value(&desired)?,
@@ -73,8 +73,8 @@ impl TracePrincipalStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::trace_principal_tests_shared_seats::*;
-    use st3_missions::store::trace_principal_tests_shared_seats::{declare, store};
+    use fractal_missions::store::trace_principal_tests_shared_seats::*;
+    use fractal_missions::store::trace_principal_tests_shared_seats::{declare, store};
 
     #[test]
     fn trace_principal_follows_only_declaring_seats_to_an_explicit_root() {

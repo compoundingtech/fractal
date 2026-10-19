@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 pub(super) async fn run_wait(client: &Client, args: WaitArgs, json_output: bool) -> Result<()> {
     validate_wait_condition(&args.condition)?;
@@ -45,7 +45,7 @@ pub(super) async fn run_work(
             let result: ClaimRecord = client
                 .post(
                     "/v1/work/delegation",
-                    &st3::model::DelegationPolicyRequest {
+                    &fractal_daemon::model::DelegationPolicyRequest {
                         person: args.person,
                         actor: args.actor,
                         actions: args.actions,
@@ -63,7 +63,7 @@ pub(super) async fn run_work(
             let response: StepRunView = client
                 .post(
                     "/v1/work/start",
-                    &st3::model::WorkStartRequest {
+                    &fractal_daemon::model::WorkStartRequest {
                         actor: args.actor.clone(),
                         title: args.title,
                         idempotency_key: args
@@ -91,7 +91,7 @@ pub(super) async fn run_work(
             let response: StepRunView = client
                 .post(
                     &format!("/v1/work/handoff/{}", urlencoding::encode(&args.subject)),
-                    &st3::model::WorkHandoffRequest {
+                    &fractal_daemon::model::WorkHandoffRequest {
                         actor: args.actor,
                         incarnation,
                         to: args.to,
@@ -113,7 +113,7 @@ pub(super) async fn run_work(
                         "/v1/work/acknowledge/{}",
                         urlencoding::encode(&args.subject)
                     ),
-                    &st3::model::WorkAcknowledgeRequest {
+                    &fractal_daemon::model::WorkAcknowledgeRequest {
                         actor: args.actor,
                         message: args.message,
                     },
@@ -205,7 +205,7 @@ pub(super) async fn run_work(
                             format!("person-response:{}", uuid::Uuid::now_v7().simple())
                         }),
                         answer: (args.answer.is_some() || args.text.is_some()).then(|| {
-                            st3::person_request::AnswerInput {
+                            fractal_daemon::person_request::AnswerInput {
                                 id: args.answer,
                                 text: args.text,
                             }
@@ -322,7 +322,7 @@ pub(super) async fn run_work(
         WorkCommand::Wait(args) => {
             let actor = args.actor.context("a work wait needs explicit --as")?;
             reject_foreign_agent_actor(&actor)?;
-            let wait_ms = st3::graph::parse_duration(&args.wait_for, true)?;
+            let wait_ms = fractal_daemon::graph::parse_duration(&args.wait_for, true)?;
             let subject = if args.subject.starts_with("step-run/") {
                 args.subject.clone()
             } else {
@@ -361,7 +361,7 @@ pub(super) async fn run_work(
         WorkCommand::Extend(args) => {
             let actor = args.actor.context("a work extension needs explicit --as")?;
             reject_foreign_agent_actor(&actor)?;
-            let by_ms = st3::graph::parse_duration(&args.by, true)?;
+            let by_ms = fractal_daemon::graph::parse_duration(&args.by, true)?;
             let incarnation = match args.incarnation {
                 Some(incarnation) => Some(incarnation),
                 None => current_agent_incarnation(client, &actor).await?,
@@ -431,7 +431,7 @@ pub(super) async fn run_work(
                     urlencoding::encode(&args.run)
                 ))
                 .await?;
-            let parsed = st3::parse_intent(&kdl, "local")?;
+            let parsed = fractal_daemon::parse_intent(&kdl, "local")?;
             let mission_id = run.mission.strip_prefix("mission/").unwrap_or(&run.mission);
             let candidate = parsed.missions.get(mission_id).with_context(|| {
                 format!(
@@ -440,7 +440,7 @@ pub(super) async fn run_work(
                 )
             })?;
             anyhow::ensure!(
-                st3::mission::top_level_mission_ids(&parsed.missions).len() == 1,
+                fractal_daemon::mission::top_level_mission_ids(&parsed.missions).len() == 1,
                 "a mission revision file must contain exactly one top-level mission"
             );
             let operation = format!("revision-{}", uuid::Uuid::now_v7().simple());
@@ -635,7 +635,7 @@ async fn post_work(
     reject_foreign_agent_actor(&actor)?;
     let subject = if args.subject.starts_with("step-run/") { args.subject.clone() }
         else { format!("step-run/{}", args.subject) };
-    let started_at_unix_ms = st_drivers::message::now_ms();
+    let started_at_unix_ms = fractal_drivers::message::now_ms();
     let response: Result<StepRunView> = async {
         let incarnation = match args.incarnation {
             Some(incarnation) => Some(incarnation),
@@ -658,16 +658,16 @@ async fn post_work(
             .await
     }.await;
     let response = response.inspect_err(|error| {
-        if action == "claim" && let Some(outage) = st3::client::daemon_unreachable(error)
+        if action == "claim" && let Some(outage) = fractal_daemon::client::daemon_unreachable(error)
             && let Some(os_error) = outage.socket_os_error()
         {
-            let receipt = st_drivers::work_claim_failure::Receipt {
+            let receipt = fractal_drivers::work_claim_failure::Receipt {
                 actor: actor.clone(), step_run: subject.clone(),
                 socket: outage.endpoint().into(), os_error, started_at_unix_ms,
-                observed_at_unix_ms: st_drivers::message::now_ms(),
+                observed_at_unix_ms: fractal_drivers::message::now_ms(),
             };
             if receipt.valid() {
-                eprintln!("{}{}", st_drivers::work_claim_failure::PREFIX,
+                eprintln!("{}{}", fractal_drivers::work_claim_failure::PREFIX,
                     serde_json::to_string(&receipt).expect("socket receipt serializes"));
             }
         }

@@ -1,4 +1,4 @@
-import type * as St3 from '@smalltalk/st3-client/schema'
+import type * as St3 from '@fractal/client/schema'
 import { DateTime, Option } from 'effect'
 
 import words from '../../../../fixtures/clients/words.json' with { type: 'json' }

@@ -83,12 +83,12 @@ carriers=every-rule-but-loop.state-and-harness-questions-keeps-the-newest-carrie
 review=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references";
 
 /// A canonical description of every rule: one line per rule of the retention policy
-/// (`crates/st3-schema/retention.toml`), then the engine's terms. The rules digest hashes it with
+/// (`crates/fractal-schema/retention.toml`), then the engine's terms. The rules digest hashes it with
 /// `RULES_VERSION`.
 pub fn rules_description() -> &'static str {
     static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DESCRIPTION.get_or_init(|| {
-        format!("{}\n{ENGINE_DESCRIPTION}", st3_schema::retention::policy().rules_description())
+        format!("{}\n{ENGINE_DESCRIPTION}", fractal_schema::retention::policy().rules_description())
     })
 }
 
@@ -120,7 +120,7 @@ pub enum Rule {
 pub fn question_kind(kind: &str) -> bool {
     matches!(
         kind,
-        st3_schema::harness_questions::OBSERVED | st3_schema::harness_questions::RESOLVED
+        fractal_schema::harness_questions::OBSERVED | fractal_schema::harness_questions::RESOLVED
     )
 }
 
@@ -137,7 +137,7 @@ pub fn expired_questions<'a>(
 
 /// Whether redundant observation history may expire at `at`.
 pub fn question_expired(resolved_at: u128, at: u128) -> bool {
-    resolved_at.saturating_add(st3_schema::harness_questions::RESOLVED_RETENTION_MS) <= at
+    resolved_at.saturating_add(fractal_schema::harness_questions::RESOLVED_RETENTION_MS) <= at
 }
 
 pub fn fields(claim: &ClaimRecord) -> Option<&serde_json::Map<String, Value>> {
@@ -160,9 +160,9 @@ pub fn field_str<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
 
 /// The planner function a policy rule's `keep` names, or `None` for a rule that keeps every
 /// claim. `seat.status-history` is planned across kinds in `plan_drops`, not by slot.
-fn planner_rule(rule: &st3_schema::retention::RulePolicy) -> Option<Rule> {
+fn planner_rule(rule: &fractal_schema::retention::RulePolicy) -> Option<Rule> {
     let min_age = rule.min_age.as_deref().map(|age| {
-        st3_schema::retention::days_ms(age).unwrap_or_else(|error| panic!("{}: {error}", rule.kind))
+        fractal_schema::retention::days_ms(age).unwrap_or_else(|error| panic!("{}: {error}", rule.kind))
     });
     let planned = match rule.keep.as_str() {
         "newest" | "newest,newest-carrier-of-each-field" => match min_age {
@@ -194,12 +194,12 @@ fn planner_rule(rule: &st3_schema::retention::RulePolicy) -> Option<Rule> {
 }
 
 /// The policy's rules by kind, each with its planner function.
-fn policy_rules() -> &'static BTreeMap<&'static str, Vec<(&'static st3_schema::retention::RulePolicy, Rule)>> {
-    static RULES: std::sync::OnceLock<BTreeMap<&'static str, Vec<(&'static st3_schema::retention::RulePolicy, Rule)>>> =
+fn policy_rules() -> &'static BTreeMap<&'static str, Vec<(&'static fractal_schema::retention::RulePolicy, Rule)>> {
+    static RULES: std::sync::OnceLock<BTreeMap<&'static str, Vec<(&'static fractal_schema::retention::RulePolicy, Rule)>>> =
         std::sync::OnceLock::new();
     RULES.get_or_init(|| {
         let mut rules = BTreeMap::<&str, Vec<_>>::new();
-        for rule in &st3_schema::retention::policy().rules {
+        for rule in &fractal_schema::retention::policy().rules {
             let planned = planner_rule(rule);
             if let Some(planned) = planned {
                 rules.entry(rule.kind.as_str()).or_default().push((rule, planned));
@@ -264,8 +264,8 @@ pub fn witnessed_names(
     later_claims: usize,
 ) -> bool {
     if later_claims > 0
-        && let Some(spec) = st3_schema::registry().claim(kind)
-        && spec.cardinality == st3_schema::Cardinality::StateTransition
+        && let Some(spec) = fractal_schema::registry().claim(kind)
+        && spec.cardinality == fractal_schema::Cardinality::StateTransition
         && own.iter().all(|name| spec.fields.contains_key(name))
     {
         return true;
@@ -661,8 +661,8 @@ pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
         .into_iter()
         .flat_map(|inputs| inputs.values())
         .filter_map(|input| input.get("claim_id").and_then(Value::as_str));
-    let review = st3_schema::review::claim_references(&claim.kind, body);
-    let predecessors = st3_schema::review::KINDS
+    let review = fractal_schema::review::claim_references(&claim.kind, body);
+    let predecessors = fractal_schema::review::KINDS
         .contains(&claim.kind.as_str())
         .then_some(claim.predecessors.iter().map(String::as_str))
         .into_iter()
@@ -674,8 +674,8 @@ pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
 /// is not plain append or state transition, or one the registry does not know.
 pub fn guarded_kind(kind: &str) -> bool {
     !matches!(
-        st3_schema::registry().claim(kind).map(|spec| spec.cardinality.clone()),
-        Some(st3_schema::Cardinality::Append | st3_schema::Cardinality::StateTransition)
+        fractal_schema::registry().claim(kind).map(|spec| spec.cardinality.clone()),
+        Some(fractal_schema::Cardinality::Append | fractal_schema::Cardinality::StateTransition)
     )
 }
 
@@ -761,7 +761,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
         first
             .iter()
             .map(|index| &claims[*index].claim)
-            .filter(|claim| claim.kind == st3_schema::harness_questions::RESOLVED)
+            .filter(|claim| claim.kind == fractal_schema::harness_questions::RESOLVED)
             .map(|claim| (claim.subject.as_str(), claim.accepted_at_unix_ms)),
         cut,
     );
@@ -992,7 +992,7 @@ pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
         |row| row.get(0),
     )?;
     if legacy {
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h47a731449d40 owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_event_payloads", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hcd7ca9d12c78 owner=fractal_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_event_payloads", [])?;
     }
     for table in PROJECTION_TABLES {
         let exists: bool = transaction.query_row(
@@ -1001,7 +1001,7 @@ pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
             |row| row.get(0),
         )?;
         if exists {
-            transaction.execute(&format!(/* sqlite-large-value: allow-for-now lv-h9817b8b736b1 owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])?;
+            transaction.execute(&format!(/* sqlite-large-value: allow-for-now lv-h67ed73d86ad9 owner=fractal_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])?;
         }
     }
     rebuild_operations_tx(transaction)?;
@@ -1032,7 +1032,7 @@ pub fn subject_answers_with_sources(connection: &Connection, subject: &str, cut:
 fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sources: Option<&mut CheckpointAnswerSources>) -> Result<Value> {
     let mut answers = serde_json::Map::new();
     if subject.starts_with("glass/") {
-        let person = st3_schema::glasses::owner(subject).map_err(anyhow::Error::new)?;
+        let person = fractal_schema::glasses::owner(subject).map_err(anyhow::Error::new)?;
         answers.insert(
             "glasses".into(),
             json!(super::glasses::glasses_at(
@@ -1043,7 +1043,7 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
         );
     }
     if subject.starts_with("arrangement/") {
-        let person = st3_schema::arrangements::owner(subject).map_err(anyhow::Error::new)?;
+        let person = fractal_schema::arrangements::owner(subject).map_err(anyhow::Error::new)?;
         answers.insert("arrangements".into(), json!(super::arrangements::arrangements_at(connection, person, i64::MAX as u64)?));
         answers.insert("arrangement".into(), json!(super::arrangements::arrangement_at(connection, subject, i64::MAX as u64)?));
     }
@@ -1203,7 +1203,7 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
     }
     answers.insert("latest".into(), Value::Object(latest));
     let timing_claims = connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hfa821a5dea0b owner=st3_store::store::checkpoint_rules TODO=trace-statement-and-value-representation */ &format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha9759d1acc2c owner=fractal_store::store::checkpoint_rules TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind IN (
                  'step-run.state','step-run.carried','work.claimed','work.renewed',
@@ -1326,9 +1326,9 @@ pub fn clear_projections(transaction: &Transaction<'_>) -> Result<()> {
             |row| row.get(0),
         )?;
         if exists {
-            transaction.execute(&format!(/* sqlite-large-value: allow-for-now lv-h83cc921064a7 owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])?;
+            transaction.execute(&format!(/* sqlite-large-value: allow-for-now lv-h72e64e178b66 owner=fractal_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])?;
         }
     }
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h381eea1a19ee owner=st3_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations;")?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h45129f3e11a0 owner=fractal_store::store::checkpoint_rules TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations;")?;
     Ok(())
 }

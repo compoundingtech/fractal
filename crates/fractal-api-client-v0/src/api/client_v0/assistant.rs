@@ -4,8 +4,8 @@ use super::*;
 use rusqlite::OptionalExtension as _;
 pub use native::propose;
 pub use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
-pub use st3_api_core::api::client_v0::assistant::*;
-pub use st3_api_core::api::client_v0::assistant::{PRINCIPAL, append, authenticate, authorize_route, device_resources, trusted_issuer};
+pub use fractal_api_core::api::client_v0::assistant::*;
+pub use fractal_api_core::api::client_v0::assistant::{PRINCIPAL, append, authenticate, authorize_route, device_resources, trusted_issuer};
 pub mod authorization;
 pub mod native;
 pub mod reads;
@@ -470,8 +470,8 @@ mod tests {
         let app=super::super::super::fabric_router(state.clone());
         let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
         let profile=root.path().join("assistant-devices.json");
-        let key=st3_client::device::SigningKey::generate(st3_client::device::KeyAlgorithm::Ed25519).unwrap();
-        let device=st3_client::device::complete_assistant(&profile,&endpoint,
+        let key=fractal_client::device::SigningKey::generate(fractal_client::device::KeyAlgorithm::Ed25519).unwrap();
+        let device=fractal_client::device::complete_assistant(&profile,&endpoint,
             challenge["pairing_id"].as_str().unwrap(),challenge["code"].as_str().unwrap(),key,false).await.unwrap();
         assert_eq!(serde_json::to_value(&device.session.principal).unwrap(),PRINCIPAL);
         assert!(device.client().unwrap().capabilities().await.is_err());

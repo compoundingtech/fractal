@@ -134,7 +134,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case assistantTerminalContent = "assistant.terminal-content"
 }
 
-public let st3ClientReadPaths: [ReadOperation: String] = [
+public let fractalClientReadPaths: [ReadOperation: String] = [
     .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",

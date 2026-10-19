@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use st3_client::Client;
-use st3_terminal_direct::{FabricTarget, LocalTerminal, RouteError, RouteRequest};
+use fractal_client::Client;
+use fractal_terminal_direct::{FabricTarget, LocalTerminal, RouteError, RouteRequest};
 
 /// How long Fabric gets, all told, before the gateway takes over.
 const FABRIC_ATTEMPT: Duration = Duration::from_secs(4);
@@ -121,7 +121,7 @@ async fn open_in(
                 pty_root: here.pty_root,
             };
             let (name, incarnation) = (local.runtime_id.clone(), local.incarnation_id.clone());
-            match st3_terminal_direct::open_local_terminal(&local).await {
+            match fractal_terminal_direct::open_local_terminal(&local).await {
                 Ok(stream) => Ok(Opened::Stream {
                     stream,
                     name,
@@ -257,7 +257,7 @@ async fn over_fabric(
         .map_err(|error| Miss::NotThisTerminal(error.plain()))?;
     for scope in ["terminal.read", "terminal.control"] {
         if !capabilities.value.capabilities.iter().any(|capability| {
-            capability.id == scope && capability.state == st3_client::CapabilityState::Granted
+            capability.id == scope && capability.state == fractal_client::CapabilityState::Granted
         }) {
             return Err(Miss::NotThisTerminal(format!(
                 "st does not grant you `{scope}` for a direct attachment"
@@ -272,21 +272,21 @@ async fn over_fabric(
             .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    let peer = st3_terminal_direct::owner_peer(&fabric, &members, owner)
+    let peer = fractal_terminal_direct::owner_peer(&fabric, &members, owner)
         .await
         .ok_or_else(|| {
             Miss::Unavailable(format!(
                 "{owner} advertises no Fabric node, and no Fabric peer of this machine has its name"
             ))
         })?;
-    let protocol = st3_terminal_direct::protocol(&fleet_id);
+    let protocol = fractal_terminal_direct::protocol(&fleet_id);
     let target = FabricTarget {
         fabric,
         peer,
         protocol: protocol.clone(),
     };
     let request = RouteRequest::new(terminal.name, terminal.subject, terminal.incarnation);
-    st3_terminal_direct::open_route(&target, &request)
+    fractal_terminal_direct::open_route(&target, &request)
         .await
         .map_err(|error| match error {
             RouteError::Refused(reason) => {
@@ -322,14 +322,14 @@ fn state_dir() -> Option<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    Some(st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal")))
+    Some(fractal_client::product_dirs::resolve(base.join("st3"), base.join("fractal")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use st3::model::ClaimInput;
+    use fractal_daemon::model::ClaimInput;
     use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
     use std::sync::Arc;
@@ -345,10 +345,10 @@ mod tests {
         format!("{}:{created_at}", std::process::id())
     }
 
-    fn state(root: &Path) -> st3::api::AppState {
-        st3::api::AppState {
+    fn state(root: &Path) -> fractal_daemon::api::AppState {
+        fractal_daemon::api::AppState {
             owning_person: None,
-            store: Arc::new(st3::store::Store::open_memory("attach-node").unwrap()),
+            store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
             node: "attach-node".into(),
@@ -359,11 +359,11 @@ mod tests {
             configured_peers: Vec::new(),
             client_relay: None,
             native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
         }
     }
 
-    fn observe_terminal(store: &st3::store::Store, incarnation: &str) {
+    fn observe_terminal(store: &fractal_daemon::store::Store, incarnation: &str) {
         store
             .append_claim(&ClaimInput {
                 subject: SUBJECT.into(),
@@ -383,7 +383,7 @@ mod tests {
             .unwrap();
     }
 
-    fn replicate(source: &st3::store::Store, target: &st3::store::Store) {
+    fn replicate(source: &fractal_daemon::store::Store, target: &fractal_daemon::store::Store) {
         source.bind_fleet("attach-fleet").unwrap();
         target.bind_fleet("attach-fleet").unwrap();
         for _ in 0..100 {
@@ -455,10 +455,10 @@ mod tests {
         })
     }
 
-    async fn serve(state: st3::api::AppState, socket: &Path) -> tokio::task::JoinHandle<()> {
+    async fn serve(state: fractal_daemon::api::AppState, socket: &Path) -> tokio::task::JoinHandle<()> {
         let path = socket.to_path_buf();
         let server = tokio::spawn(async move {
-            let _ = st3::api::serve_unix(&path, st3::api::router(state)).await;
+            let _ = fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await;
         });
         let deadline = Instant::now() + Duration::from_secs(5);
         while std::os::unix::net::UnixStream::connect(socket).is_err() {
@@ -482,7 +482,7 @@ mod tests {
     /// Time the real attach path to a live seat, read only: the runtime read stui makes, the
     /// route (local socket or Fabric), and the first screen of a PEEK, which sends no input and
     /// resizes nothing. Run by hand against a real daemon and fleet:
-    /// `STUI_PROBE_SUBJECT=agent/... STUI_PROBE_PERSON=person/... cargo test -p stui
+    /// `STUI_PROBE_SUBJECT=agent/... STUI_PROBE_PERSON=person/... cargo test -p fractal-tui
     /// live_direct_probe -- --ignored --nocapture`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "reads a live seat through the real daemon and Fabric"]
@@ -491,7 +491,7 @@ mod tests {
         let person = std::env::var("STUI_PROBE_PERSON").expect("STUI_PROBE_PERSON");
         let runtime = std::env::var("STUI_PROBE_RUNTIME").expect("STUI_PROBE_RUNTIME");
         let socket =
-            st3_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(PathBuf::from))
+            fractal_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(PathBuf::from))
                 .unwrap();
         let client = Client::unix_as(&socket, person);
         let started = Instant::now();
@@ -511,7 +511,7 @@ mod tests {
             ),
             _ => {
                 let envelope = client.runtimes_get(&runtime).await.unwrap();
-                let st3_client::Resource::Runtime(found) = envelope.value else {
+                let fractal_client::Resource::Runtime(found) = envelope.value else {
                     panic!("not a runtime")
                 };
                 (
@@ -754,7 +754,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut state = state(root.path());
         // Another host runs the terminal; this daemon only knows it through replication.
-        let owner = st3::store::Store::open_memory("owner-node").unwrap();
+        let owner = fractal_daemon::store::Store::open_memory("owner-node").unwrap();
         observe_terminal(&owner, &incarnation(CREATED_AT));
         replicate(&owner, &state.store);
         state.fleet_id = Some(FLEET_ID.into());
@@ -826,7 +826,7 @@ mod tests {
         with_fleet: bool,
     ) -> (Client, tokio::task::JoinHandle<()>, PathBuf) {
         let mut state = state(root);
-        let owner = st3::store::Store::open_memory("owner-node").unwrap();
+        let owner = fractal_daemon::store::Store::open_memory("owner-node").unwrap();
         observe_terminal(&owner, &incarnation(CREATED_AT));
         replicate(&owner, &state.store);
         state.fleet_id = Some(FLEET_ID.into());

@@ -14,7 +14,7 @@ pub const BACKFILL_CLEAR_ROWS: usize = 64;
 pub const FOLD_CLAIMS: usize = 64;
 pub const PRUNE_ROWS: usize = 64;
 const BACKFILL_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
-const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha8020839be9b owner=st3_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
+const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb72fc75f85f1 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_selectors_v1(
  subject TEXT NOT NULL,born_index INTEGER NOT NULL,retired_index INTEGER,
  sender TEXT NOT NULL DEFAULT 'requester',recipient TEXT NOT NULL DEFAULT '',
@@ -194,9 +194,9 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     ).optional()?;
     if trigger_generation.as_deref() != Some("1") {
         // Upgrade old source capture once, never churn SQLite's schema on reopen.
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h07bba595e569 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS client_message_cut_repair;DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc0ebfddf4a2b owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS client_message_cut_repair;DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;")?;
     }
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h75a2dcaf7ca6 owner=st3_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb6aa628a36c9 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_cut_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL);
 INSERT OR IGNORE INTO local_client_message_cut_epoch VALUES(1,0);
 CREATE TRIGGER IF NOT EXISTS client_message_cut_claim_delete AFTER DELETE ON claims WHEN OLD.subject LIKE 'message/%' BEGIN
@@ -213,21 +213,21 @@ WHEN NEW.state='repaired' AND (OLD.state!='repaired' OR OLD.replacement_claim_id
  UPDATE local_client_message_cut_epoch SET epoch=epoch+1 WHERE id=1;
 END;
 "#)?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha1275ae09321 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ SELECTOR_SCHEMA)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf3d82e91a912 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ SELECTOR_SCHEMA)?;
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h9de379d49b42 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-hb92e5d1ad214 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [TRIGGER_MARKER],
     )?;
     // Older completed v1 caches acquire a conservative first-publication cohort.
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hcebd7aece405 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_publications SELECT CAST(value AS INTEGER),?2 FROM meta WHERE key=?1 AND NOT EXISTS(SELECT 1 FROM local_client_message_publications)",
+        /* sqlite-large-value: allow-for-now lv-h06b3f8910df0 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_publications SELECT CAST(value AS INTEGER),?2 FROM meta WHERE key=?1 AND NOT EXISTS(SELECT 1 FROM local_client_message_publications)",
         params![MARKER,u64::try_from(crate::client_values::client_now_ms())?],
     )?;
     Ok(())
 }
 
 fn drop_version_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h94e2970fbbdd owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ r#"
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hab1c315a36db owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ r#"
 DROP TRIGGER IF EXISTS client_messages_claim_insert;
 DROP TRIGGER IF EXISTS client_messages_claim_delete;
 DROP TRIGGER IF EXISTS client_messages_claim_update;
@@ -296,7 +296,7 @@ fn desired_selection(connection: &Connection, subject: &str) -> Result<DesiredSe
         Ok(value) => Ok(DesiredSelection::Parsed(value)),
         Err(error) => {
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hc8faad8fd36e owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
+                /* sqlite-large-value: allow-for-now lv-h46958ef73818 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
                 [MALFORMED_MARKER],
             )?;
             tracing::warn!(subject, error = %error, "skipping malformed message desired projection during selector fold");
@@ -312,7 +312,7 @@ fn folded_header(connection: &Connection, work: &mut FoldWork) -> Result<Option<
         return Ok(Some(base));
     }
     let indexed: Option<(u64,bool)> = connection.prepare_cached("SELECT created_index,closed FROM message_index WHERE subject=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h6d4f80e1f789 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h28ac822f10fc owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
     let Some((created_index,index_closed)) = indexed else { return Ok(None); };
     let [sender,recipient,tags,status] = std::mem::take(&mut work.values).map(|value| value.and_then(|(_, value)| value));
     let desired = match desired_selection(connection, &work.subject)? {
@@ -341,7 +341,7 @@ fn folded_header(connection: &Connection, work: &mut FoldWork) -> Result<Option<
     let recipient=normalize_message_party(&recipient);
     let bare=recipient.strip_prefix("agent/").filter(|suffix|!suffix.contains('/')).unwrap_or(&recipient);
     let native_mailbox: bool=connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_to_index WHERE kind='message.sent' AND json_extract(body,'$.fields.to') IN (?2,?3) AND subject=?1)")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h6c362a354533 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ params![work.subject,recipient,bare],|row|row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h89cf90b1ce5e owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ params![work.subject,recipient,bare],|row|row.get(0))?;
     let declared_mailbox=desired.as_ref().and_then(|value|canonical_child_string(value,"to")).is_some_and(|to|to==recipient || to==bare);
     Ok(Some(Header { sender,recipient,mailbox:native_mailbox||declared_mailbox,closed:index_closed||status.as_deref()==Some("closed"),
         reminder,version:format!("{version:020}"),sent_key,created_index,desired_mask,native_mailbox }))
@@ -372,7 +372,7 @@ fn next_selection_row(connection: &Connection, work: &FoldWork) -> Result<Option
             WHERE claims.subject=?1 AND claims.store_index>?2 AND claims.store_index<=?3
             ORDER BY claims.store_index LIMIT 1")
     });
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc6a6284f80cd owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL)?.query_row(/* sqlite-large-value: allow-for-now lv-hc09e7404036f owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ params![work.subject,work.after,work.cut], |row| {
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hff5351235ff3 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL)?.query_row(/* sqlite-large-value: allow-for-now lv-h0911d1535b55 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ params![work.subject,work.after,work.cut], |row| {
         let mut values = std::array::from_fn(|_| None);
         for (index, value) in values.iter_mut().enumerate() {
             if row.get::<_, bool>(7 + index * 2)? { *value = Some(row.get(8 + index * 2)?); }
@@ -389,7 +389,7 @@ fn bounded_position(transaction: &Transaction<'_>, row: &SelectionRow, budget: &
     if let Some(position) = row.position { return Ok(Some(position)); }
     let (after, count) = transaction.prepare_cached(
         "SELECT after_index,claim_count FROM local_client_message_fold_batches WHERE batch_id=?1",
-    )?.query_row(/* sqlite-large-value: allow-for-now lv-h5f0f873f9f4d owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [&row.batch], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)))
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h81e2b73dd592 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [&row.batch], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)))
         .optional()?.unwrap_or((0, 0));
     let available = FOLD_CLAIMS.saturating_sub(budget.claims);
     if available == 0 { return Ok(None); }
@@ -410,7 +410,7 @@ fn bounded_position(transaction: &Transaction<'_>, row: &SelectionRow, budget: &
     // prefixes that span another row or must resume in a later transaction.
     if through != row.index || count > 1 {
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h7ca0849f7fe1 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_fold_batches(batch_id,after_index,claim_count) VALUES(?1,?2,?3)
+            /* sqlite-large-value: allow-for-now lv-heaacde28b465 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_fold_batches(batch_id,after_index,claim_count) VALUES(?1,?2,?3)
              ON CONFLICT(batch_id) DO UPDATE SET after_index=excluded.after_index,claim_count=excluded.claim_count",
             params![row.batch,through,count],
         )?;
@@ -444,7 +444,7 @@ fn clear_fold_batches(transaction: &Transaction<'_>, budget: &mut FoldBudget) ->
     let available = BACKFILL_CLEAR_ROWS.saturating_sub(budget.scratch_rows);
     if available == 0 { return Ok(false); }
     let removed = transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-h361968b4526a owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_fold_batches WHERE batch_id IN (
+        /* sqlite-large-value: allow-for-now lv-h95b765a6a6aa owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_fold_batches WHERE batch_id IN (
          SELECT batch_id FROM local_client_message_fold_batches ORDER BY batch_id LIMIT ?1)",
         [available],
     )?;
@@ -474,7 +474,7 @@ fn new_fold_work(transaction: &Transaction<'_>, subject: String, flags: u8, gene
 
 fn save_fold_work(transaction: &Transaction<'_>, work: &FoldWork) -> Result<()> {
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-he7566d022167 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-h19f32c1f681e owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![FOLD_MARKER,serde_json::to_string(work)?],
     )?;
     Ok(())
@@ -482,11 +482,11 @@ fn save_fold_work(transaction: &Transaction<'_>, work: &FoldWork) -> Result<()> 
 
 fn current_header(connection: &Connection,subject: &str) -> Result<Option<(u64,Header)>> {
     connection.prepare_cached("SELECT born_index,sender,recipient,mailbox,closed,reminder,version,sent_key,created_index,desired_mask,native_mailbox FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-hb53937e7d88e owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [subject],|row|Ok((row.get(0)?,Header { sender:row.get(1)?,recipient:row.get(2)?,mailbox:row.get(3)?,closed:row.get(4)?,reminder:row.get(5)?,version:row.get(6)?,sent_key:row.get(7)?,created_index:row.get(8)?,desired_mask:row.get(9)?,native_mailbox:row.get(10)? }))).optional().map_err(Into::into)
+        .query_row(/* sqlite-large-value: allow-for-now lv-h9713df66791f owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [subject],|row|Ok((row.get(0)?,Header { sender:row.get(1)?,recipient:row.get(2)?,mailbox:row.get(3)?,closed:row.get(4)?,reminder:row.get(5)?,version:row.get(6)?,sent_key:row.get(7)?,created_index:row.get(8)?,desired_mask:row.get(9)?,native_mailbox:row.get(10)? }))).optional().map_err(Into::into)
 }
 
 fn retire(transaction: &Transaction<'_>,subject: &str,cut: u64,now: u64) -> Result<()> {
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h07b0c0294618 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET retired_index=?2,retired_at_unix_ms=?3 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL AND born_index!=?2",params![subject,cut,now])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h4c098ba7e1b0 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET retired_index=?2,retired_at_unix_ms=?3 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL AND born_index!=?2",params![subject,cut,now])?;
     Ok(())
 }
 
@@ -494,20 +494,20 @@ fn put_header(transaction: &Transaction<'_>,subject: &str,value: &Header,cut: u6
     retire(transaction,subject,cut,now)?;
     let global_current=!value.closed && value.reminder.is_none();
     let recipient_current=global_current && value.mailbox;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h75ca9b63292c owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,sender,recipient,mailbox,closed,reminder,version,sent_key,created_index,desired_mask,native_mailbox,global_current,recipient_current) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(subject,born_index) DO UPDATE SET sender=excluded.sender,recipient=excluded.recipient,mailbox=excluded.mailbox,closed=excluded.closed,reminder=excluded.reminder,version=excluded.version,sent_key=excluded.sent_key,created_index=excluded.created_index,desired_mask=excluded.desired_mask,native_mailbox=excluded.native_mailbox,global_current=excluded.global_current,recipient_current=excluded.recipient_current,retired_index=NULL,retired_at_unix_ms=NULL",
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h3fc7059194b6 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,sender,recipient,mailbox,closed,reminder,version,sent_key,created_index,desired_mask,native_mailbox,global_current,recipient_current) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(subject,born_index) DO UPDATE SET sender=excluded.sender,recipient=excluded.recipient,mailbox=excluded.mailbox,closed=excluded.closed,reminder=excluded.reminder,version=excluded.version,sent_key=excluded.sent_key,created_index=excluded.created_index,desired_mask=excluded.desired_mask,native_mailbox=excluded.native_mailbox,global_current=excluded.global_current,recipient_current=excluded.recipient_current,retired_index=NULL,retired_at_unix_ms=NULL",
         params![subject,cut,value.sender,value.recipient,value.mailbox,value.closed,value.reminder,value.version,value.sent_key,value.created_index,value.desired_mask,value.native_mailbox,global_current,recipient_current])?;
     Ok(())
 }
 
 fn set_current(transaction: &Transaction<'_>,subject: &str,global: Option<bool>,recipient: Option<bool>,cut: u64,now: u64) -> Result<()> {
     let (born,old_global,old_recipient):(u64,bool,bool)=transaction.prepare_cached("SELECT born_index,global_current,recipient_current FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h0250d44523b4 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [subject],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-ha31cec089673 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [subject],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
     if global.unwrap_or(old_global)==old_global && recipient.unwrap_or(old_recipient)==old_recipient { return Ok(()); }
     if born==cut {
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h9d2574017b97 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET global_current=COALESCE(?2,global_current),recipient_current=COALESCE(?3,recipient_current) WHERE subject=?1 AND born_index=?4",params![subject,global,recipient,cut])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h1413ac2c96d2 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET global_current=COALESCE(?2,global_current),recipient_current=COALESCE(?3,recipient_current) WHERE subject=?1 AND born_index=?4",params![subject,global,recipient,cut])?;
     } else {
         retire(transaction,subject,cut,now)?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h40d91bb308fb owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,sender,recipient,mailbox,closed,reminder,version,sent_key,created_index,desired_mask,native_mailbox,global_current,recipient_current) SELECT subject,?2,sender,recipient,mailbox,closed,reminder,version,sent_key,created_index,desired_mask,native_mailbox,COALESCE(?3,global_current),COALESCE(?4,recipient_current) FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=?5",params![subject,cut,global,recipient,born])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h22d300873cad owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,sender,recipient,mailbox,closed,reminder,version,sent_key,created_index,desired_mask,native_mailbox,global_current,recipient_current) SELECT subject,?2,sender,recipient,mailbox,closed,reminder,version,sent_key,created_index,desired_mask,native_mailbox,COALESCE(?3,global_current),COALESCE(?4,recipient_current) FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=?5",params![subject,cut,global,recipient,born])?;
     }
     Ok(())
 }
@@ -516,11 +516,11 @@ fn reminder_winners(transaction: &Transaction<'_>,reminder: &str,recipient: Opti
     let (index,scope,flag,winner_index)=if recipient.is_some() {
         ("client_selector_recipient_reminder_candidates","AND recipient=?2 AND mailbox=1","recipient_current","client_selector_recipient_reminder_winner")
     } else { ("client_selector_reminder_candidates","","global_current","client_selector_reminder_winner") };
-    let winner: Option<String>=transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h008c0ecf6f2c owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &format!("SELECT subject FROM local_client_message_selectors_v1 INDEXED BY {index} WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND reminder=?1 {scope} AND (?2 IS NULL OR ?2 IS NOT NULL) ORDER BY version DESC,subject DESC LIMIT 1"))?
-        .query_row(/* sqlite-large-value: allow-for-now lv-hd48836453c47 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ params![reminder,recipient],|row|row.get(0)).optional()?;
+    let winner: Option<String>=transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h208f6af52507 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &format!("SELECT subject FROM local_client_message_selectors_v1 INDEXED BY {index} WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND reminder=?1 {scope} AND (?2 IS NULL OR ?2 IS NOT NULL) ORDER BY version DESC,subject DESC LIMIT 1"))?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hdb01cf278fac owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ params![reminder,recipient],|row|row.get(0)).optional()?;
     // Eligibility maintains one winner per scope; never inventory group members.
-    let old: Option<String>=transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-he47f84fa7949 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &format!("SELECT subject FROM local_client_message_selectors_v1 INDEXED BY {winner_index} WHERE born_index>=0 AND retired_index IS NULL AND {flag}=1 AND reminder IS NOT NULL AND reminder=?1 {scope} AND (?2 IS NULL OR ?2 IS NOT NULL) LIMIT 1"))?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h24e5c75cd3d8 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ params![reminder,recipient],|row|row.get(0)).optional()?;
+    let old: Option<String>=transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3bb68cc79270 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &format!("SELECT subject FROM local_client_message_selectors_v1 INDEXED BY {winner_index} WHERE born_index>=0 AND retired_index IS NULL AND {flag}=1 AND reminder IS NOT NULL AND reminder=?1 {scope} AND (?2 IS NULL OR ?2 IS NOT NULL) LIMIT 1"))?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h4c5364d2c86d owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ params![reminder,recipient],|row|row.get(0)).optional()?;
     if let Some(subject)=old
         && winner.as_deref()!=Some(&subject) {
         set_current(transaction,&subject,recipient.is_none().then_some(false),recipient.is_some().then_some(false),cut,now)?;
@@ -532,9 +532,9 @@ fn reminder_winners(transaction: &Transaction<'_>,reminder: &str,recipient: Opti
 }
 
 fn record_cut(transaction: &Transaction<'_>,cut: u64) -> Result<()> {
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-hccf47952c295 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value!=excluded.value",params![MARKER,cut.to_string()])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf2b37067abbd owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value!=excluded.value",params![MARKER,cut.to_string()])?;
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-h3ced322c6a21 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_client_message_publications(through_index,published_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hb3f2ca5f3a2f owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_client_message_publications(through_index,published_at_unix_ms)
          SELECT ?1,?2 WHERE NOT EXISTS(SELECT 1 FROM local_client_message_publications) OR EXISTS(
           SELECT 1 FROM local_client_message_selectors_v1 INDEXED BY client_selector_retired_cut
           WHERE retired_index IS NOT NULL AND retired_index<=?1 AND retired_index>COALESCE((
@@ -653,7 +653,7 @@ struct BackfillProgress {
 
 fn save_progress(transaction: &Transaction<'_>, progress: &BackfillProgress) -> Result<()> {
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-h0de066117535 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-hb9b779feaf2a owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![BACKFILL_MARKER, serde_json::to_string(progress)?],
     )?;
     Ok(())
@@ -662,9 +662,9 @@ fn save_progress(transaction: &Transaction<'_>, progress: &BackfillProgress) -> 
 fn begin_backfill(transaction: &Transaction<'_>) -> Result<BackfillProgress> {
     // Invalidate old receipts once, atomically with making the projection unavailable.
     // Clearing itself is bounded, including a rebuild with many retired headers.
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-hcbd535b49426 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_cut_epoch SET epoch=epoch+1 WHERE id=1", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h701e59355a2c owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [MARKER])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h9d9713780319 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [FOLD_MARKER])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hdd4952d8046f owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_cut_epoch SET epoch=epoch+1 WHERE id=1", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h944f37082927 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [MARKER])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hd1df65300826 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [FOLD_MARKER])?;
     let progress = BackfillProgress {
         cut: current_index_tx(transaction)?,
         phase: BackfillPhase::Clear,
@@ -677,7 +677,7 @@ fn begin_backfill(transaction: &Transaction<'_>) -> Result<BackfillProgress> {
 fn has_pending(connection: &Connection) -> Result<bool> {
     Ok(connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 INDEXED BY client_selector_pending WHERE born_index=-1)",
-    )?.query_row(/* sqlite-large-value: allow-for-now lv-h0ee6fc472975 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-hdd795cce48ab owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
 }
 
 fn fold_incomplete(connection: &Connection) -> Result<bool> {
@@ -702,7 +702,7 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
     let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_micros();
     let transaction = connection.transaction()?;
     let saved: Option<String> = transaction.prepare_cached("SELECT value FROM meta WHERE key=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-hfb64ab33598e owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [BACKFILL_MARKER], |row| row.get(0)).optional()?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h476756b0f558 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [BACKFILL_MARKER], |row| row.get(0)).optional()?;
     let mut progress = if reset {
         begin_backfill(&transaction)?
     } else if let Some(saved) = saved {
@@ -740,7 +740,7 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
     match progress.phase {
         BackfillPhase::Clear => {
             let removed = transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h22fd59237406 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE (subject,born_index) IN (
+                /* sqlite-large-value: allow-for-now lv-hdd3bcd12b2b5 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE (subject,born_index) IN (
                  SELECT subject,born_index FROM local_client_message_selectors_v1 ORDER BY subject,born_index LIMIT ?1)",
                 [BACKFILL_CLEAR_ROWS],
             )?;
@@ -755,7 +755,7 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for subject in &subjects {
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-haa7bc09e14f6 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags) VALUES(?1,-1,1,2)
+                    /* sqlite-large-value: allow-for-now lv-hd5fb23096b84 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags) VALUES(?1,-1,1,2)
                      ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1",
                     [subject],
                 )?;
@@ -776,7 +776,7 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
             if !has_pending(&transaction)? && !fold_incomplete(&transaction)? {
                 // Publication and removal of the resume marker are one atomic commit.
                 record_cut(&transaction, current_index_tx(&transaction)?)?;
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-h666969cfb186 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [BACKFILL_MARKER])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hd90512bc28fb owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [BACKFILL_MARKER])?;
                 complete = true;
             }
         }
@@ -973,14 +973,14 @@ fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBud
         if projection_blocks_selectors(transaction, active.as_ref().map(|work| work.subject.as_str()))? { break; }
         let pending: Option<(String,u8,u64,Option<String>,String)> = if let Some(work) = &active {
             transaction.prepare_cached("SELECT subject,dirty_flags,created_index,reminder,recipient FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=-1")?
-                .query_row(/* sqlite-large-value: allow-for-now lv-hc2037082654f owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h915905d8ef2e owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?
         } else {
             transaction.prepare_cached("SELECT subject,dirty_flags,created_index,reminder,recipient FROM local_client_message_selectors_v1 INDEXED BY client_selector_pending WHERE born_index=-1 ORDER BY subject LIMIT 1")?
-                .query_row(/* sqlite-large-value: allow-for-now lv-h36aaf7baa563 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h5e2590277e88 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?
         };
         let Some((subject,flags,generation,pending_reminder,pending_recipient)) = pending else {
             if active.take().is_some() {
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-hd38352e89c79 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [FOLD_MARKER])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hf9fa54d96fe2 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [FOLD_MARKER])?;
                 continue;
             }
             clear_fold_batches(transaction, &mut budget)?;
@@ -1030,7 +1030,7 @@ fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBud
                 put_header(transaction, &work.subject, value, work.cut, now)?;
             } else {
                 retire(transaction, &work.subject, work.cut, now)?;
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-h32d35a6341e5 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=?2", params![work.subject,work.cut])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h80d997d8b9b6 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=?2", params![work.subject,work.cut])?;
             }
         }
         if let Some(reminder) = pending_reminder { reminders.insert((reminder,pending_recipient)); }
@@ -1039,12 +1039,12 @@ fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBud
             if global.insert(reminder.clone()) { reminder_winners(transaction,&reminder,None,work.cut,now)?; }
             reminder_winners(transaction,&reminder,Some(&recipient),work.cut,now)?;
         }
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-hf335a2873f82 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=-1", [&work.subject])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h34b493bc8e0a owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=-1", [&work.subject])?;
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h55bec667897a owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET created_index=?2 WHERE subject=?1 AND born_index=-2",
+            /* sqlite-large-value: allow-for-now lv-hd505c1f2e69f owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET created_index=?2 WHERE subject=?1 AND born_index=-2",
             params![work.subject,work.cut],
         )?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-ha725e5fd313e owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [FOLD_MARKER])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h78788c3c5d04 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [FOLD_MARKER])?;
         budget.subjects += 1;
     }
     if publish {
@@ -1081,19 +1081,19 @@ fn prune_retired(transaction: &Transaction<'_>, now: u64) -> Result<usize> {
     let expired = now.saturating_sub(u64::try_from(crate::client_values::CLIENT_PAGE_TTL_MS)?);
     let published: u64 = transaction.query_row("SELECT value FROM meta WHERE key=?1", [MARKER], |row| row.get::<_, String>(0))?.parse()?;
     static RETIRED: std::sync::LazyLock<String> = std::sync::LazyLock::new(||format!(
-        /* sqlite-large-value: allow-for-now lv-h60413b917da3 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE (subject,born_index) IN ({EXPIRED_RETIREMENTS})"
+        /* sqlite-large-value: allow-for-now lv-hf5382e62c0d3 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE (subject,born_index) IN ({EXPIRED_RETIREMENTS})"
     ));
-    let deleted = transaction.execute(/* sqlite-large-value: allow-for-now lv-h8201083e3c67 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &RETIRED,params![expired,PRUNE_ROWS])?;
+    let deleted = transaction.execute(/* sqlite-large-value: allow-for-now lv-hf0338a02af4f owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &RETIRED,params![expired,PRUNE_ROWS])?;
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-h3c9615a467dd owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE born_index=-2 AND subject IN (
+        /* sqlite-large-value: allow-for-now lv-hb96edff86f60 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_selectors_v1 WHERE born_index=-2 AND subject IN (
          SELECT subject FROM local_client_message_selectors_v1 INDEXED BY client_selector_destructive
          WHERE born_index=-2 AND created_index<=?1 ORDER BY created_index,subject LIMIT ?2)",
         params![published,PRUNE_ROWS],
     )?;
     static PUBLICATIONS: std::sync::LazyLock<String> = std::sync::LazyLock::new(||format!(
-        /* sqlite-large-value: allow-for-now lv-h9fe111797a2b owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_publications WHERE through_index IN ({UNREFERENCED_PUBLICATIONS}) AND (?1 IS NULL OR ?1 IS NOT NULL)"
+        /* sqlite-large-value: allow-for-now lv-h35c2bc9f0cda owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_client_message_publications WHERE through_index IN ({UNREFERENCED_PUBLICATIONS}) AND (?1 IS NULL OR ?1 IS NOT NULL)"
     ));
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-haded73086e00 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &PUBLICATIONS,params![expired,PRUNE_ROWS,published])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hbaf043f88103 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &PUBLICATIONS,params![expired,PRUNE_ROWS,published])?;
     Ok(deleted)
 }
 
@@ -1105,7 +1105,7 @@ fn has_selector_cleanup(connection: &Connection) -> Result<bool> {
          SELECT 1 FROM local_client_message_selectors_v1 INDEXED BY client_selector_destructive
          WHERE born_index=-2 AND created_index<=?3)"
     ));
-    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h56b53fadb1c8 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL)?.query_row(/* sqlite-large-value: allow-for-now lv-hd1fc936fee8c owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ params![expired,PRUNE_ROWS,published], |row| row.get(0))?)
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9a3345441df1 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL)?.query_row(/* sqlite-large-value: allow-for-now lv-h96aed127ce0b owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ params![expired,PRUNE_ROWS,published], |row| row.get(0))?)
 }
 
 fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) -> String {
@@ -1213,7 +1213,7 @@ impl Store {
 
     pub fn client_messages_page(&self,person: Option<&str>,actor: Option<&str>,history: bool,through: u64,after: Option<&(u128,String)>,limit: usize) -> Result<Vec<(MessageView,Value,bool)>> {
         let connection=self.readers.get();
-        let last_change: Option<String>=connection.prepare_cached("SELECT value FROM meta WHERE key=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h246cd15455d3 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ [MARKER],|row|row.get(0)).optional()?;
+        let last_change: Option<String>=connection.prepare_cached("SELECT value FROM meta WHERE key=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-he75ba568317d owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [MARKER],|row|row.get(0)).optional()?;
         let last_change=last_change.ok_or_else(selectors_not_ready)?;
         let published = last_change.parse::<u64>()?;
         let pending = has_pending(&connection)?;
@@ -1224,7 +1224,7 @@ impl Store {
         static SQL: std::sync::LazyLock<[String;32]>=std::sync::LazyLock::new(||std::array::from_fn(|flags|page_sql(flags&1!=0,flags&2!=0,flags&4!=0,flags&8!=0,flags&16!=0)));
         let flags=usize::from(person.is_some())|(usize::from(actor.is_some())<<1)|(usize::from(history)<<2)|(usize::from(current)<<3)|(usize::from(after.is_some())<<4);
         let key=after.map(|(at,_)|crate::client_values::client_timestamp(*at));
-        let rows=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1a3f1840d2dc owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL[flags])?.query_map(params![through,person,actor,key,after.map(|(_,subject)|subject),limit.saturating_add(1)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,bool>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5a47c2ff7e59 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL[flags])?.query_map(params![through,person,actor,key,after.map(|(_,subject)|subject),limit.saturating_add(1)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,bool>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let subjects=rows.iter().map(|(subject,_,_)|subject).collect::<Vec<_>>();
         static METADATA_SQL: std::sync::LazyLock<String>=std::sync::LazyLock::new(||canonical_sql(r#"
 WITH subjects AS (SELECT value subject FROM json_each(?1)),ends AS (
@@ -1237,7 +1237,7 @@ SELECT ends.subject,first.accepted_at_unix_ms,last.accepted_at_unix_ms,last.id,
  json_extract(first.body,CASE WHEN json_type(first.body,'$.fields') IS NULL THEN '$.session_id' ELSE '$.fields.session_id' END)
 FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.id=ends.last_id
 "#));
-        let mut metadata=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd8168a2d997b owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &METADATA_SQL)?.query_map(params![serde_json::to_string(&subjects)?,through],|row|Ok((row.get::<_,String>(0)?,json!({"sent_at":row.get::<_,String>(1)?,"updated_at":row.get::<_,String>(2)?,"revision":row.get::<_,String>(3)?,"session_id":row.get::<_,Option<String>>(4)?}))))?.collect::<rusqlite::Result<BTreeMap<_,_>>>()?;
+        let mut metadata=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd0a352d48f07 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &METADATA_SQL)?.query_map(params![serde_json::to_string(&subjects)?,through],|row|Ok((row.get::<_,String>(0)?,json!({"sent_at":row.get::<_,String>(1)?,"updated_at":row.get::<_,String>(2)?,"revision":row.get::<_,String>(3)?,"session_id":row.get::<_,Option<String>>(4)?}))))?.collect::<rusqlite::Result<BTreeMap<_,_>>>()?;
         rows.into_iter().map(|(subject,created,current)| {
             let message=message_view_at(&connection,&subject,created,Some(through))?;
             let metadata=metadata.remove(&subject).ok_or_else(||anyhow::anyhow!("message cut metadata is unavailable"))?;
@@ -1248,12 +1248,12 @@ FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.i
     #[cfg(any(test, feature = "test-support"))]
     pub fn client_messages_selector_benchmark_set_enabled(&self,enabled: bool) -> Result<()> {
         let connection=self.connection.write();
-        if enabled { connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha0cedfdcf5f0 owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ SELECTOR_SCHEMA)?; } else {
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hba3e5eb493da owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;DROP TABLE IF EXISTS local_client_message_selectors_v1;")?;
-            connection.execute(/* sqlite-large-value: allow-for-now lv-h2dc43b8d30c8 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",[MARKER])?;
-            connection.execute(/* sqlite-large-value: allow-for-now lv-h73caca22c5e7 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",[BACKFILL_MARKER])?;
-            connection.execute(/* sqlite-large-value: allow-for-now lv-he0c9c13188ac owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",[FOLD_MARKER])?;
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8d31e6262dc3 owner=st3_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE IF EXISTS local_client_message_fold_batches;DROP TABLE IF EXISTS local_client_message_publications;")?;
+        if enabled { connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7007134ff0e4 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ SELECTOR_SCHEMA)?; } else {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h31befbd8af3f owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;DROP TABLE IF EXISTS local_client_message_selectors_v1;")?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-hc1ac3d35bbf4 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",[MARKER])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h4e983a238c4b owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",[BACKFILL_MARKER])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h7f9d6d439cc3 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",[FOLD_MARKER])?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb59357c7152a owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE IF EXISTS local_client_message_fold_batches;DROP TABLE IF EXISTS local_client_message_publications;")?;
         }
         Ok(())
     }
@@ -1291,7 +1291,7 @@ FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.i
         let actor=actor.filter(|actor|Some(*actor)!=person.as_deref());
         let sql=format!("EXPLAIN QUERY PLAN {}",page_sql(person.is_some(),actor.is_some(),history,true,after));
         let connection=self.readers.get();
-        let rows=connection.prepare(/* sqlite-large-value: allow-for-now lv-h3034be6a03ed owner=st3_store::store::client_messages TODO=trace-statement-and-value-representation */ &sql)?.query_map(params![current_index(&connection)?,person,actor,after.then_some("2027-01-15T08:00:00.000Z"),after.then_some("message/selector-000001"),21],|row|row.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows=connection.prepare(/* sqlite-large-value: allow-for-now lv-h636b3b2da75c owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &sql)?.query_map(params![current_index(&connection)?,person,actor,after.then_some("2027-01-15T08:00:00.000Z"),after.then_some("message/selector-000001"),21],|row|row.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 

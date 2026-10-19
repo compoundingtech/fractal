@@ -24,7 +24,7 @@ impl Store {
         let index = selected_index(current_index(&connection)?, Some(index)).map_err(anyhow::Error::new)?;
         let names = match names {
             Some(names) => names.clone(),
-            None => connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h38a0aa38048b owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+            None => connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h65dd6964ee13 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                 .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
@@ -155,7 +155,7 @@ impl Store {
             ));
         }
         for target in &request.targets {
-            st3_schema::registry()
+            fractal_schema::registry()
                 .validate_subject(target)
                 .map_err(|error| St3Error::new(error.code, error.message))?;
         }
@@ -355,7 +355,7 @@ impl Store {
             .filter(|item| item.kind == "human-gate")
             .filter_map(|item| {
                 let mission = item.mission.as_deref()?;
-                Some(st3_ui_model::missions::Gate {
+                Some(fractal_ui_model::missions::Gate {
                     mission: if mission.starts_with("mission/") {
                         mission.to_owned()
                     } else {
@@ -526,7 +526,7 @@ impl Store {
             if item.episode.is_empty() {
                 item.episode = connection
                     .query_row(
-                        /* sqlite-large-value: allow-for-now lv-hc25a6bfb7d4a owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+                        /* sqlite-large-value: allow-for-now lv-hea46ba6e1e15 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                             "SELECT id FROM claims WHERE subject=?1
                     ORDER BY CANONICAL_DESC(claims) LIMIT 1",
                         ),
@@ -568,7 +568,7 @@ impl Store {
     ) -> Result<Option<UsageSummary>> {
         let connection = self.readers.get();
         let at_index = at_index.unwrap_or(i64::MAX as u64);
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h48e52025d201 owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8c6ff8af9665 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT store_index, body, accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND kind='harness.usage' AND store_index<=?2
              ORDER BY CANONICAL_ASC(claims)",
@@ -642,7 +642,7 @@ impl Store {
                  ORDER BY subject, length(accepted_at_unix_ms), accepted_at_unix_ms",
                 at_index.unwrap_or(i64::MAX as u64)
             );
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h23b95298631d owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &sql)?;
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8e41b2b1becd owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(chunk), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -900,7 +900,7 @@ fn attention_closing_step(
 fn attention_target_state_tx(connection: &Connection, target: &str) -> Result<Option<TargetState>> {
     let row = |sql: &str, id: &str| -> Result<Option<TargetState>> {
         connection
-            .query_row(/* sqlite-large-value: allow-for-now lv-h9963f9f25bfc owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ sql, [id], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h734e628c2a7c owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ sql, [id], |row| {
                 let since = row.get::<_, String>(1)?;
                 Ok((row.get::<_, String>(0)?, since.parse().ok()))
             })
@@ -1209,7 +1209,7 @@ fn pending_human_reviews_tx(
     reviewer: Option<&str>,
 ) -> Result<Vec<HumanReviewView>> {
     let requests = {
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4073ad76bfec owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h152042da2cc3 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT request.id, request.store_index, request.batch_id, request.subject,
                     request.kind, request.origin, request.actor, request.body,
                     request.predecessors, request.accepted_at_unix_ms
@@ -1257,7 +1257,7 @@ pub fn attention_request_view_tx(
 ) -> Result<Option<AttentionRequestView>> {
     let requested = connection
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-h4726b2e3970a owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-h1393320ff051 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
                     predecessors, accepted_at_unix_ms
              FROM claims WHERE subject=?1 AND kind='attention.requested'
@@ -1272,7 +1272,7 @@ pub fn attention_request_view_tx(
     };
     let resolved = connection
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-h276083b6dae1 owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-h0a33d24f1967 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
                     predecessors, accepted_at_unix_ms
              FROM claims WHERE subject=?1 AND kind='attention.resolved'
@@ -1387,7 +1387,7 @@ fn pull_request_state_tx(connection: &Connection, target: &str) -> Result<Option
     }
     let observed = connection
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-h0dbfd66abdd8 owner=st3_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-h6f7442cae0a1 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND kind='resource.observed'
              ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",

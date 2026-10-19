@@ -1,15 +1,15 @@
-//! Controls for `st3::test_support::events`, against the real events API of an in-process daemon.
+//! Controls for `fractal_daemon::test_support::events`, against the real events API of an in-process daemon.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::api::AppState;
-use st3::client::Client;
-use st3::model::ClaimInput;
-use st3::store::Store;
-use st3::test_support::events::{Mark, claim};
+use fractal_daemon::api::AppState;
+use fractal_daemon::client::Client;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
+use fractal_daemon::test_support::events::{Mark, claim};
 use tokio::sync::{Notify, watch};
 
 const SEAT: &str = "agent/waiter";
@@ -56,7 +56,7 @@ impl Daemon {
             client_relay: None,
             native_session_home: None,
             owning_person: None,
-            planner_default: st3::model::PlannerSpec::default(),
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
         };
         let socket = daemon.socket();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -68,7 +68,7 @@ impl Daemon {
                 .unwrap();
             runtime.block_on(async {
                 tokio::select! {
-                    result = st3::api::serve_unix(&socket, st3::api::router(state)) => result.unwrap(),
+                    result = fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state)) => result.unwrap(),
                     _ = stopped => {}
                 }
             });

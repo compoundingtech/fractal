@@ -3,9 +3,9 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-@testable import St3Client
+@testable import FractalClient
 
-final class St3ClientTests: XCTestCase {
+final class FractalClientTests: XCTestCase {
     func testUsageAggregationSchemaLiteralsDecode() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -116,8 +116,8 @@ final class St3ClientTests: XCTestCase {
     }
 
     func testTimelineRouteIDStripsPrefixAndEncodesOneSegment() {
-        XCTAssertEqual(St3Client.routedSessionID("session/release-agent/9"), "release-agent%2F9")
-        XCTAssertEqual(St3Client.routedSessionID("release agent/9"), "release%20agent%2F9")
+        XCTAssertEqual(FractalClient.routedSessionID("session/release-agent/9"), "release-agent%2F9")
+        XCTAssertEqual(FractalClient.routedSessionID("release agent/9"), "release%20agent%2F9")
     }
 
     func testCapabilitiesFixtureDecodes() throws {
@@ -166,8 +166,8 @@ final class St3ClientTests: XCTestCase {
     }
 
     func testWireBridgeKeepsActionSenderVersionBytes() throws {
-        XCTAssertEqual(st3ClientAPIVersion, "st3.client.v0")
-        XCTAssertEqual(st3ClientTerminalSubprotocol, "st3.client.terminal.v0")
+        XCTAssertEqual(fractalClientAPIVersion, "st3.client.v0")
+        XCTAssertEqual(fractalClientTerminalSubprotocol, "st3.client.terminal.v0")
         let request = try ActionRequest.workRetry(id: "work/example",
             idempotencyKey: "retry/example", fence: Fence(snapshotID: "snapshot/example"),
             parameters: WorkRetryParameters(targetID: "work/example", reason: "Retry requested"))
@@ -375,14 +375,14 @@ final class St3ClientTests: XCTestCase {
             TraceHTTPRegistry.shared.remove(host: url.host!)
         }
         // The stub daemon's capabilities list is empty, as an older daemon's lacks the selector.
-        let client = St3Client(fabricLoopbackURL: url, session: session)
+        let client = FractalClient(fabricLoopbackURL: url, session: session)
         do {
             for try await _ in await client.agentsStream(subscriptionID: "details", agent: "agent/example/worker") {
                 XCTFail("an older daemon must not be sent the selector")
             }
             XCTFail("the exact agent stream must fail")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains(St3Client.exactAgentSelectorCapability), error.localizedDescription)
+            XCTAssertTrue(error.localizedDescription.contains(FractalClient.exactAgentSelectorCapability), error.localizedDescription)
         }
         XCTAssertTrue(capture.requests.contains { $0.url?.path == "/v1/client/capabilities" })
     }
@@ -483,7 +483,7 @@ final class St3ClientTests: XCTestCase {
         defer { session.invalidateAndCancel() }
         let context = TraceContext(traceparent: TraceTestFixtures.traceparent, tracestate: "vendor=value,st=existing")
         let probe = TraceContextProbe([context])
-        let client = St3Client(fabricLoopbackURL: URL(string: "https://trace.example/")!,
+        let client = FractalClient(fabricLoopbackURL: URL(string: "https://trace.example/")!,
             credential: "test-credential", session: session, client: "test-app 1",
             traceContext: { probe.next() })
         _ = await client.conversationStream(sessionID: "session/example")
@@ -510,7 +510,7 @@ final class St3ClientTests: XCTestCase {
     func testWebSocketWithoutTraceContextCallbackOmitsBothHeaders() async throws {
         let session = WebSocketCaptureSession()
         defer { session.invalidateAndCancel() }
-        let client = St3Client(fabricLoopbackURL: URL(string: "https://trace.example/")!, session: session)
+        let client = FractalClient(fabricLoopbackURL: URL(string: "https://trace.example/")!, session: session)
         _ = await client.conversationStream(sessionID: "session/example")
         XCTAssertEqual(try XCTUnwrap(session.capture.requests.first).value(forHTTPHeaderField: "x-st3-features"),
             "custom-subjects.v1, conversation-blocks.v1")
@@ -526,7 +526,7 @@ final class St3ClientTests: XCTestCase {
             let session = WebSocketCaptureSession()
             defer { session.invalidateAndCancel() }
             let probe = TraceContextProbe([context])
-            let client = St3Client(fabricLoopbackURL: URL(string: "https://trace.example/")!,
+            let client = FractalClient(fabricLoopbackURL: URL(string: "https://trace.example/")!,
                 session: session, traceContext: { probe.next() })
             _ = await client.conversationStream(sessionID: "session/example")
             assertNoTraceHeaders(try XCTUnwrap(session.capture.requests.first))
@@ -547,7 +547,7 @@ final class St3ClientTests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(http.first).value(forHTTPHeaderField: "x-st3-features"), expected)
             let session = WebSocketCaptureSession()
             defer { session.invalidateAndCancel() }
-            let client = St3Client(fabricLoopbackURL: URL(string: "https://features.example/")!,
+            let client = FractalClient(fabricLoopbackURL: URL(string: "https://features.example/")!,
                 session: session, messagesPaging: enabled)
             _ = await client.conversationStream(sessionID: "session/example")
             _ = await client.glassesStream()
@@ -572,7 +572,7 @@ final class St3ClientTests: XCTestCase {
             session.invalidateAndCancel()
             TraceHTTPRegistry.shared.remove(host: url.host!)
         }
-        let client = St3Client(fabricLoopbackURL: url, credential: "test-credential",
+        let client = FractalClient(fabricLoopbackURL: url, credential: "test-credential",
             session: session, client: "test-app 1", traceContext: traceContext, messagesPaging: messagesPaging)
         for _ in 0..<count { _ = try await client.capabilities() }
         return capture.requests

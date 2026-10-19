@@ -1,9 +1,9 @@
 //! Private workspaces are derived directly from durable claims. No cache is authority.
 use super::*;
-use st3_schema::glasses::MAX_GLASSES;
+use fractal_schema::glasses::MAX_GLASSES;
 
 pub fn glass_claims(connection: &Connection, person: &str, through: u64) -> Result<Vec<ClaimRecord>> {
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h96f33a60685c owner=st3_store::store::glasses TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h75174e01c7b9 owner=fractal_store::store::glasses TODO=trace-statement-and-value-representation */ &canonical_sql(
         "WITH ranked AS (
             SELECT claims.id, ROW_NUMBER() OVER (PARTITION BY claims.subject, claims.kind ORDER BY CANONICAL_ASC(claims)) AS first,
                 ROW_NUMBER() OVER (PARTITION BY claims.subject, claims.kind ORDER BY CANONICAL_DESC(claims)) AS last
@@ -47,7 +47,7 @@ pub fn live_claims(claims: Vec<ClaimRecord>) -> Vec<ClaimRecord> {
 }
 
 pub fn resource(claim: &ClaimRecord) -> Result<Value> {
-    let body = st3_schema::glasses::body_for_read(&claim.body["fields"]["body"])?;
+    let body = fractal_schema::glasses::body_for_read(&claim.body["fields"]["body"])?;
     Ok(
         json!({"id":claim.subject, "kind":"glass", "revision":claim.id,
         "body":body, "deleted":false,
@@ -83,7 +83,7 @@ pub fn prepare(
         return Ok(None);
     }
     let person =
-        st3_schema::glasses::owner(&input.subject).map_err(|e| St3Error::new(e.code, e.message))?;
+        fractal_schema::glasses::owner(&input.subject).map_err(|e| St3Error::new(e.code, e.message))?;
     glass_heads::flush(transaction).map_err(internal)?;
     let head = glass_heads::head(transaction, &input.subject).map_err(internal)?;
     if head.as_ref().is_some_and(|head| head.deleted) {

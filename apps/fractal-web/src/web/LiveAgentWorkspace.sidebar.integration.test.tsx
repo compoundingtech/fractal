@@ -2,7 +2,7 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as DateTime from 'effect/DateTime'
@@ -17,7 +17,7 @@ import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
-import type { ConnectionState } from '@st3/sdk/effect'
+import type { ConnectionState } from '@fractal/sdk/effect'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 

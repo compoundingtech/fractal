@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_missions::store::accountable_tests_shared_seats::*;
-use st3_missions::store::accountable_tests_shared_seats::{PERSON, ROOT, SOURCE, intent};
+use fractal_missions::store::accountable_tests_shared_seats::*;
+use fractal_missions::store::accountable_tests_shared_seats::{PERSON, ROOT, SOURCE, intent};
 
 
 #[test]

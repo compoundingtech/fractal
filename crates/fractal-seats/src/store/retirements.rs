@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{LifecycleUnavailableReason, MessageSendRefusal};
-pub use st3_missions::store::retirements::*;
-pub use st3_missions::store::retirements::{KIND, SCHEMA, admit_recipient, create_selection_triggers, overlay_row, project_subject, record, refuse_declaration, terminal_selection, writer_required};
+pub use fractal_missions::store::retirements::*;
+pub use fractal_missions::store::retirements::{KIND, SCHEMA, admit_recipient, create_selection_triggers, overlay_row, project_subject, record, refuse_declaration, terminal_selection, writer_required};
 
 fn check_registry(
     connection: &Connection,
@@ -167,8 +167,8 @@ impl RetirementsStore for Store {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-    use st3_missions::store::fleet_admission_tests_shared_seats::*;
-    use st3_missions::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
+    use fractal_missions::store::fleet_admission_tests_shared_seats::*;
+    use fractal_missions::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 
     #[test]
     fn previous_registries_retain_unknown_kind_and_field_and_upgrade_admits_original_claim() {
@@ -206,7 +206,7 @@ mod registry_tests {
             older.bind_fleet(FLEET).unwrap();
             older.pin_fleet_anchor(anchor.public()).unwrap();
             older.set_member_key(Some(peer_key.clone())).unwrap();
-            let mut registry = st3_schema::registry().clone();
+            let mut registry = fractal_schema::registry().clone();
             if unknown_kind {
                 registry.claims.remove(KIND);
             } else {
@@ -277,8 +277,8 @@ mod registry_tests {
 mod tests {
     use super::*;
     use std::sync::Barrier;
-    use st3_missions::store::retirements_tests_shared_seats::*;
-    use st3_missions::store::retirements_tests_shared_seats::{ACTOR, SUBJECT, send};
+    use fractal_missions::store::retirements_tests_shared_seats::*;
+    use fractal_missions::store::retirements_tests_shared_seats::{ACTOR, SUBJECT, send};
 
     /// The part of st3-store's producer guard for the message producers that moved up with this crate.
     #[test]

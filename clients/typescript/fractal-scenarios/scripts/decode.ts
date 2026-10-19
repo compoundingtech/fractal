@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 
-import * as Schema from '@smalltalk/st3-client/schema'
+import * as Schema from '@fractal/client/schema'
 
 import { ANCHOR_MS, catalog, loadWorld, SLICE_KINDS, wireValues, type AnySlice, type SliceKind, type World } from '../src/index.ts'
 import { FIXTURES_DIR, SLICE_FORMAT, type SliceFile } from './emit.ts'

@@ -14,8 +14,8 @@ use anyhow::Result;
 use rusqlite::{Connection, Transaction, params};
 use serde_json::{Value, json};
 use smallclaims::store::{append_claim_record_tx, claim_from_row, operation_parts};
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 
 pub(crate) const NODE: &str = "audit-node";
 

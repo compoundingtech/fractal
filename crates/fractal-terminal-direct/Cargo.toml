@@ -1,5 +1,5 @@
 [package]
-name = "st3-terminal-direct"
+name = "fractal-terminal-direct"
 version = "0.1.0"
 edition = "2024"
 description = "Reach a terminal's PTY session without an st daemon carrying its bytes: the local socket, or Fabric to the owner host"

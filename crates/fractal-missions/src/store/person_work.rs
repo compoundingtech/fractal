@@ -3,8 +3,8 @@
 use super::*;
 use crate::model::{MessageAttachment, PersonAskRequest, PersonStepResponse};
 use crate::person_request::{StructuredRequest, answer_summary};
-pub use st3_delivery::store::person_work::*;
-pub use st3_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
+pub use fractal_delivery::store::person_work::*;
+pub use fractal_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod revision_provenance_tests;
 
@@ -36,7 +36,7 @@ pub struct AskImages {
 
 pub fn person_asks_for_reconcile(connection: &Connection) -> Result<Vec<ClaimRecord>> {
     connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h23a782d96b14 owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(PERSON_ASKS_FOR_RECONCILE))?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4493c8f6ff87 owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(PERSON_ASKS_FOR_RECONCILE))?
         .query_map([], claim_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
@@ -299,7 +299,7 @@ impl PersonWorkStore for Store {
                 let Some(legacy) = legacy else { return Ok(false) };
                 let legacy: Value = serde_json::from_str(&legacy)?;
                 let accepted = canonical::claim_key(tx, id)?;
-                let mut claimed = tx.prepare(/* sqlite-large-value: allow-for-now lv-h65dad5f0e6c4 owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.claimed' ORDER BY CANONICAL_DESC(claims)"))?;
+                let mut claimed = tx.prepare(/* sqlite-large-value: allow-for-now lv-h87e4d4e1e4b7 owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.claimed' ORDER BY CANONICAL_DESC(claims)"))?;
                 let mut proven = false;
                 for claim in claimed.query_map([&origin_subject], claim_from_row)? {
                     let claim = claim?;
@@ -379,7 +379,7 @@ impl PersonWorkStore for Store {
             let resolved = resolve_answer(ask.as_ref(), input, cancel);
             let response_actor = if authorization.is_some() { "assistant/chatgpt" } else { input.actor.as_str() };
             let kind = if cancel { "work.person-cancelled" } else { "work.person-done" };
-            if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-hce55d0ab3402 owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
+            if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-hbe8f20e0537d owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
                 actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2
                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, kind], claim_from_row).optional().map_err(internal)? {
                 if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(response_actor) {
@@ -495,8 +495,8 @@ impl PersonWorkStore for Store {
         let has_asks: bool = {
             let connection = self.readers.get();
             connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h0c1c0f4ba68d owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ HAS_PERSON_ASKS_FOR_RECONCILE)?
-                .query_row(/* sqlite-large-value: allow-for-now lv-h37ac4e9738af owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h246fe5ecff77 owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ HAS_PERSON_ASKS_FOR_RECONCILE)?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h33ea5b6fc05d owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?
         };
         if !has_asks {
             // A concurrent new ask is handled by the next notified reconcile pass.
@@ -522,11 +522,11 @@ impl PersonWorkStore for Store {
                     // Telling is best effort: a notice that cannot be written must never undo
                     // this cancellation or the others in this pass.
                     if !is_update(&ask) {
-                        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hf940ddda012d owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ "SAVEPOINT tell_ask_ended")?;
+                        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h582aabe243d0 owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "SAVEPOINT tell_ask_ended")?;
                         match self.tell_ask_ended(tx, &ask) {
-                            Ok(()) => tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h52cf322b5cc5 owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ "RELEASE tell_ask_ended")?,
+                            Ok(()) => tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hd4edb41125ef owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "RELEASE tell_ask_ended")?,
                             Err(error) => {
-                                tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h5b793186ea23 owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ "ROLLBACK TO tell_ask_ended; RELEASE tell_ask_ended")?;
+                                tx.execute_batch(/* sqlite-large-value: allow-for-now lv-he8f7682c718f owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "ROLLBACK TO tell_ask_ended; RELEASE tell_ask_ended")?;
                                 tracing::warn!("the ended ask {} could not be told: {error:#}", ask.subject);
                             }
                         }
@@ -697,7 +697,7 @@ pub use crate::store::person_work_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::person_work_tests_shared_seats::{TEST_FLEET, gateway_decision, receive_exchange};
     use super::*;
-    pub use st3_delivery::store::person_work::tests::*;
+    pub use fractal_delivery::store::person_work::tests::*;
 
     #[test]
     fn empty_person_ask_reconciliation_does_not_wait_for_the_writer() {

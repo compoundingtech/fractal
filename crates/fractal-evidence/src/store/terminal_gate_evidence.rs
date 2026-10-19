@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_attention::store::terminal_gate_evidence::*;
+pub use fractal_attention::store::terminal_gate_evidence::*;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Deserialize;

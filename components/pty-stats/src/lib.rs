@@ -12,7 +12,7 @@ wit_bindgen::generate!({
 });
 
 use compoundingtech::st2_pty_stats::pty_stats as host;
-use exports::st2::resource_provider::provider_api;
+use exports::fractal_legacy_runner::resource_provider::provider_api;
 
 const SNAPSHOT_SCHEMA: &str = "dev.schickling.pty.snapshot.v1";
 const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;

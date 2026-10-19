@@ -10,7 +10,7 @@
 #[allow(dead_code, unused_macros)]
 mod ci_test_paths;
 
-pub use st3_reconcile::*;
+pub use fractal_reconcile::*;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

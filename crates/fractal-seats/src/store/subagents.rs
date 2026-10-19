@@ -1,8 +1,8 @@
 //! The part of `store::subagents` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_missions::store::subagents::*;
-pub use st3_missions::store::subagents::{SUBAGENT_KINDS, Seat, SubagentView, check_subagent_claim_tx};
+pub use fractal_missions::store::subagents::*;
+pub use fractal_missions::store::subagents::{SUBAGENT_KINDS, Seat, SubagentView, check_subagent_claim_tx};
 
 /// How long a subagent's lease lasts from its appearance or renewal.
 pub const SUBAGENT_LEASE_MS: u64 = 10 * 60 * 1000;
@@ -171,8 +171,8 @@ impl SubagentsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::subagents_tests_shared_seats::*;
-    use st3_missions::store::subagents_tests_shared_seats::{SEAT, appear, claim, ids, runtime};
+    use fractal_missions::store::subagents_tests_shared_seats::*;
+    use fractal_missions::store::subagents_tests_shared_seats::{SEAT, appear, claim, ids, runtime};
 
     pub fn declare(store: &Store, seat: &str) {
         let name = seat.trim_start_matches("agent/");

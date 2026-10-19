@@ -33,7 +33,7 @@ pub fn lease(
          FROM local_mailbox_leases WHERE subject=?1 AND component=?2",
         )
         .map_err(internal)?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h4c5d5462bedf owner=st3_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ params![fence.subject, fence.component], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h708d1f30403f owner=fractal_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ params![fence.subject, fence.component], |row| {
             Ok((
                 Fence {
                     subject: fence.subject.clone(),
@@ -72,7 +72,7 @@ pub fn refused(reason: &str) -> St3Error {
 fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberSpec>, St3Error> {
     let held: Option<(Fence, String)> = connection.prepare_cached(
         "SELECT subject,component,incarnation,epoch,member FROM local_mailbox_argv_bindings WHERE token=?1",
-    ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-heb6759882bc5 owner=st3_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ [&fence.token], |row| Ok((Fence {
+    ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-h49163266974a owner=fractal_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ [&fence.token], |row| Ok((Fence {
         token: fence.token.clone(), subject: row.get(0)?, component: row.get(1)?,
         incarnation: row.get(2)?, epoch: row.get(3)?,
     }, row.get(4)?))).optional().map_err(internal)?;
@@ -169,7 +169,7 @@ pub fn admit(
     authority: &Authority,
 ) -> Result<(), St3Error> {
     admit_with_probe(connection, request, authority, |owner| {
-        channel_liveness(owner, st_runtime::process_start_token(owner.pid), || {
+        channel_liveness(owner, fractal_runtime::process_start_token(owner.pid), || {
             (unsafe { libc::kill(owner.pid as i32, 0) }) != 0
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         })
@@ -295,7 +295,7 @@ pub fn record(
 ) -> Result<(), St3Error> {
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h17864914d6eb owner=st3_store::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_leases VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0)
+            /* sqlite-large-value: allow-for-now lv-h835ec44dfb1a owner=fractal_store::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_leases VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0)
          ON CONFLICT(subject,component) DO UPDATE SET incarnation=excluded.incarnation,
          provider=excluded.provider,session=excluded.session,sequence=excluded.sequence,
          pid=excluded.pid,process_token=excluded.process_token,token=excluded.token,

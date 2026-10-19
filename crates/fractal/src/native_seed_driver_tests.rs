@@ -46,9 +46,9 @@ fn rejects_effective_resume_environment_before_receipt() {
     }
     let root = tempfile::tempdir().unwrap();
     let variables = [
-        st3::suspension::RESUME_ENV,
-        st3::suspension::CONTINUE_ENV,
-        st3::suspension::CONTINUE_PATH_ENV,
+        fractal_daemon::suspension::RESUME_ENV,
+        fractal_daemon::suspension::CONTINUE_ENV,
+        fractal_daemon::suspension::CONTINUE_PATH_ENV,
     ];
     for variable in variables {
         for value in ["native", ""] {

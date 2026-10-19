@@ -8,7 +8,7 @@
 use super::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
-use st3_conversation_ui::text::{self, Run};
+use fractal_conversation_ui::text::{self, Run};
 use std::cell::{Cell, RefCell};
 
 #[derive(Default)]

@@ -10,9 +10,9 @@
 //! Every test owns an in-memory graph and a fake runtime, and runs without a tokio runtime so
 //! no observer polls a provider.
 
-use st3::DeliveryStore;
-use st3::MissionsStore;
-use st3::MissionsStoreCore;
+use fractal_daemon::DeliveryStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::MissionsStoreCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde_json::Value;
-use st3::model::{ClaimInput, IntentInput, MemberSpec, MissionRunRequest, MissionRunView};
-use st3::reconcile::{FaultInjection, Reconciler, RuntimeControl, RuntimeObservation};
-use st3::store::Store;
+use fractal_daemon::model::{ClaimInput, IntentInput, MemberSpec, MissionRunRequest, MissionRunView};
+use fractal_daemon::reconcile::{FaultInjection, Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::store::Store;
 use tokio::sync::Notify;
 
 const HOST: &str = "node";
@@ -257,7 +257,7 @@ mission "pair" state="ready" {
     }
 
     fn publish(&self, source: &str, key: &str) {
-        let intent = st3::parse_intent(source, HOST).unwrap();
+        let intent = fractal_daemon::parse_intent(source, HOST).unwrap();
         let mission = self
             .store
             .mission(
@@ -1263,7 +1263,7 @@ mission "healthy" state="ready" {
   agent "worker" { workspace "${ST_WORKSPACE}"; command "sleep 600"; restart "never" }
   step "wait" { assigned-to "agent/${ST_MISSION_RUN}/worker"; goal "Wait." }
 }"#;
-    let intent = st3::parse_intent(healthy, "source").unwrap();
+    let intent = fractal_daemon::parse_intent(healthy, "source").unwrap();
     let preview = source
         .mission(
             &intent,
@@ -1319,7 +1319,7 @@ mission "staffed" state="ready" {
     let missing = "mission `mission/unstaffed` references missing eligible agent `agent/${ST_MISSION_RUN}/fleet.helper`";
     assert_eq!(
         host.store
-            .unresolved_references(&st3::parse_intent(source, HOST).unwrap())
+            .unresolved_references(&fractal_daemon::parse_intent(source, HOST).unwrap())
             .unwrap(),
         [missing]
     );

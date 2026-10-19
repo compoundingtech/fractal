@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use st3_client::Arrangement;
+use fractal_client::Arrangement;
 
 /// A stable folder or subject identity; prefixes keep their key domains disjoint.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -570,7 +570,7 @@ mod tests {
         );
         arrangement.body.version = 1;
         assert_eq!(build(&arrangement, &[]), Err(ProjectionError::NotReady));
-        arrangement.resolved = Some(st3_client::ArrangementResolved {
+        arrangement.resolved = Some(fractal_client::ArrangementResolved {
             parents: BTreeMap::new(),
             folders: BTreeMap::new(),
         });
@@ -613,7 +613,7 @@ mod tests {
             .parents
             .insert("a".into(), None);
         arrangement.body.folders.get_mut("a").unwrap().tombstone =
-            Some(st3_client::ArrangementRegister {
+            Some(fractal_client::ArrangementRegister {
                 value: true,
                 revision: "opaque/delete".into(),
             });
@@ -775,7 +775,7 @@ mod tests {
         let mut arrangement = arrangement();
         add_folder(&mut arrangement, "gone", None, "a0");
         arrangement.body.folders.get_mut("gone").unwrap().tombstone =
-            Some(st3_client::ArrangementRegister {
+            Some(fractal_client::ArrangementRegister {
                 value: false,
                 revision: "opaque/delete".into(),
             });

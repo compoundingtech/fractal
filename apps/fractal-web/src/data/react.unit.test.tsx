@@ -4,7 +4,7 @@ import {
   type AgentEncoded,
   type ResourceObservationEncoded,
   type TerminalScreen,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { renderToStaticMarkup } from 'react-dom/server'

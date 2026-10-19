@@ -3,13 +3,13 @@ use super::{
     doc::{Doc, DocExt, Hit},
     text, theme,
 };
-use st3_client::{Client, ResourceObservation, ResourcesFilter};
+use fractal_client::{Client, ResourceObservation, ResourcesFilter};
 use std::collections::BTreeMap;
 
 pub(super) async fn read(
     client: &Client,
     focused: Option<&str>,
-) -> Result<(Vec<ResourceObservation>, bool), st3_client::ClientError> {
+) -> Result<(Vec<ResourceObservation>, bool), fractal_client::ClientError> {
     // Separate kind windows keep a busy observer's comments from hiding all PRs and repos.
     let mut rows = BTreeMap::new();
     let mut has_more = false;
@@ -139,9 +139,9 @@ mod socket_tests {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("resources.sock");
         let store = Arc::new(
-            st3::store::Store::open(&root.path().join("graph.db"), "resource-read-test").unwrap(),
+            fractal_daemon::store::Store::open(&root.path().join("graph.db"), "resource-read-test").unwrap(),
         );
-        let state = st3::api::AppState {
+        let state = fractal_daemon::api::AppState {
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -174,7 +174,7 @@ mod socket_tests {
             ),
         ] {
             store
-                .append_client_claim(&st3::model::ClaimInput {
+                .append_client_claim(&fractal_daemon::model::ClaimInput {
                     subject: id.into(),
                     kind: "resource.observed".into(),
                     actor: None,
@@ -190,7 +190,7 @@ mod socket_tests {
         }
         let path = socket.clone();
         let server = tokio::spawn(async move {
-            st3::api::serve_unix(&path, st3::api::router(state))
+            fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state))
                 .await
                 .unwrap();
         });
@@ -221,24 +221,24 @@ mod socket_tests {
             .arrangement_edit(
                 action,
                 idempotency,
-                st3_client::Fence {
+                fractal_client::Fence {
                     snapshot_id: snapshot.id,
                     ..Default::default()
                 },
-                st3_client::ArrangementEditParameters {
+                fractal_client::ArrangementEditParameters {
                     subject: arrangement.clone(),
                     owner: "person/avery".into(),
                     operations: vec![
-                        st3_client::ArrangementOperation::Create {
+                        fractal_client::ArrangementOperation::Create {
                             name: "Sidebar".into(),
                         },
-                        st3_client::ArrangementOperation::FolderCreate {
+                        fractal_client::ArrangementOperation::FolderCreate {
                             id: folder.clone(),
                             name: "Garden".into(),
                             parent: None,
                             key: "a0".into(),
                         },
-                        st3_client::ArrangementOperation::SubjectPlace {
+                        fractal_client::ArrangementOperation::SubjectPlace {
                             subject: pull.id.clone(),
                             folder: Some(folder.clone()),
                             key: "a0".into(),

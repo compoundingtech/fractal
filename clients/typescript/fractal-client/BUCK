@@ -6,7 +6,7 @@ load("@rules//buck2:typescript.bzl", "tsgo_typecheck")
 
 package_view(
     name = "package_tree",
-    dependency_view = "//buck2/dependencies:view_clients_typescript_st3_client_418fd70e574e",
+    dependency_view = "//buck2/dependencies:view_clients_typescript_fractal_client_d42b6074f107",
     files = {
         "Client.generated.ts": "Client.generated.ts",
         "Models.generated.ts": "Models.generated.ts",

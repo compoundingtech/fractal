@@ -12,12 +12,12 @@ use crate::SeatStatusStore;
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
-use st3_missions::store::shared_seats::*;
-use st3_missions::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
-use st3_missions::store::tests_shared_seats::*;
-use st3_missions::store::tests_shared_seats::{TAKEOVER_SOURCE, TREE_SHAPE_RUNS, TreeShapes, failed_takeover_run, full_canonical_claim_id_oracle, graph_digest_of, insert_raw_claims, late_claim_matches_a_replay, local_observation_for_test};
-use st3_missions::store::tests_shared_seats::{local_timeline_observation_for_test, observe_runtime, projection_replayed, publish_mission, publish_takeover, query_plan, replicate_fully, replicated_run_tree, roster_cache_store, simple};
-use st3_missions::store::tests_shared_seats::{takeover_step, timeline_observation};
+use fractal_missions::store::shared_seats::*;
+use fractal_missions::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+use fractal_missions::store::tests_shared_seats::*;
+use fractal_missions::store::tests_shared_seats::{TAKEOVER_SOURCE, TREE_SHAPE_RUNS, TreeShapes, failed_takeover_run, full_canonical_claim_id_oracle, graph_digest_of, insert_raw_claims, late_claim_matches_a_replay, local_observation_for_test};
+use fractal_missions::store::tests_shared_seats::{local_timeline_observation_for_test, observe_runtime, projection_replayed, publish_mission, publish_takeover, query_plan, replicate_fully, replicated_run_tree, roster_cache_store, simple};
+use fractal_missions::store::tests_shared_seats::{takeover_step, timeline_observation};
 
 
 #[test]
@@ -214,24 +214,24 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         let connection = store.connection.lock().unwrap();
         let mut statement = connection
             .prepare(
-                /* sqlite-large-value: allow-for-now lv-h2b512bbccd21 owner=st3_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_observations(after_store_index, subject, kind, body,
+                /* sqlite-large-value: allow-for-now lv-hc34c5aa42a3f owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_observations(after_store_index, subject, kind, body,
                                                         observed_at_unix_ms)
                      VALUES (?1, ?2, ?3, '{}', 1)",
             )
             .unwrap();
         for _ in 0..heartbeats {
             statement
-                .execute(/* sqlite-large-value: allow-for-now lv-hdcae1914f7a5 owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ params![later, "agent/node.amber", "harness.observed"])
+                .execute(/* sqlite-large-value: allow-for-now lv-h8b98cc1bafed owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ params![later, "agent/node.amber", "harness.observed"])
                 .unwrap();
         }
         for _ in 0..irrelevant {
             statement
-                .execute(/* sqlite-large-value: allow-for-now lv-h47319cca04cb owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ params![later, "mission-run/x", "harness.timeline"])
+                .execute(/* sqlite-large-value: allow-for-now lv-h78d8ef99ef2b owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ params![later, "mission-run/x", "harness.timeline"])
                 .unwrap();
         }
         for _ in 0..usage {
             statement
-                .execute(/* sqlite-large-value: allow-for-now lv-h26b14a3937fb owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ params![later, "agent/node.amber", "harness.timeline"])
+                .execute(/* sqlite-large-value: allow-for-now lv-hfdeea4f49499 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ params![later, "agent/node.amber", "harness.timeline"])
                 .unwrap();
         }
     };
@@ -241,7 +241,7 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
         store
             .readers
             .get()
-            .query_row(/* sqlite-large-value: allow-for-now lv-h9778b49bdc80 owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [at], |row| row.get::<_, u64>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h6ce4203ee173 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [at], |row| row.get::<_, u64>(0))
             .unwrap()
     };
     assert_eq!(
@@ -277,9 +277,9 @@ fn the_roster_frontier_old_cut_seek_skips_newer_heartbeats() {
              WHERE after_store_index<=?1 ORDER BY id DESC LIMIT 1), 0)";
     let vm_steps = |sql: &str, at: u64| {
         let connection = store.connection.lock().unwrap();
-        let _: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-h97c86c176dd3 owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ sql, [at], |row| row.get(0)).unwrap();
+        let _: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-h795c64e7abba owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ sql, [at], |row| row.get(0)).unwrap();
         let before = smallclaims::sqlite::work::total().vm_steps;
-        let _: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-hb9c62bf00f59 owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ sql, [at], |row| row.get(0)).unwrap();
+        let _: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-h0811e3bb705e owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ sql, [at], |row| row.get(0)).unwrap();
         drop(connection);
         smallclaims::sqlite::work::total().vm_steps - before
     };
@@ -719,7 +719,7 @@ observer "fenced/file" {
             let counts = || {
                 let connection = store.readers.get();
                 ["claims", "batches", "operations", "idempotency"].map(|table| {
-                    connection.query_row(/* sqlite-large-value: allow-for-now lv-ha9307f584647 owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap()
+                    connection.query_row(/* sqlite-large-value: allow-for-now lv-hac292d5d4ef7 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap()
                 })
             };
             let before_counts = counts();
@@ -1213,7 +1213,7 @@ fn an_internal_apply_restores_a_repaired_desired_claim() {
         let connection = store.connection.lock().expect("store mutex");
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hf0619f693ab6 owner=st3_seats::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
+                /* sqlite-large-value: allow-for-now lv-h02ae10d093ff owner=fractal_seats::store::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                          record_ref, writer, sequence, envelope_hash, position, raw, state,
                          claim_id, subject_hint, kind_hint, updated_at_unix_ms
                      ) VALUES (?1, 'node', 1, 'test-envelope', 0, X'', 'repaired',
@@ -1222,7 +1222,7 @@ fn an_internal_apply_restores_a_repaired_desired_claim() {
             )
             .unwrap();
         connection
-            .execute(/* sqlite-large-value: allow-for-now lv-h3e4dd6ffa61f owner=st3_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='exec/work'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-hed2cfd353eb6 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='exec/work'", [])
             .unwrap();
     }
 
@@ -1377,7 +1377,7 @@ fn person_reads_seek_what_they_show() {
     let connection = store.connection.lock().unwrap();
     let plan = |sql: &str| {
         let mut statement = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-h5479676c182d owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h95fd456b11a2 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap();
         let parameters = vec!["agent/example"; statement.parameter_count()];
         statement
@@ -1459,7 +1459,7 @@ fn owned_subject_queries_look_owners_up_by_primary_key() {
         ("retired owned intake", RETIRED_OWNED_INTAKE_SUBJECTS),
     ] {
         let mut statement = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-h937f05039d2f owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h41841329a315 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap();
         let plan = statement
             .query_map([], |row| row.get::<_, String>(3))
@@ -1684,7 +1684,7 @@ version 2
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h973552e71230 owner=st3_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h7c82318fe7b4 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
             [subject],
         )
         .unwrap();
@@ -1764,7 +1764,7 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
         })
         .unwrap();
     local.connection.lock().unwrap().execute(
-        /* sqlite-large-value: allow-for-now lv-h70a700671f2e owner=st3_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
+        /* sqlite-large-value: allow-for-now lv-h79caef580176 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
              VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', 'step-run/example/record')",
         params![subject, seed.id],
     ).unwrap();
@@ -1983,7 +1983,7 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
             .sum::<u64>(),
         300210
     );
-    let typed: st3_client::UsageRow = serde_json::from_value(period[0].clone()).unwrap();
+    let typed: fractal_client::UsageRow = serde_json::from_value(period[0].clone()).unwrap();
     assert_eq!(typed.native_session_id.as_deref(), Some("native-example"));
     assert_eq!(typed.pricing_provenance.unwrap().len(), 2);
     // Resume binds a new incarnation to the same conversation. A newer conversation on
@@ -2107,7 +2107,7 @@ fn historical_usage_claims_leave_provenance_unknown() {
     assert_eq!(rows[0]["pricing"], "old-label");
     assert!(rows[0].get("pricing_provenance").is_none());
     assert!(rows[0].get("native_session_id").is_none());
-    let typed: st3_client::UsageRow = serde_json::from_value(rows[0].clone()).unwrap();
+    let typed: fractal_client::UsageRow = serde_json::from_value(rows[0].clone()).unwrap();
     assert!(typed.native_session_id.is_none());
     assert!(typed.pricing_provenance.is_none());
 }
@@ -2136,7 +2136,7 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
     let seed = observed("working", "spend-seed");
     let own_step = |step: &str| {
         local.connection.lock().unwrap().execute(
-            /* sqlite-large-value: allow-for-now lv-hdcfb50d4b54b owner=st3_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
+            /* sqlite-large-value: allow-for-now lv-ha43c88827ede owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
                  VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', ?3)",
             params![subject, seed.id, step],
         ).unwrap();
@@ -2249,7 +2249,7 @@ fn counted_responses_are_remembered_for_a_bounded_horizon() {
             .lock()
             .unwrap()
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h4275d6997a8d owner=st3_seats::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE local_usage_seen (subject TEXT NOT NULL, source_id TEXT NOT NULL,
+                /* sqlite-large-value: allow-for-now lv-hde0e040a0ca9 owner=fractal_seats::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE local_usage_seen (subject TEXT NOT NULL, source_id TEXT NOT NULL,
                         PRIMARY KEY(subject, source_id));
                      INSERT INTO local_usage_seen VALUES ('agent/example.worker', 'counted-before');",
             )
@@ -2349,14 +2349,14 @@ resource "receipt/file" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hec4df63434b4 owner=st3_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
+            /* sqlite-large-value: allow-for-now lv-h05e94c4c465a owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id<>?1",
             [opaque_cache_key("expired-compound")],
         )
         .unwrap();
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h7567cbadedc5 owner=st3_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h69013f356fc3 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=0", [])
         .unwrap();
     assert_eq!(store.cleanup_idempotency(0).unwrap().deleted, 1);
     let before = store.index().unwrap();
@@ -3310,11 +3310,11 @@ fn forgetting_views_invalidates_every_status_reduction_mode() {
 mod canonical_audit {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-hd283d49e24ac owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ include!("canonical_audit.rs");
+    /* sqlite-large-value: allow-for-now lv-he7d7187f5337 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ include!("canonical_audit.rs");
 }
 
 mod resource_pending_receive_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h932d39bf3e97 owner=st3_seats::store::tests TODO=trace-statement-and-value-representation */ include!("resource_pending_receive_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-hd0b66bc05a07 owner=fractal_seats::store::tests TODO=trace-statement-and-value-representation */ include!("resource_pending_receive_tests.rs");
 }

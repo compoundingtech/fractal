@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{WorkAcknowledgeRequest, WorkHandoffRequest, WorkStartRequest};
-pub use st3_delivery::store::adhoc_work::*;
-pub use st3_delivery::store::adhoc_work::{enrich_handoff, pending_handoff, project_start};
+pub use fractal_delivery::store::adhoc_work::*;
+pub use fractal_delivery::store::adhoc_work::{enrich_handoff, pending_handoff, project_start};
 
 pub fn validate_recipient(
     tx: &Transaction<'_>,
@@ -79,7 +79,7 @@ pub fn transfer_tx(
     body["fields"]["handoff_to"] = json!(input.to);
     body["fields"]["handoff_message"] = json!(message);
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h3951af592adc owner=st3_missions::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to='[]' WHERE subject=?1",
+        /* sqlite-large-value: allow-for-now lv-h484ea3403f07 owner=fractal_missions::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to='[]' WHERE subject=?1",
         params![current.subject, input.to],
     )
     .map_err(internal)?;
@@ -192,7 +192,7 @@ impl AdhocWorkStore for Store {
             .remove(&mission_id)
             .ok_or_else(|| St3Error::new("internal", "minimal work mission missing"))?;
         self.connection.batched(|tx| {
-            if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-h897591bc3f7a owner=st3_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [&run], claim_from_row).optional().map_err(internal)? {
+            if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-h1a7eefa5184a owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [&run], claim_from_row).optional().map_err(internal)? {
                 if existing.body["fields"]["ad_hoc_title"] != input.title || existing.actor.as_deref() != Some(&input.actor) {
                     return Err(St3Error::new("idempotency-conflict", "this start key already names another task"));
                 }
@@ -232,7 +232,7 @@ impl AdhocWorkStore for Store {
             if view.status != "ready" || step_owner_is_terminal_tx(tx, &subject)? {
                 return Err(St3Error::new("stale-handoff", "this handoff is no longer waiting for acknowledgment"));
             }
-            let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h267071bdf85f owner=st3_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
+            let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h21741300df1e owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
             let receipt = match seen {
                 Some(receipt) => receipt,
                 None => append_claim_tx(tx, &self.origin, &input.message, "message.read", Some(&input.actor), &json!({"fields": {"status": "read"}}), &[], None).map_err(claim_append_error)?.id,

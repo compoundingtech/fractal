@@ -947,7 +947,7 @@ mod tests {
             entry("a", Body::User("check the build".into())),
             call("t1", "$ cargo build", ToolState::Ok),
             call("t2", "$ cargo test", ToolState::Failed),
-            call("t3", "$ cargo test -p stui", ToolState::Ok),
+            call("t3", "$ cargo test -p fractal-tui", ToolState::Ok),
             entry("b", Body::Assistant("One test failed; fixed.".into())),
             call("t4", &format!("$ cat {}", "src/".repeat(40)), ToolState::Ok),
         ];
@@ -963,7 +963,7 @@ mod tests {
         let folded = text(&HashSet::new());
         let joined = folded.join("\n");
         assert!(
-            joined.contains("▸ 3 tool calls · ✓2 · ✕1 · last: $ cargo test -p stui"),
+            joined.contains("▸ 3 tool calls · ✓2 · ✕1 · last: $ cargo test -p fractal-tui"),
             "{joined}"
         );
         assert!(

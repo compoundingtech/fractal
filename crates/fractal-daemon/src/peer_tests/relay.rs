@@ -35,7 +35,7 @@ use crate::store::{ CheckpointAction, CheckpointManifest, CheckpointManifestNeed
 use crate::client::CLIENT_READ_FORWARD_PATH;
 use crate::model::*;
 use std::os::unix::fs::PermissionsExt as _;
-use st3_peer::peer::*;
+use fractal_peer::peer::*;
 use crate::model::ClaimInput;
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
@@ -138,7 +138,7 @@ async fn raw_geometry(stream: &mut tokio::net::UnixStream, rows: u16, cols: u16)
 #[tokio::test]
 async fn membership_only_gateway_holds_raw_writers_and_fences_capabilities() {
     use pty_core::protocol::{MessageType, encode_attach, encode_data, encode_peek, encode_resize};
-    use st3_client::RawTerminalMode;
+    use fractal_client::RawTerminalMode;
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let owner = raw_app(owner_root.path(), "raw-owner");
@@ -342,7 +342,7 @@ async fn membership_only_gateway_holds_raw_writers_and_fences_capabilities() {
         .await
         .unwrap();
     }
-    let client = st3_client::Client::unix_gateway(&gateway_socket, credential);
+    let client = fractal_client::Client::unix_gateway(&gateway_socket, credential);
     let terminal = "terminal/agent/raw-seat";
     assert!(
         client
@@ -659,7 +659,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
                 "person/avery",
                 "terminal/fixture-seat",
                 "fixture:i1",
-                st3_client::RawTerminalMode::Attach,
+                fractal_client::RawTerminalMode::Attach,
                 None,
             )
             .await
@@ -846,7 +846,7 @@ struct LeasePair {
     _gateway_root: tempfile::TempDir,
     owner: crate::api::AppState,
     gateway: crate::api::AppState,
-    client: st3_client::Client,
+    client: fractal_client::Client,
     incarnation: String,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     drop_owner_watch: Arc<std::sync::atomic::AtomicBool>,
@@ -1021,20 +1021,20 @@ async fn lease_pair() -> LeasePair {
         _pty: pty,
         owner,
         gateway,
-        client: st3_client::Client::unix_gateway(&gateway_socket, credential),
+        client: fractal_client::Client::unix_gateway(&gateway_socket, credential),
         incarnation,
         tasks: vec![owner_task, peer_task, gateway_task, proxy_task],
         drop_owner_watch,
     }
 }
 
-async fn leased_peek(pair: &LeasePair) -> st3_client::RawTerminalStream {
+async fn leased_peek(pair: &LeasePair) -> fractal_client::RawTerminalStream {
     let attachment = pair
         .client
         .raw_terminal_attachment(
             "terminal/agent/raw-seat",
             &pair.incarnation,
-            st3_client::RawTerminalMode::Peek,
+            fractal_client::RawTerminalMode::Peek,
         )
         .await
         .unwrap();
@@ -1110,7 +1110,7 @@ async fn authenticated_and_capability_peek_have_no_commits_and_retain_revocation
     }
     peek.activity.selected_use().await.unwrap();
     let attachment = pair.client.raw_terminal_attachment(
-        "terminal/agent/raw-seat", &pair.incarnation, st3_client::RawTerminalMode::Peek,
+        "terminal/agent/raw-seat", &pair.incarnation, fractal_client::RawTerminalMode::Peek,
     ).await.unwrap();
     let mut browser = pair.client.raw_terminal_stream_controlled(&attachment).await.unwrap();
     assert!(pair.client.raw_terminal_stream_controlled(&attachment).await.is_err(),
@@ -1148,7 +1148,7 @@ async fn raw_lease_revocation_crosses_two_daemons_without_graph_replication() {
             .raw_terminal_attachment(
                 "terminal/agent/raw-seat",
                 &pair.incarnation,
-                st3_client::RawTerminalMode::Peek
+                fractal_client::RawTerminalMode::Peek
             )
             .await
             .is_err()
@@ -1193,7 +1193,7 @@ async fn raw_lease_owner_revocation_cancels_blocked_output_and_preserves_read_on
             .raw_terminal_attachment(
                 "terminal/agent/raw-seat",
                 &pair.incarnation,
-                st3_client::RawTerminalMode::Attach
+                fractal_client::RawTerminalMode::Attach
             )
             .await
             .is_err(),
@@ -1418,21 +1418,21 @@ async fn a_gateway_streams_a_remote_terminal_through_owner_long_polls() {
         }
     }
 
-    let client = st3_client::Client::unix_as(&gateway_socket, "person/avery");
+    let client = fractal_client::Client::unix_as(&gateway_socket, "person/avery");
     let capabilities = client.capabilities().await.unwrap();
     let attachment = client
         .terminal_attach(
             "action/remote-terminal-attach",
             "remote-terminal-attach-0000001",
-            st3_client::Fence {
+            fractal_client::Fence {
                 snapshot_id: capabilities.snapshot.id,
                 runtime_incarnation: Some("remote-runtime:i1".into()),
                 terminal_sequence: Some(capabilities.snapshot.store_index),
-                ..st3_client::Fence::default()
+                ..fractal_client::Fence::default()
             },
-            st3_client::TargetParameters {
+            fractal_client::TargetParameters {
                 target_id: "terminal/agent/remote-shell".into(),
-                ..st3_client::TargetParameters::default()
+                ..fractal_client::TargetParameters::default()
             },
         )
         .await
@@ -1638,7 +1638,7 @@ async fn a_cli_attach_from_another_host_paints_screens_and_delivers_input() {
         stdout: stdout.as_raw_fd(),
         stderr: stderr.as_raw_fd(),
     };
-    let client = st3_client::Client::unix_as(&gateway_socket, "person/avery");
+    let client = fractal_client::Client::unix_as(&gateway_socket, "person/avery");
     let attach = tokio::spawn(async move {
         let code = crate::remote_terminal::attach_with_io(
             &client,
@@ -1841,7 +1841,7 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
     let mut image = b"\x89PNG\r\n\x1a\n".to_vec();
     image.extend((0..1_300_000_u32).map(|index| (index % 251) as u8));
     let hash = hex::encode(Sha256::digest(&image));
-    let uploaded = st3_client::Client::unix_as(&owner_socket, "person/avery")
+    let uploaded = fractal_client::Client::unix_as(&owner_socket, "person/avery")
         .upload_blob(image.clone(), "image/png")
         .await
         .unwrap()
@@ -2372,7 +2372,7 @@ async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
         }
     }
 
-    let client = st3_client::Client::unix_as(&sockets[0], "person/avery");
+    let client = fractal_client::Client::unix_as(&sockets[0], "person/avery");
     let session_id = format!(
         "session/{}",
         &hex::encode(sha2::Sha256::digest(
@@ -2397,15 +2397,15 @@ async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
         .terminal_attach(
             "action/chain-terminal-attach",
             "chain-terminal-attach-00000001",
-            st3_client::Fence {
+            fractal_client::Fence {
                 snapshot_id: capabilities.snapshot.id,
                 runtime_incarnation: Some(incarnation.into()),
                 terminal_sequence: Some(capabilities.snapshot.store_index),
-                ..st3_client::Fence::default()
+                ..fractal_client::Fence::default()
             },
-            st3_client::TargetParameters {
+            fractal_client::TargetParameters {
                 target_id: format!("terminal/{agent}"),
-                ..st3_client::TargetParameters::default()
+                ..fractal_client::TargetParameters::default()
             },
         )
         .await
@@ -2563,7 +2563,7 @@ async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_i
         }
     }
 
-    let client = st3_client::Client::unix_as(&sockets[0], "person/avery");
+    let client = fractal_client::Client::unix_as(&sockets[0], "person/avery");
     let page = client
         .messages_list_for_peer(agent, None, Some(20), false)
         .await
@@ -2831,7 +2831,7 @@ async fn a_followed_conversation_says_why_while_its_owner_cannot_be_reached() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let client = st3_client::Client::unix_as(&gateway_socket, "person/example");
+    let client = fractal_client::Client::unix_as(&gateway_socket, "person/example");
     let mut stream = client.collection_stream().await.unwrap();
     stream
         .subscribe_conversation("conversation", agent)
@@ -2844,11 +2844,11 @@ async fn a_followed_conversation_says_why_while_its_owner_cannot_be_reached() {
         .unwrap()
         .unwrap()
         .unwrap();
-    let st3_client::CollectionEvent::Resync { id, code, message } = event else {
+    let fractal_client::CollectionEvent::Resync { id, code, message } = event else {
         panic!("expected a resync, got {event:?}");
     };
     assert_eq!(id, "conversation");
-    assert_eq!(code, Some(st3_client::ErrorCode::RemoteUnavailable));
+    assert_eq!(code, Some(fractal_client::ErrorCode::RemoteUnavailable));
     assert!(
         message.is_some_and(|message| message.contains("conversation-owner")),
         "the message names the owner"
@@ -2988,7 +2988,7 @@ async fn gateway_fetches_authenticated_owner_record_chunks_and_propagates_invali
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    let client = st3_client::Client::unix_as(&gateway_socket, "person/example");
+    let client = fractal_client::Client::unix_as(&gateway_socket, "person/example");
     let page = client
         .timeline(&session_id, None, None)
         .await
@@ -2998,7 +2998,7 @@ async fn gateway_fetches_authenticated_owner_record_chunks_and_propagates_invali
         .items
         .iter()
         .find_map(|item| match &item.body {
-            st3_client::TimelineBody::Content(body) => body
+            fractal_client::TimelineBody::Content(body) => body
                 .blocks
                 .first()
                 .and_then(|block| block.continuation.as_ref())
@@ -3035,8 +3035,8 @@ async fn gateway_fetches_authenticated_owner_record_chunks_and_propagates_invali
     assert!(
         matches!(
             error,
-            st3_client::ClientError::Api(
-                st3_client::ErrorCode::ConversationContentInvalidated,
+            fractal_client::ClientError::Api(
+                fractal_client::ErrorCode::ConversationContentInvalidated,
                 _,
                 _
             )
@@ -3136,7 +3136,7 @@ async fn a_gateway_receives_remote_conversation_changes_without_idle_data() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    let client = st3_client::Client::unix_as(&gateway_socket, "person/example");
+    let client = fractal_client::Client::unix_as(&gateway_socket, "person/example");
     let baseline = client
         .conversation_changes(&session_id, None, 0)
         .await

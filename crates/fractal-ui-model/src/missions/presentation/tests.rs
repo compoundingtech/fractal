@@ -53,7 +53,7 @@ fn step(id: &str, state: &str, extra: Value) -> Value {
     step
 }
 
-fn mission(state: &str, steps: Vec<Value>) -> st3_client::Mission {
+fn mission(state: &str, steps: Vec<Value>) -> fractal_client::Mission {
     serde_json::from_value(json!({
         "id": "mission/fleet/example/audit", "kind": "mission", "revision": "r1",
         "title": "fleet/example/audit", "updated_at": "2026-10-14T10:00:00Z", "state": state,

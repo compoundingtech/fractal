@@ -141,7 +141,7 @@ describe('privacy gate', () => {
   it('flags email addresses outside the reserved example domains', () => {
     expect(scanContent('x.md', `contact ${'ada'}@${'corp'}.io`).map((finding) => finding.rule)).toEqual(['email address outside reserved domains'])
     expect(scanContent('x.md', 'contact ada@example.com, robin@team.example.org, avery@scenario.invalid')).toEqual([])
-    expect(scanContent('x.ts', "import { St3Client } from '@smalltalk/st3-client'")).toEqual([])
+    expect(scanContent('x.ts', "import { FractalClient } from '@fractal/client'")).toEqual([])
   })
 
   it('flags IPv4 addresses outside the documentation ranges and loopback', () => {

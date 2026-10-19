@@ -54,7 +54,7 @@ pub fn validate_declaration(
             "the declaration must name its bound terminal",
         )
     })?;
-    st3_schema::owned_terminals::validate_declaration_owner(
+    fractal_schema::owned_terminals::validate_declaration_owner(
         &binding.subject,
         "intent.desired",
         actor,
@@ -67,7 +67,7 @@ pub fn validate_declaration(
             .member
             .as_ref()
             .is_none_or(|m| m.lifecycle != MemberLifecycle::TerminalBound || !m.terminal)
-        || st3_schema::owned_terminals::owner(&binding.subject)
+        || fractal_schema::owned_terminals::owner(&binding.subject)
             .map_err(|e| St3Error::new(e.code, e.message))?
             .is_none_or(|owner| !owner.starts_with("person/"))
         || uuid::Uuid::parse_str(&binding.id).is_err()

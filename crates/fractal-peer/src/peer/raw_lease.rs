@@ -226,13 +226,13 @@ pub async fn receive_owner(
     binding: RawTerminalLeaseBinding,
     member_key: Option<String>,
 ) -> Response {
-    let client = st3_client::Client::unix_as(state.backend().socket(), &binding.person);
+    let client = fractal_client::Client::unix_as(state.backend().socket(), &binding.person);
     let result = async {
         let attachment = client
             .raw_terminal_attachment(
                 &binding.terminal,
                 &binding.incarnation,
-                st3_client::RawTerminalMode::Peek,
+                fractal_client::RawTerminalMode::Peek,
             )
             .await?;
         anyhow::ensure!(

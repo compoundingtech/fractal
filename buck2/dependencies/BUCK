@@ -2,7 +2,7 @@
 # Source: BUCK.genie.ts
 
 # Projected from pnpm-lock.yaml for the Buck importers in lock.ts.
-# Store fingerprint: sha256:f880343580f6d9ce77ab1511648efab1bede69abf370508b41ffbc4140ee1226
+# Store fingerprint: sha256:4893e71abadf7266913b7ffa1b21b289e8b1e738bbd1a4b32c0ef3d2714a5763
 
 load("@rules//buck2/dependencies:defs.bzl", "pnpm_package", "pnpm_platform_gated_packages")
 
@@ -68,7 +68,7 @@ pnpm_store_entry(
 )
 
 pnpm_store_view(
-    name = "view_clients_typescript_st3_client_418fd70e574e",
+    name = "view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
         "effect": "effect@4.0.0",
@@ -90,7 +90,7 @@ pnpm_store_view(
 )
 
 pnpm_store_view(
-    name = "view_clients_typescript_st3_views_4839e64c8727",
+    name = "view_clients_typescript_fractal_views_beb5b8218462",
     runtime = ":assemble-store.ts",
     direct = {
         "typescript": "typescript@6.0.3",
@@ -103,10 +103,10 @@ pnpm_store_view(
         "tsserver": "typescript@6.0.3\tbin/tsserver",
     },
     workspace_trees = {
-        "workspace_clients_typescript_st3_client_2de42fb899eb": "//clients/typescript/st3-client:package_tree",
+        "workspace_clients_typescript_fractal_client_a9aaa0b98a67": "//clients/typescript/fractal-client:package_tree",
     },
     workspace_dependencies = {
-        "@smalltalk/st3-client": "workspace_clients_typescript_st3_client_2de42fb899eb",
+        "@fractal/client": "workspace_clients_typescript_fractal_client_a9aaa0b98a67",
     },
     visibility = ["PUBLIC"],
 )

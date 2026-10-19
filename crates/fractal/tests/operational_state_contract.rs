@@ -1,12 +1,12 @@
-use st3::DeliveryStore;
-use st3::MissionsStore;
-use st3::SeatsStoreCore;
+use fractal_daemon::DeliveryStore;
+use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use st3::model::{ClaimInput, MissionRunRequest};
-use st3::store::Store;
+use fractal_daemon::model::{ClaimInput, MissionRunRequest};
+use fractal_daemon::store::Store;
 
 fn fixture_root() -> PathBuf {
     Path::new(test_env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/operational-state")
@@ -219,7 +219,7 @@ fn expired_lease_is_actionably_ready_at_snapshot_time() {
     let value = fixture("expired-lease.json");
     let store = Store::open_memory("operational-fixture").unwrap();
     let source = value["mission"].as_str().unwrap();
-    let intent = st3::parse_intent(source, "operational-fixture").unwrap();
+    let intent = fractal_daemon::parse_intent(source, "operational-fixture").unwrap();
     store
         .apply_internal(&intent, "expired-lease-mission")
         .unwrap();

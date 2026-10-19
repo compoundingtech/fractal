@@ -1,8 +1,8 @@
 //! The part of `store::stop_deferral` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_missions::store::stop_deferral::*;
-pub use st3_missions::store::stop_deferral::{create_schema};
+pub use fractal_missions::store::stop_deferral::*;
+pub use fractal_missions::store::stop_deferral::{create_schema};
 
 /// Store indexes per backfill page. A cold page reads only these kinds' rows; on a copy of a
 /// 16 GB production store the whole scan read about 26k rows in under two seconds.
@@ -25,12 +25,12 @@ impl StopDeferralStore for Store {
     fn latest_stop_deferral(&self, subject: &str) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h060f6542ad7a owner=st3_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he5f85abd9fdd owner=fractal_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.id IN ({})
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             family_sql("diagnostic", "?1", None),
-        )))?.query_row(/* sqlite-large-value: allow-for-now lv-h5c2eacbbc778 owner=st3_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ [subject], claim_from_row).optional().map_err(Into::into)
+        )))?.query_row(/* sqlite-large-value: allow-for-now lv-hf597a0f4dc5a owner=fractal_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ [subject], claim_from_row).optional().map_err(Into::into)
     }
 
     fn pending_stop_deferral_failure(
@@ -40,7 +40,7 @@ impl StopDeferralStore for Store {
         smallclaims::touched::note_read(|| diagnostic.subject.clone());
         let connection = self.readers.get();
         connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h53d4ab1f2e9e owner=st3_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2afd780341d3 owner=fractal_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
                 "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.id IN ({})
                AND json_extract(claims.body,'$.fields.episode')=?2
@@ -50,7 +50,7 @@ impl StopDeferralStore for Store {
                 family_sql("recovered", "?1", Some("claims.id")),
             )))?
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-hb6c84ce81115 owner=st3_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ params![
+                /* sqlite-large-value: allow-for-now lv-h2abf19e5f0ed owner=fractal_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ params![
                     diagnostic.subject,
                     format!("stop-deferred:{}", diagnostic.id)
                 ],
@@ -76,7 +76,7 @@ impl StopDeferralStore for Store {
             {
                 let connection = self.readers.get();
                 for (name, kind, predicate, reference) in FAMILIES {
-                    let mut page = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd02a43fd83d7 owner=st3_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ &format!(
+                    let mut page = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h49656b361b89 owner=fractal_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ &format!(
                         "SELECT subject,{reference},id FROM claims INDEXED BY claims_kind_index
                          WHERE kind='{kind}' AND store_index>?1 AND store_index<=?2 AND {predicate}"
                     ))?;
@@ -95,15 +95,15 @@ impl StopDeferralStore for Store {
         let transaction = connection.transaction()?;
         {
             let mut insert = transaction.prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h5696ed08f85e owner=st3_seats::store::stop_deferral TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stop_deferral_claims(subject,family,reference,claim_id)
+                /* sqlite-large-value: allow-for-now lv-hcac8f8112fd2 owner=fractal_seats::store::stop_deferral TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stop_deferral_claims(subject,family,reference,claim_id)
                  VALUES (?1,?2,?3,?4)",
             )?;
             for (subject, name, reference, id) in &rows {
-                insert.execute(/* sqlite-large-value: allow-for-now lv-h6db0a8d4be17 owner=st3_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ params![subject, name, reference, id])?;
+                insert.execute(/* sqlite-large-value: allow-for-now lv-h2f45038c4172 owner=fractal_seats::store::stop_deferral TODO=trace-statement-and-value-representation */ params![subject, name, reference, id])?;
             }
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h0adc8787fc19 owner=st3_seats::store::stop_deferral TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_stop_deferral_backfill SET complete=1 WHERE singleton=1",
+            /* sqlite-large-value: allow-for-now lv-h5880045ca4a3 owner=fractal_seats::store::stop_deferral TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_stop_deferral_backfill SET complete=1 WHERE singleton=1",
             [],
         )?;
         transaction.commit()?;

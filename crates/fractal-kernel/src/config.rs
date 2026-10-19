@@ -20,10 +20,10 @@ pub struct Config {
     pub node: String,
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub access_mode: Option<st_drivers::access::AccessMode>,
+    pub access_mode: Option<fractal_drivers::access::AccessMode>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub seat_priority: Option<st_runtime::SeatPriority>,
+    pub seat_priority: Option<fractal_runtime::SeatPriority>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
@@ -451,7 +451,7 @@ fn parse_duration_ms(value: &str, name: &str) -> Result<u64> {
 
 impl Default for Config {
     fn default() -> Self {
-        let state_dir = st3_client::product_dirs::state_dir();
+        let state_dir = fractal_client::product_dirs::state_dir();
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("run"));
@@ -486,18 +486,18 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn active_access_mode(&self) -> st_drivers::access::AccessMode {
+    pub fn active_access_mode(&self) -> fractal_drivers::access::AccessMode {
         self.access_mode.unwrap_or_default()
     }
 
-    pub fn active_seat_priority(&self) -> st_runtime::SeatPriority {
+    pub fn active_seat_priority(&self) -> fractal_runtime::SeatPriority {
         self.seat_priority.unwrap_or_default()
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
     pub fn initialize_install_config(&self, path: &Path) -> Result<()> {
         let mut fresh = self.clone();
-        fresh.access_mode = Some(self.access_mode.unwrap_or(st_drivers::access::AccessMode::Auto));
+        fresh.access_mode = Some(self.access_mode.unwrap_or(fractal_drivers::access::AccessMode::Auto));
         let bytes = toml::to_string(&fresh)?;
         let parent = path.parent().context("the install config path has no directory")?;
         fs::create_dir_all(parent)?;
@@ -513,7 +513,7 @@ impl Config {
     }
 
     pub fn default_path() -> PathBuf {
-        st3_client::product_dirs::config_dir().join("config.toml")
+        fractal_client::product_dirs::config_dir().join("config.toml")
     }
 
     pub fn load(path: Option<&Path>) -> Result<Self> {
@@ -582,7 +582,7 @@ impl Config {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && path.is_none() => {
                 return Ok((
                     Self {
-                        access_mode: Some(st_drivers::access::AccessMode::Auto),
+                        access_mode: Some(fractal_drivers::access::AccessMode::Auto),
                         ..Self::default()
                     },
                     Vec::new(),
@@ -1033,7 +1033,7 @@ mod tests {
 
     #[test]
     fn seat_priority_defaults_to_background_and_accepts_normal() {
-        use st_runtime::SeatPriority;
+        use fractal_runtime::SeatPriority;
         assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
         let background: Config = toml::from_str("seat_priority=\"background\"").unwrap();
         assert_eq!(background.active_seat_priority(), SeatPriority::Background);
@@ -1045,7 +1045,7 @@ mod tests {
 
     #[test]
     fn install_access_mode_preserves_legacy_config_and_writes_auto_once() {
-        use st_drivers::access::AccessMode;
+        use fractal_drivers::access::AccessMode;
         let root = tempdir().unwrap();
         let path = root.path().join("config.toml");
         let legacy: Config = toml::from_str("node=\"example\"\n").unwrap();

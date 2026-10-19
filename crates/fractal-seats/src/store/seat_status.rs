@@ -1,8 +1,8 @@
 //! The part of `store::seat_status` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_missions::store::seat_status::*;
-pub use st3_missions::store::seat_status::{MAX_TRANSITIONS, WINDOW_MS, enrich_harness, history_at, history_at_with_sources, history_source, observation_time, permission_blocked, state_run_since, transition_positions};
+pub use fractal_missions::store::seat_status::*;
+pub use fractal_missions::store::seat_status::{MAX_TRANSITIONS, WINDOW_MS, enrich_harness, history_at, history_at_with_sources, history_source, observation_time, permission_blocked, state_run_since, transition_positions};
 
 pub const STALE_MS: u128 = 90_000;
 
@@ -44,8 +44,8 @@ impl SeatStatusStore for Store {
         let prompt_query = newest_claims_of_kind_query("claims.accepted_at_unix_ms", "harness.diagnostic")
             .replace(" ORDER BY", " AND json_extract(claims.body,'$.fields.incarnation_id')=?3 AND json_extract(claims.body,'$.fields.code') IN ('provider-auth-expired','provider-trust-prompt','provider-auth-restored','provider-update-prompt','provider-update-restored') ORDER BY") + " LIMIT 1";
         let prompt: Option<String> = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb50a9603a7cb owner=st3_seats::store::seat_status TODO=trace-statement-and-value-representation */ &prompt_query)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-he12dd6e66d38 owner=st3_seats::store::seat_status TODO=trace-statement-and-value-representation */ params![subject, index, harness.incarnation_id], |row| {
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-he1deaebb15d6 owner=fractal_seats::store::seat_status TODO=trace-statement-and-value-representation */ &prompt_query)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hdd0d4ca3ab13 owner=fractal_seats::store::seat_status TODO=trace-statement-and-value-representation */ params![subject, index, harness.incarnation_id], |row| {
                 row.get(0)
             })
             .optional()?;
@@ -59,7 +59,7 @@ impl SeatStatusStore for Store {
                AND json_extract(body, '$.fields.incarnation_id')=?3
              ORDER BY id DESC LIMIT 1",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-he4836e305e93 owner=st3_seats::store::seat_status TODO=trace-statement-and-value-representation */ params![subject, index, harness.incarnation_id], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h9bfe7fe631a3 owner=fractal_seats::store::seat_status TODO=trace-statement-and-value-representation */ params![subject, index, harness.incarnation_id], |row| {
                 Ok((row.get(0)?, row.get::<_, i64>(1)? as u128))
             })
             .optional()?;
@@ -98,8 +98,8 @@ impl SeatStatusStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::seat_status_tests_shared_seats::*;
-    use st3_missions::store::seat_status_tests_shared_seats::{checked_harness, input, observe, runtime};
+    use fractal_missions::store::seat_status_tests_shared_seats::*;
+    use fractal_missions::store::seat_status_tests_shared_seats::{checked_harness, input, observe, runtime};
 
     #[test]
     fn approval_observation_is_blocked_in_current_then_clears() {

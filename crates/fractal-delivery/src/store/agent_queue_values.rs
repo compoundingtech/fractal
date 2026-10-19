@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 use super::Store;
 use crate::client_values::{client_timestamp, client_work_state};
-pub use st3_store::store::agent_queue_values::*;
+pub use fractal_store::store::agent_queue_values::*;
 
 pub const AGENT_QUEUE_FIELDS: [&str; 8] = [
     "current_work_ids", "active_work_count", "next_work_id", "upcoming_work_ids",

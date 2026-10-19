@@ -472,7 +472,7 @@ async fn assert_parity(fixture: &Fixture, session: &ClientSession, held: &BTreeM
 }
 
 fn custom_review_kind(store: &Store) {
-    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h4e2bce3276a9 owner=st3_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h5ab62dec9ce4 owner=fractal_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/custom-review.json"
     )).unwrap();
     store.register_custom_kind(&crate::store::custom::RegistrationRequest {
@@ -685,7 +685,7 @@ async fn inventory_reconnect(
 }
 
 fn inventory_schema(frame: &Value) {
-    let schema: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h759ea581df94 owner=st3_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let schema: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h2e43c9d83f46 owner=fractal_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
     ))
     .unwrap();
@@ -701,8 +701,8 @@ fn inventory_schema(frame: &Value) {
         .or_else(|| frame["upserts"].as_array())
         .unwrap()
     {
-        let resource: st3_client::Resource = serde_json::from_value(row.clone()).unwrap();
-        assert!(!matches!(resource, st3_client::Resource::Unknown(_)));
+        let resource: fractal_client::Resource = serde_json::from_value(row.clone()).unwrap();
+        assert!(!matches!(resource, fractal_client::Resource::Unknown(_)));
     }
 }
 

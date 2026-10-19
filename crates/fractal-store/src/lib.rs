@@ -9,13 +9,13 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
-pub use st3_kernel::*;
-pub use st3_telemetry::*;
-pub use st3_secrets::*;
-pub use st3_seats_base::*;
-pub use st3_delivery_base::*;
-pub use st3_missions_base::*;
-pub use st3_github_base::*;
+pub use fractal_kernel::*;
+pub use fractal_telemetry::*;
+pub use fractal_secrets::*;
+pub use fractal_seats_base::*;
+pub use fractal_delivery_base::*;
+pub use fractal_missions_base::*;
+pub use fractal_github_base::*;
 pub use smallclaims::{performance, profile, task_cpu};
 
 #[cfg(any(test, feature = "test-support"))]

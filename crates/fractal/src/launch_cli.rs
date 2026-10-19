@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 pub(super) async fn run_launch(
     client: &Client,
@@ -506,7 +506,7 @@ pub(super) async fn run_mission_view(
             print_mission_tree_continuation(&run, &page, args.limit);
             // A daemon without lanes answers 404; the run itself is still shown.
             if let Ok(lanes) = client
-                .get::<Vec<st3::model::LaneView>>(&format!(
+                .get::<Vec<fractal_daemon::model::LaneView>>(&format!(
                     "/v1/lanes?run={}",
                     urlencoding::encode(&run.subject)
                 ))
@@ -747,7 +747,7 @@ async fn retire_mission(client: &Client, args: MissionRetireArgs, json_output: b
 
 fn print_mission_tree_continuation(
     selected: &MissionRunView,
-    page: &st3::model::MissionRunTreePage,
+    page: &fractal_daemon::model::MissionRunTreePage,
     limit: usize,
 ) {
     if let Some(cursor) = &page.next_cursor {
@@ -776,7 +776,7 @@ fn render_mission_overview(view: &Value) -> String {
     if let Some(value) = view.get("provenance")
         && let Ok(provenance) = serde_json::from_value(value.clone())
     {
-        out.push_str(&st3::provenance::render(&provenance));
+        out.push_str(&fractal_daemon::provenance::render(&provenance));
     }
     for (key, title) in [("newest", "NEWEST"), ("failed", "FAILED")] {
         let _ = writeln!(out, "{title} (up to {} runs)", view["preview_limit"]);
@@ -798,7 +798,7 @@ fn render_mission_overview(view: &Value) -> String {
 }
 
 /// The lanes a mission run owns, for `st missions show`.
-fn render_run_lanes(lanes: &[st3::model::LaneView], now: u128) -> String {
+fn render_run_lanes(lanes: &[fractal_daemon::model::LaneView], now: u128) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();

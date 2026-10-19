@@ -7,10 +7,10 @@ pub use crate::store::resource_preparation_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::resource_preparation_shared_seats::{BEFORE_VALIDATE};
 use super::*;
-pub use st3_delivery::store::resource_preparation::*;
+pub use fractal_delivery::store::resource_preparation::*;
 #[cfg(any(test, feature = "test-support"))]
-pub use st3_store::store::resource_preparation::tests_shared_seats;
-pub use st3_delivery::store::resource_preparation::{Fence, NativeCut, Prepared};
+pub use fractal_store::store::resource_preparation::tests_shared_seats;
+pub use fractal_delivery::store::resource_preparation::{Fence, NativeCut, Prepared};
 #[cfg(test)]
 #[allow(hidden_glob_reexports)] // st3-store's module of the same name is private; this one holds the tests that moved
 mod tests;
@@ -144,7 +144,7 @@ pub fn inputs_with_actuals(
                 .and_then(|actual| actual.get("facts").cloned());
             let observed_at = transaction
                 .query_row(
-                    /* sqlite-large-value: allow-for-now lv-hcf68b5e0877e owner=st3_missions::store::resource_preparation TODO=trace-statement-and-value-representation */ &canonical_sql(
+                    /* sqlite-large-value: allow-for-now lv-h310c8b4305ae owner=fractal_missions::store::resource_preparation TODO=trace-statement-and-value-representation */ &canonical_sql(
                         "SELECT accepted_at_unix_ms FROM claims
                                      WHERE subject=?1 AND kind='resource.observed'
                                      ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",

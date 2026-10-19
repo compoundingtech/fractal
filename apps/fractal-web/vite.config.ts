@@ -49,7 +49,7 @@ export default defineConfig({
     },
     extensionBuild({ entry: '../src/extensions/app-public.ts', privateBuild: false }),
     ...createStylexVitePlugins({
-      externalPackages: ['@smalltalk/fractal-ui'],
+      externalPackages: ['@fractal/ui'],
       entries: [new URL('./src/web/main.tsx', import.meta.url).pathname],
     }),
     deferBuiltStylesheets(),

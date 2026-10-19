@@ -1,9 +1,9 @@
 use serde_json::json;
-use st3::api::{AppState, router, serve_unix};
-use st3::backup;
-use st3::client::{Client, Endpoint};
-use st3::model::ClaimInput;
-use st3::store::Store;
+use fractal_daemon::api::{AppState, router, serve_unix};
+use fractal_daemon::backup;
+use fractal_daemon::client::{Client, Endpoint};
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
 fn backup_cli(root: &Path, socket: &Path) -> tokio::process::Command {
-    let mut command = st3::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
     command.env("XDG_CONFIG_HOME", root.join("config"));
     command.env("XDG_STATE_HOME", root.join("state"));
     command.env("XDG_DATA_HOME", root.join("data"));

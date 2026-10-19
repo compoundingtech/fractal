@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::json;
-use st3_client::{Client, RawTerminalAttachment, RawTerminalMode};
+use fractal_client::{Client, RawTerminalAttachment, RawTerminalMode};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_tungstenite::tungstenite::{
     Message,
@@ -150,7 +150,7 @@ async fn attach_selected_use_is_rejected_without_closing_pty() {
             .unwrap();
         assert!(matches!(
             controlled.activity.selected_use().await,
-            Err(st3_client::ClientError::Protocol(_)),
+            Err(fractal_client::ClientError::Protocol(_)),
         ));
         let mut stream = controlled.stream;
         stream.write_all(b"foreground-input").await.unwrap();

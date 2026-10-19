@@ -307,8 +307,8 @@ fn spawn(
     let executable = crate::reconcile::launch_executable()?;
     let environment = crate::reconcile::member_environment(&declared, &executable, recorder)?;
     let mut source = item.view.command.clone();
-    st_runtime::expand_path_placeholder(&mut source, &environment);
-    let shell = st_runtime::resolve_executable("sh", &environment)?;
+    fractal_runtime::expand_path_placeholder(&mut source, &environment);
+    let shell = fractal_runtime::resolve_executable("sh", &environment)?;
     let output = std::fs::File::create(log)
         .with_context(|| format!("create the check log {}", log.display()))?;
     let mut command = Command::new(shell);

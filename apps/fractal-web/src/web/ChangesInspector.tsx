@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { DiffPanel } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DiffPanel.tsx'
-import { ResourceCardV1, ResourceChipV1 } from '@smalltalk/fractal-ui/assistant-ui/resources'
+import { ResourceCardV1, ResourceChipV1 } from '@fractal/ui/assistant-ui/resources'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useConversation, useDataSource, useFeedInterest } from '../data/react.tsx'
 import type { Feed, ConversationPage } from '../data/source.ts'

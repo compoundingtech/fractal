@@ -1,7 +1,7 @@
-import type { SyncNotice, SyncPeer } from '@smalltalk/st3-client';
+import type { SyncNotice, SyncPeer } from '@fractal/client';
 
 // The optional `sync` notice on a client page, in the words stui and `st now` use (SyncPeer::summary
-// in crates/st3-client/src/generated.rs): this host lacks records a peer holds, so what a page shows
+// in crates/fractal-client/src/generated.rs): this host lacks records a peer holds, so what a page shows
 // can be out of date, or it holds the same records as a peer and projects a different graph.
 
 /** `1 envelope` or `124,384 envelopes`. */

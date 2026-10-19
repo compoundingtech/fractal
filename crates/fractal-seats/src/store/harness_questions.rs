@@ -2,11 +2,11 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use smallclaims::store::checkpoint::claims_of_kind_in_order;
-use st3_schema::harness_questions::{
+use fractal_schema::harness_questions::{
     Answer, OBSERVED, Question, RESOLVED, Receipt, Status, actor_key, answers, questions, subject,
 };
-pub use st3_missions::store::harness_questions::*;
-pub use st3_missions::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
+pub use fractal_missions::store::harness_questions::*;
+pub use fractal_missions::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
 
 /// A native question as the harness shows it, without its text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,7 +79,7 @@ impl HarnessQuestionsStore for Store {
             observation: &QuestionObservation,
             after_read: impl FnOnce(),
         ) -> Result<HarnessQuestion, St3Error> {
-        let native_id = st3_schema::harness_questions::native_id_digest(&observation.native_id);
+        let native_id = fractal_schema::harness_questions::native_id_digest(&observation.native_id);
         let subject = subject(&observation.agent, &observation.session, &native_id);
         let current = self.harness_question_held(&subject)?;
         // Fence the observation we inspected, not a head that may already contain a
@@ -190,8 +190,8 @@ impl HarnessQuestionsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::harness_questions_tests_shared_seats::*;
-    use st3_missions::store::harness_questions_tests_shared_seats::{DAY, answer};
+    use fractal_missions::store::harness_questions_tests_shared_seats::*;
+    use fractal_missions::store::harness_questions_tests_shared_seats::{DAY, answer};
 
     fn observation() -> QuestionObservation {
         QuestionObservation {
@@ -210,7 +210,7 @@ mod tests {
             let mut observed = observation();
             observed.native_id = native.into();
             let question = store.observe_harness_question(&observed).unwrap();
-            assert_eq!(question.native_id, st3_schema::harness_questions::native_id_digest(native));
+            assert_eq!(question.native_id, fractal_schema::harness_questions::native_id_digest(native));
             assert_eq!(question.id, subject(&observed.agent, &observed.session, &question.native_id));
             for claim in store.claims_for(&question.id, None).unwrap() {
                 assert!(!claim.body.to_string().contains(native));
@@ -360,10 +360,10 @@ mod tests {
             state(&alder, "runtime.observed", json!({"status": "running", "runtime_id": "runtime-1", "incarnation_id": "inc-1"}));
             state(&alder, "harness.observed", json!({"state": "working", "driver": "claude", "incarnation_id": "inc-1"}));
             let first = alder.observe_harness_question(&observation()).unwrap();
-            st3_store::store::tests_shared::receive_and_project(
+            fractal_store::store::tests_shared::receive_and_project(
                 &birch,
                 "alder",
-                &st3_store::store::tests_shared::exchange_from(&alder, &ReplicationInventory::default()),
+                &fractal_store::store::tests_shared::exchange_from(&alder, &ReplicationInventory::default()),
             );
             // Both writers in the same later millisecond.
             for store in [&alder, &birch] {
@@ -382,11 +382,11 @@ mod tests {
                 .unwrap();
             for (name, source) in [("alder", &alder), ("birch", &birch)] {
                 let exchange =
-                    st3_store::store::tests_shared::exchange_from(source, &ReplicationInventory::default());
-                st3_store::store::tests_shared::receive_and_project(&relay, name, &exchange);
+                    fractal_store::store::tests_shared::exchange_from(source, &ReplicationInventory::default());
+                fractal_store::store::tests_shared::receive_and_project(&relay, name, &exchange);
             }
             (
-                st3_store::store::tests_shared::exchange_from(&relay, &ReplicationInventory::default()),
+                fractal_store::store::tests_shared::exchange_from(&relay, &ReplicationInventory::default()),
                 first.id,
             )
         })
@@ -398,8 +398,8 @@ mod tests {
         let connection = store.readers.get();
         let index = store.index().unwrap();
         json!({
-            "harness": st3_store::store::current_harness_at(&connection, &seat, None).unwrap(),
-            "history": st3_store::store::seat_status::history_at(&connection, &seat, 20 * DAY, index).unwrap(),
+            "harness": fractal_store::store::current_harness_at(&connection, &seat, None).unwrap(),
+            "history": fractal_store::store::seat_status::history_at(&connection, &seat, 20 * DAY, index).unwrap(),
             "question": store.harness_question(question, u128::MAX).unwrap(),
         })
     }
@@ -411,10 +411,10 @@ mod tests {
                 .iter()
                 .flat_map(|&index| std::iter::repeat_n(exchange.envelopes[index].clone(), copies))
                 .collect();
-            let admission = st3_store::store::tests_shared::receive_and_project(
+            let admission = fractal_store::store::tests_shared::receive_and_project(
                 target,
                 "cedar",
-                &st3_store::store::tests_shared_seats::exchange_of("cedar", envelopes),
+                &fractal_store::store::tests_shared_seats::exchange_of("cedar", envelopes),
             );
             assert_eq!((admission.invalid, admission.unknown), (0, 0));
         }
@@ -445,7 +445,7 @@ mod tests {
         let target = Store::open(&path, "dogwood").unwrap();
         deliver_harness(&target, &(0..exchange.envelopes.len()).rev().collect::<Vec<_>>(), 1, 1);
         assert_eq!(&harness_snapshot(&target), harness_reference());
-        st3_store::store::tests_shared::receive_and_project(&target, "cedar", exchange);
+        fractal_store::store::tests_shared::receive_and_project(&target, "cedar", exchange);
         assert_eq!(&harness_snapshot(&target), harness_reference());
         drop(target);
         let target = Store::open(&path, "dogwood").unwrap();

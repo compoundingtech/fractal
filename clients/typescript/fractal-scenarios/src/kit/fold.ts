@@ -1,4 +1,4 @@
-import type { Resource } from '@smalltalk/st3-client'
+import type { Resource } from '@fractal/client'
 
 import type { AnySlice, Slice, SliceKind, SliceStates, SyncSurface, TimelineEvent, WireResource } from './slice.ts'
 import type { SyncStatus } from './syncStatus.ts'

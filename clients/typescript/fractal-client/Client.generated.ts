@@ -204,7 +204,7 @@ function bounded(value: number | undefined, maximum: number, name: string): void
     }
 }
 
-export class St3Client {
+export class FractalClient {
     private readonly baseUrl: string;
     private readonly credential?: ClientOptions['credential'];
     private readonly traceContext?: ClientOptions['traceContext'];
@@ -238,8 +238,8 @@ export class St3Client {
      * This client with every request and stream carrying `traceContext` instead, so a caller can name
      * the span that owns one call; credentials, transport, and discovery stay shared.
      */
-    withTraceContext(traceContext: () => TraceContext | undefined): St3Client {
-        const view = new St3Client({
+    withTraceContext(traceContext: () => TraceContext | undefined): FractalClient {
+        const view = new FractalClient({
             baseUrl: this.baseUrl,
             fetchImpl: this.fetchImpl,
             traceContext,

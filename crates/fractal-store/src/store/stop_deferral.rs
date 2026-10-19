@@ -61,7 +61,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     // The trigger and the ceiling commit together: every claim above the ceiling was copied
     // by the trigger, and every claim at or below it is the backfill's.
     connection.execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-hd82a4f1dd9c8 owner=st3_store::store::stop_deferral TODO=chunk-or-reference-variable-columns */ "SAVEPOINT stop_deferral_schema;
+        /* sqlite-large-value: allow-for-now lv-had3b7f5ab6ff owner=fractal_store::store::stop_deferral TODO=chunk-or-reference-variable-columns */ "SAVEPOINT stop_deferral_schema;
          DROP INDEX IF EXISTS claims_stop_deferral_diagnostic_index;
          DROP INDEX IF EXISTS claims_stop_deferral_failure_index;
          DROP INDEX IF EXISTS claims_stop_deferral_recovery_index;
@@ -130,7 +130,7 @@ impl Store {
         at_index: u64,
     ) -> Result<BTreeMap<String, String>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8e14c329131f owner=st3_store::store::stop_deferral TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9dfc4dc2c7bf owner=fractal_store::store::stop_deferral TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "WITH seats AS MATERIALIZED (
                SELECT desired.subject,desired.claim_id,
                  (SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id

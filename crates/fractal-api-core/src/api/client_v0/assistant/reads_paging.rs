@@ -222,7 +222,7 @@ fn check_mission_source(state: &AppState, cursor: Option<&ClientPageCursor>, ind
         let kind = change.get_ref(1).map_err(ApiError::internal)?.as_str().map_err(ApiError::internal)?;
         // Use the canonical registry's subject families, including all step claims
         // (standalone person asks can create missions). Repairs can replace old inputs.
-        let family = st3_schema::registry().subject(subject).map(|spec| spec.family.as_str());
+        let family = fractal_schema::registry().subject(subject).map(|spec| spec.family.as_str());
         if count == CHANGE_LIMIT
             || matches!(family, Some("mission" | "mission-run" | "step-run" | "run-generation" | "revision-proposal"))
             || matches!(kind, "repair.applied" | "record.repaired")

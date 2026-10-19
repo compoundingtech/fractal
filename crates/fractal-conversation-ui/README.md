@@ -21,7 +21,7 @@ status events and emit unpaired media refs only at the next message or end of th
 
 ```toml
 [dependencies]
-st3-conversation-ui = { path = "../st3-conversation-ui" }
+fractal-conversation-ui = { path = "../fractal-conversation-ui" }
 ```
 
 Selections accept strings or any UI line type implementing `SelectionLine`. Its `continuation`
@@ -30,7 +30,7 @@ and `None` preserves a real newline. The same selection algorithm strips message
 code fences and shared indentation for every renderer.
 
 ```rust
-use st3_conversation_ui::Selection;
+use fractal_conversation_ui::Selection;
 
 let selection = Selection {
     pane: "session/demo".into(),
@@ -48,7 +48,7 @@ Verify the two builds independently, since a workspace build unifies the termina
 features:
 
 ```sh
-cargo test --locked -p st3-conversation-ui --no-default-features
-cargo test --locked -p st3-conversation-ui --features ratatui
-cargo tree --locked -p st3-conversation-ui --no-default-features -e normal
+cargo test --locked -p fractal-conversation-ui --no-default-features
+cargo test --locked -p fractal-conversation-ui --features ratatui
+cargo tree --locked -p fractal-conversation-ui --no-default-features -e normal
 ```

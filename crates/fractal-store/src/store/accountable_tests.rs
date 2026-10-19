@@ -60,14 +60,14 @@ fn accountable_root_raw_and_replica_paths_reject_forgery_and_unknown_stays_unkno
         .unwrap()
         .unwrap();
     assert!(matches!(
-        classify_replicated_claim_with_registry(&record, st3_schema::registry()).unwrap(),
+        classify_replicated_claim_with_registry(&record, fractal_schema::registry()).unwrap(),
         ReplicatedClaimAdmission::Valid
     ));
     for actor in [None, Some("agent/example/child"), Some("person/robin")] {
         let mut forged = record.clone();
         forged.actor = actor.map(str::to_owned);
         assert_eq!(
-            classify_replicated_claim_with_registry(&forged, st3_schema::registry())
+            classify_replicated_claim_with_registry(&forged, fractal_schema::registry())
                 .err()
                 .unwrap()
                 .code,
@@ -93,7 +93,7 @@ fn accountable_root_raw_and_replica_paths_reject_forgery_and_unknown_stays_unkno
             _ => forged.body["owner_run"] = json!("mission-run/example/run"),
         }
         assert_eq!(
-            classify_replicated_claim_with_registry(&forged, st3_schema::registry())
+            classify_replicated_claim_with_registry(&forged, fractal_schema::registry())
                 .err()
                 .unwrap()
                 .code,
@@ -101,7 +101,7 @@ fn accountable_root_raw_and_replica_paths_reject_forgery_and_unknown_stays_unkno
             "{mutate}"
         );
     }
-    let mut old = st3_schema::registry().clone();
+    let mut old = fractal_schema::registry().clone();
     old.claims
         .get_mut("intent.desired")
         .unwrap()
@@ -151,7 +151,7 @@ fn accountable_root_grammar_rejects_nonpersons_duplicates_and_nested_values() {
     let mut desired = intent().subjects[ROOT].clone();
     desired.owner_run = Some("mission-run/example/run".into());
     assert!(
-        st3_schema::accountable::validate_claim(
+        fractal_schema::accountable::validate_claim(
             ROOT,
             "intent.desired",
             &serde_json::to_value(desired).unwrap(),
@@ -212,8 +212,8 @@ fn accountable_absent_preserves_previous_cbor_bytes_and_desired_revisions() {
     assert_eq!(desired_revision(&minimal), "e9fcc02577cf489c512b41ff9998ade7db1e9c12a66d8269fe13e379757da944");
     assert_eq!(canonical_hash(&previous(&minimal)).unwrap(), desired_revision(&minimal));
 
-    let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc9993c692f01 owner=st3_store::store::accountable_tests TODO=trace-statement-and-value-representation */ include_str!(
-        "../../../st3-daemon/tests/fixtures/harness-access-previous-build.json"
+    let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h6aafefa4c2e6 owner=fractal_store::store::accountable_tests TODO=trace-statement-and-value-representation */ include_str!(
+        "../../../fractal-daemon/tests/fixtures/harness-access-previous-build.json"
     )).unwrap();
     for body in fixture["desired_subjects"].as_array().unwrap() {
         let mut desired: DesiredSubject = serde_json::from_value(body.clone()).unwrap();

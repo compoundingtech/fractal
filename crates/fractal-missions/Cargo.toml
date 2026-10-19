@@ -1,18 +1,18 @@
 [package]
-name = "st3-missions"
+name = "fractal-missions"
 version = "0.1.0"
 edition = "2024"
 description = "The missions domain of the store"
 license = "MIT"
 
 [features]
-# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-delivery/test-support"]
+# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
+test-support = ["fractal-delivery/test-support"]
 
 [dependencies]
-st3-delivery = { path = "../st3-delivery" }
+fractal-delivery = { path = "../fractal-delivery" }
 # Shared test modules of the store are named by their own path.
-st3-store = { path = "../st3-store" }
+fractal-store = { path = "../fractal-store" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 flate2 = "1"
@@ -23,13 +23,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
-st3-kernel = { path = "../st3-kernel" }
-st3-schema = { path = "../st3-schema" }
+fractal-kernel = { path = "../fractal-kernel" }
+fractal-schema = { path = "../fractal-schema" }
 tempfile = "3"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
-st3_missions_self = { package = "st3-missions", path = ".", features = ["test-support"] }
+fractal_missions_self = { package = "fractal-missions", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 proptest = "1"

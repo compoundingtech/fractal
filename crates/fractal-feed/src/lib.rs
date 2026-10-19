@@ -18,7 +18,7 @@ pub mod tree;
 pub use terminal::{action_pair, terminal_fence, terminal_screen_fence};
 pub use inventory::{Inventories, Inventory};
 
-use st3_client::{
+use fractal_client::{
     CapabilityState, Client, ClientError, CollectionEvent, CollectionStream, ErrorCode, Fence,
     Resource, Snapshot, TargetParameters, TerminalScreen, TimelineEntry,
 };
@@ -663,7 +663,7 @@ async fn connected(
                     // so the last copy shown can say it is stale (the owner's host is away).
                     CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
                         let Some(current) = conversing.iter().find(|current| current.id == id) else { continue };
-                        let message = st3_client::plain_message(code.as_ref(), &message);
+                        let message = fractal_client::plain_message(code.as_ref(), &message);
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent: false }).is_err() {
                             return Ended::Closed;
                         }
@@ -678,7 +678,7 @@ async fn connected(
                         {
                             if matches!(window, Window::Inventory(_)) {
                                 if let Some(message) = message {
-                                    let plain = st3_client::plain_message(code.as_ref(), &message);
+                                    let plain = fractal_client::plain_message(code.as_ref(), &message);
                                     pending_reports.report(window, Instant::now(), plain);
                                 }
                                 continue;
@@ -687,7 +687,7 @@ async fn connected(
                             // not ready); the retries are quiet until the window loads.
                             let first = window_retries.failed(window, Instant::now());
                             if first && let Some(message) = message {
-                                let message = st3_client::plain_message(code.as_ref(), &message);
+                                let message = fractal_client::plain_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), message);
                             }
                         }
@@ -700,7 +700,7 @@ async fn connected(
                         }
                     }
                     CollectionEvent::Error { id, code, message } if id.starts_with(CONVERSATION) => {
-                        let message = st3_client::plain_message(code.as_ref(), &message);
+                        let message = fractal_client::plain_message(code.as_ref(), &message);
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         let permanent = !conversation_may_clear(code.as_ref());
                         // Anything else may clear: the agent starts, its host comes back, its
@@ -719,13 +719,13 @@ async fn connected(
                                 continue;
                             }
                             if matches!(window, Window::Inventory(_)) {
-                                let plain = st3_client::plain_message(code.as_ref(), &message);
+                                let plain = fractal_client::plain_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), plain);
                                 continue;
                             }
                             // Said once, and only if it lasts; the retries are quiet until it loads.
                             if window_retries.failed(window, Instant::now()) {
-                                let message = st3_client::plain_message(code.as_ref(), &message);
+                                let message = fractal_client::plain_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), message);
                             }
                         } else if id == TERMINAL {
@@ -1166,7 +1166,7 @@ enum Refusal {
 fn terminal_reason(code: Option<&ErrorCode>, message: &str) -> String {
     match code {
         Some(ErrorCode::StaleFence) if !message.is_empty() => message.to_owned(),
-        _ => st3_client::plain_message(code, message),
+        _ => fractal_client::plain_message(code, message),
     }
 }
 
@@ -1212,7 +1212,7 @@ async fn attach(
     runtime_id: &str,
     terminal_id: &str,
     expected: Option<&str>,
-) -> Result<st3_client::TerminalAttachment, Refusal> {
+) -> Result<fractal_client::TerminalAttachment, Refusal> {
     for attempt in 0..FENCE_TRIES {
         let current = client.runtimes_get(runtime_id).await.map_err(refusal)?;
         let Resource::Runtime(runtime) = current.value else {
@@ -1402,7 +1402,7 @@ mod tests {
         ClientError::Api(
             code.clone(),
             message.into(),
-            Box::new(st3_client::ErrorEnvelope {
+            Box::new(fractal_client::ErrorEnvelope {
                 api_version: "v0".into(),
                 error_version: "1".into(),
                 request_id: "request".into(),

@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 //! Cancellation owns both declared execs and directly launched gates, including after restart.
-use st3::DeliveryStore;
-use st3::MissionsStore;
+use fractal_daemon::DeliveryStore;
+use fractal_daemon::MissionsStore;
 use std::fs::File;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -42,7 +42,7 @@ impl Daemon {
     fn launch(&mut self) {
         let log = File::create(self.root.join("daemon.log")).unwrap();
         self.child = Some(
-            st3::test_support::command(test_bin!("st3-fixture"))
+            fractal_daemon::test_support::command(test_bin!("st3-fixture"))
                 .env_clear()
                 .env("HOME", &self.root)
                     .env(
@@ -85,7 +85,7 @@ impl Daemon {
     }
 
     fn command(&self, args: &[&str]) -> Value {
-        let output = st3::test_support::command(test_bin!("st3-fixture"))
+        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
             .env_clear()
             .env("HOME", &self.root)
             .env("ST3_DAEMON_WAIT", "0")
@@ -182,8 +182,8 @@ fn live(pid: i32) -> bool {
 
 #[test]
 fn isolated_daemon_deduplicates_completed_reviews_and_cancels_a_superseded_head() {
-    use st3::model::{ClaimInput, MissionRunRequest};
-    use st3::store::Store;
+    use fractal_daemon::model::{ClaimInput, MissionRunRequest};
+    use fractal_daemon::store::Store;
     use std::collections::BTreeMap;
 
     let root = tempfile::tempdir().unwrap();
@@ -220,11 +220,11 @@ observer "repo" { resource "resource/repo"; provider "github.repository"; locato
 subscription "reviews" { observer "observer/repo"; on "pull_requests"; delivery "mission" { mission "review"; resource "source"; workspace "/tmp/example-reviews" } }
 "#;
     // Standalone observers and subscriptions use the owned-set publication grammar.
-    let intent = st3::graph::parse_owned_set_intent(source, "orchid").unwrap();
+    let intent = fractal_daemon::graph::parse_owned_set_intent(source, "orchid").unwrap();
     let plan = store
         .mission(
             &intent,
-            st3::model::IntentInput {
+            fractal_daemon::model::IntentInput {
                 kdl: source.into(),
                 source_name: None,
             },
@@ -539,7 +539,7 @@ mission "orchid/cancellation" state="ready" {
 
 #[test]
 fn cancellation_stops_execs_and_waiting_gates_before_finally_finishes() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     cancellation_stops_owned_work(false);
@@ -547,7 +547,7 @@ fn cancellation_stops_execs_and_waiting_gates_before_finally_finishes() {
 
 #[test]
 fn cancellation_adopts_and_stops_gate_processes_after_daemon_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     cancellation_stops_owned_work(true);

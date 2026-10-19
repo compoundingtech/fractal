@@ -1,6 +1,6 @@
 //! Run in release mode on a private SQLite backup, never a live store.
 //! Prints only timings, counts and authority digests, not stored content.
-use st3::{
+use fractal_daemon::{
     model::{ClaimInput, ReplicationInventory},
     store::Store,
 };
@@ -156,9 +156,9 @@ fn main() -> anyhow::Result<()> {
                 )
         );
         if let (Some(key), Some(signature)) = (&envelope.member_key, &envelope.signature) {
-            anyhow::ensure!(st3::fleet::verify_signature(
+            anyhow::ensure!(fractal_daemon::fleet::verify_signature(
                 key,
-                &st3::fleet::envelope_signature_message(
+                &fractal_daemon::fleet::envelope_signature_message(
                     &fleet,
                     &envelope.writer,
                     envelope.sequence,
@@ -195,9 +195,9 @@ fn main() -> anyhow::Result<()> {
                 )
         );
         if let (Some(key), Some(signature)) = (&envelope.member_key, &envelope.signature) {
-            anyhow::ensure!(st3::fleet::verify_signature(
+            anyhow::ensure!(fractal_daemon::fleet::verify_signature(
                 key,
-                &st3::fleet::envelope_signature_message(
+                &fractal_daemon::fleet::envelope_signature_message(
                     &fleet,
                     &envelope.writer,
                     envelope.sequence,

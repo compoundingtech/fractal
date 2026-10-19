@@ -188,17 +188,17 @@ pub fn verify_file(path: &Path) -> Result<Header> {
 }
 
 /// Build privately at the current schema. Failed restores never publish a partial graph.
-pub /* sqlite-large-value-flow: allow-for-now flow-hcae396e7e94c owner=st3_store::backup TODO=chunk-or-reference-exact-wire-values */ fn restore(source: &Path, destination: &Path) -> Result<RestoreReport> {
+pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_store::backup TODO=chunk-or-reference-exact-wire-values */ fn restore(source: &Path, destination: &Path) -> Result<RestoreReport> {
     let header = verify_file(source)?;
     let existing = if destination.exists() {
         let connection = rusqlite::Connection::open(destination)?;
         connection.busy_timeout(std::time::Duration::ZERO)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h49e0b125b20f owner=st3_store::backup TODO=trace-statement-and-value-representation */ "BEGIN EXCLUSIVE;")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h84213c6880a6 owner=fractal_store::backup TODO=trace-statement-and-value-representation */ "BEGIN EXCLUSIVE;")?;
         require_empty_database(&connection)?;
         // A WAL file may outlive the last connection. Changing journal mode takes the locks
         // that distinguish a closed database from a live WAL reader, unlike file existence.
         // Keep the exclusive connection lock through publication so no new writer can enter.
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd37cf3f7caed owner=st3_store::backup TODO=trace-statement-and-value-representation */ "COMMIT; PRAGMA locking_mode=EXCLUSIVE;")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9a6064fa060f owner=fractal_store::backup TODO=trace-statement-and-value-representation */ "COMMIT; PRAGMA locking_mode=EXCLUSIVE;")?;
         connection
             .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
             .context("restore requires an offline database")?;
@@ -387,7 +387,7 @@ fn require_empty_database(connection: &rusqlite::Connection) -> Result<()> {
         )?;
         if exists {
             let has_envelopes: bool = connection.query_row(
-                /* sqlite-large-value: allow-for-now lv-hc87a71c66285 owner=st3_store::backup TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM {table})"),
+                /* sqlite-large-value: allow-for-now lv-hf3f3b02320eb owner=fractal_store::backup TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM {table})"),
                 [],
                 |r| r.get(0),
             )?;

@@ -3,8 +3,8 @@
 use super::*;
 use serde::Deserialize;
 pub use crate::model::DeclarationDiff;
-pub use st3_delivery::store::declarations::*;
-pub use st3_delivery::store::declarations::{PublicationDefinition, diffs};
+pub use fractal_delivery::store::declarations::*;
+pub use fractal_delivery::store::declarations::{PublicationDefinition, diffs};
 
 pub trait DeclarationsStore {
     fn publication_definition(

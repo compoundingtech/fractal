@@ -1,8 +1,8 @@
 //! The part of `store::mission_eligibility` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_delivery::store::mission_eligibility::*;
-pub use st3_delivery::store::mission_eligibility::{MISSING_AGENT_CONDITION, episode};
+pub use fractal_delivery::store::mission_eligibility::*;
+pub use fractal_delivery::store::mission_eligibility::{MISSING_AGENT_CONDITION, episode};
 
 pub trait MissionEligibilityStore {
     /// Stop ownership is enough to preserve an existing cross-run ready queue.

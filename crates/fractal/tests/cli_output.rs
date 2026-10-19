@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use st3::SeatsStoreCore;
+use fractal_daemon::SeatsStoreCore;
 use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
-use st3::api::AppState;
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, oneshot, watch};
 
 fn closed_pipe() -> Stdio {
@@ -25,7 +25,7 @@ fn closed_pipe() -> Stdio {
 
 async fn run(socket: Option<&Path>, args: &[&str], closed: bool) -> Output {
     let scratch = tempfile::tempdir().unwrap();
-    let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
     command
         .env("NO_COLOR", "1")
         .env("TMPDIR", scratch.path())
@@ -74,7 +74,7 @@ async fn shared_cli_output_exits_cleanly_with_a_closed_pipe() {
 #[tokio::test]
 async fn shared_cli_output_reports_errors_other_than_a_closed_pipe() {
     let scratch = tempfile::tempdir().unwrap();
-    let output = st3::test_support::async_command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
         .env("TMPDIR", scratch.path())
         .arg("skill")
         .stdout(
@@ -105,11 +105,11 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
     for fail_cleanup in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let state_dir = root.path().join("state");
-        st3::fleet::join::found(
+        fractal_daemon::fleet::join::found(
             &state_dir,
             "orchid",
-            &st3::fleet::join::MemberSettings {
-                mode: st3::config::FleetMode::DialOut,
+            &fractal_daemon::fleet::join::MemberSettings {
+                mode: fractal_daemon::config::FleetMode::DialOut,
                 port: None,
                 transports: Some(vec![]),
                 advertise_loopback: false,
@@ -169,13 +169,13 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
         let served = socket.clone();
         let (ready, started) = oneshot::channel();
         let server = tokio::spawn(async move {
-            st3::api::serve_unix_with_ready(&served, app, || {
+            fractal_daemon::api::serve_unix_with_ready(&served, app, || {
                 ready.send(()).unwrap();
             })
             .await
         });
         started.await.unwrap();
-        let child = st3::test_support::async_command(test_bin!("st3-fixture"))
+        let child = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
             .env("HOME", root.path())
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("TMPDIR", root.path())
@@ -205,7 +205,7 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
                 !output.status.success(),
                 "a closed receipt must not hide a later cleanup failure"
             );
-            assert!(st3::config::FleetFile::load(&state_dir).unwrap().is_some());
+            assert!(fractal_daemon::config::FleetFile::load(&state_dir).unwrap().is_some());
             assert!(!cancelled.load(Ordering::Relaxed));
         } else {
             assert_clean(&output);
@@ -214,10 +214,10 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
                 "the leave record must be written after the truncated receipt"
             );
             assert!(
-                st3::config::FleetFile::load(&state_dir).unwrap().is_none(),
+                fractal_daemon::config::FleetFile::load(&state_dir).unwrap().is_none(),
                 "membership cleanup must finish after the truncated receipt"
             );
-            assert!(!st3::fleet::join::key_directory(&state_dir).exists());
+            assert!(!fractal_daemon::fleet::join::key_directory(&state_dir).exists());
             assert!(
                 cancelled.load(Ordering::Relaxed),
                 "the final leave-cancel mutation must run"
@@ -232,7 +232,7 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
 async fn mission_start_and_read_output_exit_cleanly_with_a_closed_pipe() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("cli-output").unwrap());
-    let intent = st3::graph::parse_intent(
+    let intent = fractal_daemon::graph::parse_intent(
         r#"version 2
 mission "orchid" state="ready" {
   goal "Exercise CLI output."
@@ -262,7 +262,7 @@ mission "orchid" state="ready" {
     let served = socket.clone();
     let (ready, started) = oneshot::channel();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix_with_ready(&served, st3::api::router(state), || {
+        fractal_daemon::api::serve_unix_with_ready(&served, fractal_daemon::api::router(state), || {
             ready.send(()).unwrap();
         })
         .await

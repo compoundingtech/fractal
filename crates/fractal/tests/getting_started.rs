@@ -81,7 +81,7 @@ impl Newcomer {
     }
 
     fn command(root: &Path) -> Command {
-        let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
         command
             .env_clear()
             .env("PATH", Self::path(root))
@@ -132,7 +132,7 @@ impl Drop for Newcomer {
 
 #[test]
 fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let Some(pty) = pty() else {
@@ -149,7 +149,7 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(st3_client::Client::unix(newcomer.root.path().join("run/st.sock")).agents_list_after(None, None, false, 0))
+        .block_on(fractal_client::Client::unix(newcomer.root.path().join("run/st.sock")).agents_list_after(None, None, false, 0))
         .expect("the fixture must publish its initial roster");
     for args in [
         &["now"][..],

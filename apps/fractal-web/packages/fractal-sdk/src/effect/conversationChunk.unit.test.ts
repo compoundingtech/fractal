@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
-import type { CollectionFrame } from '@smalltalk/st3-client'
-import { decodeUnknownSync, TimelineEntry } from '@smalltalk/st3-client/schema'
+import type { CollectionFrame } from '@fractal/client'
+import { decodeUnknownSync, TimelineEntry } from '@fractal/client/schema'
 import * as Schema from 'effect/Schema'
 import { describe, expect, it } from 'vitest'
 

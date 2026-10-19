@@ -4,15 +4,15 @@ use crate::MissionsStore;
 use crate::PersonWorkStore;
 use super::*;
 use crate::model::LoopSpec;
-pub use st3_missions::store::attention_snapshot::*;
-pub use st3_missions::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, agent, conversation_agent, native_prompt_gone_key, person_attention_item, plan_approval, resolve_native_harness_at, screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key};
+pub use fractal_missions::store::attention_snapshot::*;
+pub use fractal_missions::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, agent, conversation_agent, native_prompt_gone_key, person_attention_item, plan_approval, resolve_native_harness_at, screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ClaimInput, PersonStepResponse};
-    use st3_missions::store::attention_snapshot_tests_shared_seats::*;
-    use st3_missions::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
+    use fractal_missions::store::attention_snapshot_tests_shared_seats::*;
+    use fractal_missions::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
 
     /// A person ask joins the collection at its asking claim's acceptance, never at the
     /// waiting time it names: a migrated ask can name a time before it was asked. Fault-only

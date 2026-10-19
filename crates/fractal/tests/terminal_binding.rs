@@ -1,9 +1,9 @@
 #![cfg(unix)]
 //! Borrowed PTYs are tested through the runtime backend: every physical action is recorded.
 use serde_json::{Value, json};
-use st3::model::{ClaimInput, IntentInput, MemberSpec, MessageSendRequest, MessageView};
-use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
-use st3::store::Store;
+use fractal_daemon::model::{ClaimInput, IntentInput, MemberSpec, MessageSendRequest, MessageView};
+use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::store::Store;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, watch};
@@ -58,8 +58,8 @@ impl RuntimeControl for Runtime {
         self.actions.lock().unwrap().push("leftovers".into());
     }
 }
-fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), st3::St3Error> {
-    let intent = st3::parse_intent(source, "orchid")?;
+fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_daemon::St3Error> {
+    let intent = fractal_daemon::parse_intent(source, "orchid")?;
     let preview = store.mission(
         &intent,
         IntentInput {
@@ -188,13 +188,13 @@ fn binding_forbids_managed_side_effects_and_requires_an_invocation_fence() {
         "exec \"helper\" { command \"true\"; }",
     ] {
         let source = source(INVOCATION).replacen("name \"Terminal/claude\";", additional, 1);
-        assert!(st3::parse_intent(&source, "orchid").is_err(), "{source}");
+        assert!(fractal_daemon::parse_intent(&source, "orchid").is_err(), "{source}");
     }
-    assert!(st3::parse_intent(&source("not-a-uuid"), "orchid").is_err());
-    let intent = st3::parse_intent(&source(INVOCATION), "orchid").unwrap();
+    assert!(fractal_daemon::parse_intent(&source("not-a-uuid"), "orchid").is_err());
+    let intent = fractal_daemon::parse_intent(&source(INVOCATION), "orchid").unwrap();
     let member = intent.subjects[SEAT].member.as_ref().unwrap();
-    assert_eq!(member.lifecycle, st3::model::MemberLifecycle::TerminalBound);
-    assert_eq!(member.restart, st3::model::RestartType::Never);
+    assert_eq!(member.lifecycle, fractal_daemon::model::MemberLifecycle::TerminalBound);
+    assert_eq!(member.restart, fractal_daemon::model::RestartType::Never);
 }
 
 #[test]
@@ -273,7 +273,7 @@ fn exits_stops_and_replaced_shells_never_act_on_the_borrowed_pty() {
 
 #[tokio::test]
 async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_restart() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -281,7 +281,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = st3::api::AppState {
+    let state = fractal_daemon::api::AppState {
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
@@ -298,7 +298,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix_bound(&server_socket, &server_socket, st3::api::router(state))
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_socket, fractal_daemon::api::router(state))
             .await
             .unwrap();
     });
@@ -308,7 +308,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let client = st3::client::Client::new(st3::client::Endpoint::Unix(socket));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket));
     // The real native wrapper launches a model-free provider, which consumes one real
     // Claude channel notification and exits. All files live under this fixture's HOME.
     let provider = root.path().join("fake-claude.py");
@@ -343,7 +343,7 @@ finally:
         .map(|directory| directory.join("python3"))
         .find(|candidate| candidate.is_file())
         .expect("terminal provider fixture needs python3 on the executing runner");
-    let mut command = st3::test_support::async_command(env!("ST3_FIXTURE_BASH"));
+    let mut command = fractal_daemon::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
         .env("PATH", env!("ST3_FIXTURE_PATH"))

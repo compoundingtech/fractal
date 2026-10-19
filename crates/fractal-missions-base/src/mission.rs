@@ -2114,7 +2114,7 @@ fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, St3Error> {
                 .filter(|(name, _)| name.as_str() != "kind")
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect::<BTreeMap<_, _>>();
-            st3_schema::registry()
+            fractal_schema::registry()
                 .validate_resource_facts(resource_kind, &facts)
                 .map_err(|error| St3Error::new(error.code, error.message))?;
         }

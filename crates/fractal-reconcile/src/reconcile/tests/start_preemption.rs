@@ -317,7 +317,7 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
         .connection
         .batched(|tx| {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h61ef885b2368 owner=st3_reconcile::reconcile::tests::start_preemption TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE aba_a AS SELECT * FROM desired WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h48c2f0251057 owner=fractal_reconcile::reconcile::tests::start_preemption TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE aba_a AS SELECT * FROM desired WHERE subject=?1",
                 [subject],
             )
         })
@@ -333,20 +333,20 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
         .connection
         .batched(|tx| {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h0c3da2acbe45 owner=st3_reconcile::reconcile::tests::start_preemption TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE aba_b AS SELECT * FROM desired WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h84ba2c0cf470 owner=fractal_reconcile::reconcile::tests::start_preemption TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE aba_b AS SELECT * FROM desired WHERE subject=?1",
                 [subject],
             )
         })
         .unwrap()
         .unwrap();
-    store.connection.batched(|tx| tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hb7cc138c3566 owner=st3_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_a;")).unwrap().unwrap();
+    store.connection.batched(|tx| tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h792af572b89f owner=fractal_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_a;")).unwrap().unwrap();
     let after_retraction = store
         .desired_subjects_named(&[subject.into()])
         .unwrap()
         .remove(0);
     assert_eq!(after_retraction.kind, stale.kind);
     assert_eq!(after_retraction.desired, stale.desired);
-    store.connection.batched(|tx| tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h294ade210bb2 owner=st3_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_b;")).unwrap().unwrap();
+    store.connection.batched(|tx| tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h3764e001cf25 owner=fractal_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_b;")).unwrap().unwrap();
     assert_eq!(store.selected_desired_token(subject).unwrap(), token);
     let member = stale.member.as_ref().unwrap().clone();
     let prepared = start_jobs::PreparedStart {
@@ -1220,10 +1220,10 @@ async fn missing_or_repaired_original_request_prevents_real_native_start() {
         let local_id: i64 = request.id.rsplit('/').next().unwrap().parse().unwrap();
         if change == "deleted" {
             connection
-                .execute(/* sqlite-large-value: allow-for-now lv-h2bc9920cd4d4 owner=st3_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id=?1", [local_id])
+                .execute(/* sqlite-large-value: allow-for-now lv-hb85425500fee owner=fractal_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id=?1", [local_id])
                 .unwrap();
         } else {
-            connection.execute(/* sqlite-large-value: allow-for-now lv-ha48799047359 owner=st3_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_observations SET body=json_set(body,'$.fields.runtime_id','foreign-runtime') WHERE id=?1", [local_id]).unwrap();
+            connection.execute(/* sqlite-large-value: allow-for-now lv-hb34a1701bda0 owner=fractal_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_observations SET body=json_set(body,'$.fields.runtime_id','foreign-runtime') WHERE id=?1", [local_id]).unwrap();
         }
         assert!(!store.runtime_start_request_retained(&request).unwrap());
         reconciler.start_queued_job(&operation).unwrap();
@@ -1460,7 +1460,7 @@ fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     assert!(guard_called.load(Ordering::Acquire));
     assert_eq!(
         error
-            .downcast_ref::<st_runtime::StartRejected>()
+            .downcast_ref::<fractal_runtime::StartRejected>()
             .unwrap()
             .operation
             .as_deref(),
@@ -1478,7 +1478,7 @@ fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure
         return;
     }
     use std::os::unix::fs::PermissionsExt as _;
-    st_runtime::initialize_isolation(&BTreeMap::new());
+    fractal_runtime::initialize_isolation(&BTreeMap::new());
     let root = tempfile::tempdir().unwrap();
     let pty = root.path().join("pty");
     let called = root.path().join("called");
@@ -1524,7 +1524,7 @@ fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure
     assert_eq!(guards.load(Ordering::Relaxed), 2);
     assert!(error.to_string().contains("declaration changed"));
     assert!(
-        error.downcast_ref::<st_runtime::StartRejected>().is_none(),
+        error.downcast_ref::<fractal_runtime::StartRejected>().is_none(),
         "the earlier physical launcher remains potentially live: {error:#}"
     );
 }
@@ -1537,7 +1537,7 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     use std::os::unix::fs::PermissionsExt as _;
     // Select the supported detached mode in this isolated subprocess. A systemd
     // launcher is itself a created producer, even when its inner executable fails.
-    st_runtime::initialize_isolation(&BTreeMap::new());
+    fractal_runtime::initialize_isolation(&BTreeMap::new());
     for (binary, rejected) in [
         ("invalid executable format", true),
         ("#!/bin/sh\nexit 1\n", false),
@@ -1580,14 +1580,14 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
         let runtime = NativeRuntime::new(&state, None, &pty);
         let error = runtime.start_guarded(&member, &|| Ok(())).unwrap_err();
         assert_eq!(
-            error.downcast_ref::<st_runtime::StartRejected>().is_some(),
+            error.downcast_ref::<fractal_runtime::StartRejected>().is_some(),
             rejected,
             "{error:#}"
         );
         if rejected {
             assert_eq!(
                 error
-                    .downcast_ref::<st_runtime::StartRejected>()
+                    .downcast_ref::<fractal_runtime::StartRejected>()
                     .unwrap()
                     .operation
                     .as_deref(),
@@ -1616,9 +1616,9 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     impl NativeLatePty {
     fn new() -> Self {
         use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
-        st_runtime::initialize_isolation(&BTreeMap::new());
+        fractal_runtime::initialize_isolation(&BTreeMap::new());
         let real_pty =
-            st_runtime::resolve_executable("pty", &crate::environment::snapshot().unwrap())
+            fractal_runtime::resolve_executable("pty", &crate::environment::snapshot().unwrap())
                 .unwrap();
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");

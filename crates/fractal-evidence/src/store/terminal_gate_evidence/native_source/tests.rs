@@ -1,16 +1,16 @@
 #![allow(unused_imports)]
 use crate::PublicationFactsStore;
-use st3_attention::store::terminal_gate_evidence::native_source_shared::*;
+use fractal_attention::store::terminal_gate_evidence::native_source_shared::*;
 use super::*;
 use crate::graph::{parse_execution_intent, parse_intent};
 use crate::store::{Store, append_claim_tx, project_mission_run_created, select_replicated_desired, select_replicated_mission};
 use serde_json::json;
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
-use st3_attention::store::terminal_gate_evidence::native_source_shared::*;
-use st3_attention::store::terminal_gate_evidence::native_source_shared::{Binding, FINGERPRINT, GUARD, NativeSource, RAW_BYTES, ROWS, SOURCE_BYTES, bounded_row, decode, point};
-use st3_attention::store::terminal_gate_evidence::native_source_shared::{required};
-use st3_attention::store::terminal_gate_evidence::native_source_tests_shared::*;
-use st3_attention::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
+use fractal_attention::store::terminal_gate_evidence::native_source_shared::*;
+use fractal_attention::store::terminal_gate_evidence::native_source_shared::{Binding, FINGERPRINT, GUARD, NativeSource, RAW_BYTES, ROWS, SOURCE_BYTES, bounded_row, decode, point};
+use fractal_attention::store::terminal_gate_evidence::native_source_shared::{required};
+use fractal_attention::store::terminal_gate_evidence::native_source_tests_shared::*;
+use fractal_attention::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
 
 
 #[test]
@@ -32,7 +32,7 @@ fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
             let writer = f.store.connection.write();
             writer
                 .execute_batch(
-                    /* sqlite-large-value: allow-for-now lv-hb8b81926488f owner=st3_evidence::store::terminal_gate_evidence::native_source::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE witness_writes(n INTEGER NOT NULL);
+                    /* sqlite-large-value: allow-for-now lv-h1efa448d2bf1 owner=fractal_evidence::store::terminal_gate_evidence::native_source::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE witness_writes(n INTEGER NOT NULL);
                 INSERT INTO witness_writes VALUES(0);",
                 )
                 .unwrap();
@@ -40,7 +40,7 @@ fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
                 for event in ["INSERT", "UPDATE", "DELETE"] {
                     writer
                         .execute_batch(&format!(
-                            /* sqlite-large-value: allow-for-now lv-h73da0ee5ce63 owner=st3_evidence::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER writes_{table}_{event}
+                            /* sqlite-large-value: allow-for-now lv-hc70fa4d4b937 owner=fractal_evidence::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER writes_{table}_{event}
                         AFTER {event} ON main.{table} BEGIN UPDATE witness_writes SET n=n+1; END;"
                         ))
                         .unwrap();
@@ -63,13 +63,13 @@ fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
         // Establish the unrelated batch outside the measured INSERT. Report one claim
         // admission itself, including every native and fixture trigger WHEN predicate.
         f.store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h8ac771d5e3c1 owner=st3_evidence::store::terminal_gate_evidence::native_source::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('foreign','node',999,'fixture-foreign','1')",
+            /* sqlite-large-value: allow-for-now lv-h6a8265dd75e4 owner=fractal_evidence::store::terminal_gate_evidence::native_source::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('foreign','node',999,'fixture-foreign','1')",
             [],
         ).unwrap();
         let mut writer = f.store.connection.write();
         let tx = writer.transaction().unwrap();
         let insert_scope = SqliteWorkScope::start();
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h431c074919c2 owner=st3_evidence::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h642808069a55 owner=fractal_evidence::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
             VALUES('measured-unrelated','foreign','exec/measured-unrelated','runtime.observed','node','{}','[]','1')", []).unwrap();
         let insert_work = insert_scope.finish();
         eprintln!(
@@ -98,7 +98,7 @@ fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
         // At n=0 this is a genuine absent-key point operation; the larger sources update
         // one unrelated row. Neither may capture a source change or write a witness.
         let unrelated = f.measured(|tx| {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-ha6b3a3fc433e owner=st3_evidence::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=body WHERE id='foreign/1'", [])
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h6469b5963239 owner=fractal_evidence::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=body WHERE id='foreign/1'", [])
                 .unwrap();
         });
         eprintln!("native source unrelated path rows={n}: {unrelated:?}");
@@ -114,7 +114,7 @@ fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
             assert_eq!(f.source.installer.root(&tx, VIEW).unwrap(), root);
         }
         let work=f.measured(|tx|{
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h66a622cd5390 owner=st3_evidence::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=body WHERE subject='exec/one/probe' AND kind='runtime.observed'",[]).unwrap();
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h6d7e1c03e2f1 owner=fractal_evidence::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=body WHERE subject='exec/one/probe' AND kind='runtime.observed'",[]).unwrap();
         });
         eprintln!("native source full no-op path unrelated={n}: {work:?}");
         assert!(

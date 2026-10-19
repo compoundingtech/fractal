@@ -1,16 +1,16 @@
 //! The part of `store::conversation_reads` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_missions::store::conversation_reads::*;
-pub use st3_missions::store::conversation_reads::{Owner, Owners};
+pub use fractal_missions::store::conversation_reads::*;
+pub use fractal_missions::store::conversation_reads::{Owner, Owners};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_missions::store::conversation_reads_shared_seats::*;
-    use st3_missions::store::conversation_reads_shared_seats::{BEFORE_MESSAGE_DECODE, BEFORE_OWNER_PUBLISH};
-    use st3_missions::store::conversation_reads_tests_shared_seats::*;
-    use st3_missions::store::conversation_reads_tests_shared_seats::{append};
+    use fractal_missions::store::conversation_reads_shared_seats::*;
+    use fractal_missions::store::conversation_reads_shared_seats::{BEFORE_MESSAGE_DECODE, BEFORE_OWNER_PUBLISH};
+    use fractal_missions::store::conversation_reads_tests_shared_seats::*;
+    use fractal_missions::store::conversation_reads_tests_shared_seats::{append};
 
     fn oracle(store: &Store, at: u64) -> Owners {
         store

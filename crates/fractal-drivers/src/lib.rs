@@ -115,7 +115,7 @@ mod watch;
 
 // The declaration model and the catalog walk live in the `agent-spec` crate, so st2 and any other
 // reader of the same catalog share one implementation. Re-exported under their original paths:
-// `st2::spec::…` / `st2::discovery::…` keep working for the binary and the test suite.
+// `fractal_legacy_runner::spec::…` / `fractal_legacy_runner::discovery::…` keep working for the binary and the test suite.
 pub use agent_spec::kdl_version;
 pub use agent_spec::{discovery, spec};
 

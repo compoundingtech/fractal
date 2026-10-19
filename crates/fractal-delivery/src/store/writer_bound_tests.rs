@@ -7,8 +7,8 @@ pub use crate::store::writer_bound_tests_shared_missions::*;
 pub use crate::store::writer_bound_tests_shared_missions::BOUND;
 use super::*;
 use std::time::Duration;
-use st3_store::store::writer_bound_tests_shared_delivery::*;
-use st3_store::store::writer_bound_tests_shared_delivery::{FLEET};
+use fractal_store::store::writer_bound_tests_shared_delivery::*;
+use fractal_store::store::writer_bound_tests_shared_delivery::{FLEET};
 
 
 /// A peer catching up on 1,500 claims: export, receipt, admission, repairs and projection each

@@ -33,7 +33,7 @@ use tokio_tungstenite::tungstenite::Message;
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hbd721da3c0c4 owner=st3_api_core::api::mailbox_tests_shared TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hb967428e5ded owner=fractal_api_core::api::mailbox_tests_shared TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![
                     (anchor - u128::from(crate::api::mail_backlog::THRESHOLD_MS) - 1_000)
                         .to_string(),

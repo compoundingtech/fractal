@@ -1,4 +1,4 @@
-import type { TimelineEntry } from '@smalltalk/st3-client'
+import type { TimelineEntry } from '@fractal/client'
 import { ANCHOR, ANCHOR_MS, buildWorld, genericVariants, type World, type WorldDefinition } from '../src/index.ts'
 import { recordingIdentities, type JsonObject, type JsonValue, type RecordingRow, type RecordingScript, type RecordingTurn } from './recordings.ts'
 import { syntheticFleetMidRefactor } from '../src/worlds/fleetMidRefactor.ts'

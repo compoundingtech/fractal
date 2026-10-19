@@ -1,7 +1,7 @@
 import { availableParallelism, loadavg } from 'node:os'
 
-import type { CollectionFrame } from '@smalltalk/st3-client'
-import { decodeUnknownSync, Resource as ResourceCodec } from '@smalltalk/st3-client/schema'
+import type { CollectionFrame } from '@fractal/client'
+import { decodeUnknownSync, Resource as ResourceCodec } from '@fractal/client/schema'
 import { expect, it } from 'vitest'
 
 import { agents, frame, snapshot } from './windowIngest.fixture.ts'

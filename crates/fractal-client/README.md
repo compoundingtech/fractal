@@ -1,10 +1,10 @@
-# st3-client
+# fractal-client
 
 Reusable typed Rust client for `st3.client.v0`. It consumes versioned JSON projections and actions;
 it never parses st3 CLI output, KDL, Markdown, raw claim envelopes, or harness transcripts.
 
 ```rust
-let client = st3_client::Client::unix("/path/to/st3.sock");
+let client = fractal_client::Client::unix("/path/to/st3.sock");
 let capabilities = client.capabilities().await?;
 let work = client.work_list(None, Some(100), false).await?;
 ```
@@ -36,7 +36,7 @@ let attachment = client
     .raw_terminal_attachment(
         "terminal/demo",
         "demo-runtime:incarnation",
-        st3_client::RawTerminalMode::Attach,
+        fractal_client::RawTerminalMode::Attach,
     )
     .await?;
 let connector = client.raw_terminal_stream(&attachment).await?;
@@ -75,5 +75,5 @@ Paired observations require the pairing issuer's gateway. `pairing.revoke` on an
 member fails without committing, with HTTP 409 `issuer-required` and
 `details.issuer_host_id`. Automatic cross-gateway revocation routing is not provided.
 
-Run `cargo run -p st3-client-codegen -- --check` from the repository root to verify the generated
+Run `cargo run -p fractal-client-codegen -- --check` from the repository root to verify the generated
 models and operation surfaces exactly match the normative schema and operation manifest.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { applyWindow, St3Client, type CollectionFrame, type CollectionWindow } from '@smalltalk/st3-client'
-import * as Schema from '@smalltalk/st3-client/schema'
+import { applyWindow, FractalClient, type CollectionFrame, type CollectionWindow } from '@fractal/client'
+import * as Schema from '@fractal/client/schema'
 
 import { decodeSlice, everyVariant } from '../scripts/decode.ts'
 import { sliceTimes } from '../scripts/emit.ts'
@@ -94,11 +94,11 @@ describe('unknown-fields catalog world', () => {
     ]))
   })
 
-  it.each([ANCHOR_MS, ANCHOR_MS + SHIFT_MS])('preserves unknown values through real St3Client HTTP and sockets at now=%s', async (now) => {
+  it.each([ANCHOR_MS, ANCHOR_MS + SHIFT_MS])('preserves unknown values through real FractalClient HTTP and sockets at now=%s', async (now) => {
     const world = build(now)
     const clock = manualClock(world.now)
     const replay = createReplay(world, { clock })
-    const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl: async (input, init) => {
+    const client = new FractalClient({ baseUrl: 'http://scenario.invalid', fetchImpl: async (input, init) => {
       const response = await replay.fetch(input, init)
       Schema.decodeUnknownSync(Schema.Envelope, 'tolerant')(await response.clone().json())
       return response

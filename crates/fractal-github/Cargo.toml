@@ -1,16 +1,16 @@
 [package]
-name = "st3-github"
+name = "fractal-github"
 version = "0.1.0"
 edition = "2024"
 description = "The GitHub domain: the git change index and service, repository subjects, and seat watches"
 license = "MIT"
 
 [features]
-# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-evidence/test-support"]
+# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
+test-support = ["fractal-evidence/test-support"]
 
 [dependencies]
-st3-evidence = { path = "../st3-evidence" }
+fractal-evidence = { path = "../fractal-evidence" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 getrandom = "0.3"
@@ -27,6 +27,6 @@ tracing = "0.1"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
-st3_github_self = { package = "st3-github", path = ".", features = ["test-support"] }
+fractal_github_self = { package = "fractal-github", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

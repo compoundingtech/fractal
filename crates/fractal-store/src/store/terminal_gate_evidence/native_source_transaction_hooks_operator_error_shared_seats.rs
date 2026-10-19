@@ -190,7 +190,7 @@ impl Operator for DelegatingOperator {
         let probe = self.cell.probe.load(Ordering::Relaxed);
         let result = if probe {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h9ee58f3fde2d owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_operator_error_shared_seats TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_operator_probe(payload) VALUES(zeroblob(65536))",
+                /* sqlite-large-value: allow-for-now lv-h273955dad943 owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_operator_error_shared_seats TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_operator_probe(payload) VALUES(zeroblob(65536))",
                 [],
             )
             .map(|_| false)

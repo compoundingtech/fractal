@@ -6,11 +6,11 @@ use std::process::Stdio;
 
 #[test]
 fn unscoped_claude_channel_serves_mcp_until_eof_without_a_daemon_or_state() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let mut child = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
+    let mut child = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
         .env("XDG_STATE_HOME", root.path().join("state")).env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
@@ -78,7 +78,7 @@ fn unscoped_claude_channel_serves_mcp_until_eof_without_a_daemon_or_state() {
 
 #[test]
 fn channel_installer_leaves_user_plugin_disabled_and_local_settings_intact() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -92,7 +92,7 @@ fn channel_installer_leaves_user_plugin_disabled_and_local_settings_intact() {
     let settings = b"{\"enabledPlugins\":{\"st-channel@st\":true}}\n";
     std::fs::write(&local, settings).unwrap();
     let log = root.path().join("commands");
-    let output = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
+    let output = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
         .env("HOME", root.path())
         .env("XDG_DATA_HOME", root.path().join("data"))
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -123,11 +123,11 @@ fn channel_installer_leaves_user_plugin_disabled_and_local_settings_intact() {
 
 #[test]
 fn identity_without_subject_is_a_configuration_error_instead_of_idle_mcp() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let output = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
+    let output = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
         .env("XDG_RUNTIME_DIR", root.path().join("run"))
@@ -146,7 +146,7 @@ fn identity_without_subject_is_a_configuration_error_instead_of_idle_mcp() {
 
 #[test]
 fn unsupported_provider_cannot_enable_the_plugin_before_disable_support_is_checked() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     for response in [
@@ -164,7 +164,7 @@ fn unsupported_provider_cannot_enable_the_plugin_before_disable_support_is_check
         .unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
         let log = root.path().join("commands");
-        let output = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
+        let output = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
             .env("HOME", root.path())
             .env("XDG_DATA_HOME", root.path().join("data"))
             .env(

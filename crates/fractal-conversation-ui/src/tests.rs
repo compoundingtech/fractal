@@ -29,7 +29,7 @@ pub(crate) fn theme() -> Theme {
     }
 }
 
-fn item(id: &str, sequence: u64, revision: u64, text: &str) -> st3_client::TimelineEntry {
+fn item(id: &str, sequence: u64, revision: u64, text: &str) -> fractal_client::TimelineEntry {
     serde_json::from_value(serde_json::json!({
         "id": id, "sequence": sequence, "revision": revision,
         "timestamp": "2026-09-30T10:00:00Z", "role": "assistant", "final": true,
@@ -148,7 +148,7 @@ fn explicit_availability_updates_and_new_windows_do_not_inherit_old_history() {
 
 #[test]
 fn earlier_pages_go_above_the_window_and_survive_a_new_window_that_meets_them() {
-    let window = |items: Vec<st3_client::TimelineEntry>, has_more: bool| Frame {
+    let window = |items: Vec<fractal_client::TimelineEntry>, has_more: bool| Frame {
         replace: true,
         has_more: Some(has_more),
         items,
@@ -189,7 +189,7 @@ fn earlier_pages_go_above_the_window_and_survive_a_new_window_that_meets_them() 
 
 #[test]
 fn projection_notices_do_not_connect_disconnected_history_windows() {
-    let notice = |sequence: u64| -> st3_client::TimelineEntry {
+    let notice = |sequence: u64| -> fractal_client::TimelineEntry {
         serde_json::from_value(serde_json::json!({
             "id": "timeline-entry/session/a/timeline-query-limited",
             "sequence": sequence, "revision": 1,
@@ -567,11 +567,11 @@ fn shared_transcripts_match_without_a_renderer() {
         let input = serde_json::from_str::<serde_json::Value>(input).unwrap();
         let items = match input {
             serde_json::Value::Object(page) => {
-                serde_json::from_value::<Vec<st3_client::TimelineEntry>>(
+                serde_json::from_value::<Vec<fractal_client::TimelineEntry>>(
                     page.get("items").cloned().unwrap_or(serde_json::Value::Null),
                 )
             }
-            entries => serde_json::from_value::<Vec<st3_client::TimelineEntry>>(entries),
+            entries => serde_json::from_value::<Vec<fractal_client::TimelineEntry>>(entries),
         }
         .unwrap();
         let mut entries =
@@ -589,7 +589,7 @@ fn shared_transcripts_match_without_a_renderer() {
 
 #[test]
 fn omp_bookkeeping_custom_entries_hide_and_other_custom_entries_stay() {
-    let items = serde_json::from_str::<Vec<st3_client::TimelineEntry>>(include_str!(
+    let items = serde_json::from_str::<Vec<fractal_client::TimelineEntry>>(include_str!(
         "../../../fixtures/clients/transcripts/native-omp-run.json"
     ))
     .unwrap();
@@ -602,7 +602,7 @@ fn omp_bookkeeping_custom_entries_hide_and_other_custom_entries_stay() {
     // A custom entry of another kind is not bookkeeping and stays.
     let mut other = items.clone();
     for entry in &mut other {
-        if let st3_client::TimelineBody::Content(content) = &mut entry.body {
+        if let fractal_client::TimelineBody::Content(content) = &mut entry.body {
             for block in &mut content.blocks {
                 if block.source_type == "custom" {
                     block.payload["raw"]["customType"] = "future_custom".into();
@@ -716,7 +716,7 @@ fn task_assignments_render_once_on_invocation_for_pending_and_completed_results(
             .find(|block| block["view"]["type"] == "task")
             .unwrap();
         block["view"]["agents"][0]["status"] = status.into();
-        let items = serde_json::from_value::<Vec<st3_client::TimelineEntry>>(page["items"].clone())
+        let items = serde_json::from_value::<Vec<fractal_client::TimelineEntry>>(page["items"].clone())
             .unwrap();
         let entries = adapt::conversation(&items, &Default::default());
         for assignment in ["Review synthetic code", "Report all findings"] {
@@ -741,7 +741,7 @@ fn parity_entries() -> Vec<Entry> {
         "../../../fixtures/clients/transcripts/omp-parity.json"
     ))
     .unwrap();
-    let items = serde_json::from_value::<Vec<st3_client::TimelineEntry>>(page["items"].clone())
+    let items = serde_json::from_value::<Vec<fractal_client::TimelineEntry>>(page["items"].clone())
         .unwrap();
     adapt::conversation(&items, &Default::default())
 }
@@ -759,12 +759,12 @@ fn shared_style_rules_are_available_without_a_renderer() {
 
 #[test]
 fn claude_skill_expansion_belongs_to_its_call_and_keeps_the_actual_body() {
-    let timeline: Vec<st3_client::TimelineEntry> = serde_json::from_str(include_str!(
+    let timeline: Vec<fractal_client::TimelineEntry> = serde_json::from_str(include_str!(
         "../../../fixtures/clients/transcripts/claude-skill.json"
     ))
     .unwrap();
     let raw = match &timeline[2].body {
-        st3_client::TimelineBody::Content(content) => content.text.as_deref().unwrap(),
+        fractal_client::TimelineBody::Content(content) => content.text.as_deref().unwrap(),
         other => panic!("unexpected {other:?}"),
     };
     // A window starting after the call still preserves the entire skill as ordinary text.
@@ -786,7 +786,7 @@ fn claude_skill_expansion_belongs_to_its_call_and_keeps_the_actual_body() {
 #[test]
 #[cfg(feature = "ratatui")]
 fn claude_skill_renders_folded_and_opens_with_its_newlines_and_quoted_tag() {
-    let timeline = serde_json::from_str::<Vec<st3_client::TimelineEntry>>(include_str!(
+    let timeline = serde_json::from_str::<Vec<fractal_client::TimelineEntry>>(include_str!(
         "../../../fixtures/clients/transcripts/claude-skill.json"
     ))
     .unwrap();
@@ -831,7 +831,7 @@ fn claude_skill_renders_folded_and_opens_with_its_newlines_and_quoted_tag() {
 #[test]
 fn the_note_that_earlier_history_is_not_shown_is_at_the_start_not_the_bottom() {
     // Nathan, 2026-10-06: the note showed at the bottom of a conversation, by the message box.
-    let entry = |index: u64, kind: &str, body: serde_json::Value, at: &str| -> st3_client::TimelineEntry {
+    let entry = |index: u64, kind: &str, body: serde_json::Value, at: &str| -> fractal_client::TimelineEntry {
         serde_json::from_value(serde_json::json!({
             "id": format!("entry/{index}"), "sequence": index, "revision": 1,
             "timestamp": at, "role": "assistant", "final": true, "type": kind, "body": body
@@ -901,7 +901,7 @@ fn exposed_timeline_variants_media_and_unknown_payloads_are_visible() {
             }))
             .unwrap()
         })
-        .collect::<Vec<st3_client::TimelineEntry>>();
+        .collect::<Vec<fractal_client::TimelineEntry>>();
     let rendered = adapt::conversation(&timeline, &Default::default());
     let display = serde_json::to_string(&rendered).unwrap();
     for visible in [
@@ -980,12 +980,12 @@ fn only_structural_delivery_envelopes_split_harness_content() {
 
 #[test]
 fn skill_expansions_match_the_pending_name_in_this_turn() {
-    let timeline: Vec<st3_client::TimelineEntry> = serde_json::from_str(include_str!(
+    let timeline: Vec<fractal_client::TimelineEntry> = serde_json::from_str(include_str!(
         "../../../fixtures/clients/transcripts/claude-skill.json"
     ))
     .unwrap();
     let mut other = timeline.clone();
-    if let st3_client::TimelineBody::ToolCall(call) = &mut other[0].body {
+    if let fractal_client::TimelineBody::ToolCall(call) = &mut other[0].body {
         call.arguments = serde_json::json!({"skill": "another"});
     }
     let entries = adapt::conversation(&other, &Default::default());
@@ -1011,7 +1011,7 @@ fn skill_expansions_match_the_pending_name_in_this_turn() {
         if output.iter().any(|line| line == "## Messages")));
     // Plugin names carry a namespace while the base directory uses the skill basename.
     let mut plugin = timeline.clone();
-    if let st3_client::TimelineBody::ToolCall(call) = &mut plugin[0].body {
+    if let fractal_client::TimelineBody::ToolCall(call) = &mut plugin[0].body {
         call.arguments = serde_json::json!({"skill": "example:st"});
     }
     let entries = adapt::conversation(&plugin, &Default::default());
@@ -1055,7 +1055,7 @@ fn wrapping_multiline_runs_preserves_blank_rows_styles_and_copy_boundaries() {
 
 #[test]
 fn attachment_only_mail_and_non_image_refs_remain_visible() {
-    let message: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+    let message: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
         "id":"mail","sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",
         "role":"user","final":true,"type":"message",
         "body":{"message_id":"message/media","role":"user","from":"person/ada","to":"agent/a",
@@ -1072,7 +1072,7 @@ fn attachment_only_mail_and_non_image_refs_remain_visible() {
 
 #[test]
 fn a_long_message_shows_its_start_and_says_where_the_rest_is_read() {
-    let long: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+    let long: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
         "id":"mail","sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",
         "role":"user","final":true,"type":"message",
         "body":{"message_id":"message/harbor","role":"user","from":"person/ada","to":"agent/a",
@@ -1085,7 +1085,7 @@ fn a_long_message_shows_its_start_and_says_where_the_rest_is_read() {
     assert!(body.starts_with("Harbor notes: the tide table…"), "{body}");
     assert!(body.contains("12.5 KiB") && body.contains("st conversations read message/harbor"), "{body}");
     // A message with no body size reads exactly as before.
-    let short: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+    let short: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
         "id":"mail","sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",
         "role":"user","final":true,"type":"message",
         "body":{"message_id":"message/short","role":"user","from":"person/ada","to":"agent/a"}
@@ -1143,7 +1143,7 @@ fn a_seat_still_starting_reads_as_one_calm_line_not_an_error() {
     assert!(!line.contains("not bound") && !line.contains("SessionStart") && !line.contains("nothing"));
 }
 
-fn review_entry(kind: &str, role: &str, body: serde_json::Value) -> st3_client::TimelineEntry {
+fn review_entry(kind: &str, role: &str, body: serde_json::Value) -> fractal_client::TimelineEntry {
     serde_json::from_value(serde_json::json!({
         "id":kind,"sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",
         "role":role,"final":true,"type":kind,"body":body
@@ -1284,7 +1284,7 @@ fn review_unpaired_mail_refs_do_not_leak_into_the_next_envelope() {
 #[test]
 fn a_persons_signed_message_says_which_device_signed_it_and_whether_it_checks() {
     // Nathan, 2026-10-06: signatures existed but no screen showed them.
-    let timeline = |provenance: serde_json::Value| -> Vec<st3_client::TimelineEntry> {
+    let timeline = |provenance: serde_json::Value| -> Vec<fractal_client::TimelineEntry> {
         vec![
             serde_json::from_value(serde_json::json!({
                 "id": "entry/1", "sequence": 1, "revision": 1, "timestamp": "2026-10-06T21:00:00Z",
@@ -1328,7 +1328,7 @@ fn a_persons_signed_message_says_which_device_signed_it_and_whether_it_checks() 
 #[test]
 fn native_unknown_system_blocks_and_user_reasoning_tags_remain_visible() {
     let raw = "[unrecognized future]\n{\"raw\":{\"token\":\"invented-token\"}}";
-    let entry: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({"id":"timeline-entry/raw","sequence":1,"revision":1,"timestamp":"2026-10-06T12:00:00Z","role":"system","type":"content","final":true,"body":{"media_type":"text/plain","text":raw,"blocks":[{"id":"raw","kind":"unknown","source_type":"future","payload":{"raw":{"token":"invented-token"}}}]}})).unwrap();
+    let entry: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({"id":"timeline-entry/raw","sequence":1,"revision":1,"timestamp":"2026-10-06T12:00:00Z","role":"system","type":"content","final":true,"body":{"media_type":"text/plain","text":raw,"blocks":[{"id":"raw","kind":"unknown","source_type":"future","payload":{"raw":{"token":"invented-token"}}}]}})).unwrap();
     let shown = crate::adapt::conversation(&[entry], &std::collections::BTreeMap::new());
     assert!(matches!(&shown[0].body, Body::Event(text) if text == raw));
     assert_eq!(
@@ -1343,7 +1343,7 @@ fn native_unknown_system_blocks_and_user_reasoning_tags_remain_visible() {
 #[test]
 fn display_filters_hide_context_but_raw_mode_keeps_every_entry_and_byte() {
     let raw = "<system-reminder>invented-token</system-reminder>visible\u{1b}\n<thinking>private reasoning</thinking>";
-    let content: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({"id":"timeline-entry/filters","sequence":1,"revision":1,"timestamp":"2026-10-06T12:00:00Z","role":"user","type":"content","final":true,"body":{"media_type":"text/plain","text":raw,"blocks":[{"id":"source","kind":"source_record","source_type":"claude","visibility":"internal","payload":{"raw":{"text":raw}}}]}})).unwrap();
+    let content: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({"id":"timeline-entry/filters","sequence":1,"revision":1,"timestamp":"2026-10-06T12:00:00Z","role":"user","type":"content","final":true,"body":{"media_type":"text/plain","text":raw,"blocks":[{"id":"source","kind":"source_record","source_type":"claude","visibility":"internal","payload":{"raw":{"text":raw}}}]}})).unwrap();
     let original = serde_json::to_value(&content).unwrap();
     let shown = adapt::conversation_with_filters(
         std::slice::from_ref(&content),
@@ -1379,7 +1379,7 @@ fn native_window_notice_explains_that_the_remainder_is_not_fetchable() {
 
 #[test]
 fn native_window_notice_with_unfetchable_remainder_stays_at_start() {
-    let entry = |index: u64, kind: &str, body: serde_json::Value, at: &str| -> st3_client::TimelineEntry {
+    let entry = |index: u64, kind: &str, body: serde_json::Value, at: &str| -> fractal_client::TimelineEntry {
         serde_json::from_value(serde_json::json!({
             "id": format!("entry/{index}"), "sequence": index, "revision": 1,
             "timestamp": at, "role": "assistant", "final": true, "type": kind, "body": body
@@ -1410,7 +1410,7 @@ fn native_window_notice_with_unfetchable_remainder_stays_at_start() {
 // step, and the harness's own records between calls. None of that is conversation.
 #[test]
 fn native_run_shows_one_mail_and_collates_calls_without_bookkeeping() {
-    let items = serde_json::from_str::<Vec<st3_client::TimelineEntry>>(include_str!(
+    let items = serde_json::from_str::<Vec<fractal_client::TimelineEntry>>(include_str!(
         "../../../fixtures/clients/transcripts/native-claude-run.json"
     ))
     .unwrap();
@@ -1463,7 +1463,7 @@ fn native_run_shows_one_mail_and_collates_calls_without_bookkeeping() {
 #[test]
 fn invocation_details_survive_tool_results_and_summaries_fold() {
     let call = |id: &str, view: serde_json::Value| {
-        serde_json::from_value::<st3_client::TimelineEntry>(serde_json::json!({
+        serde_json::from_value::<fractal_client::TimelineEntry>(serde_json::json!({
             "id":id, "sequence":1, "revision":1, "timestamp":"2026-10-08T12:00:00Z",
             "role":"assistant", "final":true, "type":"tool_call",
             "body":{"call_id":id,"name":view["type"],"arguments":{},
@@ -1477,7 +1477,7 @@ fn invocation_details_survive_tool_results_and_summaries_fold() {
         ("hub", serde_json::json!({"type":"hub","op":"send","target":"Child","message":"sent\nbody"}), vec!["sent", "body"]),
         ("search", serde_json::json!({"type":"search","engine":"grep","pattern":"needle","case":false,"gitignore":true,"skip":2}), vec!["case: false", "gitignore: true", "skip: 2"]),
     ] {
-        let result: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+        let result: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
             "id":format!("{kind}-result"),"sequence":2,"revision":1,"timestamp":"2026-10-08T12:00:01Z",
             "role":"tool","final":true,"type":"tool_result",
             "body":{"call_id":kind,"status":"success","media_type":"text/plain","content":"receipt"}
@@ -1492,7 +1492,7 @@ fn invocation_details_survive_tool_results_and_summaries_fold() {
 /// A conversation as it reads in a real session: status, usage and withheld-content records every
 /// turn, a repeated channel error, and the harness's echo of two deliveries (a channel message and
 /// a background task) after message entries that name no sender. Shapes only; no real content.
-fn noise() -> Vec<st3_client::TimelineEntry> {
+fn noise() -> Vec<fractal_client::TimelineEntry> {
     serde_json::from_str(include_str!("../../../fixtures/clients/transcripts/noise.json")).unwrap()
 }
 
@@ -1576,7 +1576,7 @@ fn assistant_error_and_compaction_are_explicit_expandable_cards() {
         (serde_json::json!({"type":"assistant_error","status":"recovered","presentation":"compact-recovered","is_error":false,"message":"synthetic failure","retry":{"note":"retried successfully"}}), "error", vec!["synthetic failure", "retried successfully"], ToolState::Ok),
         (serde_json::json!({"type":"compaction","summary":"first summary line\nlast summary line","tokens_before":100,"tokens_after":20}), "status", vec!["first summary line", "last summary line"], ToolState::Ok),
     ] {
-        let entry: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+        let entry: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
             "id":"summary", "sequence":1,"revision":1,"timestamp":"2026-10-08T12:00:00Z",
             "role":"assistant","final":true,"type":"content",
             "body":{"media_type":"text/plain","blocks":[{"id":"summary","kind":kind,"source_type":"synthetic","payload":{},"view":view}]}
@@ -1621,7 +1621,7 @@ fn a_waiting_or_running_status_with_a_real_reason_is_never_hidden() {
         }
         review_entry("status", "system", body)
     };
-    let shown = |entry: st3_client::TimelineEntry| adapt::conversation(&[entry], &Default::default()).len();
+    let shown = |entry: fractal_client::TimelineEntry| adapt::conversation(&[entry], &Default::default()).len();
     // The plain heartbeats are hidden.
     for routine in [
         status("waiting", None),
@@ -1655,7 +1655,7 @@ fn a_delivered_image_is_the_messages_image_and_never_its_seat_path() {
         "<smalltalk-message id=\"d1\" from=\"person/ada\" to=\"agent/example/gardener\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/d1\">\nthe pond again\n<attachment path=\"/home/example/.local/state/st3/drivers/gardener/attachments/{sha}.png\" media_type=\"image/png\" bytes=\"1269\" name=\"pond.png\"/>\n<attachment media_type=\"image/png\" bytes=\"70\" name=\"seed.png\" unavailable=\"expired\"/>\n</smalltalk-message>"
     );
     let mut prompt = item("delivered", 1, 1, &delivery);
-    prompt.role = st3_client::TimelineRole::User;
+    prompt.role = fractal_client::TimelineRole::User;
     let entries = adapt::conversation(&[prompt], &Default::default());
     let Some(Body::Mail { body, images, .. }) = entries.iter().map(|entry| &entry.body).find(|body| matches!(body, Body::Mail { .. })) else {
         panic!("{entries:#?}");

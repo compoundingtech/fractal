@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, offeredAnswers, openAlerts, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer } from '@smalltalk/st3-views/homeView';
+import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, offeredAnswers, openAlerts, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer } from '@fractal/views/homeView';
 
 const item = (id, attention_kind, extra = {}) => ({ id: `attention/${id}`, kind: 'attention', attention_kind, title: id, detail: '', priority: 'normal', state: 'open', person_id: 'person/alex', requested_at: '2026-09-30T11:00:00Z', source_id: 'x', actions: [], ...extra });
 const actor = 'person/alex/session/phone';

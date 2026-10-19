@@ -2,14 +2,14 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use st3::client::{OutagePhase, daemon_unreachable};
-use st3::model::DoctorCheck;
+use fractal_daemon::client::{OutagePhase, daemon_unreachable};
+use fractal_daemon::model::DoctorCheck;
 
 pub(super) fn client_config_check(unknown: &[String]) -> Option<DoctorCheck> {
     (!unknown.is_empty()).then(|| DoctorCheck {
         name: "client-config".into(),
         status: "warn".into(),
-        message: st3::config::Config::unknown_client_keys_message(unknown),
+        message: fractal_daemon::config::Config::unknown_client_keys_message(unknown),
     })
 }
 
@@ -29,7 +29,7 @@ pub(super) fn developer_tools(environment: &BTreeMap<String, String>) -> DoctorC
     }
     let missing = tools
         .into_iter()
-        .filter(|tool| st_runtime::resolve_executable(tool, environment).is_err())
+        .filter(|tool| fractal_runtime::resolve_executable(tool, environment).is_err())
         .collect::<Vec<_>>();
     DoctorCheck {
         name: "build-tools".into(),
@@ -50,7 +50,7 @@ pub(super) fn human_outage_message(error: &anyhow::Error) -> Option<String> {
     if ["ST_AGENT", "ST_MISSION_RUN", "ST3_INCARNATION"]
         .iter()
         .any(|name| std::env::var_os(name).is_some()
-            || st_drivers::contracts::fractal_env_name(name)
+            || fractal_drivers::contracts::fractal_env_name(name)
                 .is_some_and(|new| std::env::var_os(new).is_some()))
     {
         return None;
@@ -59,7 +59,7 @@ pub(super) fn human_outage_message(error: &anyhow::Error) -> Option<String> {
     // Starting recovery and remote endpoints need their own diagnosis, not a local setup.
     if outage.phase() != OutagePhase::Connect
         || !Path::new(outage.endpoint()).is_absolute()
-        || st3::startup::read(Path::new(outage.endpoint()))
+        || fractal_daemon::startup::read(Path::new(outage.endpoint()))
             .is_some_and(|readiness| readiness.status == "starting")
     {
         return None;

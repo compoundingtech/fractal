@@ -185,7 +185,7 @@ if (import.meta.main) {
     for (const { path, problem } of problems) console.error(`${problem}: fixtures/scenarios/${path}`)
     for (const { path, problem } of recordings) console.error(`${problem}: recordings/${path}`)
     if (problems.length > 0 || recordings.length > 0) {
-      console.error('fixtures/scenarios is out of date; run: pnpm --filter @smalltalk/st3-scenarios emit')
+      console.error('fixtures/scenarios is out of date; run: pnpm --filter @fractal/scenarios emit')
       process.exitCode = 1
     } else console.log('emit --check: fixtures/scenarios is up to date')
   } else {

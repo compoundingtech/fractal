@@ -106,7 +106,7 @@ pub fn query_plan(store: &Store, sql: &str, params: impl rusqlite::Params) -> Ve
     store
         .readers
         .get()
-        .prepare(/* sqlite-large-value: allow-for-now lv-hc68b55017020 owner=st3_store::store::tests_shared_seats TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
+        .prepare(/* sqlite-large-value: allow-for-now lv-h63b64c5b049a owner=fractal_store::store::tests_shared_seats TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
         .unwrap()
         .query_map(params, |row| row.get::<_, String>(3))
         .unwrap()
@@ -124,7 +124,7 @@ pub fn insert_raw_claims(store: &Store, claims: &[(&str, &str)]) -> u64 {
     for (subject, kind) in claims {
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h36cce79eff2a owner=st3_store::store::tests_shared_seats TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
+                /* sqlite-large-value: allow-for-now lv-h54cdeb4d9314 owner=fractal_store::store::tests_shared_seats TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id, batch_id, subject, kind, origin, actor, body,
                                         predecessors, accepted_at_unix_ms)
                      VALUES (?1, 'batch/raw', ?2, ?3, 'node', NULL, '{}', '[]', '1')",
                 params![Uuid::now_v7().to_string(), subject, kind],
@@ -258,7 +258,7 @@ pub fn full_canonical_claim_id_oracle(
     at: Option<u64>,
 ) -> Vec<String> {
     connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-heb7295e762a2 owner=st3_store::store::tests_shared_seats TODO=trace-statement-and-value-representation */ &canonical_sql(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h2f4809cfd539 owner=fractal_store::store::tests_shared_seats TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id FROM claims WHERE subject=?1 AND store_index<=?2
              ORDER BY CANONICAL_ASC(claims)",
         ))
@@ -278,7 +278,7 @@ pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationEx
         projection_digests: Default::default(),
         peer: peer.into(),
         fleet_id: TEST_FLEET.into(),
-        schema_digest: runtime::compatibility_digest(&st3_schema::registry().digest()),
+        schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
         authority_digest: String::new(),

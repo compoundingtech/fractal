@@ -14,14 +14,14 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use smallclaims::read_budget::{self, ReadBudget};
 use super::{ApiError, AppState, ClientTransportBoundary};
-pub use st3_api_core::api::read_deadline::*;
-pub use st3_api_core::api::read_deadline::{WorkError, envelope, error, handler, query, spawn_blocking, spawn_handler, spawn_mutation_handler, store_read};
+pub use fractal_api_core::api::read_deadline::*;
+pub use fractal_api_core::api::read_deadline::{WorkError, envelope, error, handler, query, spawn_blocking, spawn_handler, spawn_mutation_handler, store_read};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use st3_api_core::api::read_deadline_tests_shared_client_v0_tests::{idle_long_poll_keeps_its_normal_empty_answer, request};
+    use fractal_api_core::api::read_deadline_tests_shared_client_v0_tests::{idle_long_poll_keeps_its_normal_empty_answer, request};
 
     #[test]
     fn deadlines_classify_reads_without_cancelling_writes_or_shortening_event_waits() {

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use st3::api::AppState;
-use st3::model::{ClaimInput, PlannerSpec};
-use st3::store::Store;
+use fractal_daemon::api::AppState;
+use fractal_daemon::model::{ClaimInput, PlannerSpec};
+use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 async fn provider_incarnation(
@@ -51,7 +51,7 @@ async fn provider_incarnation(
     };
     let listener_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&listener_socket, st3::api::router(state)).await
+        fractal_daemon::api::serve_unix(&listener_socket, fractal_daemon::api::router(state)).await
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -61,7 +61,7 @@ async fn provider_incarnation(
     }
     let resume_path =
         resume.then(|| {
-            st_drivers::reexec::write_state(root.path(), "driver", &json!({
+            fractal_drivers::reexec::write_state(root.path(), "driver", &json!({
         "driver":"exec", "subject":"agent/garden/worker", "incarnation":"worker:current",
         "session":{"kind":"provider", "pid":0, "session":"provider-session", "seq":0},
         "loop_state":{"ready":false, "harness_record_started":false,
@@ -73,7 +73,7 @@ async fn provider_incarnation(
     let socket_arg = socket.clone();
     let home = root.path().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
         command
             .env_clear()
             .env("PTY_ROOT", home.join("pty"))
@@ -82,7 +82,7 @@ async fn provider_incarnation(
             command.env("ST3_INCARNATION", incarnation);
         }
         if let Some(path) = startup_resume_path {
-            command.env(st_drivers::reexec::DRIVER_RESUME_ENV, path);
+            command.env(fractal_drivers::reexec::DRIVER_RESUME_ENV, path);
         }
         command
             .arg("--endpoint")
@@ -117,7 +117,7 @@ async fn provider_incarnation(
 
 #[tokio::test]
 async fn fresh_driver_exports_its_incarnation_in_the_provider_environment() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     provider_incarnation(None, false, "agent/garden/worker", "worker:current").await;
@@ -125,7 +125,7 @@ async fn fresh_driver_exports_its_incarnation_in_the_provider_environment() {
 
 #[tokio::test]
 async fn fresh_driver_replaces_an_inherited_incarnation() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     provider_incarnation(
@@ -139,7 +139,7 @@ async fn fresh_driver_replaces_an_inherited_incarnation() {
 
 #[tokio::test]
 async fn reexecuted_driver_refreshes_its_environment_from_the_saved_runtime_fence() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     provider_incarnation(
@@ -153,7 +153,7 @@ async fn reexecuted_driver_refreshes_its_environment_from_the_saved_runtime_fenc
 
 #[tokio::test]
 async fn exec_gates_start_without_an_agent_runtime_fence() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     provider_incarnation(None, false, "gate-operation/catalog/check", "").await;

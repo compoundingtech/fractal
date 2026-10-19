@@ -1,4 +1,4 @@
-import type { Agent, Arrangement, ArrangementFolder, ArrangementPlacementRegister } from '@smalltalk/st3-client'
+import type { Agent, Arrangement, ArrangementFolder, ArrangementPlacementRegister } from '@fractal/client'
 
 import type { FactoryContext } from './context.ts'
 import { fork, int } from './rng.ts'

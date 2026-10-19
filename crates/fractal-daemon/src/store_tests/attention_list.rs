@@ -53,7 +53,7 @@ ClaimInput {
 
 fn custom(store: &Store, subject: &str, person: &str) {
 let manifest =
-    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9c183bdfe983 owner=st3_daemon::store_tests::attention_list TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/custom-review.json"))
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h3f11fc42fd46 owner=fractal_daemon::store_tests::attention_list TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/custom-review.json"))
         .unwrap();
 store
     .register_custom_kind(&crate::store::custom::RegistrationRequest {
@@ -265,7 +265,7 @@ let before = refresh_and_check(&store);
 {
     let mut writer = store.connection.write();
     let tx = writer.transaction().unwrap();
-    tx.execute(/* sqlite-large-value: allow-for-now lv-habd90c64fad6 owner=st3_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled' WHERE subject=?1", [&ask.subject])
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h91a00803e6a2 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled' WHERE subject=?1", [&ask.subject])
         .unwrap();
     tx.rollback().unwrap();
 }
@@ -355,7 +355,7 @@ let project_through = |through: u64| {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h5e37877a582c owner=st3_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hdbafd41c1bab owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, '0')
              ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=?1",
             [through],

@@ -1,4 +1,4 @@
-import type { Snapshot, TerminalAttachment } from '@smalltalk/st3-client'
+import type { Snapshot, TerminalAttachment } from '@fractal/client'
 import type { Selector } from './slice.ts'
 
 /** Wire boundaries point into slice state/events, never contain response items. */

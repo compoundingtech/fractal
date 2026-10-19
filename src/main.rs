@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 
-use st2::{
+use fractal_legacy_runner::{
     HostLock, Runner, SystemRunner, UpReport, detect_host, ding, discover, exec_state_dir, message,
     up_loop, up_once,
 };
@@ -31,9 +31,9 @@ fn main() -> Result<()> {
     // rule, not a hook rule: `claude-observe` is event-driven and stays instrumented, exactly as
     // `06-observability`'s spec names it.
     let mut telemetry = if matches!(command, Command::Driver(DriverCmd::ClaudeStatusline { .. })) {
-        st2::telemetry::Telemetry::local_only()
+        fractal_legacy_runner::telemetry::Telemetry::local_only()
     } else {
-        st2::telemetry::Telemetry::init(if matches!(command, Command::Up { once: false, .. }) {
+        fractal_legacy_runner::telemetry::Telemetry::init(if matches!(command, Command::Up { once: false, .. }) {
             "supervisor"
         } else if matches!(
             command,
@@ -121,16 +121,16 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             let catalog = catalog.canonicalize().unwrap_or(catalog);
             match (required_resume_generation, required_resume_incarnation) {
                 (Some(generation), Some(incarnation)) => {
-                    st2::codex_app_server::run_controlled_residency_attempt(
+                    fractal_legacy_runner::codex_app_server::run_controlled_residency_attempt(
                         &catalog,
                         identity,
                         runtime_id,
                         codex_argv,
-                        st2::residency::Generation(generation),
+                        fractal_legacy_runner::residency::Generation(generation),
                         incarnation,
                     )
                 }
-                (None, None) => st2::codex_app_server::run_controlled(
+                (None, None) => fractal_legacy_runner::codex_app_server::run_controlled(
                     &catalog,
                     identity,
                     runtime_id,
@@ -142,7 +142,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
         Command::ClaudeMcp { identity } => {
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::claude_mcp::run(&catalog, &identity)
+            fractal_legacy_runner::claude_mcp::run(&catalog, &identity)
         }
         Command::Driver(DriverCmd::Codex {
             identity,
@@ -155,17 +155,17 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             let catalog = catalog.canonicalize().unwrap_or(catalog);
             match (required_resume_generation, required_resume_incarnation) {
                 (Some(generation), Some(incarnation)) => {
-                    st2::codex_app_server::run_controlled_residency_attempt(
+                    fractal_legacy_runner::codex_app_server::run_controlled_residency_attempt(
                         &catalog,
                         identity,
                         runtime_id,
                         argv,
-                        st2::residency::Generation(generation),
+                        fractal_legacy_runner::residency::Generation(generation),
                         incarnation,
                     )
                 }
                 (None, None) => {
-                    st2::codex_app_server::run_controlled(&catalog, identity, runtime_id, argv)
+                    fractal_legacy_runner::codex_app_server::run_controlled(&catalog, identity, runtime_id, argv)
                 }
                 _ => unreachable!("clap requires the complete residency launch fence"),
             }
@@ -173,7 +173,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
         Command::Driver(DriverCmd::PiChannel { identity }) => {
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::pi_channel::run(&catalog, &identity)
+            fractal_legacy_runner::pi_channel::run(&catalog, &identity)
         }
         Command::Driver(DriverCmd::PiSession {
             identity,
@@ -182,7 +182,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
         }) => {
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::pi_session::run(&catalog, identity, runtime_id, argv)
+            fractal_legacy_runner::pi_session::run(&catalog, identity, runtime_id, argv)
         }
         Command::Driver(DriverCmd::ClaudeMcp { identity }) => {
             let catalog = catalog_arg(None)?;
@@ -190,12 +190,12 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             let identity = identity
                 .or_else(|| std::env::var("ST_AGENT").ok())
                 .context("--identity is required when ST_AGENT is not set")?;
-            st2::claude_mcp::run(&catalog, &identity)
+            fractal_legacy_runner::claude_mcp::run(&catalog, &identity)
         }
         Command::Driver(DriverCmd::OmpChannel { identity }) => {
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::pi_channel::run_omp(&catalog, &identity)
+            fractal_legacy_runner::pi_channel::run_omp(&catalog, &identity)
         }
         Command::Driver(DriverCmd::OmpSession {
             identity,
@@ -207,15 +207,15 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
             match (required_resume_generation, required_resume_incarnation) {
-                (Some(generation), Some(incarnation)) => st2::omp_session::run_residency_attempt(
+                (Some(generation), Some(incarnation)) => fractal_legacy_runner::omp_session::run_residency_attempt(
                     &catalog,
                     identity,
                     runtime_id,
                     argv,
-                    st2::residency::Generation(generation),
+                    fractal_legacy_runner::residency::Generation(generation),
                     incarnation,
                 ),
-                (None, None) => st2::omp_session::run(&catalog, identity, runtime_id, argv),
+                (None, None) => fractal_legacy_runner::omp_session::run(&catalog, identity, runtime_id, argv),
                 _ => unreachable!("clap requires the complete residency launch fence"),
             }
         }
@@ -223,7 +223,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             eprintln!("warning: `st2 driver claude` is deprecated; use `st2 driver claude-mcp`");
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::claude_mcp::run(&catalog, &identity)
+            fractal_legacy_runner::claude_mcp::run(&catalog, &identity)
         }
         Command::Driver(DriverCmd::ClaudeSession {
             identity,
@@ -236,16 +236,16 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             let catalog = catalog.canonicalize().unwrap_or(catalog);
             match (required_resume_generation, required_resume_incarnation) {
                 (Some(generation), Some(incarnation)) => {
-                    st2::claude_session::run_residency_attempt(
+                    fractal_legacy_runner::claude_session::run_residency_attempt(
                         &catalog,
                         identity,
                         runtime_id,
                         argv,
-                        st2::residency::Generation(generation),
+                        fractal_legacy_runner::residency::Generation(generation),
                         incarnation,
                     )
                 }
-                (None, None) => st2::claude_session::run(&catalog, identity, runtime_id, argv),
+                (None, None) => fractal_legacy_runner::claude_session::run(&catalog, identity, runtime_id, argv),
                 _ => unreachable!("clap requires the complete residency launch fence"),
             }
         }
@@ -256,12 +256,12 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
         }) => {
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::claude_session::run_observe(&catalog, &identity, runtime_id.as_deref(), &event)
+            fractal_legacy_runner::claude_session::run_observe(&catalog, &identity, runtime_id.as_deref(), &event)
         }
         Command::Driver(DriverCmd::ClaudeStatusline { identity }) => {
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::claude_session::run_statusline(&catalog, &identity)
+            fractal_legacy_runner::claude_session::run_statusline(&catalog, &identity)
         }
         Command::Driver(DriverCmd::OpencodeSession {
             identity,
@@ -270,7 +270,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
         }) => {
             let catalog = catalog_arg(None)?;
             let catalog = catalog.canonicalize().unwrap_or(catalog);
-            st2::opencode_session::run(&catalog, identity, runtime_id, argv)
+            fractal_legacy_runner::opencode_session::run(&catalog, identity, runtime_id, argv)
         }
         Command::Driver(DriverCmd::Expand { spec, agent, host }) => {
             let catalog = catalog_arg(None)?;
@@ -282,9 +282,9 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             set,
             ctx,
         } => status_cmd(identity, agent_id, set, ctx),
-        Command::Rename(args) => presentation_cmd(st2::agent_author::PresentationField::Name, args),
+        Command::Rename(args) => presentation_cmd(fractal_legacy_runner::agent_author::PresentationField::Name, args),
         Command::Describe(args) => {
-            presentation_cmd(st2::agent_author::PresentationField::Description, args)
+            presentation_cmd(fractal_legacy_runner::agent_author::PresentationField::Description, args)
         }
         Command::Agent(AgentCmd::Address(args)) => address_cmd(args),
         Command::Agent(AgentCmd::DesiredState {
@@ -319,16 +319,16 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
         }) => {
             let catalog = catalog_arg(None)?;
             let source = match (spec, bundle) {
-                (Some(path), None) => st2::agent_publish::PublishSource::Spec(path),
-                (None, Some(path)) => st2::agent_publish::PublishSource::Bundle(path),
+                (Some(path), None) => fractal_legacy_runner::agent_publish::PublishSource::Spec(path),
+                (None, Some(path)) => fractal_legacy_runner::agent_publish::PublishSource::Bundle(path),
                 _ => unreachable!("clap enforces one publication source"),
             };
             let expectation = match (expect_absent, expect_sha256) {
-                (true, None) => st2::agent_publish::PublishExpectation::Absent,
-                (false, Some(hash)) => st2::agent_publish::PublishExpectation::Sha256(hash),
+                (true, None) => fractal_legacy_runner::agent_publish::PublishExpectation::Absent,
+                (false, Some(hash)) => fractal_legacy_runner::agent_publish::PublishExpectation::Sha256(hash),
                 _ => unreachable!("clap enforces one publication expectation"),
             };
-            let result = st2::agent_publish::publish(st2::agent_publish::PublishRequest {
+            let result = fractal_legacy_runner::agent_publish::publish(fractal_legacy_runner::agent_publish::PublishRequest {
                 catalog,
                 source,
                 expectation,
@@ -341,8 +341,8 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
                 println!(
                     "{} {} {}",
                     match result.status {
-                        st2::agent_publish::PublishStatus::Published => "published",
-                        st2::agent_publish::PublishStatus::Unchanged => "unchanged",
+                        fractal_legacy_runner::agent_publish::PublishStatus::Published => "published",
+                        fractal_legacy_runner::agent_publish::PublishStatus::Unchanged => "unchanged",
                     },
                     result.bus_id,
                     result.path.display()
@@ -352,11 +352,11 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
         }
         Command::Agent(AgentCmd::Digest { spec, bundle, json }) => {
             let source = match (spec, bundle) {
-                (Some(path), None) => st2::agent_publish::PublishSource::Spec(path),
-                (None, Some(path)) => st2::agent_publish::PublishSource::Bundle(path),
+                (Some(path), None) => fractal_legacy_runner::agent_publish::PublishSource::Spec(path),
+                (None, Some(path)) => fractal_legacy_runner::agent_publish::PublishSource::Bundle(path),
                 _ => unreachable!("clap enforces one source"),
             };
-            let digest = st2::agent_publish::digest_source(source)?;
+            let digest = fractal_legacy_runner::agent_publish::digest_source(source)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&digest)?);
             } else {
@@ -368,7 +368,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             if !json {
                 anyhow::bail!("`st2 catalog graph` v1 requires --json");
             }
-            let graph = st2::catalog_graph::snapshot(
+            let graph = fractal_legacy_runner::catalog_graph::snapshot(
                 &catalog_arg(None)?,
                 &host.unwrap_or_else(detect_host),
             )?;
@@ -385,7 +385,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             json,
         }) => {
             let result =
-                st2::catalog_transaction::bootstrap(st2::catalog_transaction::BootstrapRequest {
+                fractal_legacy_runner::catalog_transaction::bootstrap(fractal_legacy_runner::catalog_transaction::BootstrapRequest {
                     catalog: catalog_arg(None)?,
                     prepared,
                     input_sha256,
@@ -396,8 +396,8 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
                 println!(
                     "{} {}",
                     match result.status {
-                        st2::catalog_transaction::BootstrapStatus::Created => "created",
-                        st2::catalog_transaction::BootstrapStatus::Unchanged => "unchanged",
+                        fractal_legacy_runner::catalog_transaction::BootstrapStatus::Created => "created",
+                        fractal_legacy_runner::catalog_transaction::BootstrapStatus::Unchanged => "unchanged",
                     },
                     result.root_sha256
                 );
@@ -405,7 +405,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             Ok(())
         }
         Command::Catalog(CatalogCmd::Digest { prepared, json }) => {
-            let digest = st2::catalog_transaction::digest_prepared(&catalog_arg(None)?, &prepared)?;
+            let digest = fractal_legacy_runner::catalog_transaction::digest_prepared(&catalog_arg(None)?, &prepared)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&digest)?);
             } else {
@@ -421,7 +421,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             if !json {
                 anyhow::bail!("`st2 catalog diff` v1 requires --json");
             }
-            let result = st2::catalog_transaction::diff(st2::catalog_transaction::DiffRequest {
+            let result = fractal_legacy_runner::catalog_transaction::diff(fractal_legacy_runner::catalog_transaction::DiffRequest {
                 catalog: catalog_arg(None)?,
                 prepared,
                 expect_sha256,
@@ -435,7 +435,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             json,
         }) => {
             let result =
-                st2::catalog_transaction::snapshot(st2::catalog_transaction::SnapshotRequest {
+                fractal_legacy_runner::catalog_transaction::snapshot(fractal_legacy_runner::catalog_transaction::SnapshotRequest {
                     catalog: catalog_arg(None)?,
                     output,
                     raw_preimage,
@@ -446,8 +446,8 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
                 println!(
                     "{} {} {}",
                     match result.status {
-                        st2::catalog_transaction::SnapshotStatus::Created => "created",
-                        st2::catalog_transaction::SnapshotStatus::Unchanged => "unchanged",
+                        fractal_legacy_runner::catalog_transaction::SnapshotStatus::Created => "created",
+                        fractal_legacy_runner::catalog_transaction::SnapshotStatus::Unchanged => "unchanged",
                     },
                     result.root_sha256,
                     result.output.display()
@@ -464,7 +464,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             json,
         }) => {
             let mode = if resume {
-                st2::catalog_transaction::ApplyMode::Resume
+                fractal_legacy_runner::catalog_transaction::ApplyMode::Resume
             } else {
                 let prepared = prepared.context("clap requires --prepared unless --resume")?;
                 let input_sha256 =
@@ -472,20 +472,20 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
                 let expect_sha256 =
                     expect_sha256.context("clap requires --expect-sha256 unless --resume")?;
                 if raw_preimage {
-                    st2::catalog_transaction::ApplyMode::RawPreimage {
+                    fractal_legacy_runner::catalog_transaction::ApplyMode::RawPreimage {
                         prepared,
                         input_sha256,
                         expect_sha256,
                     }
                 } else {
-                    st2::catalog_transaction::ApplyMode::Prepared {
+                    fractal_legacy_runner::catalog_transaction::ApplyMode::Prepared {
                         prepared,
                         input_sha256,
                         expect_sha256,
                     }
                 }
             };
-            let result = st2::catalog_transaction::apply(st2::catalog_transaction::ApplyRequest {
+            let result = fractal_legacy_runner::catalog_transaction::apply(fractal_legacy_runner::catalog_transaction::ApplyRequest {
                 catalog: catalog_arg(None)?,
                 mode,
             })?;
@@ -495,8 +495,8 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
                 println!(
                     "{} {}",
                     match result.status {
-                        st2::catalog_transaction::ApplyStatus::Applied => "applied",
-                        st2::catalog_transaction::ApplyStatus::Unchanged => "unchanged",
+                        fractal_legacy_runner::catalog_transaction::ApplyStatus::Applied => "applied",
+                        fractal_legacy_runner::catalog_transaction::ApplyStatus::Unchanged => "unchanged",
                     },
                     result.after_sha256
                 );
@@ -511,11 +511,11 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             json,
         }) => {
             let selection = if all_retired {
-                st2::catalog_archive::Selection::AllRetired
+                fractal_legacy_runner::catalog_archive::Selection::AllRetired
             } else {
-                st2::catalog_archive::Selection::Identities(identity)
+                fractal_legacy_runner::catalog_archive::Selection::Identities(identity)
             };
-            let result = st2::catalog_archive::archive(st2::catalog_archive::ArchiveRequest {
+            let result = fractal_legacy_runner::catalog_archive::archive(fractal_legacy_runner::catalog_archive::ArchiveRequest {
                 catalog: catalog_arg(None)?,
                 host: host.unwrap_or_else(detect_host),
                 selection,
@@ -546,7 +546,7 @@ fn dispatch(command: Command, catalog_path: Option<&std::path::Path>) -> Result<
             host,
             json,
         }) => {
-            let result = st2::catalog_archive::unarchive(st2::catalog_archive::UnarchiveRequest {
+            let result = fractal_legacy_runner::catalog_archive::unarchive(fractal_legacy_runner::catalog_archive::UnarchiveRequest {
                 catalog: catalog_arg(None)?,
                 host: host.unwrap_or_else(detect_host),
                 identity,
@@ -634,7 +634,7 @@ fn driver_expand_cmd(
     agent: Option<&str>,
     host: Option<&str>,
 ) -> Result<()> {
-    let (mut specs, warnings) = st2::discover_file(catalog, path)
+    let (mut specs, warnings) = fractal_legacy_runner::discover_file(catalog, path)
         .with_context(|| format!("reading driver declaration {}", path.display()))?;
     for warning in warnings {
         eprintln!("warning: {warning}");
@@ -658,7 +658,7 @@ fn driver_expand_cmd(
             )
         }
     );
-    let output = st2::driver::expand_driver(&specs[0], host.unwrap_or(""))?;
+    let output = fractal_legacy_runner::driver::expand_driver(&specs[0], host.unwrap_or(""))?;
     print!("{output}");
     Ok(())
 }
@@ -669,28 +669,28 @@ fn hooks_cmd(command: HooksCmd) -> Result<()> {
             replace,
             allow_downgrade,
         } => {
-            let dir = st2::hooks::install(replace || allow_downgrade)?;
-            let root = st2::hooks::hooks_root()?;
+            let dir = fractal_legacy_runner::hooks::install(replace || allow_downgrade)?;
+            let root = fractal_legacy_runner::hooks::hooks_root()?;
             println!(
                 "installed hook set {} in {}\nreceipt {}",
-                st2::hooks::hookset_id(),
+                fractal_legacy_runner::hooks::hookset_id(),
                 dir.display(),
                 root.join("current.json").display()
             );
         }
         HooksCmd::Verify => {
-            let dir = st2::hooks::verify_installed()?;
+            let dir = fractal_legacy_runner::hooks::verify_installed()?;
             println!(
                 "verified hook set {} in {}",
-                st2::hooks::hookset_id(),
+                fractal_legacy_runner::hooks::hookset_id(),
                 dir.display()
             );
         }
         HooksCmd::VerifyOwn => {
-            let dir = st2::hooks::verify_required_set()?;
+            let dir = fractal_legacy_runner::hooks::verify_required_set()?;
             println!(
                 "verified this binary's hook set {} in {}",
-                st2::hooks::hookset_id(),
+                fractal_legacy_runner::hooks::hookset_id(),
                 dir.display()
             );
         }
@@ -701,15 +701,15 @@ fn hooks_cmd(command: HooksCmd) -> Result<()> {
 fn down_cmd(root: &Path, host: Option<String>) -> Result<()> {
     // A single-file team spec: tear down the DECLARED team's sessions (symmetric with `st2 up`/`st2 ls`
     // over a spec — the "stop the fleet cleanly" verb). A catalog dir falls through to catalog teardown.
-    if let Some(spec_file) = st2::eval_run::resolve_spec_path(root) {
-        let (spec, spec_root) = st2::eval_run::load_spec(&spec_file)?;
+    if let Some(spec_file) = fractal_legacy_runner::eval_run::resolve_spec_path(root) {
+        let (spec, spec_root) = fractal_legacy_runner::eval_run::load_spec(&spec_file)?;
         // Same host resolution as `st2 up <spec>`: --host › the spec's top-level host › OS hostname.
         let this_host = host
             .or_else(|| spec.host.clone())
             .unwrap_or_else(detect_host);
-        let specs = st2::eval_run::spec_to_agent_specs(&spec.agents, &this_host, &spec_root);
+        let specs = fractal_legacy_runner::eval_run::spec_to_agent_specs(&spec.agents, &this_host, &spec_root);
         let runner = SystemRunner::new(spec_root, exec_state_dir(&this_host));
-        let report = st2::down_specs(&specs, &this_host, &runner)?;
+        let report = fractal_legacy_runner::down_specs(&specs, &this_host, &runner)?;
         println!(
             "teardown of spec {} on host '{this_host}':",
             spec_file.display()
@@ -721,14 +721,14 @@ fn down_cmd(root: &Path, host: Option<String>) -> Result<()> {
     let this_host = host.unwrap_or_else(detect_host);
     let catalog_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let runner = SystemRunner::new(catalog_root, exec_state_dir(&this_host));
-    let report = st2::down(root, &this_host, &runner)?;
+    let report = fractal_legacy_runner::down(root, &this_host, &runner)?;
     println!("teardown on host '{this_host}':");
     print_report(&report);
     Ok(())
 }
 
 fn eval_cmd(folder: &Path, host: Option<String>, keep: bool, json: bool) -> Result<()> {
-    let spec_file = st2::eval_run::resolve_spec_path(folder).with_context(|| {
+    let spec_file = fractal_legacy_runner::eval_run::resolve_spec_path(folder).with_context(|| {
         format!(
             "{} is not an st2 spec (a *.kdl file, or a folder with one)",
             folder.display()
@@ -740,7 +740,7 @@ fn eval_cmd(folder: &Path, host: Option<String>, keep: bool, json: bool) -> Resu
             std::env::set_var("ST2_EVAL_JSON", "1");
         }
     }
-    let report = st2::eval_run::run_eval(&spec_file, host, keep)?;
+    let report = fractal_legacy_runner::eval_run::run_eval(&spec_file, host, keep)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -797,15 +797,15 @@ fn validate_cmd(
     let catalog_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let host = host.unwrap_or_else(detect_host);
     let report = if let Some(candidate) = candidate {
-        st2::agent_publish::validate_candidate_for_host(
+        fractal_legacy_runner::agent_publish::validate_candidate_for_host(
             &catalog_root,
-            st2::agent_publish::PublishSource::Spec(candidate),
+            fractal_legacy_runner::agent_publish::PublishSource::Spec(candidate),
             &host,
         )
     } else {
-        let _catalog_lock = st2::CatalogLock::shared(&catalog_root)
+        let _catalog_lock = fractal_legacy_runner::CatalogLock::shared(&catalog_root)
             .context("acquire shared catalog-authoring lock for validation")?;
-        st2::validate::validate_for_host(&catalog_root, &host)
+        fractal_legacy_runner::validate::validate_for_host(&catalog_root, &host)
     };
     let (errors, warnings) = (report.errors(), report.warnings());
 
@@ -824,8 +824,8 @@ fn validate_cmd(
             })
             .collect();
         let out = serde_json::json!({
-            "schema": st2::validate::VALIDATE_RECEIPT_SCHEMA,
-            "policyProfile": st2::validate::CORE_CATALOG_POLICY_PROFILE,
+            "schema": fractal_legacy_runner::validate::VALIDATE_RECEIPT_SCHEMA,
+            "policyProfile": fractal_legacy_runner::validate::CORE_CATALOG_POLICY_PROFILE,
             "agentSpecRevision": agent_spec::AGENT_SPEC_REVISION,
             "issues": issues,
             "agents": report.agents,
@@ -916,14 +916,14 @@ fn catalog_root_for_env() -> Result<PathBuf> {
     absolute_catalog_path(&root)
 }
 fn resolve_wake_target<'a>(
-    specs: &'a [st2::AgentSpec],
+    specs: &'a [fractal_legacy_runner::AgentSpec],
     host: &str,
-    selector: &st2::identity::AgentSelector,
-) -> Result<Option<&'a st2::AgentSpec>> {
-    let entries = st2::identity::address_book(specs, host);
-    let resolved = match st2::identity::resolve_local_first(&entries, selector, host) {
+    selector: &fractal_legacy_runner::identity::AgentSelector,
+) -> Result<Option<&'a fractal_legacy_runner::AgentSpec>> {
+    let entries = fractal_legacy_runner::identity::address_book(specs, host);
+    let resolved = match fractal_legacy_runner::identity::resolve_local_first(&entries, selector, host) {
         Ok(resolved) => resolved,
-        Err(st2::identity::ResolveError::Unknown { .. }) => return Ok(None),
+        Err(fractal_legacy_runner::identity::ResolveError::Unknown { .. }) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     if resolved.host != host {
@@ -947,11 +947,11 @@ fn wake_cmd(
     let spec = resolve_wake_target(&found.specs, &host, &selector)?
         .context("wake reference does not name an agent owned by this host")?;
     anyhow::ensure!(
-        spec.residency_policy == st2::ResidencyPolicy::OnDemand && spec.desired_state.is_running(),
+        spec.residency_policy == fractal_legacy_runner::ResidencyPolicy::OnDemand && spec.desired_state.is_running(),
         "wake target is not a running on-demand agent"
     );
     let agent_id = spec.effective_id(&host);
-    let path = st2::residency_host::request_wake(&root, &host, &agent_id)?;
+    let path = fractal_legacy_runner::residency_host::request_wake(&root, &host, &agent_id)?;
     println!(
         "wake requested for '{}' on {host}; request {}",
         spec.bus_id(&host),
@@ -966,11 +966,11 @@ fn request_attach_wake(root: &Path, target: &str) -> Result<()> {
     if let Some(spec) = resolve_wake_target(
         &found.specs,
         &host,
-        &st2::identity::AgentSelector::Address(target.to_owned()),
-    )? && spec.residency_policy == st2::ResidencyPolicy::OnDemand
+        &fractal_legacy_runner::identity::AgentSelector::Address(target.to_owned()),
+    )? && spec.residency_policy == fractal_legacy_runner::ResidencyPolicy::OnDemand
         && spec.desired_state.is_running()
     {
-        st2::residency_host::request_wake(root, &host, &spec.effective_id(&host))?;
+        fractal_legacy_runner::residency_host::request_wake(root, &host, &spec.effective_id(&host))?;
     }
     Ok(())
 }
@@ -980,7 +980,7 @@ fn request_attach_wake(root: &Path, target: &str) -> Result<()> {
 fn with_bus_env(cmd: &mut std::process::Command, root: &Path) {
     cmd.env("CATALOG", root)
         .env("ST_ROOT", root)
-        .env("PTY_ROOT", st2::catalog::pty_root(root));
+        .env("PTY_ROOT", fractal_legacy_runner::catalog::pty_root(root));
 }
 
 /// `st2 pty [<pty-args>…]` — a thin pass-through to `pty` with the catalog's bus env pre-set, so
@@ -1025,13 +1025,13 @@ fn env_cmd(root: &Path) -> Result<()> {
     println!("export ST_ROOT={c}");
     println!(
         "export PTY_ROOT={}",
-        st2::catalog::pty_root(&canonical).display()
+        fractal_legacy_runner::catalog::pty_root(&canonical).display()
     );
     Ok(())
 }
 
 fn pretrust_cmd(dirs: &[PathBuf]) -> Result<()> {
-    let n = st2::pretrust::pretrust(dirs)?;
+    let n = fractal_legacy_runner::pretrust::pretrust(dirs)?;
     println!(
         "pre-trusted {n} workspace{} in the ambient Claude and Codex configs",
         if n == 1 { "" } else { "s" }
@@ -1058,7 +1058,7 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
 
     // 2) Supervision mode. A one-shot/manual host intentionally has no lock. A caller that expects
     // a resident loop can opt into enforcing one; a stale file always indicates an unclean exit.
-    let host_lock = st2::HostLock::new(root, &this_host);
+    let host_lock = fractal_legacy_runner::HostLock::new(root, &this_host);
     match host_lock.live_owner() {
         Some(_) => report_check(&mut problems, true, "supervisor (st2 up) running", ""),
         None if host_lock.has_stale_lock() => report_check(
@@ -1083,7 +1083,7 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
 
     // 3) Per this-host declaration: active tasks require liveness and fresh presence; suspended
     // tasks require no live work; retired tasks require complete record absence.
-    let _catalog_lock = st2::CatalogLock::shared(&catalog)
+    let _catalog_lock = fractal_legacy_runner::CatalogLock::shared(&catalog)
         .context("acquire shared catalog-authoring lock for doctor snapshot")?;
     let found = discover(&catalog);
     for e in &found.errors {
@@ -1142,10 +1142,10 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
         // for the record's window — a trigger nobody produces resolves on memory instead.
         // Advisory, not a problem: a carried-forward attempt is correct behaviour today.
         let delivery_state_dirs = [
-            st2::codex_app_server::state_dir(&catalog, &bus_id),
-            st2::opencode_session::state_dir(&catalog, &bus_id),
+            fractal_legacy_runner::codex_app_server::state_dir(&catalog, &bus_id),
+            fractal_legacy_runner::opencode_session::state_dir(&catalog, &bus_id),
         ];
-        match st2::migrations::delivery_state::resolution_signal(&delivery_state_dirs) {
+        match fractal_legacy_runner::migrations::delivery_state::resolution_signal(&delivery_state_dirs) {
             Ok(signal) if signal.is_clear() => {}
             Ok(signal) => report_advisory(
                 &format!("{bus_id} pre-ledger delivery state (DELTA-006)"),
@@ -1227,7 +1227,7 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
             );
         }
         if let Some(dir) = spec.path.parent() {
-            let path = st2::status::status_path(dir);
+            let path = fractal_legacy_runner::status::status_path(dir);
             if !path.is_file() {
                 report_check(
                     &mut problems,
@@ -1236,25 +1236,25 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
                     "no status file — is its session owner refreshing presence?",
                 );
             } else {
-                let state = st2::status::read_state(&path);
+                let state = fractal_legacy_runner::status::read_state(&path);
                 report_check(
                     &mut problems,
-                    state != st2::status::State::Unknown,
+                    state != fractal_legacy_runner::status::State::Unknown,
                     &format!("{bus_id} presence fresh (is `{}`)", state.as_str()),
                     "rotted to `unknown` — is its session owner refreshing presence?",
                 );
             }
             // Observed harness state is advisory-only in doctor: absence names a driver gap and
             // a derived `unknown` names its reason, but neither fails the exit code.
-            let observed_path = st2::harness_state::harness_state_path(dir);
-            let pty_root = st2::agents::probe_pty_root(&catalog);
-            let probe = |session: &str| st2::ding::session_liveness_in(&pty_root, session);
-            match st2::harness_state::read(&observed_path, Some(&probe)) {
+            let observed_path = fractal_legacy_runner::harness_state::harness_state_path(dir);
+            let pty_root = fractal_legacy_runner::agents::probe_pty_root(&catalog);
+            let probe = |session: &str| fractal_legacy_runner::ding::session_liveness_in(&pty_root, session);
+            match fractal_legacy_runner::harness_state::read(&observed_path, Some(&probe)) {
                 None => report_advisory(
                     &format!("{bus_id} observed harness state absent"),
                     "no driver has published a harness-state record for this agent",
                 ),
-                Some(observed) if observed.state == st2::harness_state::Activity::Unknown => {
+                Some(observed) if observed.state == fractal_legacy_runner::harness_state::Activity::Unknown => {
                     report_advisory(
                         &format!("{bus_id} observed harness state indeterminate"),
                         &format!(
@@ -1264,7 +1264,7 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
                     )
                 }
                 Some(observed)
-                    if observed.state == st2::harness_state::Activity::Ended
+                    if observed.state == fractal_legacy_runner::harness_state::Activity::Ended
                         && spec.desired_state.as_str() == "running" =>
                 {
                     report_advisory(
@@ -1301,12 +1301,12 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
             // number, which is not a fault — so only a high reading and a stale record beside a
             // `running` desired state speak.
             if let Some(context) =
-                st2::harness_context::read(&st2::harness_context::harness_context_path(dir))
+                fractal_legacy_runner::harness_context::read(&fractal_legacy_runner::harness_context::harness_context_path(dir))
             {
                 // The harness's own percent, never one st2 divided out of the operands beside it,
                 // and never clamped: an overrun above 100 is exactly what this warns about.
                 if context.used_percent.is_some_and(|percent| {
-                    percent >= st2::harness_context::HARNESS_CONTEXT_WARN_PERCENT
+                    percent >= fractal_legacy_runner::harness_context::HARNESS_CONTEXT_WARN_PERCENT
                 }) {
                     report_advisory(
                         &format!(
@@ -1316,7 +1316,7 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
                         &format!(
                             "at or above st2's {}% attention threshold, read {} ago — st2's own \
                              number, not a prediction of where this harness compacts",
-                            st2::harness_context::HARNESS_CONTEXT_WARN_PERCENT.round(),
+                            fractal_legacy_runner::harness_context::HARNESS_CONTEXT_WARN_PERCENT.round(),
                             humanize_ms(context.age_ms)
                         ),
                     );
@@ -1332,31 +1332,31 @@ fn doctor_cmd(root: &Path, host: Option<String>, require_supervisor: bool) -> Re
                     );
                 }
             }
-            if st2::driver_diagnostic::expected_for(spec) {
-                let diagnostic = st2::driver_diagnostic::read(&st2::driver_diagnostic::path(dir));
+            if fractal_legacy_runner::driver_diagnostic::expected_for(spec) {
+                let diagnostic = fractal_legacy_runner::driver_diagnostic::read(&fractal_legacy_runner::driver_diagnostic::path(dir));
                 match &diagnostic {
-                    st2::driver_diagnostic::Observed::Failure(failure) => report_advisory(
+                    fractal_legacy_runner::driver_diagnostic::Observed::Failure(failure) => report_advisory(
                         &format!(
                             "{bus_id} native driver diagnostic: {}/{}",
                             failure.stage.as_str(),
                             failure.reason.as_str()
                         ),
-                        st2::driver_diagnostic::repair_text(&diagnostic),
+                        fractal_legacy_runner::driver_diagnostic::repair_text(&diagnostic),
                     ),
-                    st2::driver_diagnostic::Observed::Indeterminate(reason) => report_advisory(
+                    fractal_legacy_runner::driver_diagnostic::Observed::Indeterminate(reason) => report_advisory(
                         &format!(
                             "{bus_id} native driver diagnostic indeterminate ({})",
                             reason.as_str()
                         ),
-                        st2::driver_diagnostic::repair_text(&diagnostic),
+                        fractal_legacy_runner::driver_diagnostic::repair_text(&diagnostic),
                     ),
                     // Absence is only a fault where the driver publishes a boundary result on
                     // every launch; for Claude and Codex it is the healthy steady state.
-                    st2::driver_diagnostic::Observed::Absent => {
-                        if st2::driver_diagnostic::absence_is_a_fault(spec) {
+                    fractal_legacy_runner::driver_diagnostic::Observed::Absent => {
+                        if fractal_legacy_runner::driver_diagnostic::absence_is_a_fault(spec) {
                             report_advisory(
                                 &format!("{bus_id} native driver diagnostic absent"),
-                                st2::driver_diagnostic::repair_text(&diagnostic),
+                                fractal_legacy_runner::driver_diagnostic::repair_text(&diagnostic),
                             );
                         }
                     }
@@ -1380,17 +1380,17 @@ fn tasks_cmd(root: &Path, host: Option<String>) -> Result<()> {
         Err(error) => {
             let detail = format!("canonicalize catalog {}: {error}", root.display());
             let inventory =
-                st2::task_inventory::TaskInventory::incomplete(root.to_path_buf(), host, detail);
+                fractal_legacy_runner::task_inventory::TaskInventory::incomplete(root.to_path_buf(), host, detail);
             println!("{}", inventory.to_json());
             anyhow::bail!("task inventory incomplete")
         }
     };
-    let before = match st2::catalog_lock::read_fence(&catalog) {
+    let before = match fractal_legacy_runner::catalog_lock::read_fence(&catalog) {
         Ok(fence) => fence,
         Err(error) => return print_incomplete_tasks(catalog, host, error.to_string()),
     };
     let found = discover(&catalog);
-    let observed = match st2::catalog_lock::read_fence(&catalog) {
+    let observed = match fractal_legacy_runner::catalog_lock::read_fence(&catalog) {
         Ok(fence) if fence == before => fence,
         Ok(_) => {
             return print_incomplete_tasks(
@@ -1402,7 +1402,7 @@ fn tasks_cmd(root: &Path, host: Option<String>) -> Result<()> {
         Err(error) => return print_incomplete_tasks(catalog, host, error.to_string()),
     };
     let runner = SystemRunner::new(catalog.clone(), exec_state_dir(&host));
-    let parks = match st2::park::DirParkObserver::for_supervisor(&catalog, &host) {
+    let parks = match fractal_legacy_runner::park::DirParkObserver::for_supervisor(&catalog, &host) {
         Ok(parks) => parks,
         Err(error) => {
             return print_incomplete_tasks(
@@ -1412,12 +1412,12 @@ fn tasks_cmd(root: &Path, host: Option<String>) -> Result<()> {
             );
         }
     };
-    let mut inventory = st2::task_inventory::inventory(&catalog, &host, &found, &runner, &parks);
+    let mut inventory = fractal_legacy_runner::task_inventory::inventory(&catalog, &host, &found, &runner, &parks);
     let after = discover(&catalog);
-    if !st2::task_inventory::same_discovery(&found, &after) {
+    if !fractal_legacy_runner::task_inventory::same_discovery(&found, &after) {
         inventory.mark_incomplete("catalog declarations changed during task observation");
     }
-    match st2::catalog_lock::read_fence(&catalog) {
+    match fractal_legacy_runner::catalog_lock::read_fence(&catalog) {
         Ok(after) if after == observed => {}
         Ok(_) => inventory.mark_incomplete("catalog generation changed during task observation"),
         Err(error) => inventory.mark_incomplete(error.to_string()),
@@ -1441,8 +1441,8 @@ fn unpark_cmd(catalog: &Path, task: &str, host: Option<String>) -> Result<()> {
     let catalog = catalog
         .canonicalize()
         .with_context(|| format!("canonicalize catalog {}", catalog.display()))?;
-    let dir = st2::park::SupervisorScope::current(&catalog, &host)?.unpark_request_dir();
-    st2::park::request_unpark(&dir, task)?;
+    let dir = fractal_legacy_runner::park::SupervisorScope::current(&catalog, &host)?.unpark_request_dir();
+    fractal_legacy_runner::park::request_unpark(&dir, task)?;
     println!(
         "unpark requested for '{task}' in catalog {} on {host}; that supervisor grants it on its \
          next reconcile pass. Confirm with `st2 tasks --json` — the task's `parked` field clears.",
@@ -1452,7 +1452,7 @@ fn unpark_cmd(catalog: &Path, task: &str, host: Option<String>) -> Result<()> {
 }
 
 fn print_incomplete_tasks(catalog: PathBuf, host: String, detail: String) -> Result<()> {
-    let inventory = st2::task_inventory::TaskInventory::incomplete(catalog, host, detail);
+    let inventory = fractal_legacy_runner::task_inventory::TaskInventory::incomplete(catalog, host, detail);
     println!("{}", inventory.to_json());
     anyhow::bail!("task inventory incomplete")
 }
@@ -1491,7 +1491,7 @@ fn humanize_ms(age_ms: u64) -> String {
 }
 
 fn presentation_cmd(
-    field: st2::agent_author::PresentationField,
+    field: fractal_legacy_runner::agent_author::PresentationField,
     args: PresentationArgs,
 ) -> Result<()> {
     let (selector, requested, json, host) = args.selection()?;
@@ -1502,7 +1502,7 @@ fn presentation_cmd(
         .ok()
         .filter(|value| !value.is_empty());
     let requested = requested.as_deref();
-    match st2::agent_author::set_presentation(
+    match fractal_legacy_runner::agent_author::set_presentation(
         &root,
         &identity,
         &host,
@@ -1515,14 +1515,14 @@ fn presentation_cmd(
                 println!("{}", serde_json::to_string(&receipt)?);
             } else {
                 let state = match (receipt.result, receipt.value.as_deref()) {
-                    (st2::agent_author::AuthorOutcome::Changed, Some(value)) => {
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Changed, Some(value)) => {
                         format!("set to {value:?}")
                     }
-                    (st2::agent_author::AuthorOutcome::Changed, None) => "cleared".to_owned(),
-                    (st2::agent_author::AuthorOutcome::Unchanged, Some(value)) => {
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Changed, None) => "cleared".to_owned(),
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Unchanged, Some(value)) => {
                         format!("already {value:?}")
                     }
-                    (st2::agent_author::AuthorOutcome::Unchanged, None) => {
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Unchanged, None) => {
                         "already clear".to_owned()
                     }
                 };
@@ -1559,20 +1559,20 @@ fn address_cmd(args: PresentationArgs) -> Result<()> {
         .ok()
         .filter(|value| !value.is_empty());
     let requested = requested.as_deref();
-    match st2::agent_author::set_address(&root, &selector, &host, actor.as_deref(), requested) {
+    match fractal_legacy_runner::agent_author::set_address(&root, &selector, &host, actor.as_deref(), requested) {
         Ok(receipt) => {
             if json {
                 println!("{}", serde_json::to_string(&receipt)?);
             } else {
                 let state = match (receipt.result, receipt.address.as_deref()) {
-                    (st2::agent_author::AuthorOutcome::Changed, Some(value)) => {
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Changed, Some(value)) => {
                         format!("set to {value:?}")
                     }
-                    (st2::agent_author::AuthorOutcome::Changed, None) => "cleared".to_owned(),
-                    (st2::agent_author::AuthorOutcome::Unchanged, Some(value)) => {
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Changed, None) => "cleared".to_owned(),
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Unchanged, Some(value)) => {
                         format!("already {value:?}")
                     }
-                    (st2::agent_author::AuthorOutcome::Unchanged, None) => {
+                    (fractal_legacy_runner::agent_author::AuthorOutcome::Unchanged, None) => {
                         "already clear".to_owned()
                     }
                 };
@@ -1615,9 +1615,9 @@ fn desired_state_cmd(
     json: bool,
 ) -> Result<()> {
     let state = match state.as_str() {
-        "running" => st2::agent_author::DesiredStateValue::Running,
-        "suspended" => st2::agent_author::DesiredStateValue::Suspended,
-        "retired" => st2::agent_author::DesiredStateValue::Retired,
+        "running" => fractal_legacy_runner::agent_author::DesiredStateValue::Running,
+        "suspended" => fractal_legacy_runner::agent_author::DesiredStateValue::Suspended,
+        "retired" => fractal_legacy_runner::agent_author::DesiredStateValue::Retired,
         _ => unreachable!("clap validates desired state"),
     };
     let root = catalog_arg(None)?;
@@ -1626,7 +1626,7 @@ fn desired_state_cmd(
     let actor = std::env::var("ST_AGENT")
         .ok()
         .filter(|value| !value.is_empty());
-    match st2::agent_author::set_desired_state(
+    match fractal_legacy_runner::agent_author::set_desired_state(
         &root,
         &identity,
         &host,
@@ -1654,8 +1654,8 @@ fn desired_state_cmd(
                         .map(|marker| format!(" managed-by={marker:?}"))
                         .unwrap_or_default(),
                     match receipt.result {
-                        st2::agent_author::AuthorOutcome::Changed => "changed",
-                        st2::agent_author::AuthorOutcome::Unchanged => "unchanged",
+                        fractal_legacy_runner::agent_author::AuthorOutcome::Changed => "changed",
+                        fractal_legacy_runner::agent_author::AuthorOutcome::Unchanged => "unchanged",
                     }
                 );
             }
@@ -1690,15 +1690,15 @@ fn status_cmd(
         Some(id) => id,
         None => acting_route(&root, &host, &ctx)?,
     };
-    let sp = st2::status::status_path(&agent_dir_of(&root, &id, &host)?);
+    let sp = fractal_legacy_runner::status::status_path(&agent_dir_of(&root, &id, &host)?);
     match set {
-        None => println!("{}", st2::status::read_state(&sp).as_str()),
+        None => println!("{}", fractal_legacy_runner::status::read_state(&sp).as_str()),
         Some(word) => {
-            let state = st2::status::State::parse_settable(&word).with_context(|| {
+            let state = fractal_legacy_runner::status::State::parse_settable(&word).with_context(|| {
                 format!("invalid state '{word}' (settable: offline|available|busy|away|dnd)")
             })?;
             message::with_resolved_agent_dir(&root, &route_selector(&id), &host, |agent| {
-                st2::status::set_state(&st2::status::status_path(agent), state)
+                fractal_legacy_runner::status::set_state(&fractal_legacy_runner::status::status_path(agent), state)
             })?;
             println!("status: {}", state.as_str());
         }
@@ -1723,13 +1723,13 @@ fn agents_cmd(
         ctx.root = catalog;
     }
     let (root, host) = resolve_ctx(&ctx)?;
-    let _catalog_lock = st2::CatalogLock::shared(&root)
+    let _catalog_lock = fractal_legacy_runner::CatalogLock::shared(&root)
         .context("acquire shared catalog-authoring lock for agent roster")?;
     let selected = identity.is_some() || agent_id.is_some();
     let found = if selected {
-        st2::discover_strict(&root)
+        fractal_legacy_runner::discover_strict(&root)
     } else {
-        st2::discover(&root)
+        fractal_legacy_runner::discover(&root)
     };
     if selected && !found.errors.is_empty() {
         let errors = found
@@ -1743,7 +1743,7 @@ fn agents_cmd(
             found.errors.len()
         );
     }
-    let mut rows = st2::agents::roster_from_discovered(&found, &root, &host);
+    let mut rows = fractal_legacy_runner::agents::roster_from_discovered(&found, &root, &host);
     if let Some(identity) = &identity {
         rows.retain(|row| row.identity == *identity);
         anyhow::ensure!(
@@ -1772,7 +1772,7 @@ fn agents_cmd(
         }
     }
     if json {
-        println!("{}", st2::agents::to_json(&rows, enrich));
+        println!("{}", fractal_legacy_runner::agents::to_json(&rows, enrich));
     } else {
         for r in &rows {
             let lifecycle = if r.desired_state == "running" {
@@ -1804,17 +1804,17 @@ fn agents_cmd(
 
 /// The compact observed-harness-state column for human `st2 agents` output. `-` means no record
 /// exists (no driver has published one), which is distinct from a derived `unknown`.
-fn observed_column(observed: Option<&st2::harness_state::Observed>) -> String {
+fn observed_column(observed: Option<&fractal_legacy_runner::harness_state::Observed>) -> String {
     // Prefixed so the observed word is never mistaken for the declared presence beside it —
     // two bare state words in one row is the exact ambiguity the ontology's collision rules name.
     let Some(observed) = observed else {
         return "obs:-".to_string();
     };
     let mut column = observed.state.as_str().to_string();
-    if observed.blocked_on == st2::harness_state::BlockedOn::Human {
+    if observed.blocked_on == fractal_legacy_runner::harness_state::BlockedOn::Human {
         column.push_str("+human");
     }
-    if observed.state == st2::harness_state::Activity::Unknown
+    if observed.state == fractal_legacy_runner::harness_state::Activity::Unknown
         && let Some(reason) = observed.reason.as_deref()
     {
         column = format!("unknown({reason})");
@@ -1826,7 +1826,7 @@ fn observed_column(observed: Option<&st2::harness_state::Observed>) -> String {
 /// `?` means a record exists whose percent the harness withheld — Claude before its session's
 /// first API response, pi across a compaction — and the two must not render alike, or the column
 /// says "nobody is watching" for a producer that is watching and honestly does not know.
-fn context_column(context: Option<&st2::harness_context::Observed>) -> String {
+fn context_column(context: Option<&fractal_legacy_runner::harness_context::Observed>) -> String {
     // Prefixed like the observed column beside it, so neither compact word is mistaken for the
     // other or for declared presence.
     let Some(context) = context else {
@@ -1875,7 +1875,7 @@ fn ding_cmd(
         Some(id) => resolve_route(
             &catalog_root,
             &this_host,
-            st2::identity::AgentSelector::Id(id),
+            fractal_legacy_runner::identity::AgentSelector::Id(id),
         )?,
         None => acting_route(&catalog_root, &this_host, &ctx)?,
     };
@@ -1888,7 +1888,7 @@ fn ding_cmd(
     let agent_dir = message::resolve_agent_dir(&catalog_root, &route_selector(&id), &this_host)?
         .unwrap_or_else(|| catalog_root.join(&id));
     let inbox = resolve_message_inbox(&catalog_root, &id, &this_host)?;
-    let status_path = st2::status::status_path(&agent_dir);
+    let status_path = fractal_legacy_runner::status::status_path(&agent_dir);
     eprintln!(
         "st2 ping: watching {}'s inbox ({}) → poking pty '{session}'",
         id,
@@ -1941,7 +1941,7 @@ fn acting_route(root: &Path, host: &str, ctx: &MsgCtx) -> Result<String> {
         return Ok(address);
     }
     let id = acting_id(ctx)?;
-    match resolve_selected(root, host, st2::identity::AgentSelector::Id(id.clone())) {
+    match resolve_selected(root, host, fractal_legacy_runner::identity::AgentSelector::Id(id.clone())) {
         Ok(selected) => Ok(selected.route),
         Err(_) => Ok(id),
     }
@@ -1951,8 +1951,8 @@ fn acting_route(root: &Path, host: &str, ctx: &MsgCtx) -> Result<String> {
 ///
 /// A route is an effective address by construction — `resolve_route` produced it from the address
 /// book — so this states that namespace explicitly instead of letting a bare string be retyped.
-fn route_selector(reference: &str) -> st2::identity::AgentSelector {
-    st2::identity::AgentSelector::Address(reference.to_owned())
+fn route_selector(reference: &str) -> fractal_legacy_runner::identity::AgentSelector {
+    fractal_legacy_runner::identity::AgentSelector::Address(reference.to_owned())
 }
 
 /// Resolve a recipient/identity to its agent folder in the catalog, or a clear error.
@@ -1969,10 +1969,10 @@ fn agent_dir_of(root: &Path, id: &str, host: &str) -> Result<PathBuf> {
 fn agent_selector(
     reference: Option<String>,
     id: Option<String>,
-) -> Option<st2::identity::AgentSelector> {
+) -> Option<fractal_legacy_runner::identity::AgentSelector> {
     match (reference, id) {
-        (_, Some(id)) => Some(st2::identity::AgentSelector::Id(id)),
-        (Some(reference), None) => Some(st2::identity::AgentSelector::Address(reference)),
+        (_, Some(id)) => Some(fractal_legacy_runner::identity::AgentSelector::Id(id)),
+        (Some(reference), None) => Some(fractal_legacy_runner::identity::AgentSelector::Address(reference)),
         (None, None) => None,
     }
 }
@@ -1981,7 +1981,7 @@ fn agent_selector(
 fn one_selector(
     reference: Option<String>,
     id: Option<String>,
-) -> Result<st2::identity::AgentSelector> {
+) -> Result<fractal_legacy_runner::identity::AgentSelector> {
     agent_selector(reference, id)
         .context("no agent selected: pass an agent reference or the exact `--id` form")
 }
@@ -2008,16 +2008,16 @@ struct SelectedAgent {
 fn resolve_selected(
     root: &Path,
     host: &str,
-    selector: st2::identity::AgentSelector,
+    selector: fractal_legacy_runner::identity::AgentSelector,
 ) -> Result<SelectedAgent> {
     let id = match selector {
-        st2::identity::AgentSelector::Address(reference) => {
+        fractal_legacy_runner::identity::AgentSelector::Address(reference) => {
             return Ok(SelectedAgent {
                 declaration: reference.clone(),
                 route: reference,
             });
         }
-        st2::identity::AgentSelector::Id(id) => id,
+        fractal_legacy_runner::identity::AgentSelector::Id(id) => id,
     };
     let found = discover(root);
     // Retired subjects are present here and absent from the routable address book on purpose:
@@ -2026,9 +2026,9 @@ fn resolve_selected(
     let entries = found
         .specs
         .iter()
-        .map(|spec| st2::identity::AddressBookEntry::of(spec, host))
+        .map(|spec| fractal_legacy_runner::identity::AddressBookEntry::of(spec, host))
         .collect::<Vec<_>>();
-    let resolved = &st2::identity::resolve_id(&entries, &id)?.id;
+    let resolved = &fractal_legacy_runner::identity::resolve_id(&entries, &id)?.id;
     let spec = found
         .specs
         .iter()
@@ -2044,7 +2044,7 @@ fn resolve_selected(
 fn resolve_declaration(
     root: &Path,
     host: &str,
-    selector: st2::identity::AgentSelector,
+    selector: fractal_legacy_runner::identity::AgentSelector,
 ) -> Result<String> {
     resolve_selected(root, host, selector).map(|selected| selected.declaration)
 }
@@ -2053,7 +2053,7 @@ fn resolve_declaration(
 fn resolve_route(
     root: &Path,
     host: &str,
-    selector: st2::identity::AgentSelector,
+    selector: fractal_legacy_runner::identity::AgentSelector,
 ) -> Result<String> {
     resolve_selected(root, host, selector).map(|selected| selected.route)
 }
@@ -2242,14 +2242,14 @@ fn message_cmd(cmd: MessageCmd) -> Result<()> {
             }
             if count {
                 match view.coverage {
-                    st2_wire::message::SentCoverage::Since { .. } => {
+                    fractal_wire::message::SentCoverage::Since { .. } => {
                         println!("{}", view.messages.len());
                         return Ok(());
                     }
-                    st2_wire::message::SentCoverage::Unavailable => {
+                    fractal_wire::message::SentCoverage::Unavailable => {
                         anyhow::bail!("sent-message coverage is unavailable")
                     }
-                    st2_wire::message::SentCoverage::Partial { pending, .. } => {
+                    fractal_wire::message::SentCoverage::Partial { pending, .. } => {
                         anyhow::bail!("sent-message coverage is partial ({pending} pending)")
                     }
                 }
@@ -2259,9 +2259,9 @@ fn message_cmd(cmd: MessageCmd) -> Result<()> {
                 return Ok(());
             }
             let coverage = match view.coverage {
-                st2_wire::message::SentCoverage::Unavailable => "unavailable".to_string(),
-                st2_wire::message::SentCoverage::Since { since } => format!("since {since}"),
-                st2_wire::message::SentCoverage::Partial { since, pending } => {
+                fractal_wire::message::SentCoverage::Unavailable => "unavailable".to_string(),
+                fractal_wire::message::SentCoverage::Since { since } => format!("since {since}"),
+                fractal_wire::message::SentCoverage::Partial { since, pending } => {
                     format!("partial since {since}; {pending} pending")
                 }
             };
@@ -2463,7 +2463,7 @@ fn event_cmd(cmd: EventCmd) -> Result<()> {
             let (root, host) = resolve_ctx(&ctx)?;
             let recipient = resolve_route(&root, &host, one_selector(recipient, recipient_id)?)?;
             let body = body_or_stdin(body)?;
-            let receipt = st2::event::emit(
+            let receipt = fractal_legacy_runner::event::emit(
                 &root,
                 &host,
                 &recipient,
@@ -2525,7 +2525,7 @@ fn stream_cmd(cmd: StreamCmd) -> Result<()> {
     };
     if remove {
         let receipt =
-            st2::agent_author::remove_stream(&root, &target, &host, actor.as_deref(), &name)?;
+            fractal_legacy_runner::agent_author::remove_stream(&root, &target, &host, actor.as_deref(), &name)?;
         if json {
             println!("{}", serde_json::to_string(&receipt)?);
         } else {
@@ -2536,7 +2536,7 @@ fn stream_cmd(cmd: StreamCmd) -> Result<()> {
         }
     } else {
         let receipt =
-            st2::agent_author::add_stream(&root, &target, &host, actor.as_deref(), &name, launch)?;
+            fractal_legacy_runner::agent_author::add_stream(&root, &target, &host, actor.as_deref(), &name, launch)?;
         if json {
             println!("{}", serde_json::to_string(&receipt)?);
         } else {
@@ -2562,7 +2562,7 @@ fn request_cmd(cmd: RequestCmd) -> Result<()> {
             let (root, host) = resolve_ctx(&ctx)?;
             let principal = acting_id(&ctx)?;
             let body = parse_json_body(body)?;
-            let receipt = st2::request::publish(
+            let receipt = fractal_legacy_runner::request::publish(
                 &root,
                 &host,
                 &principal,
@@ -2583,7 +2583,7 @@ fn request_cmd(cmd: RequestCmd) -> Result<()> {
             let (root, host) = resolve_ctx(&ctx)?;
             let agent = acting_id(&ctx)?;
             let body = parse_json_body(body)?;
-            let receipt = st2::request::reply(
+            let receipt = fractal_legacy_runner::request::reply(
                 &root,
                 &host,
                 &agent,
@@ -2600,7 +2600,7 @@ fn request_cmd(cmd: RequestCmd) -> Result<()> {
         } => {
             let (root, host) = resolve_ctx(&ctx)?;
             let agent = acting_id(&ctx)?;
-            let request = st2::request::read(&root, &host, &agent, &request_filename)?;
+            let request = fractal_legacy_runner::request::read(&root, &host, &agent, &request_filename)?;
             if json {
                 println!("{}", serde_json::to_string(&request)?);
             } else {
@@ -2618,16 +2618,16 @@ fn request_cmd(cmd: RequestCmd) -> Result<()> {
         } => {
             let (root, host) = resolve_ctx(&ctx)?;
             let principal = acting_id(&ctx)?;
-            let status = st2::request::status(&root, &host, &principal, &idempotency_key)?;
+            let status = fractal_legacy_runner::request::status(&root, &host, &principal, &idempotency_key)?;
             if json {
                 println!("{}", serde_json::to_string(&status)?);
             } else {
                 match status {
-                    st2::request::RequestStatus::Pending {
+                    fractal_legacy_runner::request::RequestStatus::Pending {
                         idempotency_key,
                         request_filename,
                     } => println!("pending {idempotency_key} ({request_filename})"),
-                    st2::request::RequestStatus::Replied {
+                    fractal_legacy_runner::request::RequestStatus::Replied {
                         idempotency_key,
                         request_filename,
                         from,
@@ -2661,7 +2661,7 @@ fn parse_typed_tags(tags: Vec<String>) -> Result<std::collections::BTreeMap<Stri
     Ok(parsed)
 }
 
-fn print_publish_receipt(receipt: &st2::request::PublishReceipt, json: bool) -> Result<()> {
+fn print_publish_receipt(receipt: &fractal_legacy_runner::request::PublishReceipt, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(receipt)?);
     } else {
@@ -2693,8 +2693,8 @@ struct LsItemJson<'a> {
     body: Option<&'a str>,
 }
 
-impl<'a> From<&'a st2::message::Message> for LsItemJson<'a> {
-    fn from(m: &'a st2::message::Message) -> Self {
+impl<'a> From<&'a fractal_legacy_runner::message::Message> for LsItemJson<'a> {
+    fn from(m: &'a fractal_legacy_runner::message::Message) -> Self {
         LsItemJson {
             filename: &m.filename,
             ts: m.ts_ms,
@@ -2713,7 +2713,7 @@ impl<'a> From<&'a st2::message::Message> for LsItemJson<'a> {
 }
 
 impl<'a> LsItemJson<'a> {
-    fn from_message(m: &'a st2::message::Message, include_body: bool) -> Self {
+    fn from_message(m: &'a fractal_legacy_runner::message::Message, include_body: bool) -> Self {
         let mut item = Self::from(m);
         if include_body {
             item.body = Some(&m.body);
@@ -2744,8 +2744,8 @@ struct MessageJson<'a> {
     body: &'a str,
 }
 
-impl<'a> From<&'a st2::message::Message> for MessageJson<'a> {
-    fn from(m: &'a st2::message::Message) -> Self {
+impl<'a> From<&'a fractal_legacy_runner::message::Message> for MessageJson<'a> {
+    fn from(m: &'a fractal_legacy_runner::message::Message) -> Self {
         MessageJson {
             filename: &m.filename,
             ts: m.ts_ms,
@@ -2764,7 +2764,7 @@ impl<'a> From<&'a st2::message::Message> for MessageJson<'a> {
 }
 
 fn context_cmd(cmd: ContextCmd) -> Result<()> {
-    use st2::context::{self, View};
+    use fractal_legacy_runner::context::{self, View};
     match cmd {
         ContextCmd::Read {
             identity,
@@ -2850,8 +2850,8 @@ fn service_cmd(cmd: ServiceCmd) -> Result<()> {
     let (action, args) = match cmd {
         ServiceCmd::Install(args) => (UnitAction::Install, args),
         ServiceCmd::RenderUnit(args) => (UnitAction::Render, args),
-        ServiceCmd::Status => return st2::service::status(),
-        ServiceCmd::Uninstall => return st2::service::uninstall(),
+        ServiceCmd::Status => return fractal_legacy_runner::service::status(),
+        ServiceCmd::Uninstall => return fractal_legacy_runner::service::uninstall(),
     };
     let ServiceUnitArgs {
         catalog,
@@ -2869,7 +2869,7 @@ fn service_cmd(cmd: ServiceCmd) -> Result<()> {
         residency_idle_after
             .zip(residency_warm_capacity)
             .map(
-                |(idle_after, warm_capacity)| st2::residency_host::HostPolicy {
+                |(idle_after, warm_capacity)| fractal_legacy_runner::residency_host::HostPolicy {
                     idle_after,
                     warm_capacity,
                 },
@@ -2877,10 +2877,10 @@ fn service_cmd(cmd: ServiceCmd) -> Result<()> {
 
     match action {
         UnitAction::Install => {
-            st2::service::install(&catalog, host, pty_root, residency_policy, memory_max_mb)
+            fractal_legacy_runner::service::install(&catalog, host, pty_root, residency_policy, memory_max_mb)
         }
         UnitAction::Render => {
-            let unit = st2::service::render_unit(
+            let unit = fractal_legacy_runner::service::render_unit(
                 &catalog,
                 host,
                 pty_root,
@@ -2896,12 +2896,12 @@ fn service_cmd(cmd: ServiceCmd) -> Result<()> {
 fn claude_channel_cmd(cmd: ClaudeChannelCmd) -> Result<()> {
     match cmd {
         ClaudeChannelCmd::Install { no_policy } => {
-            st2::claude_channel::install(no_policy).map(|_| ())
+            fractal_legacy_runner::claude_channel::install(no_policy).map(|_| ())
         }
-        ClaudeChannelCmd::Status => st2::claude_channel::status(),
-        ClaudeChannelCmd::Uninstall { keep_policy } => st2::claude_channel::uninstall(keep_policy),
-        ClaudeChannelCmd::InstallPolicy => st2::claude_channel::install_policy().map(|_| ()),
-        ClaudeChannelCmd::UninstallPolicy => st2::claude_channel::uninstall_policy(),
+        ClaudeChannelCmd::Status => fractal_legacy_runner::claude_channel::status(),
+        ClaudeChannelCmd::Uninstall { keep_policy } => fractal_legacy_runner::claude_channel::uninstall(keep_policy),
+        ClaudeChannelCmd::InstallPolicy => fractal_legacy_runner::claude_channel::install_policy().map(|_| ()),
+        ClaudeChannelCmd::UninstallPolicy => fractal_legacy_runner::claude_channel::uninstall_policy(),
     }
 }
 
@@ -2912,7 +2912,7 @@ fn resource_bindings(
     root: &Path,
     selector: &str,
     host: &str,
-) -> Result<(String, Vec<st2::Resource>)> {
+) -> Result<(String, Vec<fractal_legacy_runner::Resource>)> {
     with_resource_bindings_snapshot(root, selector, host, |identity, bindings| {
         Ok((identity, bindings))
     })
@@ -2924,11 +2924,11 @@ fn with_resource_bindings_snapshot<T>(
     root: &Path,
     selector: &str,
     host: &str,
-    consume: impl FnOnce(String, Vec<st2::Resource>) -> Result<T>,
+    consume: impl FnOnce(String, Vec<fractal_legacy_runner::Resource>) -> Result<T>,
 ) -> Result<T> {
-    let _catalog_lock = st2::CatalogLock::shared(root)
+    let _catalog_lock = fractal_legacy_runner::CatalogLock::shared(root)
         .context("acquire shared catalog-authoring lock for Resource bindings")?;
-    let found = st2::discover_strict(root);
+    let found = fractal_legacy_runner::discover_strict(root);
     if let Some(error) = found.errors.first() {
         anyhow::bail!(
             "cannot prove an exact Resource binding target while {} is malformed: {}",
@@ -3080,8 +3080,8 @@ fn resource_cmd(cmd: ResourceCmd) -> Result<()> {
                             format!("no resource binding '{name}' declared by {identity}")
                         })?;
                     resource_refresh_snapshot_checkpoint();
-                    let generation = st2::resource_observe::catalog_generation(&root)?;
-                    let request = st2::resource_observe::ObserveRequest::new(
+                    let generation = fractal_legacy_runner::resource_observe::catalog_generation(&root)?;
+                    let request = fractal_legacy_runner::resource_observe::ObserveRequest::new(
                         identity.clone(),
                         name.clone(),
                         generation,
@@ -3090,7 +3090,7 @@ fn resource_cmd(cmd: ResourceCmd) -> Result<()> {
                     Ok((identity, request))
                 })?;
             let request_id = request.request_id.clone();
-            let client = st2::resource_observe::submit_request(&root, &host, &request)?;
+            let client = fractal_legacy_runner::resource_observe::submit_request(&root, &host, &request)?;
             let waited = client.wait_for_terminal(Duration::from_secs(wait))?;
             if waited.timed_out {
                 if json {
@@ -3160,7 +3160,7 @@ fn resource_cmd(cmd: ResourceCmd) -> Result<()> {
                 .transpose()
                 .map_err(|error| anyhow::anyhow!("--selector-json is not valid JSON: {error}"))?;
             let (root, host, actor, target) = resource_author_target(agent, agent_id, &ctx)?;
-            let receipt = st2::agent_author::add_resource_with_selector(
+            let receipt = fractal_legacy_runner::agent_author::add_resource_with_selector(
                 &root,
                 &target,
                 &host,
@@ -3190,7 +3190,7 @@ fn resource_cmd(cmd: ResourceCmd) -> Result<()> {
         } => {
             let (root, host, actor, target) = resource_author_target(agent, agent_id, &ctx)?;
             let receipt =
-                st2::agent_author::remove_resource(&root, &target, &host, actor.as_deref(), &name)?;
+                fractal_legacy_runner::agent_author::remove_resource(&root, &target, &host, actor.as_deref(), &name)?;
             if json {
                 println!("{}", serde_json::to_string(&receipt)?);
             } else {
@@ -3210,7 +3210,7 @@ fn resource_cmd(cmd: ResourceCmd) -> Result<()> {
             ctx,
         } => {
             let (root, host, actor, target) = resource_author_target(agent, agent_id, &ctx)?;
-            let receipt = st2::agent_author::rename_resource(
+            let receipt = fractal_legacy_runner::agent_author::rename_resource(
                 &root,
                 &target,
                 &host,
@@ -3263,7 +3263,7 @@ fn resolve_context_dir(
         Some(identity) => identity,
         None => acting_route(&root, &host, ctx)?,
     };
-    Ok(st2::context::context_dir(&agent_dir_of(&root, &id, &host)?))
+    Ok(fractal_legacy_runner::context::context_dir(&agent_dir_of(&root, &id, &host)?))
 }
 
 fn plural(n: usize) -> &'static str {
@@ -3274,7 +3274,7 @@ fn plural(n: usize) -> &'static str {
 /// nomad-decoupled, exactly like `st2 up --catalog <catalog>`. `--once` does a
 /// single boot pass; otherwise it supervises on a timer under a host lock until Ctrl-C.
 fn up_spec_fleet(spec_file: &Path, host: Option<String>, once: bool, interval: u64) -> Result<()> {
-    let (spec, root) = st2::eval_run::load_spec(spec_file)?;
+    let (spec, root) = fractal_legacy_runner::eval_run::load_spec(spec_file)?;
     // File-level taxonomy (the maintainer): a file with NO agents is an eval-only ("job") file — it has nothing
     // to supervise; it is run to a verdict via `st2 eval`, not `st2 up`. Refuse it here with a pointer.
     if spec.agents.is_empty() {
@@ -3292,10 +3292,10 @@ fn up_spec_fleet(spec_file: &Path, host: Option<String>, once: bool, interval: u
         .unwrap_or_else(detect_host);
     // Seats boot as fresh top-level agents. Authored bare `st2` commands use the PATH prepend while
     // generated DING sidecars bind directly to the executable captured by this context.
-    let task_context = st2::reconcile::TaskCompileContext::current(root.clone())?;
-    st2::eval_run::prepare_spawn_env(task_context.st2_executable());
-    let mut specs = st2::eval_run::spec_to_agent_specs(&spec.agents, &this_host, &root);
-    st2::reconcile::compile_generated_tasks(&mut specs, &this_host, &task_context)?;
+    let task_context = fractal_legacy_runner::reconcile::TaskCompileContext::current(root.clone())?;
+    fractal_legacy_runner::eval_run::prepare_spawn_env(task_context.st2_executable());
+    let mut specs = fractal_legacy_runner::eval_run::spec_to_agent_specs(&spec.agents, &this_host, &root);
+    fractal_legacy_runner::reconcile::compile_generated_tasks(&mut specs, &this_host, &task_context)?;
     let runner = SystemRunner::new(root.clone(), exec_state_dir(&this_host));
 
     // One supervisor per (spec dir, host) — the same host-lock discipline as the catalog path.
@@ -3306,7 +3306,7 @@ fn up_spec_fleet(spec_file: &Path, host: Option<String>, once: bool, interval: u
     }
 
     if once {
-        let report = st2::up_once_specs(&specs, &this_host, &runner);
+        let report = fractal_legacy_runner::up_once_specs(&specs, &this_host, &runner);
         println!(
             "booted team from spec {} on host '{this_host}' (once):",
             spec_file.display()
@@ -3330,7 +3330,7 @@ fn up_spec_fleet(spec_file: &Path, host: Option<String>, once: bool, interval: u
         spec_file.display(),
         specs.len()
     );
-    let result = st2::up_loop_specs(
+    let result = fractal_legacy_runner::up_loop_specs(
         &specs,
         &root,
         &this_host,
@@ -3358,7 +3358,7 @@ fn up(
 ) -> Result<()> {
     // An st2-SPEC path (a `*.kdl` file, or a folder with one top-level spec `*.kdl`) supervises its
     // top-level team directly — no catalog discovery. Otherwise, the classic catalog reconcile loop.
-    if let Some(spec_file) = st2::eval_run::resolve_spec_path(root) {
+    if let Some(spec_file) = fractal_legacy_runner::eval_run::resolve_spec_path(root) {
         if task.is_some() {
             anyhow::bail!("--task is for folder catalogs, not single-file specs");
         }
@@ -3377,12 +3377,12 @@ fn up(
     let catalog_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
 
     if materialize_only {
-        let _catalog_lock = st2::CatalogLock::shared(&catalog_root)
+        let _catalog_lock = fractal_legacy_runner::CatalogLock::shared(&catalog_root)
             .context("acquire shared catalog-authoring lock for materialization")?;
         let mut found = discover(&catalog_root);
         let ownership_specs = found.specs.clone();
         if let Some(selector) = task.as_deref() {
-            let (owner, _, _) = st2::reconcile::resolve_task(&found.specs, selector, &this_host)?;
+            let (owner, _, _) = fractal_legacy_runner::reconcile::resolve_task(&found.specs, selector, &this_host)?;
             let owner_identity = owner.identity.clone();
             let owner_path = owner.path.clone();
             found
@@ -3400,12 +3400,12 @@ fn up(
         for error in &found.errors {
             eprintln!("error: {}: {}", error.path.display(), error.message);
         }
-        if st2::hooks::required_by_codex(&found.specs, &this_host, &catalog_root) {
-            st2::hooks::verify_required_set().context(
+        if fractal_legacy_runner::hooks::required_by_codex(&found.specs, &this_host, &catalog_root) {
+            fractal_legacy_runner::hooks::verify_required_set().context(
                 "verifying explicitly installed lifecycle hooks before Codex materialization",
             )?;
         }
-        let report = st2::materialize::materialize_catalog_against(
+        let report = fractal_legacy_runner::materialize::materialize_catalog_against(
             &catalog_root,
             &found.specs,
             &ownership_specs,
@@ -3451,13 +3451,13 @@ fn up(
                 anyhow::bail!("--task cannot be combined with host residency policy")
             }
             (Some(selector), None) => {
-                st2::run::up_once_selected(&catalog_root, selector, &this_host, &runner)?
+                fractal_legacy_runner::run::up_once_selected(&catalog_root, selector, &this_host, &runner)?
             }
-            (None, Some((idle_after, warm_capacity))) => st2::up_once_with_residency(
+            (None, Some((idle_after, warm_capacity))) => fractal_legacy_runner::up_once_with_residency(
                 &catalog_root,
                 &this_host,
                 &runner,
-                st2::residency_host::HostPolicy {
+                fractal_legacy_runner::residency_host::HostPolicy {
                     idle_after,
                     warm_capacity,
                 },
@@ -3493,12 +3493,12 @@ fn up(
         }
     };
     let result = match residency_policy {
-        Some((idle_after, warm_capacity)) => st2::up_loop_with_residency(
+        Some((idle_after, warm_capacity)) => fractal_legacy_runner::up_loop_with_residency(
             &catalog_root,
             &this_host,
             &runner,
             Duration::from_secs(interval),
-            st2::residency_host::HostPolicy {
+            fractal_legacy_runner::residency_host::HostPolicy {
                 idle_after,
                 warm_capacity,
             },
@@ -3545,8 +3545,8 @@ fn report_line(label: &str, items: &[String]) {
 fn ls(root: &Path) -> Result<()> {
     // A single-file st2 spec: PREVIEW the declared team WITHOUT booting (a safe validate/inspect path
     // before `st2 up`). A catalog dir has no top-level spec .kdl, so it falls through to discovery.
-    if let Some(spec_file) = st2::eval_run::resolve_spec_path(root) {
-        let (spec, _dir) = st2::eval_run::load_spec(&spec_file)?;
+    if let Some(spec_file) = fractal_legacy_runner::eval_run::resolve_spec_path(root) {
+        let (spec, _dir) = fractal_legacy_runner::eval_run::load_spec(&spec_file)?;
         // File-level taxonomy: no agents = an eval-only file → `st2 eval`; agents = a fleet → `st2 up`.
         let classification = if spec.agents.is_empty() {
             "eval-only → st2 eval"
@@ -3581,12 +3581,12 @@ fn ls(root: &Path) -> Result<()> {
         }
         return Ok(());
     }
-    let _catalog_lock = st2::CatalogLock::shared(root)
+    let _catalog_lock = fractal_legacy_runner::CatalogLock::shared(root)
         .context("acquire shared catalog-authoring lock for catalog listing")?;
     let found = discover(root);
     let mut specs = found.specs.clone();
-    let task_context = st2::reconcile::TaskCompileContext::current(root.to_path_buf())?;
-    st2::reconcile::compile_generated_tasks(&mut specs, &detect_host(), &task_context)
+    let task_context = fractal_legacy_runner::reconcile::TaskCompileContext::current(root.to_path_buf())?;
+    fractal_legacy_runner::reconcile::compile_generated_tasks(&mut specs, &detect_host(), &task_context)
         .context("compile generated tasks for catalog listing")?;
 
     if specs.is_empty() {
@@ -3595,7 +3595,7 @@ fn ls(root: &Path) -> Result<()> {
     for spec in &specs {
         let host = spec.host.as_deref().unwrap_or("<this-host>");
         let kind = match spec.job_type {
-            st2::JobType::Service => "service",
+            fractal_legacy_runner::JobType::Service => "service",
         };
         let runnable = if spec.is_runnable() {
             ""
@@ -3623,8 +3623,8 @@ fn ls(root: &Path) -> Result<()> {
         );
         for task in &spec.tasks {
             let tk = match task.kind {
-                st2::TaskKind::Pty => "pty",
-                st2::TaskKind::Exec => "exec",
+                fractal_legacy_runner::TaskKind::Pty => "pty",
+                fractal_legacy_runner::TaskKind::Exec => "exec",
             };
             let launch = match (&task.command, &task.argv) {
                 (Some(command), _) => format!("command {command}"),
@@ -3649,8 +3649,8 @@ fn ls(root: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn addressed_spec() -> st2::AgentSpec {
-        st2::AgentSpec {
+    fn addressed_spec() -> fractal_legacy_runner::AgentSpec {
+        fractal_legacy_runner::AgentSpec {
             id: Some("immutable-worker-id".to_owned()),
             address: Some("chat".to_owned()),
             identity: "worker".to_owned(),
@@ -3658,15 +3658,15 @@ mod tests {
             description: None,
             host: Some("host-a".to_owned()),
             role: None,
-            job_type: st2::JobType::Service,
+            job_type: fractal_legacy_runner::JobType::Service,
             workspace: None,
             supervisor: None,
-            desired_state: st2::AgentDesiredState::Running,
-            residency_policy: st2::ResidencyPolicy::OnDemand,
+            desired_state: fractal_legacy_runner::AgentDesiredState::Running,
+            residency_policy: fractal_legacy_runner::ResidencyPolicy::OnDemand,
             keep: false,
             restart: None,
             delivery: None,
-            session_driver: Some(st2::SessionDriver::Omp),
+            session_driver: Some(fractal_legacy_runner::SessionDriver::Omp),
             driver: None,
             delivery_readiness: None,
             resources: Vec::new(),
@@ -3684,7 +3684,7 @@ mod tests {
             let target = resolve_wake_target(
                 &specs,
                 "host-a",
-                &st2::identity::AgentSelector::Address(reference.to_owned()),
+                &fractal_legacy_runner::identity::AgentSelector::Address(reference.to_owned()),
             )
             .unwrap()
             .unwrap();
@@ -3701,7 +3701,7 @@ mod tests {
             resolve_wake_target(
                 &specs,
                 "host-a",
-                &st2::identity::AgentSelector::Address("worker".to_owned()),
+                &fractal_legacy_runner::identity::AgentSelector::Address("worker".to_owned()),
             )
             .unwrap()
             .is_none()
@@ -3710,7 +3710,7 @@ mod tests {
             resolve_wake_target(
                 &specs,
                 "host-a",
-                &st2::identity::AgentSelector::Id("immutable-worker-id".to_owned()),
+                &fractal_legacy_runner::identity::AgentSelector::Id("immutable-worker-id".to_owned()),
             )
             .unwrap()
             .unwrap()

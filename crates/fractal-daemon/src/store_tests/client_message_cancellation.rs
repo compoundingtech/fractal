@@ -71,7 +71,7 @@ fn cancellation_apply_with_many_claimants_has_one_selector_commit_allowance() {
         let transaction = connection.transaction().unwrap();
         for step in &run.steps {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h2abf5edd5f84 owner=st3_daemon::store_tests::client_message_cancellation TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner='agent/node.worker' WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-heac934d3891d owner=fractal_daemon::store_tests::client_message_cancellation TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner='agent/node.worker' WHERE subject=?1",
                 [&step.subject],
             ).unwrap();
         }

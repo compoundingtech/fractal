@@ -27,13 +27,13 @@ fn version(directory: &std::path::Path, args: &[&str]) -> String {
 fn version_is_baked_and_available_without_a_daemon() {
     let root = tempfile::tempdir().unwrap();
     // A different caller checkout must not change the version, even if it is dirty.
-    let git = st3::test_support::git()
+    let git = fractal_daemon::test_support::git()
         .args(["init", "-q"])
         .current_dir(root.path())
         .output()
         .unwrap();
     assert!(git.status.success());
-    let commit = st3::test_support::git()
+    let commit = fractal_daemon::test_support::git()
         .args([
             "-c",
             "user.name=Example",
@@ -54,7 +54,7 @@ fn version_is_baked_and_available_without_a_daemon() {
         .unwrap();
     assert!(commit.status.success(), "{commit:?}");
     std::fs::write(root.path().join("untracked"), "different source").unwrap();
-    let expected = st_drivers::version::machine_version();
+    let expected = fractal_drivers::version::machine_version();
     for args in [
         vec!["--version", "--json"],
         vec!["--json", "--version"],

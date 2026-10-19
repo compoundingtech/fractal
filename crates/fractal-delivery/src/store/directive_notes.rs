@@ -2,11 +2,11 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use smallclaims::store::canonical;
-use st3_schema::directive_notes::KIND;
-pub use st3_store::store::directive_notes::*;
+use fractal_schema::directive_notes::KIND;
+pub use fractal_store::store::directive_notes::*;
 #[cfg(any(test, feature = "test-support"))]
-pub use st3_store::store::directive_notes::tests_shared_seats;
-pub use st3_store::store::directive_notes::{DirectiveNote, create_schema, current, flush, project, rebuild, validate_publication};
+pub use fractal_store::store::directive_notes::tests_shared_seats;
+pub use fractal_store::store::directive_notes::{DirectiveNote, create_schema, current, flush, project, rebuild, validate_publication};
 #[cfg(test)]
 mod tests;
 
@@ -51,7 +51,7 @@ impl DirectiveNotesStore for Store {
         let mut pending = VecDeque::from([(actor.to_owned(), 0)]);
         while let Some((actor, hops)) = pending.pop_front() {
             if actor.starts_with("person/") {
-                if st3_schema::directive_notes::validate_actor(&actor, KIND, Some(&actor)).is_ok() {
+                if fractal_schema::directive_notes::validate_actor(&actor, KIND, Some(&actor)).is_ok() {
                     people.insert(actor);
                 }
                 continue;
@@ -85,7 +85,7 @@ impl DirectiveNotesStore for Store {
             smallclaims::touched::note_read(|| format!("actor:{actor}"));
             for column in ["assignee", "lease_owner"] {
                 let connection = self.readers.get();
-                let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0faef02e09e9 owner=st3_delivery::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
+                let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h49e5ef1a73a7 owner=fractal_delivery::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
                     "SELECT s.subject,r.requester FROM (
                          SELECT subject,run_id,generation_id FROM step_runs WHERE {column}=?1
                          AND status IN ('pending','ready','claimed','working','submitted','verifying','blocked','waiting-person')

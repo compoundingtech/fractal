@@ -3,8 +3,8 @@ use crate::MissionsStore;
 use crate::HarnessQuestionsStore;
 use super::*;
 use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
-use st3_missions::store::fleet_admission_tests_shared_seats::*;
-pub use st3_missions::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
+use fractal_missions::store::fleet_admission_tests_shared_seats::*;
+pub use fractal_missions::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 
 
 #[test]
@@ -20,7 +20,7 @@ fn older_registry_projects_missions_while_provenance_waits_for_upgrade() {
     older.bind_fleet(FLEET).unwrap();
     older.pin_fleet_anchor(anchor_key.public()).unwrap();
     older.set_member_key(Some(older_key.clone())).unwrap();
-    let mut registry = st3_schema::registry().clone();
+    let mut registry = fractal_schema::registry().clone();
     registry.claims.remove("mission.provenance").unwrap();
     older.set_claim_registry(registry);
     sync(&current, &older);
@@ -98,7 +98,7 @@ fn submitted_incarnation_waits_on_older_members_and_legacy_submissions_replay() 
     older.bind_fleet(FLEET).unwrap();
     older.pin_fleet_anchor(anchor_key.public()).unwrap();
     older.set_member_key(Some(older_key.clone())).unwrap();
-    let mut registry = st3_schema::registry().clone();
+    let mut registry = fractal_schema::registry().clone();
     registry
         .claims
         .get_mut("work.submitted")
@@ -309,7 +309,7 @@ fn a_step_wait_waits_on_older_members_and_converges_after_they_upgrade() {
     older.pin_fleet_anchor(anchor_key.public()).unwrap();
     older.set_member_key(Some(older_key.clone())).unwrap();
     // A build from before the wait: work.progress has neither new field.
-    let mut registry = st3_schema::registry().clone();
+    let mut registry = fractal_schema::registry().clone();
     for field in ["clock", "wait_until_unix_ms"] {
         registry
             .claims
@@ -437,7 +437,7 @@ mission "garden" state="ready" {
 
 #[test]
 fn harness_questions_wait_on_older_members_without_a_heal_and_converge_after_upgrade() {
-    use st3_schema::harness_questions::{OBSERVED, Question, RESOLVED, Status};
+    use fractal_schema::harness_questions::{OBSERVED, Question, RESOLVED, Status};
     let anchor_key = key();
     let older_key = key();
     let current = node("current", Some(&anchor_key), Some(&anchor_key));
@@ -450,7 +450,7 @@ fn harness_questions_wait_on_older_members_without_a_heal_and_converge_after_upg
     older.pin_fleet_anchor(anchor_key.public()).unwrap();
     older.set_member_key(Some(older_key.clone())).unwrap();
     // A build from before harness questions: neither kind is registered.
-    let mut registry = st3_schema::registry().clone();
+    let mut registry = fractal_schema::registry().clone();
     for kind in [OBSERVED, RESOLVED] {
         registry.claims.remove(kind).unwrap();
     }

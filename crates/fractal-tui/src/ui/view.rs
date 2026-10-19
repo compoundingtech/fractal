@@ -3,7 +3,7 @@
 //! The live client and the demo fixtures both produce a `World`. Anything the graph cannot
 //! answer yet is an `Option` or a `Load`, so a screen can say "unknown" instead of guessing.
 
-pub use st3_ui_model::missions::{Mission, Step, StepState, Word};
+pub use fractal_ui_model::missions::{Mission, Step, StepState, Word};
 use std::collections::BTreeMap;
 
 /// Something that arrives later. `Loading` is never drawn as empty.
@@ -81,12 +81,12 @@ pub struct World {
     /// account and host, as st reports it. Not in the shared demo world: the phone has no
     /// usage screen yet.
     #[serde(skip)]
-    pub usage: Load<Vec<st3_client::UsageRow>>,
+    pub usage: Load<Vec<fractal_client::UsageRow>>,
     /// Each account's freshest limits reading, from the same read.
     #[serde(skip)]
-    pub usage_limits: Vec<st3_client::UsageLimit>,
+    pub usage_limits: Vec<fractal_client::UsageLimit>,
     #[serde(skip)]
-    pub agent_messages: Option<st3_client::AgentMessageEstimate>,
+    pub agent_messages: Option<fractal_client::AgentMessageEstimate>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
@@ -260,9 +260,9 @@ pub enum AttentionKind {
         question: String,
         /// A structured ask's typed fields (#1010): summary, reasons, links, named answers and
         /// a recommendation. Absent on a free-text ask.
-        structured: Option<Box<st3_client::StructuredRequest>>,
+        structured: Option<Box<fractal_client::StructuredRequest>>,
         /// The images it carries, read from st through the ask.
-        images: Vec<st3_conversation_ui::MailImage>,
+        images: Vec<fractal_conversation_ui::MailImage>,
     },
     /// Information the person asked an agent for (`st work update`): it asks nothing, and it
     /// clears once they read it.
@@ -515,4 +515,4 @@ pub struct Device {
 
 // -------------------------------------------------------------- conversations
 
-pub use st3_conversation_ui::{Body, Entry, ToolState};
+pub use fractal_conversation_ui::{Body, Entry, ToolState};

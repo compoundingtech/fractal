@@ -213,7 +213,7 @@ fn seat_of(step: &MissionStep, fleet: &dyn Fleet) -> Option<Seat> {
 }
 
 /// The mission's presentation, from its row, its open gates and the agents its steps name.
-pub fn present(mission: &st3_client::Mission, gates: &[Gate], fleet: &dyn Fleet) -> Presentation {
+pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fleet) -> Presentation {
     let work = mission_steps(mission);
     let gates = gates
         .iter()

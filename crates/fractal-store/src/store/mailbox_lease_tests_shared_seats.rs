@@ -11,7 +11,7 @@ pub fn authority(sequence: u64) -> Authority {
             session: format!("provider-{sequence}"),
             sequence,
             pid: std::process::id(),
-            process_token: st_runtime::process_start_token(std::process::id()).unwrap(),
+            process_token: fractal_runtime::process_start_token(std::process::id()).unwrap(),
         }
     }
 

@@ -220,7 +220,7 @@ pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) 
     crate::node_identity::resolve(&mut config)?;
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
-        st_runtime::isolation_mode() != st_runtime::Isolation::DegradedDetached,
+        fractal_runtime::isolation_mode() != fractal_runtime::Isolation::DegradedDetached,
         "st service install needs a working systemd user manager and transient user scopes"
     );
     let exe = env::current_exe().context("resolve the current st executable")?;
@@ -449,7 +449,7 @@ pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
         .pty_root
         .clone()
         .unwrap_or_else(|| config.state_dir.join("pty"));
-    let pty = st_runtime::PtyRuntime::new(pty_root.clone());
+    let pty = fractal_runtime::PtyRuntime::new(pty_root.clone());
     if pty_root.exists() {
         let owned = pty
             .snapshot()?
@@ -477,7 +477,7 @@ pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
     }
 
     let exec_root = config.state_dir.join("exec");
-    let exec = st_runtime::ExecRuntime::new(exec_root.clone(), config.state_dir.join("logs"));
+    let exec = fractal_runtime::ExecRuntime::new(exec_root.clone(), config.state_dir.join("logs"));
     if exec_root.is_dir() {
         let mut ids = fs::read_dir(&exec_root)?
             .collect::<std::result::Result<Vec<_>, _>>()?
@@ -490,13 +490,13 @@ pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
         ids.sort();
         ids.dedup();
         for id in &ids {
-            if let Some(st_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
+            if let Some(fractal_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
                 exec.stop_if(id, Some(&generation.generation_id))?;
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
         for id in &ids {
-            if let Some(st_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
+            if let Some(fractal_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
                 exec.kill_if(id, Some(&generation.generation_id))?;
             }
         }
@@ -660,7 +660,7 @@ fn stop_daemon_process(
 }
 
 fn running_pty_ids(
-    snapshot: impl IntoIterator<Item = st_runtime::PtyObservation>,
+    snapshot: impl IntoIterator<Item = fractal_runtime::PtyObservation>,
 ) -> std::collections::HashSet<String> {
     snapshot
         .into_iter()
@@ -1129,7 +1129,7 @@ pub fn render_systemd_user_unit(spec: &ServiceSpec) -> String {
     let cache_environment = spec.read_cache_kib
         .map(|kib| format!("Environment=SMALLCLAIMS_READ_CACHE_KIB={kib}\n"))
         .unwrap_or_default();
-    let weight = st_runtime::LIVE_WEIGHT;
+    let weight = fractal_runtime::LIVE_WEIGHT;
     let instance_environment = systemd_instance_environment();
     format!(
         "[Unit]\n\
@@ -1611,7 +1611,7 @@ mod tests {
     #[test]
     fn reset_does_not_force_stop_an_already_exited_pty() {
         let ids = running_pty_ids([
-            st_runtime::PtyObservation {
+            fractal_runtime::PtyObservation {
                 name: "running".into(),
                 status: "running".into(),
                 exit_code: None,
@@ -1620,7 +1620,7 @@ mod tests {
                 display_name: None,
                 tags: Default::default(),
             },
-            st_runtime::PtyObservation {
+            fractal_runtime::PtyObservation {
                 name: "exited".into(),
                 status: "exited".into(),
                 exit_code: Some(129),

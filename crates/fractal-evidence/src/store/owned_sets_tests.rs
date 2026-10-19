@@ -5,12 +5,12 @@ use crate::OwnedSetsStore;
 use super::owned_sets::{Options, Source};
 use super::*;
 use crate::parse_intent;
-use st3_attention::store::card_fold_tests_shared::*;
-use st3_attention::store::card_fold_tests_shared::{agent_subjects, assert_card_fold_parity, assert_card_reads_parity, assert_card_reads_parity_with, per_subject_card_status};
-use st3_attention::store::owned_sets_tests_shared::*;
-use st3_attention::store::owned_sets_tests_shared::{bundle, direct, share, signed_fleet, signed_share};
-use st3_attention::store::tests_shared::*;
-use st3_attention::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
+use fractal_attention::store::card_fold_tests_shared::*;
+use fractal_attention::store::card_fold_tests_shared::{agent_subjects, assert_card_fold_parity, assert_card_reads_parity, assert_card_reads_parity_with, per_subject_card_status};
+use fractal_attention::store::owned_sets_tests_shared::*;
+use fractal_attention::store::owned_sets_tests_shared::{bundle, direct, share, signed_fleet, signed_share};
+use fractal_attention::store::tests_shared::*;
+use fractal_attention::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 mod empty_authority_guard;
 
 fn options(store: &Store, sequence: u64) -> Options {
@@ -166,7 +166,7 @@ fn missing_staged_subject_index_does_not_fence_valid_candidates() {
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-he8e2a06183ba owner=st3_evidence::store::owned_sets_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_owned_set_subject_index")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hffada0345e64 owner=fractal_evidence::store::owned_sets_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_owned_set_subject_index")
         .unwrap();
     assert_eq!(store.owned_desired_subjects(&desired).unwrap(), before);
     assert_pass_candidates_match_effect_guards(&store, &desired);
@@ -298,7 +298,7 @@ fn receipt_read_errors_do_not_turn_into_eligible_candidates() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h14ee6fc15d37 owner=st3_evidence::store::owned_sets_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='invalid' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-ha2e3c5490ccd owner=fractal_evidence::store::owned_sets_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='invalid' WHERE id=?1",
             [&receipt.claim],
         )
         .unwrap();
@@ -319,10 +319,10 @@ fn repaired_receipt_eligibility_is_rechecked_between_passes() {
     let second = source.owned_sets().unwrap().remove(0);
     let new = source.desired_subjects().unwrap();
     // Repair addresses envelope records, which the legacy claim-only transport does not create.
-    st3_attention::store::tests_shared::receive_and_project(
+    fractal_attention::store::tests_shared::receive_and_project(
         &target,
         &source.origin,
-        &st3_attention::store::tests_shared::exchange_from(&source, &target.replication_inventory().unwrap()),
+        &fractal_attention::store::tests_shared::exchange_from(&source, &target.replication_inventory().unwrap()),
     );
     assert!(target.owned_desired_subjects(&old).unwrap().is_empty());
     assert_pass_candidates_match_effect_guards(&target, &new);
@@ -338,7 +338,7 @@ fn repaired_receipt_eligibility_is_rechecked_between_passes() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-ha4afbe9b7715 owner=st3_evidence::store::owned_sets_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
+            /* sqlite-large-value: allow-for-now lv-h05344f98e859 owner=fractal_evidence::store::owned_sets_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
             [&record.record_ref],
         )
         .unwrap();
@@ -569,12 +569,12 @@ fn a_staged_owned_set_member_check_seeks_tagged_claims() {
         ("agent/garden/absent", false),
     ] {
         let staged: bool = connection
-            .query_row(/* sqlite-large-value: allow-for-now lv-hfee12259a06c owner=st3_evidence::store::owned_sets_tests TODO=trace-statement-and-value-representation */ query, [subject], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hb12122daaec6 owner=fractal_evidence::store::owned_sets_tests TODO=trace-statement-and-value-representation */ query, [subject], |row| row.get(0))
             .unwrap();
         assert_eq!(staged, expected, "{subject}");
     }
     let plan = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-h2bbd3ac01870 owner=st3_evidence::store::owned_sets_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
+        .prepare(/* sqlite-large-value: allow-for-now lv-hf2325bea4421 owner=fractal_evidence::store::owned_sets_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
         .unwrap()
         .query_map(["agent/garden/unmanaged"], |row| row.get::<_, String>(3))
         .unwrap()
@@ -1553,7 +1553,7 @@ fn pass_staged_subject_selection_uses_the_partial_index() {
     let store = Store::open_memory("amber").unwrap();
     let connection = store.readers.get();
     let plans = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-hdfc7f3f7f6a0 owner=st3_evidence::store::owned_sets_tests TODO=trace-statement-and-value-representation */ &format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h5b6283d87495 owner=fractal_evidence::store::owned_sets_tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             super::owned_sets::STAGED_SUBJECTS_QUERY
         ))
@@ -1615,7 +1615,7 @@ fn the_agent_card_fold_reads_set_owned_declarations_as_the_reduction_does() {
         transaction.rollback().unwrap();
     }
     let indexes = (0..=store.index().unwrap()).collect::<Vec<_>>();
-    st3_attention::store::card_fold_tests_shared::assert_card_fold_parity(&store, &indexes);
+    fractal_attention::store::card_fold_tests_shared::assert_card_fold_parity(&store, &indexes);
     let reads = store
         .agent_card_reads(&["agent/garden/orchard".to_owned()], store.index().unwrap(), &HashMap::new())
         .unwrap();

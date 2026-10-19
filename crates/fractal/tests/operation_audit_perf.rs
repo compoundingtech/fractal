@@ -24,7 +24,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::store::Store;
+use fractal_daemon::store::Store;
 
 use crate::operation_audit::{
     NODE, claim, mark_repaired, old_drift, old_operation_projection_drift, settle_operations,

@@ -68,7 +68,7 @@ async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> Output {
             caller.write_all(&body).await.unwrap();
         }
     });
-    let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
     command
         .kill_on_drop(true)
         .env("NO_COLOR", "1")

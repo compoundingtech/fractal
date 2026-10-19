@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use rusqlite::StatementStatus;
-use st3_store::store::authored_pull_requests_tests_shared_missions::*;
-use st3_store::store::authored_pull_requests_tests_shared_missions::{insert};
+use fractal_store::store::authored_pull_requests_tests_shared_missions::*;
+use fractal_store::store::authored_pull_requests_tests_shared_missions::{insert};
 
 
 #[test]
@@ -13,7 +13,7 @@ fn authored_pull_request_lookup_indexes_existing_schema_seventeen_on_open() {
     let connection = store.connection.write();
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hd7da377f0f0b owner=st3_missions::store::authored_pull_requests_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_authored_pull_request_url_index;
+            /* sqlite-large-value: allow-for-now lv-hb276519116eb owner=fractal_missions::store::authored_pull_requests_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_authored_pull_request_url_index;
          DROP INDEX claims_authored_pull_request_number_index;",
         )
         .unwrap();
@@ -35,7 +35,7 @@ fn authored_pull_request_lookup_indexes_existing_schema_seventeen_on_open() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        st3_schema::STORAGE_VERSION
+        fractal_schema::STORAGE_VERSION
     );
     assert_eq!(
         connection
@@ -145,13 +145,13 @@ fn authored_pull_request_lookup_preserves_identity_head_and_canonical_order() {
     // Ordinary SQLite index maintenance must reflect changed identities and removals.
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h6efd523bdb22 owner=st3_missions::store::authored_pull_requests_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='number'",
+            /* sqlite-large-value: allow-for-now lv-h76da90fca6b9 owner=fractal_missions::store::authored_pull_requests_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id='number'",
             [json!({"fields":{"facts":{"repository":"other", "number":42}}}).to_string()],
         )
         .unwrap();
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-haba3619dd8e2 owner=st3_missions::store::authored_pull_requests_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id IN ('url', 'both', 'duplicate-run')",
+            /* sqlite-large-value: allow-for-now lv-h7feac990657f owner=fractal_missions::store::authored_pull_requests_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id IN ('url', 'both', 'duplicate-run')",
             [],
         )
         .unwrap();
@@ -173,7 +173,7 @@ fn authored_pull_request_lookup_seeks_through_sparse_unrelated_history() {
     );
     let query = canonical_sql(AUTHORING_PULL_REQUEST_RUNS_QUERY);
     let plan = transaction
-        .prepare(/* sqlite-large-value: allow-for-now lv-h5cc3da6c5bbe owner=st3_missions::store::authored_pull_requests_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
+        .prepare(/* sqlite-large-value: allow-for-now lv-ha2aaa649d90f owner=fractal_missions::store::authored_pull_requests_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
         .unwrap()
         .query_map(params!["url", "repo", 42], |row| row.get::<_, String>(3))
         .unwrap()
@@ -221,7 +221,7 @@ fn authored_pull_request_lookup_seeks_through_sparse_unrelated_history() {
                 ),
             ] {
                 {
-                    let statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h300d1255546f owner=st3_missions::store::authored_pull_requests_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
+                    let statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h631730f00ece owner=fractal_missions::store::authored_pull_requests_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
                     statement.reset_status(StatementStatus::VmStep);
                     statement.reset_status(StatementStatus::FullscanStep);
                 }
@@ -229,7 +229,7 @@ fn authored_pull_request_lookup_seeks_through_sparse_unrelated_history() {
                     authoring_pull_request_runs_tx(&transaction, &facts).unwrap(),
                     expected
                 );
-                let statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-ha068c372bcbf owner=st3_missions::store::authored_pull_requests_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
+                let statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb1717289cd89 owner=fractal_missions::store::authored_pull_requests_tests TODO=trace-statement-and-value-representation */ &query).unwrap();
                 assert_eq!(
                     statement.get_status(StatementStatus::FullscanStep),
                     0,

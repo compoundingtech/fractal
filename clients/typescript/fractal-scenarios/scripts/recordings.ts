@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import * as Schema from '@smalltalk/st3-client/schema'
+import * as Schema from '@fractal/client/schema'
 import type { RecordingRow, RecordingScript, RecordingTurn, JsonValue, JsonObject } from '../src/kit/importRecording.ts'
 export { importRecording } from '../src/kit/importRecording.ts'
 export type { RecordingRow, RecordingScript, RecordingTurn, JsonValue, JsonObject } from '../src/kit/importRecording.ts'

@@ -1,14 +1,14 @@
 #![allow(unused_imports)]
 use crate::AttentionStore;
 use super::*;
-use st3_seats::store::checkpoint_capture_epoch_tests_shared_attention_tests::{capture_bounds, epoch, projected_store, publish};
+use fractal_seats::store::checkpoint_capture_epoch_tests_shared_attention_tests::{capture_bounds, epoch, projected_store, publish};
 
 
 #[test]
 fn direct_desired_deletion_advances_capture_epoch_without_a_claim_append() {
     let store = projected_store();
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h77acd6325689 owner=st3_attention::store::checkpoint_capture_epoch_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run='mission-run/capture-owner' WHERE subject='agent/writer.capture'", [],
+        /* sqlite-large-value: allow-for-now lv-h1376c4efa186 owner=fractal_attention::store::checkpoint_capture_epoch_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run='mission-run/capture-owner' WHERE subject='agent/writer.capture'", [],
     ).unwrap();
     let index = store.index().unwrap();
     let before = epoch(&store);

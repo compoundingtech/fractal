@@ -6,8 +6,8 @@ use crate::provenance::tests::*;
 use crate::provenance::*;
 use crate::parse_intent;
 use crate::store::Store;
-use st3_store::store::provenance_tests_shared_missions::*;
-use st3_store::store::provenance_tests_shared_missions::{publish};
+use fractal_store::store::provenance_tests_shared_missions::*;
+use fractal_store::store::provenance_tests_shared_missions::{publish};
 
 
 #[test]

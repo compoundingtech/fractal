@@ -1,4 +1,4 @@
-import type { CollectionFrame, Resource, Snapshot } from '@smalltalk/st3-client'
+import type { CollectionFrame, Resource, Snapshot } from '@fractal/client'
 
 /** A decoded window and its exact wire rows (the roster snapshot boundary needs both). */
 export interface ProcessedWindow<A> {

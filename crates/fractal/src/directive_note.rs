@@ -1,11 +1,11 @@
-use st3::cli_println as println;
+use fractal_daemon::cli_println as println;
 
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};
 use serde::Deserialize;
 use serde_json::json;
-use st3::client::{Client, Endpoint};
-use st3::store::directive_notes::DirectiveNote;
+use fractal_daemon::client::{Client, Endpoint};
+use fractal_daemon::store::directive_notes::DirectiveNote;
 
 #[derive(Args)]
 #[command(after_help = "Notes are explicit reads only: no launch delivery, notifications or UI. Only a person can set or clear their own note. Notes never assign work, approve a gate or grant authority.")]
@@ -47,7 +47,7 @@ pub(super) async fn run(
     json_output: bool,
 ) -> Result<()> {
     let actor = super::configured_actor(args.actor.as_deref(), configured_person, "note")?;
-    if let Some(own) = st_drivers::contracts::env("ST_AGENT").filter(|own| !own.is_empty()) {
+    if let Some(own) = fractal_drivers::contracts::env("ST_AGENT").filter(|own| !own.is_empty()) {
         anyhow::ensure!(actor == own, "an agent must read notes as its own harness identity");
         anyhow::ensure!(args.command.is_none(), "only a person outside an agent seat can set or clear a note");
     }

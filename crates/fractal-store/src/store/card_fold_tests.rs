@@ -40,7 +40,7 @@ fn newest_claim_reads_sort_only_the_newest_millisecond() {
     let store = Store::open_memory("alder").unwrap();
     let connection = store.readers.get();
     let plan = connection
-        .prepare(/* sqlite-large-value: allow-for-now lv-hb40f8dbbba4d owner=st3_store::store::card_fold_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", card_fold::newest_claims_sql()))
+        .prepare(/* sqlite-large-value: allow-for-now lv-haacfae1ab071 owner=fractal_store::store::card_fold_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", card_fold::newest_claims_sql()))
         .unwrap()
         .query_map(params!["[]", 1], |row| row.get::<_, String>(3))
         .unwrap()

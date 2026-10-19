@@ -10,7 +10,7 @@ use smallclaims::ivm::{LocalChange, Readiness, Views, source_cut};
 
 pub const VIEW: &str = "st3.mission-selection.v1";
 pub const SOURCE: &str = "st3.mission-selection.changed";
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha75b45aa6e87 owner=st3_store::store::mission_ivm TODO=chunk-or-reference-variable-columns */ r#"
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h77c407af0deb owner=fractal_store::store::mission_ivm TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_mission_counts (
  mission_id TEXT NOT NULL, status TEXT NOT NULL, count INTEGER NOT NULL CHECK(count>0),
  PRIMARY KEY(mission_id,status)
@@ -128,12 +128,12 @@ pub fn flush(tx: &Transaction<'_>, views: &Views, at: u128, limit: usize) -> Res
             "mission selection maintenance deferred"
         );
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-hac1eeab81697 owner=st3_store::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mission_pending WHERE mission_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h080ed3f99217 owner=fractal_store::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_mission_pending WHERE mission_id=?1",
             [mission],
         )?;
     }
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-ha8ce25d71fa1 owner=st3_store::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mission_clock SET through_ms=?1 WHERE through_ms<?1",
+        /* sqlite-large-value: allow-for-now lv-hde04efd8bcf1 owner=fractal_store::store::mission_ivm TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mission_clock SET through_ms=?1 WHERE through_ms<?1",
         [i64::try_from(at)?],
     )?;
     Ok(keys.len())

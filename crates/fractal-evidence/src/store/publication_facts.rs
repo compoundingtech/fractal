@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::PublicationStore;
 use super::*;
-pub use st3_attention::store::publication_facts::*;
-pub use st3_attention::store::publication_facts::{PAGE, create_schema, flush, initialize, install_cache_observer, ready, reset};
+pub use fractal_attention::store::publication_facts::*;
+pub use fractal_attention::store::publication_facts::{PAGE, create_schema, flush, initialize, install_cache_observer, ready, reset};
 
 pub trait PublicationFactsStore {
     fn publication_evidence_ready(&self) -> Result<bool>;
@@ -40,9 +40,9 @@ impl PublicationFactsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_attention::store::shared::*;
-    use st3_attention::store::publication_facts_tests_shared::*;
-    use st3_attention::store::publication_facts_tests_shared::{input};
+    use fractal_attention::store::shared::*;
+    use fractal_attention::store::publication_facts_tests_shared::*;
+    use fractal_attention::store::publication_facts_tests_shared::{input};
 
     fn finish(store: &Store) {
         for _ in 0..10000 {

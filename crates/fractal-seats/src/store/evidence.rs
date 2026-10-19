@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStore;
 use super::*;
-pub use st3_missions::store::evidence::*;
+pub use fractal_missions::store::evidence::*;
 
 pub trait EvidenceSeatsStore {
     /// [`Self::agent_resources_cached_at`], with when the rows were published.
@@ -72,7 +72,7 @@ impl EvidenceSeatsStore for Store {
                 "invalid native observation envelope",
             ));
         }
-        st3_schema::registry()
+        fractal_schema::registry()
             .validate_public_claim(
                 &input.subject,
                 &input.kind,

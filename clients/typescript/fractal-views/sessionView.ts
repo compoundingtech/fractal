@@ -1,5 +1,5 @@
 import type { ConversationHeader } from './conversationView.ts';
-import type { Page, Session } from '@smalltalk/st3-client';
+import type { Page, Session } from '@fractal/client';
 
 // The gateway's discovery fields are additional properties on the generated
 // st3.client.v0 Session resource. Keep this interpretation at the UI boundary.

@@ -2,7 +2,7 @@
 //! loopback, with the time split by stage on both nodes.
 //!
 //! ```sh
-//! TMPDIR=/var/tmp cargo test --release -p st3 --test integration first_sync:: -- --nocapture
+//! TMPDIR=/var/tmp cargo test --release -p fractal --test integration first_sync:: -- --nocapture
 //! ```
 //!
 //! A debug build skips it, as does a Nix build, whose sandbox is no place to time a sync.
@@ -19,17 +19,17 @@
 //! The two stores take about 1.5 GB under `TMPDIR`. Point it at a disk with room and a short
 //! path, since the daemon sockets live there too.
 
-use st3::MissionsStore;
+use fractal_daemon::MissionsStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use st3::model::{
+use fractal_daemon::model::{
     ClaimInput, IntentInput, MissionRunRequest, ReplicationStatus, ReplicationTimings, WorkRequest,
 };
-use st3::store::Store;
+use fractal_daemon::store::Store;
 
 const FLEET: &str = "5d0c6f8e-2b1a-4c3d-9e8f-7a6b5c4d3e2f";
 // Below the Linux and macOS ephemeral port ranges, so no outgoing connection can hold them.
@@ -61,10 +61,10 @@ const RENEWALS_PER_STEP: usize = 5;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_empty_node_syncs_its_peer_within_two_minutes() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    if !st3::test_support::optimized_build() {
+    if !fractal_daemon::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -155,7 +155,7 @@ async fn an_empty_node_syncs_its_peer_within_two_minutes() {
     );
 
     let _source = Node::start(&source_dir, path_dir);
-    let source = st3::client::Client::unix(source_dir.join("run/st3.sock"));
+    let source = fractal_daemon::client::Client::unix(source_dir.join("run/st3.sock"));
     // Seal and export the source's envelopes before the clock starts.
     let sealed = Instant::now();
     let source_status = wait_for(&source, Duration::from_secs(600), |status| {
@@ -171,7 +171,7 @@ async fn an_empty_node_syncs_its_peer_within_two_minutes() {
 
     let clock = Instant::now();
     let _target = Node::start(&target_dir, path_dir);
-    let target = st3::client::Client::unix(target_dir.join("run/st3.sock"));
+    let target = fractal_daemon::client::Client::unix(target_dir.join("run/st3.sock"));
     let mut last_report = Instant::now();
     let mut outcome = None;
     while clock.elapsed() < deadline {
@@ -268,7 +268,7 @@ fn env_number<T: std::str::FromStr>(name: &str, default: T) -> T {
 fn generate(path: &Path, total: usize) -> BTreeMap<String, usize> {
     let store = Store::open(path, "source").unwrap();
     store.bind_fleet(FLEET).unwrap();
-    let intent = st3::parse_intent(MISSION, "source").unwrap();
+    let intent = fractal_daemon::parse_intent(MISSION, "source").unwrap();
     let mission = store
         .mission(
             &intent,
@@ -575,7 +575,7 @@ struct Node(Vec<Child>);
 impl Node {
     fn start(dir: &Path, path_dir: &Path) -> Self {
         let spawn = |args: &[&str], log: &str| {
-            st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"))
+            fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"))
                 .args(args)
                 .arg("--config")
                 .arg(dir.join("config.toml"))
@@ -620,8 +620,8 @@ impl Drop for Node {
 
 /// Both nodes' status once they hold the same records and graph, or after a minute.
 async fn settle(
-    source: &st3::client::Client,
-    target: &st3::client::Client,
+    source: &fractal_daemon::client::Client,
+    target: &fractal_daemon::client::Client,
 ) -> (ReplicationStatus, ReplicationStatus) {
     let started = Instant::now();
     loop {
@@ -638,7 +638,7 @@ async fn settle(
 }
 
 async fn wait_for(
-    client: &st3::client::Client,
+    client: &fractal_daemon::client::Client,
     limit: Duration,
     ready: impl Fn(&ReplicationStatus) -> bool,
 ) -> Option<ReplicationStatus> {
@@ -694,10 +694,10 @@ fn report(node: &str, timings: &ReplicationTimings, elapsed: Duration) {
 /// Envelopes are signed by their writer's member key and verified by every receiver. The
 /// benchmark fleet is unkeyed, so measure that work for the same number of envelopes here.
 fn report_signing(envelopes: u64) {
-    let (key, _) = st3::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_daemon::fleet::MemberKey::generate().unwrap();
     let messages = (0..envelopes)
         .map(|sequence| {
-            st3::fleet::envelope_signature_message(FLEET, "source", sequence, &"a".repeat(64))
+            fractal_daemon::fleet::envelope_signature_message(FLEET, "source", sequence, &"a".repeat(64))
         })
         .collect::<Vec<_>>();
     let started = Instant::now();
@@ -708,7 +708,7 @@ fn report_signing(envelopes: u64) {
     let signing = started.elapsed();
     let started = Instant::now();
     for (message, signature) in messages.iter().zip(&signatures) {
-        assert!(st3::fleet::verify_signature(
+        assert!(fractal_daemon::fleet::verify_signature(
             key.public(),
             message,
             signature

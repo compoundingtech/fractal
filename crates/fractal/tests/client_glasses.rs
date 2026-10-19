@@ -3,8 +3,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
-use st3::{api::AppState, model::ClaimInput, store::Store};
-use st3_client::{
+use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
+use fractal_client::{
     Client, CollectionEvent, GlassBody, GlassDelete, GlassLayout, GlassPut, GlassTab,
 };
 use std::{path::Path, sync::Arc, time::Duration};
@@ -77,7 +77,7 @@ async fn legacy_glass_reads_convert_and_client_writes_require_the_current_shape(
             idempotency_key: None,
         })
         .unwrap();
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let path = format!("/v1/client/glasses/{id}");
     let (status, read) = request(
         app.clone(),
@@ -139,7 +139,7 @@ async fn legacy_glass_reads_convert_and_client_writes_require_the_current_shape(
 async fn glasses_routes_enforce_owner_and_mutation_contract_and_hide_raw_history() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let id = "019a0000-0000-7000-8000-000000000001";
     let path = format!("/v1/client/glasses/{id}");
     let body = json!({"name":"Main workspace", "layout":{"split":"right","ratio":0.3,"children":[{"tabs":[{"title":"Work","pane":"agent:opaque"},{"pane":"mission:opaque"}]},{"tabs":[]}]}});
@@ -389,10 +389,10 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         ]},"base_revision":null})).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
-    let app = st3::api::router(state.clone());
+    let app = fractal_daemon::api::router(state.clone());
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -406,7 +406,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
     assert!(matches!(
         denied_stream.next_event().await.unwrap().unwrap(),
         CollectionEvent::Error {
-            code: Some(st3_client::ErrorCode::Forbidden),
+            code: Some(fractal_client::ErrorCode::Forbidden),
             ..
         }
     ));
@@ -423,7 +423,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         panic!("expected initial glasses snapshot")
     };
     assert_eq!(items.len(), 1);
-    let st3_client::Resource::Glass(glass) = &items[0] else {
+    let fractal_client::Resource::Glass(glass) = &items[0] else {
         panic!("expected a typed glass")
     };
     assert_eq!(glass.header.revision, legacy.id);
@@ -497,7 +497,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         .unwrap();
     assert!(matches!(change,CollectionEvent::Changes{removes,..} if removes.len()==1));
     stream.close().await;
-    let challenge = client.pairing_begin_person(&st3_client::PersonPairingBegin { api_version: "st3.client.v0".into(),
+    let challenge = client.pairing_begin_person(&fractal_client::PersonPairingBegin { api_version: "st3.client.v0".into(),
     device_name: "Fixture phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
@@ -506,7 +506,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         .unwrap()
         .value;
     let paired = client.pairing_complete_person(&challenge.pairing_id,
-    &st3_client::PairingComplete {
+    &fractal_client::PairingComplete {
         api_version: "st3.client.v0".into(),
         code: challenge.code,
         device_public_key: "a".repeat(64),
@@ -518,7 +518,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
     let gateway_socket = root.path().join("gateway.sock");
     let gateway_server_socket = gateway_socket.clone();
     let gateway = tokio::spawn(async move {
-        st3::api::serve_unix(&gateway_server_socket, st3::api::fabric_router(state))
+        fractal_daemon::api::serve_unix(&gateway_server_socket, fractal_daemon::api::fabric_router(state))
             .await
             .unwrap();
     });

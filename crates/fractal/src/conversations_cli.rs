@@ -1,6 +1,6 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
-use st3::{cli_print as print, cli_println as println};
+use fractal_daemon::{cli_print as print, cli_println as println};
 
 fn print_timeline_page(
     response: &ClientEnvelope<ClientTimelinePage>,
@@ -40,9 +40,9 @@ fn print_conversation_page(
         width,
         color,
         if simple {
-            st3_conversation_ui::Density::Simple
+            fractal_conversation_ui::Density::Simple
         } else {
-            st3_conversation_ui::Density::Full
+            fractal_conversation_ui::Density::Full
         },
     );
     if response.value.page.has_more
@@ -96,7 +96,7 @@ async fn follow_conversation(
         }
         match stream.next_event().await? {
             None => anyhow::bail!("st closed the conversation stream"),
-            Some(st3_client::CollectionEvent::Conversation {
+            Some(fractal_client::CollectionEvent::Conversation {
                 session_id,
                 replace,
                 items,
@@ -115,16 +115,16 @@ async fn follow_conversation(
                     json_output,
                 )?;
             }
-            Some(st3_client::CollectionEvent::Error { message, .. }) => {
+            Some(fractal_client::CollectionEvent::Error { message, .. }) => {
                 anyhow::bail!("st could not show this conversation: {message}")
             }
             // st retries on its own; say why once, so a quiet follow is not read as a quiet agent.
-            Some(st3_client::CollectionEvent::Resync {
+            Some(fractal_client::CollectionEvent::Resync {
                 code,
                 message: Some(message),
                 ..
             }) => {
-                let message = st3_client::plain_message(code.as_ref(), &message);
+                let message = fractal_client::plain_message(code.as_ref(), &message);
                 if stalled.as_deref() != Some(message.as_str()) {
                     eprintln!("st: {message} · trying again");
                     stalled = Some(message);
@@ -139,7 +139,7 @@ pub(super) async fn upload_attachments(
     endpoint: &Endpoint,
     actor: &str,
     files: &[PathBuf],
-) -> Result<Vec<st3::model::AttachmentInput>> {
+) -> Result<Vec<fractal_daemon::model::AttachmentInput>> {
     let mut attachments = Vec::new();
     for file in files {
         attachments.push(upload_attachment(endpoint, actor, file, None).await?);
@@ -196,7 +196,7 @@ pub(super) async fn run_message(
         MessageCommand::Ls(args) => {
             let identity = message_list_identity(
                 args.identity.or(args.actor),
-                st_drivers::contracts::env("ST_AGENT"),
+                fractal_drivers::contracts::env("ST_AGENT"),
             )?;
             reject_foreign_agent_actor(&identity)?;
             let sender = args.sender.map(|sender| normalize_message_subject(&sender));
@@ -294,7 +294,7 @@ pub(super) async fn run_message(
                     let mut value = serde_json::to_value(message)?;
                     if message.body_ref.is_some() {
                         // `content` is only the preview; `text` is the whole message.
-                        value["text"] = st3::message_body::full_text(client, message).await?.into();
+                        value["text"] = fractal_daemon::message_body::full_text(client, message).await?.into();
                     }
                     if let Some(provenance) = message_provenance(client, &message.subject).await {
                         value["provenance"] = provenance;
@@ -311,7 +311,7 @@ pub(super) async fn run_message(
                     if index > 0 && !args.raw {
                         println!("\n---\n");
                     }
-                    let text = st3::message_body::full_text(client, message).await?;
+                    let text = fractal_daemon::message_body::full_text(client, message).await?;
                     if args.raw {
                         print!("{text}");
                         if index + 1 < messages.len() && !text.ends_with('\n') {
@@ -384,7 +384,7 @@ pub(super) async fn run_message(
             print_message_receipt(&receipt, json_output)
         }
         MessageCommand::Wait(args) => {
-            let actor = message_list_identity(args.actor, st_drivers::contracts::env("ST_AGENT"))?;
+            let actor = message_list_identity(args.actor, fractal_drivers::contracts::env("ST_AGENT"))?;
             reject_foreign_agent_actor(&actor)?;
             let sender = normalize_message_subject(&args.sender);
             let timeout = parse_timeout(&args.timeout)?;
@@ -410,7 +410,7 @@ pub(super) async fn run_message(
             if let Some(actor) = actor.as_deref() {
                 reject_foreign_agent_actor(actor)?;
             }
-            let older_than_ms = st3::graph::parse_duration(&older_than, true)?;
+            let older_than_ms = fractal_daemon::graph::parse_duration(&older_than, true)?;
             let result: Value = client
                 .post("/v1/messages/cleanup", &json!({
                     "older_than_ms": older_than_ms, "to": actor, "all": all, "dry_run": dry_run,
@@ -609,7 +609,7 @@ pub(super) async fn run_message(
             .await
         }
         MessageCommand::Export { directory } => {
-            let mut export = st3::projection::MessageExport::new(&directory)?;
+            let mut export = fractal_daemon::projection::MessageExport::new(&directory)?;
             let mut count = 0_u64;
             for_each_message(client, None, true, |message| {
                 export.write(&message)?;

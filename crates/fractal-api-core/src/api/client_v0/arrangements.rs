@@ -12,7 +12,7 @@ pub fn person(
     if !person.starts_with("person/") || person.matches('/').count() != 1 || person.len() == 7 {
         return Err(validation("arrangement owner must be person/NAME"));
     }
-    st3_schema::registry().validate_subject(person).map_err(|error| validation(error.message))?;
+    fractal_schema::registry().validate_subject(person).map_err(|error| validation(error.message))?;
     if !acting_party(session) {
         return Err(forbidden("arrangements require a concrete person or trusted local fleet agent"));
     }

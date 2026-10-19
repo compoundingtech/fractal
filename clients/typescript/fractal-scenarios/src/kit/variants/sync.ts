@@ -1,4 +1,4 @@
-import type { Capabilities } from '@smalltalk/st3-client'
+import type { Capabilities } from '@fractal/client'
 import type { FactoryContext } from '../context.ts'
 import * as resources from '../resources.ts'
 import type { Selector, Slice, SyncExpectation, SyncState, SyncSurface } from '../slice.ts'

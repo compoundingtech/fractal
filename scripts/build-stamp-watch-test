@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A ref updated elsewhere in the repository must not rebuild a crate that stamps itself from Git; a new commit must.
 
-crates/agent-spec/build.rs and crates/st-drivers/build.rs stamp the build with the Git revision. They used to tell Cargo to
+crates/agent-spec/build.rs and crates/fractal-drivers/build.rs stamp the build with the Git revision. They used to tell Cargo to
 watch `git rev-parse --git-path refs`, which in a linked worktree is the COMMON directory of every worktree: any ref anyone
 updated re-ran the stamp scripts and rebuilt the whole workspace (about 12 minutes) with HEAD unmoved. This test builds each
 real build script in a linked worktree, moves unrelated refs in the common directory and in the main checkout, and asserts
@@ -20,7 +20,7 @@ GIT = ['git', '-c', 'user.name=Example', '-c', 'user.email=example@example.inval
        '-c', 'core.hooksPath=/dev/null']
 CASES = {
     'agent-spec': ('crates/agent-spec/build.rs', 'env!("AGENT_SPEC_REVISION").to_owned()'),
-    'st-drivers': ('crates/st-drivers/build.rs', 'env!("ST_BUILD_STAMP_LOCAL").to_owned()'),
+    'st-drivers': ('crates/fractal-drivers/build.rs', 'env!("ST_BUILD_STAMP_LOCAL").to_owned()'),
 }
 
 

@@ -477,7 +477,7 @@ pub use crate::otel::thread_cpu;
 
 /// When a run's result could next change with time alone: the earliest lease expiry, retry
 /// backoff, step timeout or run deadline still ahead of `now`.
-pub fn run_due(run: &st3_kernel::model::MissionRunView, now: u128) -> Option<u128> {
+pub fn run_due(run: &fractal_kernel::model::MissionRunView, now: u128) -> Option<u128> {
     run.deadline_at_unix_ms
         .filter(|time| *time > now)
         .into_iter()
@@ -487,7 +487,7 @@ pub fn run_due(run: &st3_kernel::model::MissionRunView, now: u128) -> Option<u12
 
 /// When a step's view could next change with time alone: its lease expiry, retry backoff or
 /// timeout, whichever comes first after `now`.
-pub fn step_due(step: &st3_kernel::model::StepRunView, now: u128) -> Option<u128> {
+pub fn step_due(step: &fractal_kernel::model::StepRunView, now: u128) -> Option<u128> {
     let timeout =
         step.execution_started_at_unix_ms
             .zip(step.timeout_ms)

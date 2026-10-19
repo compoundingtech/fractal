@@ -1,4 +1,4 @@
-import { Agent, AgentId, Resource, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@smalltalk/st3-client/schema'
+import { Agent, AgentId, Resource, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
 import { expect, test } from 'vitest'
 
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'

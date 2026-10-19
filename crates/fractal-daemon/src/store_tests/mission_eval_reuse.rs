@@ -98,10 +98,10 @@ assert_equivalent(&store, &id, snapshot);
 fn evaluation_definition_reuse_preserves_missing_revision_and_empty_step_behavior() {
 let snapshot = now_ms().saturating_add(10_000);
 let (store, id) = crate::reconcile::tests::mission_eval_reuse::fixture();
-store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-ha115b8da4b9a owner=st3_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_revisions", []).unwrap();
+store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h1490239c7db7 owner=fractal_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_revisions", []).unwrap();
 assert_equivalent(&store, &id, snapshot);
 assert!(store.mission_run_for_evaluation(&id).unwrap().1.is_none());
-store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hcf24bc61442d owner=st3_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs", []).unwrap();
+store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h4b3ae6545684 owner=fractal_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs", []).unwrap();
 assert_equivalent(&store, &id, snapshot);
 assert!(store.mission_run_for_evaluation(&id).unwrap().1.is_none());
 }
@@ -110,7 +110,7 @@ assert!(store.mission_run_for_evaluation(&id).unwrap().1.is_none());
 fn evaluation_definition_reuse_preserves_invalid_definition_errors() {
 let (store, id) = crate::reconcile::tests::mission_eval_reuse::fixture();
 store.connection.write().execute(
-    /* sqlite-large-value: allow-for-now lv-h299de7ee36a1 owner=st3_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body='not-json'", [],
+    /* sqlite-large-value: allow-for-now lv-h054145fcbc3a owner=fractal_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body='not-json'", [],
 ).unwrap();
 let snapshot = now_ms();
 let legacy_error = {
@@ -121,7 +121,7 @@ let current_error = store.mission_run_for_evaluation(&id).unwrap_err();
 assert!(matches!(legacy_error, rusqlite::Error::FromSqlConversionFailure(..)));
 assert!(matches!(current_error.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::FromSqlConversionFailure(..))));
 // With no steps, legacy reconciliation does not require parsing the definition.
-store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hc66c55dc75ba owner=st3_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs", []).unwrap();
+store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h81d367269148 owner=fractal_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs", []).unwrap();
 let (view, mission) = store.mission_run_for_evaluation(&id).unwrap();
 assert!(view.steps.is_empty());
 assert!(mission.is_none());
@@ -146,7 +146,7 @@ mission "untimed-history" state="ready" {
 // after newer claims. The projection's status/attempt is controlled separately by the test.
 fn timing_claim(store: &Store, subject: &str, id: usize, kind: &str, at: u128, fields: Value) {
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h7d6ab49b5ee7 owner=st3_daemon::store_tests::mission_eval_reuse TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h8e07aea4a23a owner=fractal_daemon::store_tests::mission_eval_reuse TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
          VALUES(?1,(SELECT id FROM batches LIMIT 1),?2,?3,'node',NULL,?4,'[]',?5)",
         params![format!("timing-fixture-{id}"), subject, kind,
             json!({"fields": fields}).to_string(), at.to_string()],
@@ -181,7 +181,7 @@ fn evaluation_clock_elision_preserves_decisions_and_presentation() {
             for attempt in [1, 2] {
                 for status in ["ready", "working", "completed"] {
                     store.connection.write().execute(
-                        /* sqlite-large-value: allow-for-now lv-hd9f19b1711fc owner=st3_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?1,attempt=?2 WHERE subject=?3",
+                        /* sqlite-large-value: allow-for-now lv-h2c6a9f70c609 owner=fractal_daemon::store_tests::mission_eval_reuse TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?1,attempt=?2 WHERE subject=?3",
                         params![status, attempt, subject],
                     ).unwrap();
                     for snapshot in [T + 50, T + 120, T + 2500] {

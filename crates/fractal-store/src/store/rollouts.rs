@@ -21,7 +21,7 @@ fn selection_at(
         Some(_) => {
             let desired = serde_json::from_str(&row.body).unwrap_or(Value::Null);
             DesiredSubject {
-                accountable: st3_schema::accountable::from_desired(&desired)
+                accountable: fractal_schema::accountable::from_desired(&desired)
                     .map_err(internal)?
                     .map(str::to_owned),
                 subject: subject.into(),
@@ -92,7 +92,7 @@ fn operation_for_selection_at(
     at: Option<u64>,
 ) -> Result<Option<Operation>, St3Error> {
     smallclaims::touched::note_read(|| subject.to_owned());
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd43ebdac5a3d owner=st3_store::store::rollouts TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7e7d5bb183d4 owner=fractal_store::store::rollouts TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
          FROM claims WHERE subject=?1 AND store_index<=?2 AND kind IN ('runtime.action.requested','runtime.action.succeeded','runtime.action.failed','runtime.action.deadline-reached')
          ORDER BY CANONICAL_ASC(claims)" )).map_err(internal)?;

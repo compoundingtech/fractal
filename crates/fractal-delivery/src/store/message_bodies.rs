@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use crate::message_body::{BodyFile, bodies, retention};
-pub use st3_store::store::message_bodies::*;
+pub use fractal_store::store::message_bodies::*;
 
 /// Remove the bodies in `state_dir` that no message claim here names for their sender, now and
 /// once an hour while the daemon runs. A body is written only after its claim, so what this

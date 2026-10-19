@@ -9,7 +9,7 @@ use crate::SeatsStore;
 use crate::EvidenceStore;
 use super::*;
 use crate::store::summary_list::{SummaryInputs, SummaryMachines, SummaryShared};
-use st3_ui_model::missions::Display;
+use fractal_ui_model::missions::Display;
 
 #[derive(Debug)]
 pub struct RosterNotPublished;
@@ -30,7 +30,7 @@ pub fn working(agent: &Value) -> bool {
 }
 /// A mission that is really running or about to: stuck, paused and finished runs, and ones that
 /// only wait on a person, are counted elsewhere.
-pub fn active(mission: &st3_ui_model::missions::Mission) -> bool {
+pub fn active(mission: &fractal_ui_model::missions::Mission) -> bool {
     !mission.system && mission.word.is_active()
 }
 
@@ -51,7 +51,7 @@ pub fn shared(
     let store = &state.store;
     let compute = || {
         let (missions, deadline) = store.client_summary_missions(now)?;
-        let semantics = st3_ui_model::missions::adapt(
+        let semantics = fractal_ui_model::missions::adapt(
             missions.iter(),
             std::iter::empty(),
             std::iter::empty(),
@@ -81,7 +81,7 @@ pub fn shared(
         let mut internal = request.clone();
         internal.collection = "summary-missions".into();
         internal.limit = None;
-        let prepared = windows.prepare(/* sqlite-large-value: allow-for-now lv-hddc06c02b88c owner=st3_api_core::api::client_v0::summary TODO=trace-statement-and-value-representation */ state, session, &internal);
+        let prepared = windows.prepare(/* sqlite-large-value: allow-for-now lv-h5747b91e24d9 owner=fractal_api_core::api::client_v0::summary TODO=trace-statement-and-value-representation */ state, session, &internal);
         windows
             .read(
                 state,

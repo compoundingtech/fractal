@@ -63,7 +63,7 @@ fn seed_group(store: &Store, declarations: usize) {
             desired.owner_run = Some(OWNER.into());
             let claim = append(&transaction, &desired.subject, "intent.desired", &serde_json::to_value(&desired).unwrap());
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hd6b0c4b1f57c owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run) VALUES(?1,?2,?3,?4,?5,?6)",
+                /* sqlite-large-value: allow-for-now lv-ha878a3b503cb owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![desired.subject,desired.kind,desired_revision(&desired),claim.id,
                     serde_json::to_string(&desired.desired).unwrap(),OWNER],
             ).unwrap();
@@ -87,7 +87,7 @@ fn seed_group(store: &Store, declarations: usize) {
 }
 
 fn audit_deletions(connection: &Connection) {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4d06cbf46e1d owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=chunk-or-reference-variable-columns */ r#"
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h6a20397a303e owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TEMP TABLE reminder_delete_context(subject TEXT NOT NULL);
 CREATE TEMP TABLE reminder_selector_writes(cause TEXT,subject TEXT NOT NULL,born_index INTEGER NOT NULL);
 CREATE TEMP TRIGGER reminder_delete_context_set BEFORE DELETE ON desired BEGIN
@@ -137,11 +137,11 @@ fn assert_bounded_deletion_predicate(connection: &Connection, affected: &str, al
     let predicate = trigger.split_once(" WHERE born_index>=0 AND retired_index IS NULL AND").unwrap().1
         .trim().strip_suffix("END").unwrap().trim().trim_end_matches(';').replace("OLD.subject", "?1");
     let sql = format!("SELECT subject FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL AND {predicate}");
-    let selected = connection.prepare(/* sqlite-large-value: allow-for-now lv-h802724ed3f43 owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=trace-statement-and-value-representation */ &sql).unwrap().query_map([affected], |row| row.get::<_,String>(0)).unwrap()
+    let selected = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb8bce774ae12 owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=trace-statement-and-value-representation */ &sql).unwrap().query_map([affected], |row| row.get::<_,String>(0)).unwrap()
         .collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert!(selected.len() <= 7, "the actual deletion predicate cannot inventory a reminder group");
     assert!(selected.iter().all(|subject|allowed.contains(subject)), "unexpected deletion candidates: {selected:?}");
-    let plan = connection.prepare(/* sqlite-large-value: allow-for-now lv-he4004303ce0e owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+    let plan = connection.prepare(/* sqlite-large-value: allow-for-now lv-h08196f0e7f2c owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
         .query_map([affected], |row|row.get::<_,String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     for index in ["client_selector_reminder_candidates", "client_selector_recipient_reminder_candidates",
         "client_selector_reminder_winner", "client_selector_recipient_reminder_winner"] {
@@ -204,9 +204,9 @@ fn desired_delete_large_reminder_group_changes_only_affected_subject_and_winners
         let transaction = writer.transaction().unwrap();
         // A pre-existing pending row must also capture the deleted header's old
         // recipient, rather than leave its default empty recipient behind.
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0d84ea4995dc owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-he4b3d6c68b7e owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM reminder_selector_writes", []).unwrap();
-        assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-h57a30cd23525 owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h5370020a2372 owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h417a0c76a6cf owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM reminder_selector_writes", []).unwrap();
+        assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-hc38f7ff197ca owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
         assert_single_delete_writes(&transaction,&affected,&allowed);
         assert_bounded_deletion_predicate(&transaction,&affected,&allowed);
         let pending: (String,String) = transaction.query_row(
@@ -260,9 +260,9 @@ fn desired_delete_preserves_native_reminder_and_promotes_only_old_recipient_winn
         let mut writer = store.connection.write();
         audit_deletions(&writer);
         let transaction = writer.transaction().unwrap();
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h3b2e68f0f9ac owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h121e508ebb42 owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM reminder_selector_writes", []).unwrap();
-        assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-h992e706c95ac owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h3fbbefe2fa94 owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hecbf5a76ec40 owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM reminder_selector_writes", []).unwrap();
+        assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-h3316a5f5149b owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
         assert_single_delete_writes(&transaction,&affected,&[affected.clone(),native_subject(NATIVE_MEMBERS-1)]);
         transaction.commit().unwrap();
     }
@@ -292,7 +292,7 @@ fn bulk_owned_desired_delete_does_not_rewrite_superseded_reminder_members() {
         } else {
             let mut writer = store.connection.write();
             let transaction = writer.transaction().unwrap();
-            assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-he3385f5cbf92 owner=st3_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1",[OWNER]).unwrap(),DECLARED_MEMBERS);
+            assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-hf44dc3bdb875 owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1",[OWNER]).unwrap(),DECLARED_MEMBERS);
             let changes = writes(&transaction);
             let mut per_subject = BTreeMap::<String,usize>::new();
             for (cause,_,_) in &changes { *per_subject.entry(cause.clone()).or_default() += 1; }

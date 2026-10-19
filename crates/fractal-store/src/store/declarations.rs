@@ -61,7 +61,7 @@ pub fn selected(
             .map(|row| {
                 // A derived owned-set retirement need not have its own intent.desired claim.
                 let tree = serde_json::from_str(&row.body).map_err(internal)?;
-                let accountable = st3_schema::accountable::from_desired(&tree)
+                let accountable = fractal_schema::accountable::from_desired(&tree)
                     .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
                 let desired = DesiredSubject {
                     accountable,

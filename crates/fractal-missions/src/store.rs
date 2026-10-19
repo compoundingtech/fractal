@@ -88,43 +88,43 @@ pub use smallclaims::store::{
     configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
     newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
 };
-pub use st3_delivery::store::runtime_starts::RuntimeStartOperation;
+pub use fractal_delivery::store::runtime_starts::RuntimeStartOperation;
 pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
 pub use mission_eligibility::MISSING_AGENT_CONDITION;
-pub use st3_delivery::store::database_size::DatabaseSize;
+pub use fractal_delivery::store::database_size::DatabaseSize;
 pub use person_work::AskImages;
-pub use st3_delivery::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
-pub use st3_delivery::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
-pub use st3_delivery::store::limits::ACCOUNT_READING_WINDOW_MS;
-pub use st3_delivery::store::subagents::{SUBAGENT_KINDS, SubagentView};
-pub use st3_delivery::store::runtime::SmalltalkRuntime;
+pub use fractal_delivery::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
+pub use fractal_delivery::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
+pub use fractal_delivery::store::limits::ACCOUNT_READING_WINDOW_MS;
+pub use fractal_delivery::store::subagents::{SUBAGENT_KINDS, SubagentView};
+pub use fractal_delivery::store::runtime::SmalltalkRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
-use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
-pub use st3_kernel::model::local_observation_position;
+use fractal_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
+pub use fractal_kernel::model::local_observation_position;
 pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
-pub use st3_delivery::store::*;
-pub use st3_delivery::store::{ACTUAL_CACHE_LIMIT, AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow, EffectiveStepOwner, GATE_BROKEN_CONDITION};
-pub use st3_delivery::store::{HumanAttention, INCARNATION_OF_CLAIM, IdempotencyConflict, LOCAL_OBSERVATION_COLUMNS, MailboxWatermark, MessageCacheEntry, PinnedDefinitions, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUNTIME_SUBJECTS, RecordedSeatMove, ReferenceGraph};
-pub use st3_delivery::store::{SeatQueueInputs, StatusEntry, StepLabel, StepTiming, Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_BUCKETS, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds};
-pub use st3_delivery::store::{UsageSpend, ViewEntry, WORK_NUDGED_KIND, accounts, agent_messages, agent_queue_values, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx, append_claim_with_commit_context, append_claim_with_fences};
-pub use st3_delivery::store::{append_latest_observation_publication, append_receipt_claim_tx, apply_effective_step_state, apply_effective_step_state_with_owner, assistant_write, attention, attention_list, backup, backup_format, card_fold, carried_revision_step_paths, check_mailbox_fence};
-pub use st3_delivery::store::{checkpoint, checkpoint_rules, checkpoint_status, claim_append_error, claim_by_id_tx, claim_log_order, classify_replicated_claim_with_registry, client_summary, compatible_step_paths, conversation_reads, current_desired_row, current_desired_row_tx};
-pub use st3_delivery::store::{current_harness_at, custom, database_size, delivery, desired_from_row, desired_lineage_from_tx, desired_revision, enrich_step_summaries_at, evidence, fold_step_clock, fold_step_timing, generation_id_from_subject};
-pub use st3_delivery::store::{git_change_tables, glass_heads, glasses, harness_fold_at, harness_questions, idle_mail, insert_local_observation_tx, intent_leaves_tx, is_failed_terminal, latest_actual, latest_retention, limits};
-pub use st3_delivery::store::{local_observation_dedupe_key, local_observation_from_row, local_retention, loop_run_views_tx, mailbox_changes, mailbox_lease, mailbox_wakes, message_bodies, message_subscriptions, migrate_local_usage_seen, mission_provenance, mission_run_header_tx};
-pub use st3_delivery::store::{mission_run_outcome_tx, mission_run_variables, newest_claims_of_kind_query, normalize_message_party, normalize_seat, observer_actuals, observer_subscription_detail, operation_audit, owned_sets, owner_lists, pricing_identity, project_claim_isolated_tx};
-pub use st3_delivery::store::{project_mission_run_created, project_mission_run_update, project_replicated_mission_runs, projection_digest, projection_divergence, projectors, publication, publication_facts, published_list, published_views, rebuild_planning_tx, recently_ended_since};
-pub use st3_delivery::store::{replay_graph_from_nothing_tx, resources, retirements, revision_seats, rollouts, roster_admission, runtime, runtime_list, runtime_starts, same_declared_launch, schema_fields_for_body, seat_queue_inputs_tx};
-pub use st3_delivery::store::{seat_queue_joins_query, seat_queue_moves_query, seat_status, seat_work_at_snapshot_query, seats, select_replicated_desired, select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_run_from_row, step_timeout_episode};
-pub use st3_delivery::store::{step_timeout_extension_at, stop_deferral, subagents, subject_status_at, subscription_started_run_tx, summary_list, system_local_retention, trace_principal, unread_mail, usage_native_session, usage_slot, validate_claim_input};
-pub use st3_delivery::store::{validate_local_observation};
+pub use fractal_delivery::store::*;
+pub use fractal_delivery::store::{ACTUAL_CACHE_LIMIT, AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow, EffectiveStepOwner, GATE_BROKEN_CONDITION};
+pub use fractal_delivery::store::{HumanAttention, INCARNATION_OF_CLAIM, IdempotencyConflict, LOCAL_OBSERVATION_COLUMNS, MailboxWatermark, MessageCacheEntry, PinnedDefinitions, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUNTIME_SUBJECTS, RecordedSeatMove, ReferenceGraph};
+pub use fractal_delivery::store::{SeatQueueInputs, StatusEntry, StepLabel, StepTiming, Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_BUCKETS, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds};
+pub use fractal_delivery::store::{UsageSpend, ViewEntry, WORK_NUDGED_KIND, accounts, agent_messages, agent_queue_values, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx, append_claim_with_commit_context, append_claim_with_fences};
+pub use fractal_delivery::store::{append_latest_observation_publication, append_receipt_claim_tx, apply_effective_step_state, apply_effective_step_state_with_owner, assistant_write, attention, attention_list, backup, backup_format, card_fold, carried_revision_step_paths, check_mailbox_fence};
+pub use fractal_delivery::store::{checkpoint, checkpoint_rules, checkpoint_status, claim_append_error, claim_by_id_tx, claim_log_order, classify_replicated_claim_with_registry, client_summary, compatible_step_paths, conversation_reads, current_desired_row, current_desired_row_tx};
+pub use fractal_delivery::store::{current_harness_at, custom, database_size, delivery, desired_from_row, desired_lineage_from_tx, desired_revision, enrich_step_summaries_at, evidence, fold_step_clock, fold_step_timing, generation_id_from_subject};
+pub use fractal_delivery::store::{git_change_tables, glass_heads, glasses, harness_fold_at, harness_questions, idle_mail, insert_local_observation_tx, intent_leaves_tx, is_failed_terminal, latest_actual, latest_retention, limits};
+pub use fractal_delivery::store::{local_observation_dedupe_key, local_observation_from_row, local_retention, loop_run_views_tx, mailbox_changes, mailbox_lease, mailbox_wakes, message_bodies, message_subscriptions, migrate_local_usage_seen, mission_provenance, mission_run_header_tx};
+pub use fractal_delivery::store::{mission_run_outcome_tx, mission_run_variables, newest_claims_of_kind_query, normalize_message_party, normalize_seat, observer_actuals, observer_subscription_detail, operation_audit, owned_sets, owner_lists, pricing_identity, project_claim_isolated_tx};
+pub use fractal_delivery::store::{project_mission_run_created, project_mission_run_update, project_replicated_mission_runs, projection_digest, projection_divergence, projectors, publication, publication_facts, published_list, published_views, rebuild_planning_tx, recently_ended_since};
+pub use fractal_delivery::store::{replay_graph_from_nothing_tx, resources, retirements, revision_seats, rollouts, roster_admission, runtime, runtime_list, runtime_starts, same_declared_launch, schema_fields_for_body, seat_queue_inputs_tx};
+pub use fractal_delivery::store::{seat_queue_joins_query, seat_queue_moves_query, seat_status, seat_work_at_snapshot_query, seats, select_replicated_desired, select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_run_from_row, step_timeout_episode};
+pub use fractal_delivery::store::{step_timeout_extension_at, stop_deferral, subagents, subject_status_at, subscription_started_run_tx, summary_list, system_local_retention, trace_principal, unread_mail, usage_native_session, usage_slot, validate_claim_input};
+pub use fractal_delivery::store::{validate_local_observation};
 pub mod adhoc_work;
 pub mod arrangements;
 pub mod attention_ivm;
@@ -600,7 +600,7 @@ pub fn github_post_agent_tx(
     let body = connection
         .prepare_cached("SELECT body FROM claims WHERE subject=?1 AND kind='github.posted' LIMIT 1")
         .map_err(internal)?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h95cc7407ca6c owner=st3_missions::store TODO=trace-statement-and-value-representation */ [&subject], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-hfbbc8260ab79 owner=fractal_missions::store TODO=trace-statement-and-value-representation */ [&subject], |row| row.get::<_, String>(0))
         .optional()
         .map_err(internal)?;
     Ok(body
@@ -638,7 +638,7 @@ fn authoring_pull_request_runs_tx(
     // expression-index seek per identity, deduplicates dual matches, then orders only those
     // claims with the same canonical order as the original query.
     let mut statement =
-        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h28f5fa3af422 owner=st3_missions::store TODO=trace-statement-and-value-representation */ &canonical_sql(AUTHORING_PULL_REQUEST_RUNS_QUERY))?;
+        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7e9c49567a6f owner=fractal_missions::store TODO=trace-statement-and-value-representation */ &canonical_sql(AUTHORING_PULL_REQUEST_RUNS_QUERY))?;
     let candidates = statement
         .query_map(params![url, repository, number], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -745,7 +745,7 @@ fn agent_working_since_at(
         None
     };
     let since = (|| -> Result<Option<String>> {
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hab5274e93160 owner=st3_missions::store TODO=trace-statement-and-value-representation */ &working_episode_query())?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7857e1702237 owner=fractal_missions::store TODO=trace-statement-and-value-representation */ &working_episode_query())?;
         let mut rows = statement.query_map(params![agent, incarnation, snapshot_index], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -1000,7 +1000,7 @@ impl MissionsStoreCore for Store {
             }
             let proposal_id = connection
                 .query_row(
-                    /* sqlite-large-value: allow-for-now lv-h500f99962436 owner=st3_missions::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+                    /* sqlite-large-value: allow-for-now lv-hfcf012d9a98a owner=fractal_missions::store TODO=trace-statement-and-value-representation */ &canonical_sql(
                         "SELECT p.id FROM revision_proposals p
                      JOIN mission_runs r ON r.id=p.run_id
                      JOIN claims created ON created.subject='revision-proposal/' || p.id

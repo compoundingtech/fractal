@@ -24,7 +24,7 @@ pub fn listed(store: &Store, sql: &str, params: impl rusqlite::Params) -> Vec<St
     store
         .readers
         .get()
-        .prepare(/* sqlite-large-value: allow-for-now lv-heda27c60a61a owner=st3_store::store::tests_shared_missions TODO=trace-statement-and-value-representation */ sql)
+        .prepare(/* sqlite-large-value: allow-for-now lv-hd2951072a2bf owner=fractal_store::store::tests_shared_missions TODO=trace-statement-and-value-representation */ sql)
         .unwrap()
         .query_map(params, |row| row.get::<_, String>(0))
         .unwrap()
@@ -37,7 +37,7 @@ pub fn misproject_a_step(store: &Store) {
     let connection = store.connection.lock().unwrap();
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hc0f084255760 owner=st3_store::store::tests_shared_missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET attempt=attempt+1
+            /* sqlite-large-value: allow-for-now lv-h62fde33552ae owner=fractal_store::store::tests_shared_missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET attempt=attempt+1
                  WHERE subject=(SELECT subject FROM step_runs ORDER BY subject LIMIT 1)",
             [],
         )

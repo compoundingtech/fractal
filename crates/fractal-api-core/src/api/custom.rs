@@ -119,13 +119,13 @@ pub async fn basis(
         .collect::<Vec<_>>();
     if kinds.is_empty()
         || kinds.len() > 32
-        || kinds.iter().any(|k| !st3_schema::is_custom_claim_kind(k))
+        || kinds.iter().any(|k| !fractal_schema::is_custom_claim_kind(k))
     {
         return Err(client_v0::validation(
             "basis needs 1..32 custom claim kinds",
         ));
     }
-    st3_schema::registry()
+    fractal_schema::registry()
         .validate_subject(&query.subject)
         .map_err(|e| client_v0::validation(e.message))?;
     Ok(Json(

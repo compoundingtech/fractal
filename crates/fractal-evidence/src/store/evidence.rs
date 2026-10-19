@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStore;
 use super::*;
-pub use st3_attention::store::evidence::*;
+pub use fractal_attention::store::evidence::*;
 
 /// A roster head: its cut, every agent's refs, the first cards in order, and when published.
 pub type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);
@@ -234,7 +234,7 @@ impl EvidenceStore for Store {
         let exit_position = smallclaims::store::canonical::position_sql("claims");
         let connection = self.readers.get();
         let found = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb7b877345564 owner=st3_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6706f1613b0b owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
                 "WITH current_request AS MATERIALIZED (
                    SELECT request.subject, request.batch_id, request.store_index,
                           request_batch.replica_sequence AS sequence,
@@ -289,7 +289,7 @@ impl EvidenceStore for Store {
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1"
             )))?
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-hb69b83fa89bd owner=st3_evidence::store::evidence TODO=trace-statement-and-value-representation */ params![requested.id, requested.subject, self.origin()],
+                /* sqlite-large-value: allow-for-now lv-h0b479aa9741b owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ params![requested.id, requested.subject, self.origin()],
                 |row| {
                     Ok((
                         claim_from_row(row)?,
@@ -397,7 +397,7 @@ impl EvidenceStore for Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-h8101b20fd10b owner=st3_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+                /* sqlite-large-value: allow-for-now lv-hb6ab7e0bb7a5 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
                  FROM claims WHERE kind='gate.requested'
                  AND json_extract(body, '$.fields.owner')=?1
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
@@ -430,7 +430,7 @@ impl EvidenceStore for Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-h9850534c674a owner=st3_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(
+                /* sqlite-large-value: allow-for-now lv-he1c4046f31f1 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(
                     "SELECT body FROM claims INDEXED BY claims_harness_auth_incarnation_index WHERE subject=?1 AND kind='harness.observed'
              AND json_extract(body, '$.fields.incarnation_id')=?2
              AND json_type(body, '$.fields.provider_auth') IN ('true','false')

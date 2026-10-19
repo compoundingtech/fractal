@@ -1,5 +1,5 @@
 import { it } from '@effect/vitest'
-import { St3Client, type CollectionCommand, type CollectionSocket, type Snapshot } from '@smalltalk/st3-client'
+import { FractalClient, type CollectionCommand, type CollectionSocket, type Snapshot } from '@fractal/client'
 import { Effect, SubscriptionRef } from 'effect'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
 import { makeChannel, type Channel } from './socket.ts'
@@ -56,7 +56,7 @@ const withChannel = (test: (channel: Channel, gateway: Gateway) => Effect.Effect
   Effect.gen(function* () {
     const gateway = new Gateway()
     const channel = yield* makeChannel({
-      client: new St3Client({ baseUrl: 'http://alpha.example', fetchImpl: gateway.fetch }), socket: gateway.factory,
+      client: new FractalClient({ baseUrl: 'http://alpha.example', fetchImpl: gateway.fetch }), socket: gateway.factory,
     })
     yield* channel.register({ id: 'follow/example', subscriber: {
       probeEligible: true,

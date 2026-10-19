@@ -11,7 +11,7 @@ const CUSTOM_CHANGE: &str = "st3.attention.custom.source";
 const PERSON_CLOCK: &str = "st3.attention.person.clock";
 const CUSTOM_CLOCK: &str = "st3.attention.custom.clock";
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h7639c493728f owner=st3_store::store::attention_ivm TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hac726e7443c2 owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-variable-columns */ r#"
 CREATE INDEX IF NOT EXISTS attention_open_person_sources_v3 ON step_runs(subject)
  WHERE assignee>='person/' AND assignee<'person0';
 CREATE TABLE IF NOT EXISTS local_attention_open (
@@ -83,7 +83,7 @@ impl View for Family {
         }
     }
     fn create_schema(&self, connection: &Connection) -> Result<()> {
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb945491ef62c owner=st3_store::store::attention_ivm TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd4075be32904 owner=fractal_store::store::attention_ivm TODO=trace-statement-and-value-representation */ SCHEMA)?;
         // Projection updates and raw source corrections use the same reverse index. The
         // OLD edge survives reassignment/removal until maintenance reads the new source.
         for (table, key) in [
@@ -106,12 +106,12 @@ impl View for Family {
                     "DELETE" => vec!["OLD"],
                     _ => vec!["OLD", "NEW"],
                 } {
-                    body.push_str(&format!(/* sqlite-large-value: allow-for-now lv-h74963bdd34fc owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies WHERE dependency={} ON CONFLICT DO NOTHING;", dependency(which)));
+                    body.push_str(&format!(/* sqlite-large-value: allow-for-now lv-hab52523d6925 owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies WHERE dependency={} ON CONFLICT DO NOTHING;", dependency(which)));
                     if table == "step_runs" {
-                        body.push_str(&format!(/* sqlite-large-value: allow-for-now lv-h0aad2f19cf28 owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_attention_open_dirty SELECT 'person',{which}.subject WHERE {which}.assignee>='person/' AND {which}.assignee<'person0' ON CONFLICT DO NOTHING;"));
+                        body.push_str(&format!(/* sqlite-large-value: allow-for-now lv-hde84e82e0035 owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_attention_open_dirty SELECT 'person',{which}.subject WHERE {which}.assignee>='person/' AND {which}.assignee<'person0' ON CONFLICT DO NOTHING;"));
                     }
                 }
-                connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hdd2b745ea386 owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS attention_open_{table}_{action} AFTER {action} ON {table} BEGIN {body} END;"))?;
+                connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h61a19b14a4b1 owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS attention_open_{table}_{action} AFTER {action} ON {table} BEGIN {body} END;"))?;
             }
         }
         // Canonical tie corrections can change a request/declaration without changing its
@@ -122,11 +122,11 @@ impl View for Family {
                 "DELETE" => "OLD.claim_id",
                 _ => "OLD.claim_id,NEW.claim_id",
             };
-            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h2b472c773259 owner=st3_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_record_{action} AFTER {action} ON replica_records BEGIN
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h810468890407 owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_record_{action} AFTER {action} ON replica_records BEGIN
               INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies
               WHERE dependency IN (SELECT subject FROM claims WHERE id IN ({references})) ON CONFLICT DO NOTHING; END;"))?;
         }
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha28a71e36b53 owner=st3_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_batch_update AFTER UPDATE OF origin,replica_sequence ON batches BEGIN
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hcd371697cf7d owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_batch_update AFTER UPDATE OF origin,replica_sequence ON batches BEGIN
           INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies
           WHERE dependency IN (SELECT subject FROM claims WHERE batch_id IN (OLD.id,NEW.id)) ON CONFLICT DO NOTHING; END;")?;
         Ok(())
@@ -149,7 +149,7 @@ impl View for Family {
             )
             .optional()?;
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-hbf5c96f44c96 owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open_dependencies WHERE family=?1 AND source=?2",
+            /* sqlite-large-value: allow-for-now lv-hc8217a1ab7fc owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open_dependencies WHERE family=?1 AND source=?2",
             params![family, source],
         )?;
         let next = match self {
@@ -158,7 +158,7 @@ impl View for Family {
         };
         let Some((item, body, eligible)) = next else {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h06d6132bd87f owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open WHERE family=?1 AND source=?2",
+                /* sqlite-large-value: allow-for-now lv-h083fe087453f owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open WHERE family=?1 AND source=?2",
                 params![family, source],
             )?;
             return Ok(before.is_some());
@@ -169,7 +169,7 @@ impl View for Family {
             before.as_ref() != Some(&(item_text.clone(), body_text.clone(), eligible.to_string()));
         if changed {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-hfd0754a35bf0 owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_attention_open VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                /* sqlite-large-value: allow-for-now lv-h5df984645a4b owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_attention_open VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
               ON CONFLICT(family,source) DO UPDATE SET id=excluded.id,person=excluded.person,
               priority=excluded.priority,requested=excluded.requested,eligible=excluded.eligible,
               episode=excluded.episode,item=excluded.item,body=excluded.body",
@@ -202,7 +202,7 @@ fn priority(item: &AttentionItemView) -> u8 {
 }
 fn dependency(tx: &Transaction<'_>, family: &str, source: &str, key: &str) -> Result<()> {
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h785b10f748b0 owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_attention_open_dependencies VALUES(?1,?2,?3)",
+        /* sqlite-large-value: allow-for-now lv-hd4a43b41cce0 owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_attention_open_dependencies VALUES(?1,?2,?3)",
         params![family, source, key],
     )?;
     Ok(())
@@ -420,7 +420,7 @@ pub fn flush(
         )?;
         if changes.deferred.is_empty() {
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h449791bac2ee owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open_dirty WHERE family=?1 AND source=?2",
+                /* sqlite-large-value: allow-for-now lv-h14e3d702c51f owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open_dirty WHERE family=?1 AND source=?2",
                 params![family, source],
             )?;
         }
@@ -482,12 +482,12 @@ pub fn seed_page(
         }
     };
     let keys = tx
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he465e12c1ee5 owner=st3_store::store::attention_ivm TODO=trace-statement-and-value-representation */ query)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h40dec1e85b01 owner=fractal_store::store::attention_ivm TODO=trace-statement-and-value-representation */ query)?
         .query_map(params![after, limit], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for source in &keys {
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-hc052b90b4dd0 owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_attention_open_dirty VALUES(?1,?2)",
+            /* sqlite-large-value: allow-for-now lv-h77c560ab6de7 owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_attention_open_dirty VALUES(?1,?2)",
             params![family.name(), source],
         )?;
     }
@@ -529,7 +529,7 @@ pub fn backfill_page(
             },
         )?;
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h2f147c538359 owner=st3_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open_dirty WHERE family=?1 AND source=?2",
+            /* sqlite-large-value: allow-for-now lv-h56e683f5ce35 owner=fractal_store::store::attention_ivm TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_attention_open_dirty WHERE family=?1 AND source=?2",
             params![name, source],
         )?;
     }

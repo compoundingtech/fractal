@@ -1,10 +1,10 @@
 //! This build's identity, by the shared build-versioning contract: the same stamp and
-//! formatting as st2 and st-drivers (`crates/st-drivers/src/version.rs`, compiled here as is),
+//! formatting as st2 and st-drivers (`crates/fractal-drivers/src/version.rs`, compiled here as is),
 //! fed by the workspace `build.rs` for a plain `cargo build` and by the flake's
 //! `CLI_BUILD_STAMP` for a Nix build.
 
 #[allow(dead_code)]
-#[path = "../../st-drivers/src/version.rs"]
+#[path = "../../fractal-drivers/src/version.rs"]
 mod shared;
 
 pub use shared::display_version;

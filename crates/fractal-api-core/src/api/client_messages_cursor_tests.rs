@@ -169,7 +169,7 @@ async fn message_cursor_is_invalidated_by_claim_deletion() {
     let (snapshot, query, cursor) = first_page(&state, now).await;
     let epoch = state.store.client_messages_cut_epoch().unwrap();
     let removed = state.store.connection.batched(|tx| {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h17b4d6acaa87 owner=st3_api_core::api::client_messages_cursor_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject='message/cursor-binding-1'", [])
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h2e12f8d6c4f9 owner=fractal_api_core::api::client_messages_cursor_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject='message/cursor-binding-1'", [])
     }).unwrap().unwrap();
     assert_eq!(removed, 1);
     assert!(state.store.client_messages_cut_epoch().unwrap() > epoch);
@@ -197,7 +197,7 @@ message "cursor-legacy-2" { from "requester"; to "cursor-legacy"; content "two" 
     let (snapshot, query, cursor) = first_page(&state, now).await;
     let epoch = state.store.client_messages_cut_epoch().unwrap();
     let removed = state.store.connection.batched(|tx| {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h1acf14c5039d owner=st3_api_core::api::client_messages_cursor_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='message/cursor-legacy-1'", [])
+        tx.execute(/* sqlite-large-value: allow-for-now lv-he673279c56b5 owner=fractal_api_core::api::client_messages_cursor_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='message/cursor-legacy-1'", [])
     }).unwrap().unwrap();
     assert_eq!(removed, 1);
     assert!(state.store.client_messages_cut_epoch().unwrap() > epoch);

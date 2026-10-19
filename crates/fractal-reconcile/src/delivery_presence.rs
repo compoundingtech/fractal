@@ -74,7 +74,7 @@ fn presence() -> &'static Presence {
     static PRESENCE: OnceLock<Presence> = OnceLock::new();
     PRESENCE.get_or_init(|| Presence {
         started: Instant::now(),
-        image: st_drivers::reexec::running_identity().map(|identity| identity.token()),
+        image: fractal_drivers::reexec::running_identity().map(|identity| identity.token()),
         beats: Mutex::new(HashMap::new()),
         monitors: Mutex::new(HashMap::new()),
     })
@@ -256,7 +256,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         presence.image.as_deref(),
         beat.map(|(at, mut report)| {
             report.follows_image = report.follows.as_deref().and_then(|path| {
-                st_drivers::reexec::ImageIdentity::of(std::path::Path::new(path))
+                fractal_drivers::reexec::ImageIdentity::of(std::path::Path::new(path))
                     .ok()
                     .map(|identity| identity.token())
             });

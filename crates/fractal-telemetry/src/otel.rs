@@ -437,7 +437,7 @@ fn cli_backoff_path() -> Option<PathBuf> {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    Some(st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal")).join("otel-cli-backoff"))
+    Some(fractal_client::product_dirs::resolve(base.join("st3"), base.join("fractal")).join("otel-cli-backoff"))
 }
 
 fn unix_seconds() -> u64 {
@@ -481,9 +481,9 @@ fn record_cli_failure(path: &Path, now: u64) -> std::io::Result<()> {
 pub fn resource_attributes(unit_service_name: &'static str, node: Option<&str>) -> Vec<KeyValue> {
     let mut attributes = vec![
         KeyValue::new("service.name", unit_service_name),
-        KeyValue::new("service.version", st_drivers::version::machine_version()),
+        KeyValue::new("service.version", fractal_drivers::version::machine_version()),
         KeyValue::new("service.instance.id", service_instance_id()),
-        KeyValue::new("host.name", st_drivers::run::detect_host()),
+        KeyValue::new("host.name", fractal_drivers::run::detect_host()),
     ];
     if let Some(node) = node {
         attributes.push(KeyValue::new("st3.node", node.to_owned()));

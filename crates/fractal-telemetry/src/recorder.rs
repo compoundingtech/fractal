@@ -897,8 +897,8 @@ struct Record<'a> {
 }
 
 fn record<'a>(marker: &'a Marker, call: &Call<'a>) -> Record<'a> {
-    let variable = st_drivers::contracts::env;
-    let conflict = st_drivers::contracts::identity_conflict_with(&|name| std::env::var(name).ok());
+    let variable = fractal_drivers::contracts::env;
+    let conflict = fractal_drivers::contracts::identity_conflict_with(&|name| std::env::var(name).ok());
     let subject = (!conflict).then(|| variable("ST3_SUBJECT")).flatten();
     let actor = (!conflict).then(|| variable("ST_AGENT")).flatten()
         .or_else(|| subject.clone())

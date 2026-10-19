@@ -98,11 +98,11 @@ async fn quiet_node_recovers_automatically_after_busy_writer_releases() {
         .busy_timeout(Duration::ZERO)
         .unwrap();
     let other = rusqlite::Connection::open(&path).unwrap();
-    other.execute_batch(/* sqlite-large-value: allow-for-now lv-hf1b9bdde99f0 owner=st3::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-hbef187f7188a owner=fractal::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
     assert!(store.project_replication_backlog().is_err());
     assert!(store.replication_projection_deferred());
     assert_eq!(frontier(), before);
-    other.execute_batch(/* sqlite-large-value: allow-for-now lv-h682373049104 owner=st3::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-h97f308cbe046 owner=fractal::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     // No receive, wake or manual projection follows this release: the real worker
     // must publish the admitted claim and its projected event by itself.
     let (events, mut received) = watch::channel(0u64);
@@ -151,9 +151,9 @@ async fn retry_worker_does_not_keep_store_alive_during_scheduled_backoff() {
         .busy_timeout(Duration::ZERO)
         .unwrap();
     let other = rusqlite::Connection::open(dir.path().join("claims.sqlite3")).unwrap();
-    other.execute_batch(/* sqlite-large-value: allow-for-now lv-ha9eaa8220cb2 owner=st3::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-hf54eaf6da9df owner=fractal::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
     assert!(store.project_replication_backlog().is_err());
-    other.execute_batch(/* sqlite-large-value: allow-for-now lv-h033d48f09669 owner=st3::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-h605b32403e38 owner=fractal::projection_contention_retry_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     let weak = Arc::downgrade(&store);
     let (events, _) = watch::channel(0u64);
     let (polls, mut polled) = watch::channel(false);

@@ -98,7 +98,7 @@ pub fn dir() -> Option<PathBuf> {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
     base.is_absolute()
-        .then(|| st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
+        .then(|| fractal_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
             .join("stui").join("attachments"))
 }
 
@@ -324,7 +324,7 @@ fn png_size(path: &Path) -> Option<(u32, u32)> {
 /// second open reuses it.
 pub fn received(
     dir: &Path,
-    image: &st3_conversation_ui::MailImage,
+    image: &fractal_conversation_ui::MailImage,
     bytes: &[u8],
 ) -> std::io::Result<PathBuf> {
     let extension = match image.media_type.as_str() {
@@ -377,7 +377,7 @@ pub fn downloads() -> Option<PathBuf> {
 /// Save an image a person opened where they keep downloads, under the name it was sent with
 /// (its last path part only, never a directory it names), or its hash. An existing file is
 /// never replaced: a second save of other bytes takes the next free `name-2.png`.
-pub fn save(dir: &Path, image: &st3_conversation_ui::MailImage, bytes: &[u8]) -> std::io::Result<PathBuf> {
+pub fn save(dir: &Path, image: &fractal_conversation_ui::MailImage, bytes: &[u8]) -> std::io::Result<PathBuf> {
     let extension = match image.media_type.as_str() {
         "image/jpeg" => "jpg",
         "image/gif" => "gif",
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn an_opened_image_is_saved_by_its_name_never_a_path_and_never_over_another() {
         let root = tempfile::tempdir().unwrap();
-        let image = |name: Option<&str>| st3_conversation_ui::MailImage {
+        let image = |name: Option<&str>| fractal_conversation_ui::MailImage {
             sha256: "ef".repeat(32),
             message: "message/picture".into(),
             media_type: "image/png".into(),
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn an_image_read_from_st_is_kept_once_by_its_hash() {
         let root = tempfile::tempdir().unwrap();
-        let image = st3_conversation_ui::MailImage {
+        let image = fractal_conversation_ui::MailImage {
             sha256: "cd".repeat(32),
             message: "message/picture".into(),
             media_type: "image/jpeg".into(),

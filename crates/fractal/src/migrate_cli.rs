@@ -11,9 +11,9 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::Args;
 use serde::{Deserialize, Serialize};
-use st3::client::Endpoint;
-use st3::config::Config;
-use st3_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
+use fractal_daemon::client::Endpoint;
+use fractal_daemon::config::Config;
+use fractal_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
 
 mod native;
 mod home_manager;
@@ -154,12 +154,12 @@ trait Manager {
 }
 
 pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Result<()> {
-    ensure!(st3::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
+    ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
     ensure!(matches!(endpoint, Endpoint::Unix(_)), "host migration requires the local Unix API, not a remote endpoint");
     let layout = Layout::discover()?;
     let mut config = Config::load_unvalidated(None)?;
     config.apply_fleet_file()?;
-    st3::node_identity::resolve(&mut config)?;
+    fractal_daemon::node_identity::resolve(&mut config)?;
     let expected_state = &layout.directories[1].0;
     ensure!(config.state_dir == *expected_state || config.state_dir == layout.directories[1].1,
         "host migration only moves the default XDG st3 state directory; configured state is {}", config.state_dir.display());
@@ -168,8 +168,8 @@ pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Resu
     if json {
         super::print_value(&receipt, true)
     } else {
-        st3::cli_println!("{}: {} · {} · {}", receipt.host, receipt.status, receipt.local_api, receipt.migration);
-        st3::cli_println!("memory.swap.max={} MemoryLow={} gap={}ms manager={}",
+        fractal_daemon::cli_println!("{}: {} · {} · {}", receipt.host, receipt.status, receipt.local_api, receipt.migration);
+        fractal_daemon::cli_println!("memory.swap.max={} MemoryLow={} gap={}ms manager={}",
             receipt.effective.memory_swap_max.as_deref().unwrap_or("not-applicable (launchd)"),
             receipt.effective.memory_low.as_deref().unwrap_or("not-applicable (launchd)"), receipt.gap_ms, receipt.manager);
         Ok(())
@@ -409,7 +409,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     manager.idle().await?;
     let stopped_at = Instant::now();
     stop_legacy(manager, journal)?;
-    let state_lock = st3::node_identity::lock_after_stop(&layout.directories[1].0).await
+    let state_lock = fractal_daemon::node_identity::lock_after_stop(&layout.directories[1].0).await
         .context("legacy daemon still owns its state after service stop")?;
     if home_manager(&journal.services) {
         journal.config_fence = true;

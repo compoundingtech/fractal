@@ -606,7 +606,7 @@ impl ExportDaemon {
         };
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if st3::startup::read(&daemon.socket)
+            if fractal_daemon::startup::read(&daemon.socket)
                 .is_some_and(|readiness| readiness.phase == "ready")
             {
                 return daemon;
@@ -804,7 +804,7 @@ impl ExportDaemon {
 #[cfg(target_os = "linux")]
 impl Drop for ExportDaemon {
     fn drop(&mut self) {
-        if let Some(readiness) = st3::startup::read(&self.socket)
+        if let Some(readiness) = fractal_daemon::startup::read(&self.socket)
             && let Ok(pid) = libc::pid_t::try_from(readiness.pid)
         {
             // otelite remains alive to drain the exports already observed.
@@ -837,7 +837,7 @@ fn cli_request_and_daemon_server_share_one_trace() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(st3_client::Client::unix(&daemon.socket).agents_list_after(None, None, false, 0))
+        .block_on(fractal_client::Client::unix(&daemon.socket).agents_list_after(None, None, false, 0))
         .expect("the fixture must publish its initial roster");
     let mut command = isolated_command(&collector, root.path());
     command
@@ -1388,7 +1388,7 @@ async fn daemon_collection_stream_without_export_delivers_first_frame() {
     let root = tempfile::tempdir().unwrap();
     // Direct launch uses env_clear, so there is no inherited OTLP endpoint or provider.
     let daemon = ExportDaemon::start_without_export(root.path());
-    let client = st3_client::Client::unix_as(&daemon.socket, "person/ada");
+    let client = fractal_client::Client::unix_as(&daemon.socket, "person/ada");
     let mut stream = client.collection_stream().await.unwrap();
     stream.subscribe("missions", "missions", 2, None, None).await.unwrap();
     // Readiness does not wait for the mission list's first publication. A window that subscribes
@@ -1477,7 +1477,7 @@ fn storage_stage_gates_export_detached_roots() {
     if std::env::var_os(CHILD).is_some() {
         use tracing_opentelemetry::OpenTelemetrySpanExt as _;
         use opentelemetry::trace::TraceContextExt as _;
-        let mut telemetry = st3::otel::Telemetry::init(st3::otel::Unit::Daemon, None);
+        let mut telemetry = fractal_daemon::otel::Telemetry::init(fractal_daemon::otel::Unit::Daemon, None);
         assert!(telemetry.enabled());
         assert!(std::env::var_os("ST3_PROFILE_DIR").is_none());
         assert!(!smallclaims::profile::enabled());
@@ -1487,11 +1487,11 @@ fn storage_stage_gates_export_detached_roots() {
                 "st.writer.wait_ms" = tracing::field::Empty,
                 "st.writer.ops" = tracing::field::Empty,
             );
-            st3::otel::record_writer_wait(&server, (wait, 2));
+            fractal_daemon::otel::record_writer_wait(&server, (wait, 2));
         }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("claims.sqlite3");
-        let store = st3::store::Store::open(&path, "otel-test").unwrap();
+        let store = fractal_daemon::store::Store::open(&path, "otel-test").unwrap();
         let connection = rusqlite::Connection::open(&path).unwrap();
         // Real WAL frames with no reader pin deterministically take the TRUNCATE branch.
         connection.execute_batch(
@@ -1500,19 +1500,19 @@ fn storage_stage_gates_export_detached_roots() {
         let started = std::time::SystemTime::now();
         let truncated = store.checkpoint_idle_wal_report(&connection).unwrap();
         assert!(truncated.truncate_ms.is_some() && truncated.recycled);
-        st3::otel::record_wal_checkpoint(started, Some(&truncated), false);
+        fractal_daemon::otel::record_wal_checkpoint(started, Some(&truncated), false);
         let ordinary = store.checkpoint_idle_wal_report(&connection).unwrap();
         assert!(ordinary.truncate_ms.is_none());
-        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
         let ambient = tracing::info_span!("ambient checkpoint");
         let ambient_context = ambient.context();
         let _entered = ambient.enter();
         let _attached = ambient_context.attach();
         // Repeat both gates under a tracing span and an attached OTel context.
-        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
-        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&truncated), false);
-        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), true);
-        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), None, true);
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&truncated), false);
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), true);
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), None, true);
         let writer_path = directory.path().join("writer.sqlite3");
         let writer_connection = rusqlite::Connection::open(&writer_path).unwrap();
         writer_connection.execute_batch(
@@ -1670,21 +1670,21 @@ fn assert_upgrade_link(stage: &Value, upgrade: &Value) {
 const STAGE_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
 #[cfg(target_os = "linux")]
-fn stage_replication_source(root: &Path) -> st3::store::Store {
+fn stage_replication_source(root: &Path) -> fractal_daemon::store::Store {
     let state = root.join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
-    let target = st3::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
+    let target = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
     target.bind_fleet(STAGE_FLEET).unwrap();
     target.project_replication_backlog().unwrap();
-    let source = st3::store::Store::open_memory("otel-source").unwrap();
+    let source = fractal_daemon::store::Store::open_memory("otel-source").unwrap();
     source.bind_fleet(STAGE_FLEET).unwrap();
     source
 }
 
 #[cfg(target_os = "linux")]
-async fn receive_stage_claims(daemon: &ExportDaemon, source: &st3::store::Store, traceparent: &str) {
+async fn receive_stage_claims(daemon: &ExportDaemon, source: &fractal_daemon::store::Store, traceparent: &str) {
     let exchange = source.export_replication_exchange(
-        STAGE_FLEET, &st3::model::ReplicationInventory::default(),
+        STAGE_FLEET, &fractal_daemon::model::ReplicationInventory::default(),
     ).unwrap();
     let (response, _) = daemon.request("POST", "/v1/internal/replication/receive",
         Some(serde_json::json!({"peer":"otel-source", "fleet_id":STAGE_FLEET, "exchange":exchange})),
@@ -1696,8 +1696,8 @@ async fn receive_stage_claims(daemon: &ExportDaemon, source: &st3::store::Store,
 fn seed_roster(root: &Path, subject: &str) {
     let state = root.join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
-    let store = st3::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
-    store.append_claim(&st3::model::ClaimInput {
+    let store = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
+    store.append_claim(&fractal_daemon::model::ClaimInput {
         subject: subject.into(),
         kind: "runtime.observed".into(),
         actor: None,
@@ -1906,7 +1906,7 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     // standing in for N rereads. Other held windows are irrelevant to glass claims.
     let mut revision = Value::Null;
     for change in 0..3 {
-        let saved = source.append_claim(&st3::model::ClaimInput {
+        let saved = source.append_claim(&fractal_daemon::model::ClaimInput {
             subject: "glass/person/ada/019a0000-0000-7000-8000-000000000002".into(),
             kind: "glass.upserted".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(serde_json::json!({
@@ -1991,12 +1991,12 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
-    let target = st3::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
+    let target = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
     target.bind_fleet(FLEET).unwrap();
     target.project_replication_backlog().unwrap();
-    let source = st3::store::Store::open_memory("otel-source").unwrap();
+    let source = fractal_daemon::store::Store::open_memory("otel-source").unwrap();
     source.bind_fleet(FLEET).unwrap();
-    source.append_claim(&st3::model::ClaimInput {
+    source.append_claim(&fractal_daemon::model::ClaimInput {
         subject: "resource/otel-stage-projection".into(),
         kind: "resource.observed".into(),
         actor: None,
@@ -2096,15 +2096,15 @@ fn roster_admission_waiter_links_its_holder() {
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("st3-admission-proof")));
     let _subscriber = tracing::subscriber::set_default(subscriber);
-    let _export = st3::test_support::roster_export_scope();
-    let store = st3::store::Store::open_memory("otel-admission").unwrap();
+    let _export = fractal_daemon::test_support::roster_export_scope();
+    let store = fractal_daemon::store::Store::open_memory("otel-admission").unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let holder = st3::test_support::admit_fixture_roster(&store, "refresher")
+        let holder = fractal_daemon::test_support::admit_fixture_roster(&store, "refresher")
             .instrument(tracing::info_span!("admission.holder"))
             .await;
         let mut waiter = std::pin::pin!(
-            st3::test_support::admit_fixture_roster(&store, "http")
+            fractal_daemon::test_support::admit_fixture_roster(&store, "http")
                 .instrument(tracing::info_span!("admission.waiter"))
         );
         assert!(
@@ -2117,11 +2117,11 @@ fn roster_admission_waiter_links_its_holder() {
         let try_span = tracing::info_span!("admission.try_holder");
         let holder = {
             let _entered = try_span.enter();
-            st3::test_support::try_admit_fixture_roster(&store, "ws").unwrap()
+            fractal_daemon::test_support::try_admit_fixture_roster(&store, "ws").unwrap()
         };
-        assert!(st3::test_support::try_admit_fixture_roster(&store, "other").is_none());
+        assert!(fractal_daemon::test_support::try_admit_fixture_roster(&store, "other").is_none());
         let mut waiter = std::pin::pin!(
-            st3::test_support::admit_fixture_roster(&store, "http")
+            fractal_daemon::test_support::admit_fixture_roster(&store, "http")
                 .instrument(tracing::info_span!("admission.try_waiter"))
         );
         assert!(futures_util::poll!(waiter.as_mut()).is_pending());
@@ -2129,9 +2129,9 @@ fn roster_admission_waiter_links_its_holder() {
         drop(waiter.await);
         drop(try_span);
         // An incremental refresher has no existing span; timing still identifies its hold.
-        let holder = st3::test_support::admit_fixture_roster(&store, "refresher").await;
+        let holder = fractal_daemon::test_support::admit_fixture_roster(&store, "refresher").await;
         let mut waiter = std::pin::pin!(
-            st3::test_support::admit_fixture_roster(&store, "ws")
+            fractal_daemon::test_support::admit_fixture_roster(&store, "ws")
                 .instrument(tracing::info_span!("admission.unlinked_waiter"))
         );
         assert!(futures_util::poll!(waiter.as_mut()).is_pending());
@@ -2140,15 +2140,15 @@ fn roster_admission_waiter_links_its_holder() {
 
         // W starts while A owns admission, but hands it to B before W's actual
         // enqueue. Metadata must be sampled with that enqueue, not at W's start.
-        let holder = st3::test_support::admit_fixture_roster(&store, "other")
+        let holder = fractal_daemon::test_support::admit_fixture_roster(&store, "other")
             .instrument(tracing::info_span!("admission.handoff_a"))
             .await;
         let successor = std::cell::RefCell::new(None);
         let mut waiter = std::pin::pin!(
-            st3::test_support::admit_fixture_roster_after_handoff(&store, "ws", || {
+            fractal_daemon::test_support::admit_fixture_roster_after_handoff(&store, "ws", || {
                 drop(holder);
                 successor.replace(Some(
-                    st3::test_support::admit_fixture_roster(&store, "http")
+                    fractal_daemon::test_support::admit_fixture_roster(&store, "http")
                         .instrument(tracing::info_span!(parent: None, "admission.handoff_b"))
                         .now_or_never()
                         .expect("B must acquire the admission just released by A"),
@@ -2162,28 +2162,28 @@ fn roster_admission_waiter_links_its_holder() {
         // A released permit belongs to queued B even before B is repolled. Tokio
         // cannot expose B's identity in that reservation window. W and C must not
         // blame stale A; canceling reserved B must let W acquire, with C still FIFO.
-        let holder = st3::test_support::admit_fixture_roster(&store, "refresher")
+        let holder = fractal_daemon::test_support::admit_fixture_roster(&store, "refresher")
             .instrument(tracing::info_span!("admission.reservation_a"))
             .await;
         let mut successor = Box::pin(
-            st3::test_support::admit_fixture_roster(&store, "http")
+            fractal_daemon::test_support::admit_fixture_roster(&store, "http")
                 .instrument(tracing::info_span!("admission.reserved_b"))
         );
         assert!(futures_util::poll!(successor.as_mut()).is_pending());
         let mut canceled = Box::pin(
-            st3::test_support::admit_fixture_roster(&store, "other")
+            fractal_daemon::test_support::admit_fixture_roster(&store, "other")
                 .instrument(tracing::info_span!("admission.canceled"))
         );
         assert!(futures_util::poll!(canceled.as_mut()).is_pending());
         drop(canceled);
         drop(holder);
         let mut waiter = Box::pin(
-            st3::test_support::admit_fixture_roster(&store, "ws")
+            fractal_daemon::test_support::admit_fixture_roster(&store, "ws")
                 .instrument(tracing::info_span!("admission.unknown_waiter"))
         );
         assert!(futures_util::poll!(waiter.as_mut()).is_pending());
         let mut tail = Box::pin(
-            st3::test_support::admit_fixture_roster(&store, "other")
+            fractal_daemon::test_support::admit_fixture_roster(&store, "other")
                 .instrument(tracing::info_span!("admission.unknown_tail"))
         );
         assert!(futures_util::poll!(tail.as_mut()).is_pending());
@@ -2439,7 +2439,7 @@ fn replication_worker_exports_rounds_after_graph_convergence() {
     let Some(collector) = otelite("replication_worker_exports_rounds_after_graph_convergence") else {
         return;
     };
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();

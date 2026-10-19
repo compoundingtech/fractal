@@ -2,7 +2,7 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
-use st3_client::*;
+use fractal_client::*;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> Vec<u8> {

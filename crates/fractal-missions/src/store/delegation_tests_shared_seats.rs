@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_store::store::delegation_tests_shared_seats::*;
+pub use fractal_store::store::delegation_tests_shared_seats::*;
 use crate::store::*;
 use crate::model::{DelegationPolicyRequest, DelegationProof};
 use crate::store::delegation::*;

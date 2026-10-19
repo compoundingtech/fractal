@@ -1016,7 +1016,7 @@ mission "expiring-work" state="ready" {
     // Shorten this fixture's lease before any cache is built; no claims are changed.
     let expires = client_now_ms() + 1_000;
     store.connection.lock().expect("fixture writer").execute(
-        /* sqlite-large-value: allow-for-now lv-h427a91114277 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?1 WHERE subject=?2",
+        /* sqlite-large-value: allow-for-now lv-haddf27814762 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?1 WHERE subject=?2",
         rusqlite::params![expires.to_string(), step],
     ).unwrap();
     let index = store.index().unwrap();
@@ -3045,7 +3045,7 @@ async fn retention_quick_response_failure_rolls_back_declaration() {
         .connection
         .write()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hbf2e5059645c owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_quick_failure BEFORE INSERT ON idempotency
+            /* sqlite-large-value: allow-for-now lv-h4ee889615f27 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_quick_failure BEFORE INSERT ON idempotency
              WHEN json_type(NEW.response,'$.runtime_id') IS NOT NULL
              BEGIN SELECT RAISE(ABORT,'injected lost quick response'); END;",
         )
@@ -3067,7 +3067,7 @@ async fn retention_quick_response_failure_rolls_back_declaration() {
         .store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-hbf45397bea0a owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_quick_failure")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h1d40fe723c4f owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_quick_failure")
         .unwrap();
     let first = quick_agent(&state, retention_quick_request(root.path()), "codex")
         .await
@@ -3137,7 +3137,7 @@ async fn retention_quick_legacy_missing_receipt_is_explicitly_reconstructed() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h6a9151d65224 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id=?1",
+            /* sqlite-large-value: allow-for-now lv-hc25e2957d9ce owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id=?1",
             [smallclaims::store::opaque_cache_key(
                 "quick-agent-response:retention-quick",
             )],
@@ -3443,7 +3443,7 @@ async fn retention_event_http_envelope_preserves_pacing_continuation_and_410() {
     assert_eq!(page["next_after"], json!(indexes[1]));
 
     state.store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hd87f0a4e8b07 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('event_resume_floor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-h308873de51d3 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('event_resume_floor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [indexes[1].to_string()],
     ).unwrap();
     let (status, gap) = get_request(
@@ -3553,7 +3553,7 @@ async fn retention_global_empty_wait_pages_are_paced_without_losing_eligible_eve
     };
     let floor = append(&store, "custom/test/old");
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h696e3efde158 owner=st3_api_core::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
+        /* sqlite-large-value: allow-for-now lv-h670107940355 owner=fractal_api_core::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
              CREATE TABLE legacy_fixture_events(store_index INTEGER PRIMARY KEY,kind TEXT,subject TEXT,body TEXT);
              INSERT INTO legacy_fixture_events SELECT * FROM events;
              DROP VIEW events;
@@ -3661,7 +3661,7 @@ async fn retention_event_upgrade_resyncs_lagging_cursors_and_continues_the_front
         })
         .unwrap();
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h952e81396315 owner=st3_api_core::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
+        /* sqlite-large-value: allow-for-now lv-h4eb038021bdb owner=fractal_api_core::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
              CREATE TABLE legacy_fixture_events(store_index INTEGER PRIMARY KEY,kind TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL);
              INSERT INTO legacy_fixture_events SELECT store_index,kind,subject,body FROM events;
              DROP VIEW events;
@@ -3893,9 +3893,9 @@ fn agents_list_the_subagents_their_harness_runs_now() {
     );
     assert_eq!(agent("agent/node.quiet")["subagents"], json!([]));
     // Clients read it as the typed field.
-    let typed: st3_client::Resource =
+    let typed: fractal_client::Resource =
         serde_json::from_value(agent("agent/node.busy").clone()).unwrap();
-    let st3_client::Resource::Agent(typed) = typed else {
+    let fractal_client::Resource::Agent(typed) = typed else {
         panic!("an agent resource");
     };
     assert_eq!(typed.subagents.len(), 1);
@@ -4072,8 +4072,8 @@ async fn health_build_commit_matches_version_revision() {
     assert_eq!(status, StatusCode::OK, "{health}");
     assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
     let commit = health["build"]["commit"].as_str().unwrap();
-    assert_eq!(commit, st_drivers::version::build_commit());
-    let version = st_drivers::version::machine_version();
+    assert_eq!(commit, fractal_drivers::version::build_commit());
+    let version = fractal_drivers::version::machine_version();
     let revision = version.split_once('+').unwrap().1;
     let revision = revision.strip_prefix("local.").unwrap_or(revision);
     let revision = revision.strip_suffix(".dirty").unwrap_or(revision);
@@ -4411,7 +4411,7 @@ fn doctor_reports_waiting_claims_without_a_replication_fault() {
     let mut state = state(root.path());
     state.fleet_id = Some("fleet/waiting".into());
     state.configured_peers = vec!["alder".into()];
-    let mut registry = st3_schema::registry().clone();
+    let mut registry = fractal_schema::registry().clone();
     registry.claims.remove("doc.bound").unwrap();
     state.store.set_claim_registry(registry);
     state.store.bind_fleet("fleet/waiting").unwrap();
@@ -4641,7 +4641,7 @@ async fn replication_receive_accepts_a_request_above_axums_default_body_limit() 
         "exchange": {
             "peer": "source",
             "fleet_id": "fleet",
-            "schema_digest": st3_schema::registry().digest(),
+            "schema_digest": fractal_schema::registry().digest(),
             "authority_digest": "",
             "graph_digest": "",
             "inventory": { "digest": "", "envelopes": [] },
@@ -8737,10 +8737,10 @@ fn agent_card_status_preserves_declared_and_canonical_fallback_revisions() {
     {
         let connection = store.connection.write();
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h151abd991a67 owner=st3_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1000' WHERE subject='agent/undeclared'", [],
+            /* sqlite-large-value: allow-for-now lv-hc3f2f9c1c967 owner=fractal_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1000' WHERE subject='agent/undeclared'", [],
         ).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h1953646ea387 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin='zz-card-tie' WHERE id=?1", [&runtime.batch_id]).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-hd52e3b357d23 owner=st3_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET origin='zz-card-tie' WHERE batch_id=?1", [&runtime.batch_id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-he4bab0a5a4a0 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin='zz-card-tie' WHERE id=?1", [&runtime.batch_id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h57f7065baf33 owner=fractal_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET origin='zz-card-tie' WHERE batch_id=?1", [&runtime.batch_id]).unwrap();
     }
     store.forget_current_views();
     let index = store.index().unwrap();
@@ -9194,7 +9194,7 @@ mission "agent-human" state="ready" {
         "state": "working", "driver": "omp", "incarnation_id": "human-1",
         "blocked_on": null, "ask": null, "reason": null, "input_buffer": null, "exit": null,
     }));
-    let answered: st3_client::Agent = serde_json::from_value(agent()).unwrap();
+    let answered: fractal_client::Agent = serde_json::from_value(agent()).unwrap();
     assert_eq!(answered.state, "running");
     assert_eq!(answered.harness_state.as_deref(), Some("working"));
     assert!(answered.blocked_on.is_none());
@@ -9206,7 +9206,7 @@ mission "agent-human" state="ready" {
         "state": "working", "driver": "omp", "incarnation_id": "human-1",
         "blocked_on": null, "ask": null, "reason": "compaction", "input_buffer": null, "exit": null,
     }));
-    let compacting: st3_client::Agent = serde_json::from_value(agent()).unwrap();
+    let compacting: fractal_client::Agent = serde_json::from_value(agent()).unwrap();
     assert_eq!(compacting.state, "running");
     assert_eq!(compacting.activity.as_deref(), Some("compacting"));
     // The harness schema's terminal activity keeps precedence over a stale ask.
@@ -9254,7 +9254,7 @@ mission "agent-human" state="ready" {
         "blocked_on": null, "ask": null, "reason": null, "input_buffer": null, "exit": null,
     }));
     observe_harness("working");
-    let resumed: st3_client::Agent = serde_json::from_value(agent()).unwrap();
+    let resumed: fractal_client::Agent = serde_json::from_value(agent()).unwrap();
     assert_eq!(resumed.state, "running");
     assert_eq!(resumed.harness_state.as_deref(), Some("idle"));
     assert_eq!(resumed.incarnation_id.as_deref(), Some("human-2"));
@@ -10217,8 +10217,8 @@ async fn public_claim_admission_and_idempotency_use_the_exported_schema() {
 
     let (status, schema) = get_request(app.clone(), "/v1/schema").await;
     assert_eq!(status, StatusCode::OK, "{schema}");
-    assert_eq!(schema["schema"], st3_schema::SCHEMA_NAME);
-    assert_eq!(schema["digest"], st3_schema::registry().digest());
+    assert_eq!(schema["schema"], fractal_schema::SCHEMA_NAME);
+    assert_eq!(schema["digest"], fractal_schema::registry().digest());
 
     let forbidden = serde_json::to_value(ClaimInput {
         subject: "host/node".into(),

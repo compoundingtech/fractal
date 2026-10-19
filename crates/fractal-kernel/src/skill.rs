@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
-pub const SKILL: &str = /* sqlite-large-value: allow-for-now lv-h27d52a30accc owner=st3_kernel::skill TODO=trace-statement-and-value-representation */ include_str!("skill.md");
+pub const SKILL: &str = /* sqlite-large-value: allow-for-now lv-h6ac6d24a28e7 owner=fractal_kernel::skill TODO=trace-statement-and-value-representation */ include_str!("skill.md");
 
 /// Share the skill's message sender paragraph with CLI help without duplicating its wording.
 pub fn message_sender_guidance() -> &'static str {
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn the_permission_modes_section_names_what_the_drivers_and_config_really_use() {
-        use st_drivers::access::{AccessMode, CODEX_PROFILE};
+        use fractal_drivers::access::{AccessMode, CODEX_PROFILE};
         for mode in [AccessMode::Auto, AccessMode::Bypass] {
             let key = format!("access_mode = \"{}\"", mode.as_str());
             assert!(SKILL.contains(&key), "{key}");
@@ -201,7 +201,7 @@ mod tests {
         for mode in [AccessMode::Auto, AccessMode::Bypass] {
             // The skill names the permission flags; the auto Read-rule `--settings` argument is
             // documented in docs/st3/harness-access.md, not here.
-            let flags = st_drivers::access::claude_defaults(mode, false, Path::new("/workspace"))
+            let flags = fractal_drivers::access::claude_defaults(mode, false, Path::new("/workspace"))
                 .into_iter()
                 .take_while(|argument| argument != "--settings")
                 .collect::<Vec<_>>()
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn the_skill_and_the_channel_instructions_say_the_same_thing() {
         let skill = SKILL.replace('`', "");
-        let channel = st_drivers::ding::CHANNEL_INSTRUCTIONS;
+        let channel = fractal_drivers::ding::CHANNEL_INSTRUCTIONS;
         // The channel text is the skill's paragraph without its closing pointer clause.
         let rule = channel.trim_end_matches('.');
         assert!(skill.contains(rule), "{rule}");

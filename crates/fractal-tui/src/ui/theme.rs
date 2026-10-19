@@ -81,8 +81,8 @@ pub fn label() -> Style {
 }
 
 /// The conversation library never chooses application colors.
-pub fn conversation() -> st3_conversation_ui::Theme {
-    st3_conversation_ui::Theme {
+pub fn conversation() -> fractal_conversation_ui::Theme {
+    fractal_conversation_ui::Theme {
         user_bg: USER_BG,
         tool_bg: TOOL_BG,
         tool_ok_bg: TOOL_OK_BG,

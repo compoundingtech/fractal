@@ -1,5 +1,5 @@
 [package]
-name = "st3-e2e"
+name = "fractal-e2e"
 version = "0.1.0"
 edition = "2024"
 description = "End-to-end tests that start a real st3 daemon and drive a client, the terminal UI or the feed against it"
@@ -7,12 +7,12 @@ license = "MIT"
 publish = false
 
 # Tests only. The daemon library, the client, the UI and the feed are dependencies of the tests, so none of them
-# needs a dev-dependency on the daemon any more (st3-client had one, which closed a cycle with the daemon).
+# needs a dev-dependency on the daemon any more (fractal-client had one, which closed a cycle with the daemon).
 
 [dev-dependencies]
-st3 = { package = "st3-daemon", path = "../st3-daemon", features = ["test-support"] }
-st3-client = { path = "../st3-client" }
-st3-feed = { path = "../st3-feed" }
+fractal-daemon = { path = "../fractal-daemon", features = ["test-support"] }
+fractal-client = { path = "../fractal-client" }
+fractal-feed = { path = "../fractal-feed" }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"

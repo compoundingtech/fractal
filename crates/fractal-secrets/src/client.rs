@@ -263,7 +263,7 @@ impl DaemonUnreachable {
 
     fn connect_io(endpoint: impl Into<String>, error: &std::io::Error) -> Self {
         let endpoint = endpoint.into();
-        if !error.raw_os_error().is_some_and(st_drivers::work_claim_failure::is_socket_access_defect)
+        if !error.raw_os_error().is_some_and(fractal_drivers::work_claim_failure::is_socket_access_defect)
             && let Some(mut outage) = Self::during_startup(Path::new(&endpoint)) {
             outage.socket_os_error = error.raw_os_error();
             return outage;
@@ -302,7 +302,7 @@ impl DaemonUnreachable {
     }
 
     fn local_connect_defect(&self) -> bool {
-        self.socket_os_error.is_some_and(st_drivers::work_claim_failure::is_socket_access_defect)
+        self.socket_os_error.is_some_and(fractal_drivers::work_claim_failure::is_socket_access_defect)
     }
 
     /// A short present-tense summary without advice, for callers that say what they do next.
@@ -691,7 +691,7 @@ impl Client {
                 }
                 .header("content-type", "application/json")
                 .header("connection", "close");
-                request = st3_client::propagation::inject_http(request);
+                request = fractal_client::propagation::inject_http(request);
                 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                 if let Some(person) = self.person.as_deref() {
                     request = request.header("x-st3-person", person);
@@ -817,7 +817,7 @@ impl Client {
             urlencoding::encode(&fence.token)
         );
         let mut request = url.into_client_request()?;
-        st3_client::propagation::inject_headers(request.headers_mut());
+        fractal_client::propagation::inject_headers(request.headers_mut());
         let (socket, _) = tokio::time::timeout(
             self.deadlines.terminal_handshake,
             tokio_tungstenite::client_async(request, stream),
@@ -898,8 +898,8 @@ async fn attach_local_terminal_with_io(terminal: &LocalTerminal, io: ClientIo) -
     proxy_stream_with_io(&terminal.runtime_id, stream, None, io).await
 }
 
-use st3_terminal_direct::connect_pty_session;
-pub use st3_terminal_direct::open_local_terminal;
+use fractal_terminal_direct::connect_pty_session;
+pub use fractal_terminal_direct::open_local_terminal;
 
 /// Attach this terminal straight to a PTY session that only the PTY registry named, for when the
 /// st daemon cannot say which incarnation it selected. The kernel must still name the session's
@@ -1066,7 +1066,7 @@ impl std::error::Error for UnexpectedResponse {}
 
 fn terminal_request(url: &str) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut request = url.into_client_request()?;
-    st3_client::propagation::inject_headers(request.headers_mut());
+    fractal_client::propagation::inject_headers(request.headers_mut());
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
@@ -1224,7 +1224,7 @@ async fn unix_request(
             body.len()
         )
         .into_bytes();
-        st3_client::propagation::inject_current_context(|key, value| {
+        fractal_client::propagation::inject_current_context(|key, value| {
             request.extend_from_slice(key.as_bytes());
             request.extend_from_slice(b": ");
             request.extend_from_slice(value.as_bytes());
@@ -1671,14 +1671,14 @@ mod tests {
             let span = tracing::info_span!("without_sdk");
             let _entered = span.enter();
             let websocket = terminal_request("ws://localhost/v1/terminal").unwrap();
-            let http = st3_client::propagation::inject_http(
+            let http = fractal_client::propagation::inject_http(
                 reqwest::Client::new().get("http://localhost/v1/health"),
             ).build().unwrap();
             for headers in [websocket.headers(), http.headers()] {
                 assert!(!headers.contains_key("traceparent"));
                 assert!(!headers.contains_key("tracestate"));
             }
-            st3_client::propagation::inject_current_context(|_, _| {
+            fractal_client::propagation::inject_current_context(|_, _| {
                 panic!("the Unix header writer must not be called without a valid context");
             });
         });

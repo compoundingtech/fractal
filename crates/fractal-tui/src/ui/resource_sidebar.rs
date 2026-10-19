@@ -70,7 +70,7 @@ pub(super) enum PaletteMode {
 pub(crate) struct Write {
     pub subject: String,
     pub owner: String,
-    pub operations: Vec<st3_client::ArrangementOperation>,
+    pub operations: Vec<fractal_client::ArrangementOperation>,
     pub key: String,
     pub creating: bool,
 }
@@ -82,11 +82,11 @@ struct Choices {
 }
 #[derive(Default)]
 pub(crate) struct Sidebar {
-    pub arrangements: Vec<st3_client::Arrangement>,
+    pub arrangements: Vec<fractal_client::Arrangement>,
     pub terminals: Vec<ResourceRow>,
     pub terminals_has_more: bool,
     inventory_partial: Vec<String>,
-    pub observations: Vec<st3_client::ResourceObservation>,
+    pub observations: Vec<fractal_client::ResourceObservation>,
     pub observations_has_more: bool,
     pub observations_issue: Option<String>,
     pub writable: bool,
@@ -111,8 +111,8 @@ impl Sidebar {
     /// The person's one Sidebar: the reserved subject whatever its name (#2043), else the oldest
     /// live arrangement named "Sidebar", which clients created before the reserved id. Every
     /// client picks the same one, so their edits land in the same arrangement.
-    pub(super) fn arrangement(&self) -> Option<&st3_client::Arrangement> {
-        let reserved = format!("/{}", st3_client::SIDEBAR_ARRANGEMENT_UUID);
+    pub(super) fn arrangement(&self) -> Option<&fractal_client::Arrangement> {
+        let reserved = format!("/{}", fractal_client::SIDEBAR_ARRANGEMENT_UUID);
         let live = || self.arrangements.iter().filter(|a| !a.deleted);
         live()
             .find(|a| a.header.id.ends_with(&reserved))
@@ -163,8 +163,8 @@ impl Sidebar {
         subject: &str,
         folder: Option<&str>,
         before: Option<&str>,
-    ) -> Result<Vec<st3_client::ArrangementOperation>, String> {
-        use st3_client::ArrangementOperation as Op;
+    ) -> Result<Vec<fractal_client::ArrangementOperation>, String> {
+        use fractal_client::ArrangementOperation as Op;
         let mut siblings = self
             .arrangement()
             .into_iter()
@@ -231,8 +231,8 @@ impl Sidebar {
         &self,
         id: &str,
         before: Option<&str>,
-    ) -> Result<Vec<st3_client::ArrangementOperation>, String> {
-        use st3_client::ArrangementOperation as Op;
+    ) -> Result<Vec<fractal_client::ArrangementOperation>, String> {
+        use fractal_client::ArrangementOperation as Op;
         let a = self
             .arrangement()
             .ok_or("The sidebar has not loaded yet.")?;
@@ -573,7 +573,7 @@ impl Sidebar {
     }
 }
 impl Ui {
-    pub(super) fn sidebar_edit(&mut self, operations: Vec<st3_client::ArrangementOperation>) {
+    pub(super) fn sidebar_edit(&mut self, operations: Vec<fractal_client::ArrangementOperation>) {
         if self.resource_sidebar.writing {
             self.flash("Sidebar edit is still being saved.");
             return;
@@ -599,7 +599,7 @@ impl Ui {
                         format!(
                             "arrangement/{}/{}",
                             self.world.person,
-                            st3_client::SIDEBAR_ARRANGEMENT_UUID
+                            fractal_client::SIDEBAR_ARRANGEMENT_UUID
                         ),
                         false,
                     )
@@ -610,7 +610,7 @@ impl Ui {
         if creating {
             operations.insert(
                 0,
-                st3_client::ArrangementOperation::Create {
+                fractal_client::ArrangementOperation::Create {
                     name: "Sidebar".into(),
                 },
             );
@@ -663,14 +663,14 @@ impl Ui {
                 return;
             }
         };
-        let mut operations = vec![st3_client::ArrangementOperation::FolderCreate {
+        let mut operations = vec![fractal_client::ArrangementOperation::FolderCreate {
             id: id.clone(),
             name: name.trim().into(),
             parent: None,
             key,
         }];
         if let Some(subject) = subject {
-            operations.push(st3_client::ArrangementOperation::SubjectPlace {
+            operations.push(fractal_client::ArrangementOperation::SubjectPlace {
                 subject: subject.into(),
                 folder: Some(id),
                 key: "a0".into(),
@@ -892,7 +892,7 @@ impl Ui {
 mod tests {
     use super::*;
     use serde_json::json;
-    fn arrangement() -> st3_client::Arrangement {
+    fn arrangement() -> fractal_client::Arrangement {
         serde_json::from_value(json!({
             "id":"arrangement/person/avery/019a0000-0000-7000-8000-000000000001",
             "revision":"claim/1", "updated_at":"2026-10-01T00:00:00Z", "owner":"person/avery", "deleted":false,
@@ -930,7 +930,7 @@ mod tests {
         assert!(matches!(&rows[2], Row::Resource(row) if row.id == "agent/atlas" && !row.missing));
         assert!(matches!(&rows[3], Row::Group { title, .. } if title == "Second"));
         // A resolved null takes precedence over the raw placement, and a deleted folder unfiles.
-        sidebar.arrangements[0].resolved = Some(st3_client::ArrangementResolved {
+        sidebar.arrangements[0].resolved = Some(fractal_client::ArrangementResolved {
             parents: BTreeMap::new(),
             folders: BTreeMap::from([("agent/atlas".into(), None)]),
         });
@@ -945,7 +945,7 @@ mod tests {
             .folders
             .get_mut("first")
             .unwrap()
-            .tombstone = Some(st3_client::ArrangementRegister {
+            .tombstone = Some(fractal_client::ArrangementRegister {
             value: true,
             revision: "claim/2".into(),
         });
@@ -967,7 +967,7 @@ mod tests {
         let picked = |sidebar: &Sidebar| sidebar.arrangement().map(|a| a.header.id.clone());
         let reserved = format!(
             "arrangement/person/avery/{}",
-            st3_client::SIDEBAR_ARRANGEMENT_UUID
+            fractal_client::SIDEBAR_ARRANGEMENT_UUID
         );
         let oldest = "arrangement/person/avery/019a0000-0000-7000-8000-000000000002";
         let mut sidebar = Sidebar {
@@ -982,7 +982,7 @@ mod tests {
             sidebar.arrangements.push(named(uuid, "Sidebar"));
         }
         assert_eq!(picked(&sidebar).as_deref(), Some(oldest));
-        let renamed = named(st3_client::SIDEBAR_ARRANGEMENT_UUID, "Renamed");
+        let renamed = named(fractal_client::SIDEBAR_ARRANGEMENT_UUID, "Renamed");
         sidebar.arrangements.push(renamed);
         assert_eq!(
             picked(&sidebar),
@@ -1086,7 +1086,7 @@ mod tests {
         let keys = ops
             .iter()
             .filter_map(|op| {
-                if let st3_client::ArrangementOperation::SubjectPlace { subject, key, .. } = op {
+                if let fractal_client::ArrangementOperation::SubjectPlace { subject, key, .. } = op {
                     Some((subject.as_str(), key.as_str()))
                 } else {
                     None
@@ -1103,7 +1103,7 @@ mod tests {
         );
         assert!(
             keys.values()
-                .all(|key| st3_schema::arrangements::valid_key(key))
+                .all(|key| fractal_schema::arrangements::valid_key(key))
         );
         let ops = sidebar
             .placement("agent/new", None, Some("agent/unplaced"))

@@ -78,8 +78,8 @@ use ratatui::{
     text::{Line, Span},
 };
 use screens::{Drafts, Item, ListState, Listing, TABS};
-use st3_conversation_ui::pane::order;
-use st3_conversation_ui::{PaneIntent, PaneState, Selection};
+use fractal_conversation_ui::pane::order;
+use fractal_conversation_ui::{PaneIntent, PaneState, Selection};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap, HashSet},
@@ -209,7 +209,7 @@ impl AgentControl {
 pub enum Effect {
     /// Read an image a message carries from st, keep it here, and show it.
     OpenImage {
-        image: st3_conversation_ui::MailImage,
+        image: fractal_conversation_ui::MailImage,
     },
     /// Read complete conversation content into the memory-only UI cache.
     LoadContent(content::Key),
@@ -393,7 +393,7 @@ pub struct Ui {
     /// The selection each sidebar last scrolled into view. The wheel may scroll away from
     /// the selection; only a new selection brings it back.
     list_follows: RefCell<[Option<usize>; 6]>,
-    conversation_state: st3_conversation_ui::State,
+    conversation_state: fractal_conversation_ui::State,
     /// Each conversation's header (contract §3) as st last sent it, drawn above its entries.
     pub(crate) conversation_headers: std::collections::BTreeMap<String, serde_json::Value>,
     cache: conversation::Cache,
@@ -444,7 +444,7 @@ pub struct Ui {
     popover: Option<String>,
     chat: Option<ChatState>,
     /// st's conversation search for the palette: the query asked and what came back.
-    pub(crate) said: Option<(String, Result<st3_client::ConversationSearch, String>)>,
+    pub(crate) said: Option<(String, Result<fractal_client::ConversationSearch, String>)>,
     /// The named answer chosen on the focused structured request, before Enter sends it.
     answering: Option<usize>,
     /// A decision's "request changes" answer, chosen: its id goes with the words typed next.
@@ -763,7 +763,7 @@ impl Ui {
             selected: [0; 6],
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
-            conversation_state: st3_conversation_ui::State::default(),
+            conversation_state: fractal_conversation_ui::State::default(),
             conversation_headers: std::collections::BTreeMap::new(),
             cache: conversation::Cache::default(),
             editing: false,
@@ -1037,11 +1037,11 @@ impl Ui {
         }
     }
 
-    fn density(&self) -> st3_conversation_ui::Density {
+    fn density(&self) -> fractal_conversation_ui::Density {
         if self.simple {
-            st3_conversation_ui::Density::Simple
+            fractal_conversation_ui::Density::Simple
         } else {
-            st3_conversation_ui::Density::Full
+            fractal_conversation_ui::Density::Full
         }
     }
 
@@ -1372,7 +1372,7 @@ impl Ui {
                     index += 1;
                 }
                 let words = row[start..index].iter().collect::<String>();
-                if let Some(url) = st3_conversation_ui::text::link_for(&words) {
+                if let Some(url) = fractal_conversation_ui::text::link_for(&words) {
                     self.hit(
                         Rect {
                             x: cells[start].0,
@@ -2849,13 +2849,13 @@ impl Ui {
                 // The conversation header (q3) sits above the entries, each field saying
                 // where it came from and how old it is.
                 if let Some(header) = self.conversation_headers.get(&agent.id) {
-                    let line = st3_conversation_ui::header::line(
+                    let line = fractal_conversation_ui::header::line(
                         header,
                         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     );
                     if !line.is_empty() {
                         doc.line(Line::from(Span::styled(
-                            st3_conversation_ui::header::row(&line, width),
+                            fractal_conversation_ui::header::row(&line, width),
                             theme::dim(),
                         )));
                     }
@@ -4015,7 +4015,7 @@ impl Ui {
     // ------------------------------------------------------------------- input
 
     /// The focused Home item's structured request (#1010), with the item's id.
-    fn structured_request(&self) -> Option<(String, Box<st3_client::StructuredRequest>)> {
+    fn structured_request(&self) -> Option<(String, Box<fractal_client::StructuredRequest>)> {
         let id = self.attention_focus()?;
         let item = self
             .world
@@ -4035,7 +4035,7 @@ impl Ui {
     /// An answer that asks for changes needs them in words: open the box for them at once, with
     /// the answer remembered, so a person who chose it can type (Nathan, 2026-10-12: "it says it
     /// needs my words but I can't type anywhere"). False for an answer that needs none.
-    fn ask_for_words(&mut self, answer: &st3_client::RequestAnswerOption) -> bool {
+    fn ask_for_words(&mut self, answer: &fractal_client::RequestAnswerOption) -> bool {
         if answer.outcome.as_deref() != Some("request_changes") {
             return false;
         }
@@ -4869,7 +4869,7 @@ impl Ui {
         let id = tools[index].clone();
         self.content.focused.insert(conversation.clone(), id.clone());
         // A bundled call becomes individually reachable when keyboard-focused.
-        self.conversation_state.expanded.extend(tools.iter().map(|id| st3_conversation_ui::bundle_id(id)));
+        self.conversation_state.expanded.extend(tools.iter().map(|id| fractal_conversation_ui::bundle_id(id)));
         self.content.scroll_to.borrow_mut().insert(conversation.clone(), id);
         self.flash(format!("Tool {} of {} focused · Ctrl+Enter expand · Ctrl+U images", index + 1, tools.len()));
     }
@@ -4919,7 +4919,7 @@ impl Ui {
         if let Some(entries) = self.world.conversations.get(conversation) {
             self.conversation_state.expanded.extend(entries.items().iter()
                 .filter(|entry| matches!(entry.body, Body::Tool { .. }))
-                .map(|entry| st3_conversation_ui::bundle_id(&entry.id)));
+                .map(|entry| fractal_conversation_ui::bundle_id(&entry.id)));
         }
     }
 
@@ -4932,7 +4932,7 @@ impl Ui {
         };
         let tools = entries
             .iter()
-            .filter(|entry| st3_conversation_ui::conversation::folds(&entry.body))
+            .filter(|entry| fractal_conversation_ui::conversation::folds(&entry.body))
             .map(|entry| entry.id.clone())
             .collect::<Vec<_>>();
         if tools
@@ -6456,7 +6456,7 @@ impl Ui {
             Hit::ContentImage(key) => {
                 if let Some((_, entry)) = self.content.image_owner(&key) {
                     self.conversation_state.expanded.insert(entry.clone());
-                    self.conversation_state.expanded.insert(st3_conversation_ui::bundle_id(&entry));
+                    self.conversation_state.expanded.insert(fractal_conversation_ui::bundle_id(&entry));
                 }
                 if self.content.toggle_image(&key) { self.effects.push(Effect::LoadContent(key)); }
             }
@@ -6718,7 +6718,7 @@ fn find_matches(doc: &Doc, query: &str) -> Vec<(usize, usize, usize)> {
     }
     let mut found = Vec::new();
     for (index, line) in doc.lines.iter().enumerate() {
-        let plain = st3_conversation_ui::text::plain(line);
+        let plain = fractal_conversation_ui::text::plain(line);
         let lower = plain.to_lowercase();
         // Lowercasing keeps byte offsets only for ASCII; elsewhere match the line as written.
         let haystack = if lower.len() == plain.len() {
@@ -7170,14 +7170,14 @@ mod tests {
             }))
             .unwrap()
         })
-        .collect::<Vec<st3_client::TimelineEntry>>();
+        .collect::<Vec<fractal_client::TimelineEntry>>();
         let entries = adapt::conversation(&items, &std::collections::BTreeMap::new());
         ui.world
             .conversations
             .insert(conversation.clone(), Load::Ready(entries));
         ui.content.index(&std::collections::BTreeMap::from([(
             conversation.clone(),
-            st3_conversation_ui::Timeline {
+            fractal_conversation_ui::Timeline {
                 items,
                 session_id: Some("session/expand-all".into()),
                 ..Default::default()
@@ -7301,8 +7301,8 @@ mod tests {
                 "body":{"media_type":"image/png","blocks":[{"id":id,"kind":"image","source_type":"native","payload":{},
                 "continuation":{"ref":id,"media_type":"image/png","reason":"on-demand"}}]}
             })).unwrap()
-        }).collect::<Vec<st3_client::TimelineEntry>>();
-        ui.content.index(&std::collections::BTreeMap::from([(conversation.clone(), st3_conversation_ui::Timeline {
+        }).collect::<Vec<fractal_client::TimelineEntry>>();
+        ui.content.index(&std::collections::BTreeMap::from([(conversation.clone(), fractal_conversation_ui::Timeline {
             items, session_id: Some("session/visible-images".into()), ..Default::default()
         })]));
         let first = ui.content.tool_images(&conversation, "first#images").pop().unwrap();
@@ -7376,7 +7376,7 @@ mod tests {
     #[test]
     fn mail_image_click_keeps_the_existing_blob_open_effect() {
         let mut ui = Ui::new(demo::world());
-        let image = st3_conversation_ui::MailImage {
+        let image = fractal_conversation_ui::MailImage {
             sha256: "cd".repeat(32),
             message: "message/picture".into(),
             media_type: "image/jpeg".into(),
@@ -7594,7 +7594,7 @@ mod tests {
                 gate("attention/feedback", "feedback", "review.request-changes"),
                 gate("attention/approve", "approve", "review.reject"),
             ],
-            snapshot: Some(st3_client::Snapshot {
+            snapshot: Some(fractal_client::Snapshot {
                 id: "snapshot/example-host/1/0".into(),
                 host_id: "host/example-host".into(),
                 store_index: 1,
@@ -7912,19 +7912,19 @@ mod tests {
     #[test]
     fn a_chosen_answer_never_stops_a_text_box_from_taking_keys() {
         let mut world = demo::world();
-        let request = st3_client::StructuredRequest {
+        let request = fractal_client::StructuredRequest {
             version: 1,
             entry_type: "choice".into(),
             question: "Which one?".into(),
             why_person: "Taste.".into(),
             answers: vec![
-                st3_client::RequestAnswerOption {
+                fractal_client::RequestAnswerOption {
                     id: "a".into(),
                     label: "First".into(),
                     consequence: "Goes first.".into(),
                     ..Default::default()
                 },
-                st3_client::RequestAnswerOption {
+                fractal_client::RequestAnswerOption {
                     id: "b".into(),
                     label: "Second".into(),
                     consequence: "Goes second.".into(),
@@ -7999,9 +7999,9 @@ mod tests {
     #[test]
     fn a_feedback_request_offers_words_and_a_dismissal_not_an_answer_to_choose() {
         // Nathan, 2026-10-05: "why can't I dismiss this attention item?"
-        let feedback = |kind: &str, answers: Vec<st3_client::RequestAnswerOption>| {
+        let feedback = |kind: &str, answers: Vec<fractal_client::RequestAnswerOption>| {
             let mut world = demo::world();
-            let request = st3_client::StructuredRequest {
+            let request = fractal_client::StructuredRequest {
                 version: 1,
                 entry_type: kind.into(),
                 question: "What did you run and what did you see?".into(),
@@ -8068,7 +8068,7 @@ mod tests {
         );
         // A choice has named answers: it offers those, and x still dismisses it after asking,
         // telling its asker it was set aside (Nathan, 2026-10-11).
-        let answer = st3_client::RequestAnswerOption {
+        let answer = fractal_client::RequestAnswerOption {
             id: "yes".into(),
             label: "Yes".into(),
             consequence: "Goes ahead.".into(),
@@ -8092,7 +8092,7 @@ mod tests {
             ui.effects
         );
         // Esc at the question keeps it.
-        let hold = st3_client::RequestAnswerOption {
+        let hold = fractal_client::RequestAnswerOption {
             id: "hold".into(),
             label: "Hold".into(),
             consequence: "Nothing is approved.".into(),
@@ -8111,7 +8111,7 @@ mod tests {
     #[test]
     fn a_structured_request_shows_its_fields_and_sends_a_named_answer() {
         let mut world = demo::world();
-        let request = st3_client::StructuredRequest {
+        let request = fractal_client::StructuredRequest {
             version: 1,
             entry_type: "choice".into(),
             question: "Shipped today: 62 pull requests.".into(),
@@ -8121,24 +8121,24 @@ mod tests {
                 "Seats start reliably (#1008).".into(),
                 "Search is in (#1065).".into(),
             ],
-            recommendation: Some(st3_client::RequestRecommendation {
+            recommendation: Some(fractal_client::RequestRecommendation {
                 answer: "more".into(),
                 reason: "two items need your eyes".into(),
             }),
-            subjects: vec![st3_client::RequestSubject {
+            subjects: vec![fractal_client::RequestSubject {
                 kind: "link".into(),
                 label: "pull requests merged today".into(),
                 url: Some("https://example.com/merged".into()),
                 ..Default::default()
             }],
             answers: vec![
-                st3_client::RequestAnswerOption {
+                fractal_client::RequestAnswerOption {
                     id: "read".into(),
                     label: "Read it".into(),
                     consequence: "Clears this item.".into(),
                     ..Default::default()
                 },
-                st3_client::RequestAnswerOption {
+                fractal_client::RequestAnswerOption {
                     id: "more".into(),
                     label: "Tell me more".into(),
                     consequence: "The asker replies with detail.".into(),
@@ -8213,13 +8213,13 @@ mod tests {
         // Nathan, 2026-10-07: "I can't choose an option for this attention item, it says I must
         // write something": the Send button went to the empty text box.
         let mut world = demo::world();
-        let option = |id: &str, label: &str| st3_client::RequestAnswerOption {
+        let option = |id: &str, label: &str| fractal_client::RequestAnswerOption {
             id: id.into(),
             label: label.into(),
             consequence: "Clears this item.".into(),
             ..Default::default()
         };
-        let request = st3_client::StructuredRequest {
+        let request = fractal_client::StructuredRequest {
             version: 1,
             entry_type: "choice".into(),
             question: "What should change?".into(),
@@ -8293,27 +8293,27 @@ mod tests {
     fn an_answer_that_asks_for_changes_says_it_needs_words() {
         // Nathan, 2026-10-07: "it says I must type something. What does this mean?"
         let mut world = demo::world();
-        let request = st3_client::StructuredRequest {
+        let request = fractal_client::StructuredRequest {
             version: 1,
             entry_type: "decision".into(),
             question: "Approve as written?".into(),
             why_person: "Only you can waive it.".into(),
             summary: None,
             reasons: Vec::new(),
-            recommendation: Some(st3_client::RequestRecommendation {
+            recommendation: Some(fractal_client::RequestRecommendation {
                 answer: "follow".into(),
                 reason: "it keeps the brief".into(),
             }),
             subjects: Vec::new(),
             answers: vec![
-                st3_client::RequestAnswerOption {
+                fractal_client::RequestAnswerOption {
                     id: "follow".into(),
                     label: "Follow the brief".into(),
                     consequence: "The author gets your terms.".into(),
                     outcome: Some("request_changes".into()),
                     ..Default::default()
                 },
-                st3_client::RequestAnswerOption {
+                fractal_client::RequestAnswerOption {
                     id: "approve".into(),
                     label: "Approve as written".into(),
                     consequence: "It is queued.".into(),
@@ -9449,7 +9449,7 @@ mod tests {
                 .clone();
             mission.step_metadata.insert(
                 id,
-                st3_ui_model::missions::StepMetadata {
+                fractal_ui_model::missions::StepMetadata {
                     blocked_reason: None,
                     last_progress: Some("Tests pass; opening the PR".into()),
                     nudged: None,

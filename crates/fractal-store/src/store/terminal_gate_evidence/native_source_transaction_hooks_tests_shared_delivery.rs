@@ -32,7 +32,7 @@ use crate::store::terminal_gate_evidence::*;
 use std::collections::BTreeMap;
 
 pub fn update_exit(tx: &rusqlite::Connection, code: i64) {
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hde81f5eb98df owner=st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.exit_code',?1) WHERE subject='exec/one/probe' AND kind='runtime.observed'", [code]).unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hc529ef4bae5b owner=fractal_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.exit_code',?1) WHERE subject='exec/one/probe' AND kind='runtime.observed'", [code]).unwrap();
 }
 
 pub fn answer(rx: Receiver<Result<(), String>>) -> Result<(), String> {

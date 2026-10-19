@@ -1,4 +1,4 @@
-import type { Agent } from '@smalltalk/st3-client'
+import type { Agent } from '@fractal/client'
 import { describe, expect, it } from 'vitest'
 import { catalog, loadWorld } from '../src/index.ts'
 import { decodeSlice } from '../scripts/decode.ts'

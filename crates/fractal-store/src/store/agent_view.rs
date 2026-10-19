@@ -425,8 +425,8 @@ impl View for AgentView {
         }
     }
     fn create_schema(&self, connection: &Connection) -> Result<()> {
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h03a9086f9f9c owner=st3_store::store::agent_view TODO=trace-statement-and-value-representation */ ordered::SCHEMA)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h750995aab32e owner=st3_store::store::agent_view TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_agent_harness_rows(subject TEXT PRIMARY KEY, observed TEXT);")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h070770df904f owner=fractal_store::store::agent_view TODO=trace-statement-and-value-representation */ ordered::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1e27c5bc693c owner=fractal_store::store::agent_view TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_agent_harness_rows(subject TEXT PRIMARY KEY, observed TEXT);")?;
         Ok(())
     }
     fn affected_keys(
@@ -505,7 +505,7 @@ impl View for AgentView {
             .optional()?;
         let changed = old.as_deref() != Some(&next);
         if changed {
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h050679df3f91 owner=st3_store::store::agent_view TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_agent_harness_rows VALUES(?1,?2) ON CONFLICT(subject) DO UPDATE SET observed=excluded.observed",params![key,next])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h78f68e820943 owner=fractal_store::store::agent_view TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_agent_harness_rows VALUES(?1,?2) ON CONFLICT(subject) DO UPDATE SET observed=excluded.observed",params![key,next])?;
         }
         Ok(Some(changed))
     }

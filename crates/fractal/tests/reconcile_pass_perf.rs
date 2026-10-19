@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
-use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use tokio::sync::Notify;
 
 /// A runtime in which every member the reconciler starts keeps running.
@@ -52,7 +52,7 @@ impl RuntimeControl for Started {
     fn observe_exec(&self, _: &str) -> Result<Option<RuntimeObservation>> {
         Ok(None)
     }
-    fn start(&self, member: &st3::model::MemberSpec) -> Result<()> {
+    fn start(&self, member: &fractal_daemon::model::MemberSpec) -> Result<()> {
         let mut running = self.running.lock().unwrap();
         let incarnation = format!("{}:2026-10-01T00:00:00.000Z", 1000 + running.len());
         running.insert(
@@ -105,10 +105,10 @@ fn thread_cpu_ms() -> f64 {
 fn quiet_reconcile_passes_on_a_store_copy() {
     // With ST3_PROFILE_DIR set, the file profiler writes each reconcile section's time to
     // totals.json there.
-    st3::profile::init_from_env();
+    fractal_daemon::profile::init_from_env();
     let path = PathBuf::from(std::env::var("ST3_PERF_STORE").expect("set ST3_PERF_STORE"));
     let node = std::env::var("ST3_PERF_NODE").expect("set ST3_PERF_NODE to the member's node name");
-    let store = Arc::new(st3::store::Store::open(&path, node.clone()).unwrap());
+    let store = Arc::new(fractal_daemon::store::Store::open(&path, node.clone()).unwrap());
     // The member's running runtimes, as `/v1/client/runtimes` lists them, so passes see the same
     // incarnations its seats report harness state for.
     let runtime = Started::default();
@@ -167,23 +167,23 @@ fn quiet_reconcile_passes_on_a_store_copy() {
             })
             .collect::<BTreeMap<_, _>>()
     };
-    let before = queries(&st3::performance::snapshot());
+    let before = queries(&fractal_daemon::performance::snapshot());
     let passes = 10;
     let mut wall = Vec::new();
     let mut cpu = Vec::new();
     for _ in 0..passes {
         let started = Instant::now();
         let cpu_started = thread_cpu_ms();
-        st3::profile::task("task reconcile-pass", || reconciler.reconcile_once()).unwrap();
+        fractal_daemon::profile::task("task reconcile-pass", || reconciler.reconcile_once()).unwrap();
         cpu.push(thread_cpu_ms() - cpu_started);
         wall.push(started.elapsed().as_secs_f64() * 1000.0);
     }
-    let after = queries(&st3::performance::snapshot());
+    let after = queries(&fractal_daemon::performance::snapshot());
     // The loop reads the next deadline after every pass.
     let mut deadline_cpu = Vec::new();
     for _ in 0..passes {
         let cpu_started = thread_cpu_ms();
-        st3::profile::task("task reconcile-deadline", || reconciler.next_deadline());
+        fractal_daemon::profile::task("task reconcile-deadline", || reconciler.next_deadline());
         deadline_cpu.push(thread_cpu_ms() - cpu_started);
     }
     println!(

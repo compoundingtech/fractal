@@ -7,9 +7,9 @@ async fn inventories_follow_sources_switch_periods_leave_and_reconnect_over_a_re
     let mut state = test_state(root.path());
     state.native_session_home = Some(root.path().join("native"));
     std::fs::create_dir_all(state.native_session_home.as_ref().unwrap()).unwrap();
-    let app = st3::api::router(state);
+    let app = fractal_daemon::api::router(state);
     let served = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     let client = Client::unix_as(&socket, "person/avery");
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.capabilities().await.is_err() {

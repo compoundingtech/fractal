@@ -368,7 +368,7 @@ step "approval" {
 
 #[test]
 fn feedback_gate_example_requires_a_worker_step() {
-    let source = /* sqlite-large-value: allow-for-now lv-h0780e24f058f owner=st3_store::store::mission_model_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/human-feedback.kdl");
+    let source = /* sqlite-large-value: allow-for-now lv-h19e1eda9242c owner=fractal_store::store::mission_model_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/human-feedback.kdl");
     let intent = crate::graph::parse_intent(source, "node").unwrap();
     let gate = &intent.missions["example/draft-feedback"].steps["draft"].gates[0];
     assert!(

@@ -5,12 +5,12 @@ use crate::PersonWorkStore;
 use super::*;
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
 use std::time::Instant;
-use st3_missions::store::shared_seats::*;
-use st3_missions::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
-use st3_missions::store::reconcile_work_context_shared_seats::*;
-use st3_missions::store::reconcile_work_context_shared_seats::{AFTER_OWNERS, AFTER_SUPPORT, MAX_SNAPSHOT_CALL_NS};
-use st3_missions::store::reconcile_work_context::tests_shared_seats::*;
-use st3_missions::store::reconcile_work_context::tests_shared_seats::{ACTOR, SEED, claim_for_handoff, handoff_to_peer, measured, oracle, parity};
+use fractal_missions::store::shared_seats::*;
+use fractal_missions::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+use fractal_missions::store::reconcile_work_context_shared_seats::*;
+use fractal_missions::store::reconcile_work_context_shared_seats::{AFTER_OWNERS, AFTER_SUPPORT, MAX_SNAPSHOT_CALL_NS};
+use fractal_missions::store::reconcile_work_context::tests_shared_seats::*;
+use fractal_missions::store::reconcile_work_context::tests_shared_seats::{ACTOR, SEED, claim_for_handoff, handoff_to_peer, measured, oracle, parity};
 
 
 pub fn fixture(count: usize) -> Store {
@@ -81,7 +81,7 @@ fn batched_work_metadata_matches_every_boundary_and_seeded_effective_state() {
                 };
                 connection
                     .execute(
-                        /* sqlite-large-value: allow-for-now lv-hf13f491de70d owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,lease_owner=?3,
+                        /* sqlite-large-value: allow-for-now lv-h696ec90fbf79 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,lease_owner=?3,
                     lease_incarnation='worker-one',lease_expires_at_unix_ms=?4,
                     blocked_reason=?5 WHERE subject=?1",
                         params![
@@ -105,7 +105,7 @@ fn batched_work_metadata_matches_every_boundary_and_seeded_effective_state() {
             store
                 .connection
                 .write()
-                .execute(&format!(/* sqlite-large-value: allow-for-now lv-h080b2134baa3 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET {column}=?1"), [value])
+                .execute(&format!(/* sqlite-large-value: allow-for-now lv-hd4b96831ed6a owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET {column}=?1"), [value])
                 .unwrap();
             parity(&store, ACTOR, at);
         }
@@ -156,7 +156,7 @@ fn batched_work_metadata_keeps_missing_rows_duplicates_and_errors() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-ha6b4c8421678 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body='not a mission'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hdfcc436ac55a owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body='not a mission'", [])
         .unwrap();
     for view in &original {
         let error = enrich_step_definition(&store.readers.get(), &mut view.clone()).unwrap_err();
@@ -170,13 +170,13 @@ fn batched_work_metadata_keeps_missing_rows_duplicates_and_errors() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h4c3fd708fa21 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1", [old_body])
+        .execute(/* sqlite-large-value: allow-for-now lv-ha4acc538494f owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1", [old_body])
         .unwrap();
     parity(&store, ACTOR, at);
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h8ed2565d13ab owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_revisions", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hfce78351fd93 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_revisions", [])
         .unwrap();
     parity(&store, ACTOR, at);
 }
@@ -197,7 +197,7 @@ fn batched_work_metadata_reads_new_owner_and_definition_on_each_call() {
     }
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hb838a026a1f5 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1",
+            /* sqlite-large-value: allow-for-now lv-hbcc16bdc817e owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1",
             [serde_json::to_string(&mission).unwrap()],
         )
         .unwrap();
@@ -215,7 +215,7 @@ fn batched_work_metadata_reads_new_owner_and_definition_on_each_call() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-he6ec2a85116c owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET status='completed'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h4c2c3d1a32da owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET status='completed'", [])
         .unwrap();
     assert!(
         parity(&store, ACTOR, at)
@@ -283,7 +283,7 @@ fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
         drop(connection);
         let at = now_ms();
         store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h939ee01d6f5f owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE kind IN ('work.person-done','work.person-cancelled')",
+            /* sqlite-large-value: allow-for-now lv-h7e8ac599e41d owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE kind IN ('work.person-done','work.person-cancelled')",
             [(at + 10_000).to_string()],
         ).unwrap();
         // Unlike handoff, the existing response helper has no clock filter: an admitted
@@ -299,7 +299,7 @@ fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
             .unwrap();
 
         store.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h94be986b832c owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.origin_step','step-run/another-origin') WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h503f5092bdb7 owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.origin_step','step-run/another-origin') WHERE id=?1",
             [&request.id],
         ).unwrap();
         let moved_origin = parity(&store, &input.actor, at);
@@ -314,7 +314,7 @@ fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hfc509560cc4e owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h3b7ad1f6ed2e owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?2 WHERE id=?1",
                 params![request.id, serde_json::to_string(&request.body).unwrap()],
             )
             .unwrap();
@@ -322,7 +322,7 @@ fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
             .connection
             .write()
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hdfb83228b080 owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.origin_attempt',?2) WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-hae4d3f0b993c owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.origin_attempt',?2) WHERE id=?1",
                 params![request.id, 99],
             )
             .unwrap();
@@ -339,7 +339,7 @@ fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
         store
             .connection
             .write()
-            .execute(/* sqlite-large-value: allow-for-now lv-he1f809cb3a50 owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE kind='work.person-asked'", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-ha4877394cb2e owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE kind='work.person-asked'", [])
             .unwrap();
         let orphaned = parity(&store, &input.actor, now_ms());
         assert!(orphaned.iter().all(|view| view.person_answers.is_empty()));
@@ -409,7 +409,7 @@ fn batched_work_metadata_plan_seeks_run_generation_root_and_definition() {
     let connection = store.readers.get();
     for query in [OWNERS, DEFINITIONS, PHASES, SUPPORT] {
         let plan = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-hd17ac645a062 owner=st3_seats::store::reconcile_work_context::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-h0f4af853a427 owner=fractal_seats::store::reconcile_work_context::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap()
             .query_map(["[]"], |row| row.get::<_, String>(3))
             .unwrap()
@@ -537,7 +537,7 @@ fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-hae2d82758c51 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h1018d0cd7313 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining'", [])
         .unwrap();
     let draining = parity(&store, ACTOR, now_ms());
     assert!(draining.iter().any(|view| view.subject == carried.subject));
@@ -545,7 +545,7 @@ fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-he9ed06879248 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase=?1", [&original_phase])
+        .execute(/* sqlite-large-value: allow-for-now lv-h341199aca241 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase=?1", [&original_phase])
         .unwrap();
     // Admission of an unreported verifying state retains the original claim/lease;
     // ordinary revision adoption emits its carried-claimant evidence.
@@ -634,10 +634,10 @@ fn batched_work_metadata_snapshot_survives_second_writer_and_next_call_sees_clai
         {
             let connection = writer_store.connection.write();
             connection
-                .execute(/* sqlite-large-value: allow-for-now lv-habf1eee3406a owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1", [updated])
+                .execute(/* sqlite-large-value: allow-for-now lv-h5e1685ffb0b5 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1", [updated])
                 .unwrap();
             connection
-                .execute(/* sqlite-large-value: allow-for-now lv-hdef476087abd owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining'", [])
+                .execute(/* sqlite-large-value: allow-for-now lv-h46051a18a31a owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining'", [])
                 .unwrap();
         }
         // An actual admitted state claim also lands while the older read snapshot is pinned.
@@ -714,7 +714,7 @@ fn batched_work_support_keeps_handoff_attempt_clock_and_orphan_ack_inputs() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h34598b58a55c owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hd770c22e3911 owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
             params![release.id, (at + 1).to_string()],
         )
         .unwrap();
@@ -728,12 +728,12 @@ fn batched_work_support_keeps_handoff_attempt_clock_and_orphan_ack_inputs() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h93a1bc25105e owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hc66100c88ce6 owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
             params![release.id, at.to_string()],
         )
         .unwrap();
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h32dde83b636c owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.progress' AND json_extract(body,'$.fields.handoff_acknowledged') IS NOT NULL",
+        /* sqlite-large-value: allow-for-now lv-h539605b8dc87 owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.progress' AND json_extract(body,'$.fields.handoff_acknowledged') IS NOT NULL",
         params![subject, (at + 1).to_string()],
     ).unwrap();
     let unacknowledged = parity(&store, PEER, at);
@@ -753,7 +753,7 @@ fn batched_work_support_keeps_handoff_attempt_clock_and_orphan_ack_inputs() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h78ec04cc499a owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-ha5007d290e96 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
             params![subject, (at - 1).to_string()],
         )
         .unwrap();
@@ -761,7 +761,7 @@ fn batched_work_support_keeps_handoff_attempt_clock_and_orphan_ack_inputs() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hdc394010d752 owner=st3_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.attempt',?2) WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hf22a2e666443 owner=fractal_seats::store::reconcile_work_context::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.attempt',?2) WHERE id=?1",
             params![release.id, initial[0].attempt + 1],
         )
         .unwrap();
@@ -859,7 +859,7 @@ fn batched_work_support_query_errors_refuse_the_whole_read() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-hd29e027422f0 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_person_ask_origin_step_index", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hb23b09997f8d owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_person_ask_origin_step_index", [])
         .unwrap();
     let error = read(&store, ACTOR, now_ms()).unwrap_err();
     assert!(error.to_string().contains("no such index"), "{error}");
@@ -1037,7 +1037,7 @@ fn batched_work_definition_index_preserves_nested_display_order_and_first_match(
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h999434503d1c owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1",
+            /* sqlite-large-value: allow-for-now lv-h29c67486ee08 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1",
             [serde_json::to_string(&mission).unwrap()],
         )
         .unwrap();
@@ -1057,7 +1057,7 @@ fn batched_work_metadata_registers_candidates_before_visibility_filtering() {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h18e638dfbb01 owner=st3_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining'", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hce4cde95c3d0 owner=fractal_seats::store::reconcile_work_context::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining'", [])
         .unwrap();
     let (old, old_keys) = smallclaims::touched::record(|| oracle(&store, ACTOR, at).unwrap());
     let (new, new_keys) = smallclaims::touched::record(|| read(&store, ACTOR, at).unwrap());

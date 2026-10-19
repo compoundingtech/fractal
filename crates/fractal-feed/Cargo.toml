@@ -1,5 +1,5 @@
 [package]
-name = "st3-feed"
+name = "fractal-feed"
 version = "0.1.0"
 edition = "2024"
 description = "Smalltalk live collection feed, reconnecting subscriptions and read-only snapshots"
@@ -7,8 +7,8 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
-st3-client = { path = "../st3-client" }
-st3-conversation-ui = { path = "../st3-conversation-ui" }
+fractal-client = { path = "../fractal-client" }
+fractal-conversation-ui = { path = "../fractal-conversation-ui" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 uuid = { version = "1", features = ["v7"] }
 serde = { version = "1", features = ["derive"] }

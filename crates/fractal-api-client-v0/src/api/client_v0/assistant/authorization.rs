@@ -5,8 +5,8 @@ use axum::extract::OriginalUri;
 use axum::http::HeaderMap;
 use smallclaims::hash::canonical_json_text;
 use super::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES};
-pub use st3_api_core::api::client_v0::assistant::authorization::*;
-pub use st3_api_core::api::client_v0::assistant::authorization::{ReadReceipt, ReadTrust, ReadTrustRequest, finish, pin, read, route};
+pub use fractal_api_core::api::client_v0::assistant::authorization::*;
+pub use fractal_api_core::api::client_v0::assistant::authorization::{ReadReceipt, ReadTrust, ReadTrustRequest, finish, pin, read, route};
 #[cfg(test)]
 #[path = "authorization_tests.rs"]
 mod tests;

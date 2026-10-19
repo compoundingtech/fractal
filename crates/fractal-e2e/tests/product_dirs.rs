@@ -1,7 +1,7 @@
-use st3_client::{device, discover_unix_endpoint};
+use fractal_client::{device, discover_unix_endpoint};
 
 mod tests {
-    use st3_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
+    use fractal_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
     use std::path::PathBuf;
 
     #[test]
@@ -12,22 +12,22 @@ mod tests {
             let selected = std::env::var("ST_PRODUCT_DIRS_TEST_SELECTED").unwrap();
             let config_dir = root.join("config").join(&selected);
             let state_dir = root.join("state").join(&selected);
-            assert_eq!(st3::config::Config::default_path(), config_dir.join("config.toml"));
-            assert_eq!(st3::config::Config::default().state_dir, state_dir);
+            assert_eq!(fractal_daemon::config::Config::default_path(), config_dir.join("config.toml"));
+            assert_eq!(fractal_daemon::config::Config::default().state_dir, state_dir);
             assert_eq!(
                 crate::discover_unix_endpoint(None).unwrap(),
-                st3::config::Config::default().socket
+                fractal_daemon::config::Config::default().socket
             );
             assert_eq!(
                 crate::device::profile_path().unwrap(),
                 config_dir.join("stui-devices.json")
             );
-            let path = st3::config::Config::default_path();
-            st3::config::Config::default().initialize_install_config(&path).unwrap();
-            assert_eq!(st3::config::Config::load(None).unwrap().state_dir, state_dir);
+            let path = fractal_daemon::config::Config::default_path();
+            fractal_daemon::config::Config::default().initialize_install_config(&path).unwrap();
+            assert_eq!(fractal_daemon::config::Config::load(None).unwrap().state_dir, state_dir);
             assert_eq!(
                 crate::discover_unix_endpoint(None).unwrap(),
-                st3::config::Config::default().socket
+                fractal_daemon::config::Config::default().socket
             );
             return;
         }
