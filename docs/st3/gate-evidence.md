@@ -760,6 +760,10 @@ host-signed local note (its command is the `nix develop ...` line `scripts/st-te
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
 `host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+A level's rule may also say `"lane": true` (default false): that level's notes are then held to the lane of the check in
+`.st/required-lanes.json` at the same accepted base as the policy, exactly as `--lanes-from` holds any note: the tree must not change
+the lane's definition paths (`definition_changed`) and the note must carry that base's `lane_definition_sha256` (`wrong_definition`); a base
+without a lane for the check refuses such a note (`no_lane`). Other levels are unaffected. The `agent` level (below) uses it.
 
 ### Requiring a signed note (`require`, shadow only so far)
 
@@ -888,6 +892,26 @@ code. This is cooperative trust in the host. It is bounded: a record is keyed to
 record too, the latest record decides, the merge queue still tests the integrated tree (a host-signed note never
 covers it), and sampled real runs compare a note with the job. The root-installed, hash-pinned signer
 (`scripts/evidence-sign` behind a `sekrets` grant) stays supported for a host that wants it.
+
+### Agent keys
+
+Agents push signatures (Nathan, 2026-10-19). An agent signing account has its own key and its own principal, `agent/ALIAS`, made by
+`scripts/evidence-keygen --level agent --name ALIAS` under that account (the alias is invented, never a seat or host name; keep the
+alias-to-account mapping private). Its line goes into `.st/evidence-keys` with a pull request, like a host key, and is read from the
+accepted base, so a change can never vouch for its own key. The skip policy admits `agent` exactly where it admits `host` (the `wrapper`
+kind of `genie-freshness` and `typescript-client`, the `scripts/st-test` command, `pull_request` only, never `observed` and never the merge
+queue) with one addition, `"lane": true`: an agent note must be signed against the lane definition of the accepted base, so a tree that
+edits the lane's own scripts never skips on an agent's note. The trust is still cooperative (the key's account runs the code it signs
+for); what the separate level adds is the lane binding and revocation per account: deleting one `agent/...` line from `.st/evidence-keys`
+on main stops every note that key signed from counting, for the next run after that change merges, without touching any other agent or
+host. Revocation needs no ref deletion: the notes stay, they simply no longer verify.
+
+Who can push the notes: no repository ruleset covers `refs/notes/*` (the only ruleset protects the default branch), so any identity with
+write access, including an agent seat using the operator's credential, can create, move or delete `refs/notes/evidence/*`. Creating a
+ref cannot forge evidence (a record counts only with a trusted signature and the right tree, check, command and inputs). Deleting one
+can: if a newer failing record of a tree were deleted, an older passing record would decide again. That is the same write-access boundary
+as editing a workflow, and it is why sampling stays on, the merge queue still tests the combined tree, and the gate's decision line names
+the record it used.
 
 ### Running the checks locally (`scripts/st-test`)
 

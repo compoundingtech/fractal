@@ -1088,6 +1088,69 @@ class LaneDefinitions(unittest.TestCase):
         self.assertEqual((code, json.loads(out)['reason']), (1, 'error'))
 
 
+    # ---- a signer level held to its lane (by_level "lane": true): the agent level --------------------------------------
+
+    def agent_policy(self, lane=True):
+        level = {'command': ['make', 'test'], 'events': ['pull_request']}
+        if lane is not None:
+            level['lane'] = lane
+        return json.dumps({'version': 1, 'checks': {'unit': {'trust_levels': ['machine'], 'kinds': {'wrapper': {
+            'command': ['make', 'test'], 'trust_levels': ['machine', 'agent'], 'by_level': {'agent': level}}}}}})
+
+    def agent_cli(self, tree, base):
+        code, out, _ = self.f.cli('--tree', tree, '--check', 'unit', '--keys', str(self.f.root / 'allowed-signers'),
+                                  '--policy-from', base, '--repository', 'org/repo')
+        return code, json.loads(out)
+
+    def test_an_agent_note_counts_only_with_the_base_lane_digest_and_an_unchanged_definition(self):
+        agent = self.f.key('agent', 'agent/seat-one')
+        base, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy()})
+        digest = evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', base + '^{tree}'),
+                                                 self.f.git('rev-parse', base + '^{tree}'), self.rules())['sha256']
+        commit, tree = self.files({'src/code.rs': 'agent change\n'})
+
+        def agent_note(inputs, seconds):
+            return self.f.note(commit, tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'), inputs=inputs, seconds=seconds)
+
+        agent_note({}, 1)
+        self.assertEqual(self.agent_cli(tree, base)[1]['reason'], 'wrong_definition')  # no digest: not signed against the lane
+        agent_note({'lane_definition_sha256': 'f' * 64}, 2)
+        self.assertEqual(self.agent_cli(tree, base)[1]['reason'], 'wrong_definition')
+        agent_note({'lane_definition_sha256': digest}, 3)
+        code, result = self.agent_cli(tree, base)
+        self.assertEqual((code, result['trust_level'], result['events']), (0, 'agent', ['pull_request']), result)
+        # The same note on a tree that edits the lane's own scripts is refused: the change edits its checker.
+        changed, changed_tree = self.files({'scripts/run.sh': 'edited by the change\n'})
+        self.f.note(changed, changed_tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'),
+                    inputs={'lane_definition_sha256': digest}, seconds=4)
+        self.assertEqual(self.agent_cli(changed_tree, base)[1]['reason'], 'definition_changed')
+
+    def test_lane_binding_applies_to_its_level_only_and_needs_a_lane_at_the_base(self):
+        agent = self.f.key('agent', 'agent/seat-one')
+        base, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy()})
+        commit, tree = self.files({'src/code.rs': 'two levels\n'})
+        # A machine-level note is not held to the lane: no digest needed, exactly as before.
+        self.f.note(commit, tree, self.ci, 'machine/ci1', runner='wrapper', command=('make', 'test'), seconds=1)
+        code, result = self.agent_cli(tree, base)
+        self.assertEqual((code, result['trust_level']), (0, 'machine'), result)
+        # A base with the policy but no lane for the check: an agent note is refused, never accepted unbound.
+        no_lane, _ = self.files({'.st/required-lanes.json': json.dumps({'version': 1, 'lanes': {}})})
+        commit, tree = self.files({'src/code.rs': 'no lane\n'})
+        self.f.note(commit, tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'),
+                    inputs={'lane_definition_sha256': 'a' * 64}, seconds=2)
+        self.assertEqual(self.agent_cli(tree, no_lane)[1]['reason'], 'no_lane')
+        # Without lane: true the same level would not be held to it (the switch is what makes the difference).
+        unbound, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy(lane=None)})
+        self.assertEqual(self.agent_cli(tree, unbound)[0], 0)
+
+    def test_by_level_lane_must_be_a_boolean(self):
+        for bad in ('yes', 1, None, []):
+            doc = json.loads(self.agent_policy())
+            doc['checks']['unit']['kinds']['wrapper']['by_level']['agent']['lane'] = bad
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as raised:
+                evidence_verify.policy_rules(json.dumps(doc), 'unit', 'org/repo')
+            self.assertEqual(raised.exception.reason, 'error')
+
 class CommittedPolicy(unittest.TestCase):
     """The policy file in this repository, parsed by the same code the gate runs."""
 
@@ -1202,10 +1265,19 @@ class CommittedPolicy(unittest.TestCase):
                 if 'host' in (rule.get('trust_levels') or []) or 'host' in (rule.get('by_level') or {}):
                     with_host[(check, kind)] = rule
             self.assertNotIn('host', entry['trust_levels'], check)  # never the check's own list, so never `observed`
+            self.assertNotIn('agent', entry['trust_levels'], check)
+            for kind, rule in entry['kinds'].items():
+                if 'agent' in (rule.get('trust_levels') or []):
+                    self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
         self.assertEqual(sorted(with_host), [('genie-freshness', 'wrapper'), ('typescript-client', 'wrapper')])
         for (check, kind), rule in with_host.items():
-            self.assertEqual(rule['trust_levels'], ['fleet', 'host'], check)
+            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent'], check)
             override = rule['by_level']['host']
+            self.assertFalse(override.get('lane', False), check)  # a host note is not held to the lane (cooperative machine trust)
+            # The agent level: the host's rule exactly, plus the lane binding, and nowhere else.
+            agent = dict(rule['by_level']['agent'])
+            self.assertIs(agent.pop('lane'), True, check)
+            self.assertEqual(agent, override, check)
             self.assertEqual(override['events'], ['pull_request'], check)
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
             self.assertEqual(policy['checks'][check].get('enforce', False), False, check)
@@ -1268,7 +1340,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
             # No weaker signer is admitted, except the host level for exactly two checks (see the test for the host level).
             host_checks = ('genie-freshness', 'typescript-client')
-            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host') if check in host_checks else None, check)
+            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in host_checks else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
 
 
