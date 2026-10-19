@@ -267,6 +267,8 @@
           "--exclude"
           "st3-api"
           "--exclude"
+          "st3-api-mailbox"
+          "--exclude"
           "st3-client"
           "--exclude"
           "st3-client-codegen"
@@ -501,6 +503,8 @@
             "st3-reconcile"
             "-p"
             "st3-api"
+            "-p"
+            "st3-api-mailbox"
             "-p"
             "st3-client"
             "-p"
@@ -980,6 +984,11 @@
           };
           pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
+        checks.st3-check-input-isolation =
+          assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
+          # Native check inputs must not contribute to the installed package identity.
+          assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
+          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
