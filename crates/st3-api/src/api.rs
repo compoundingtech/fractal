@@ -60,42 +60,20 @@ pub use crate::store::agent_queue_values::{
     AGENT_QUEUE_FIELDS, agent_queue_fields, agent_queue_metadata,
 };
 use crate::model::ClientReplicated;
-use crate::model::{
-    ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
-    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
-    ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer,
-    ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest,
-    DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord,
-    GateResultRequest, HumanReviewView, IntentInput, LaunchApproveAndStartRequest,
-    LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption,
-    LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest,
-    LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
-    MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
-    MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
-    MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView,
-    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec,
-    PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
-    PlanningProposalRequest, PlanningRevisionRequest,
-    PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
-    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse,
-    ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
-    ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
-    RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
-    RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
-    WorkRequest, WorkRetryRequest, WorkWakeRequest,
-};
+use crate::model::{ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput, ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer, ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest, DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord, GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest, LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption, LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest, LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt, MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest, MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest, MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView, OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec, PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningRevisionRequest, PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse, ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest, SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView, WorkRequest, WorkRetryRequest, WorkWakeRequest};
+#[cfg(test)]
+use crate::model::IntentInput;
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
-mod wire_names;
+pub mod wire_names;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
 mod message_bodies;
 mod client_adapters;
-mod client_presence;
 mod client_diagnostics;
+pub mod client_presence;
 pub mod client_v0;
 mod custom;
 use crate::delivery_presence;
@@ -112,7 +90,7 @@ pub mod mailbox;
 pub mod mail_backlog;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
-mod response_body;
+pub mod response_body;
 mod owned_sets;
 pub mod published_attention;
 pub use published_attention::start_attention_list;
@@ -126,7 +104,7 @@ pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
 mod directive_notes;
 mod request_latency;
 mod client_observations;
-mod terminal_view;
+pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
 #[cfg(target_os = "linux")]
@@ -145,7 +123,7 @@ mod legacy_handler_guard_tests;
 // them as family::handler.
 mod agents;
 pub mod client_reads;
-mod fleet;
+pub mod fleet;
 pub mod launches;
 pub mod messages;
 pub mod operations;
@@ -155,20 +133,16 @@ mod runs;
 pub mod sessions;
 pub mod work;
 // Other api code calls these handlers directly.
-use launches::{
-    approve_planning_session, cancel_planning_session, mission, preview_named_planning_candidate,
-    revise_planning_session, start_planning_session,
-};
-use messages::post_message_claim;
-use operations::{get_slo, get_slo_history};
-use records::post_review;
-use sessions::clear_context;
-use work::retry_work;
+
+
+
+
+
+
 // The tests call these handlers directly.
 #[cfg(test)]
 use client_reads::{
-    client_agents, client_agents_detail, client_history, client_history_detail,
-    client_launches_detail, client_work,
+    client_agents, client_agents_detail, client_history, client_history_detail, client_work,
 };
 #[cfg(test)]
 use operations::events;
@@ -209,17 +183,17 @@ pub struct AppState {
 }
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
-const CLIENT_API_VERSION: &str = "st3.client.v0";
-const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
-const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
-const CLIENT_MAX_PAGE_ITEMS: usize = 200;
-const CLIENT_MAX_RESPONSE_BYTES: usize = 1_048_576;
+pub const CLIENT_API_VERSION: &str = "st3.client.v0";
+pub const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
+pub const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
+pub const CLIENT_MAX_PAGE_ITEMS: usize = 200;
+pub const CLIENT_MAX_RESPONSE_BYTES: usize = 1_048_576;
 // Keep complete result sets briefly so fleet writes cannot reorder or invalidate a traversal.
 // Cursors expire after this bounded window or if the daemon restarts/evicts their snapshot.
-const CLIENT_PAGE_TTL_MS: u128 = 300_000;
+pub const CLIENT_PAGE_TTL_MS: u128 = 300_000;
 const CLIENT_PAGE_CACHE_CAPACITY: usize = 32;
 
-struct CachedClientPage {
+pub struct CachedClientPage {
     snapshot_id: String,
     collection: String,
     items_digest: String,
@@ -250,14 +224,14 @@ impl ClientTransportBoundary {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientSnapshot {
-    id: String,
+    pub id: String,
     host_id: String,
-    store_index: u64,
+    pub store_index: u64,
     projection_version: String,
-    created_at: String,
+    pub created_at: String,
     /// For rows a background refresher folded: when it published them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    published_at: Option<String>,
+    pub published_at: Option<String>,
 }
 
 /// A client page and the snapshot it was read in, which the envelope names.
@@ -265,52 +239,52 @@ pub type ClientPageResponse = (Extension<ClientSnapshot>, Json<ClientResourcePag
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ClientListQuery {
-    limit: Option<usize>,
-    cursor: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
     #[serde(default)]
-    history: bool,
-    person: Option<String>,
-    actor: Option<String>,
-    owner_run: Option<String>,
-    status: Option<String>,
+    pub history: bool,
+    pub person: Option<String>,
+    pub actor: Option<String>,
+    pub owner_run: Option<String>,
+    pub status: Option<String>,
     #[serde(default)]
-    owner: Option<String>,
+    pub owner: Option<String>,
     #[serde(default)]
-    state: Option<String>,
+    pub state: Option<String>,
     #[serde(default)]
-    native_only: bool,
+    pub native_only: bool,
     /// Agents and current work: wait briefly for a roster, or a work list, at least as new as this
     /// request, rather than answering at once from the newest published one. Agents skip the wait
     /// when the latest roster refresh failed and none is in flight.
     #[serde(default)]
-    fresh: bool,
+    pub fresh: bool,
     /// Agents: wait for publication of this host-local mutation store_index, not the head.
-    min_cut: Option<u64>,
+    pub min_cut: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct ClientPageCursor {
-    snapshot: ClientSnapshot,
-    collection: String,
-    offset: usize,
-    limit: usize,
-    history: bool,
-    person: Option<String>,
-    actor: Option<String>,
-    owner_run: Option<String>,
-    status: Option<String>,
+pub struct ClientPageCursor {
+    pub snapshot: ClientSnapshot,
+    pub collection: String,
+    pub offset: usize,
+    pub limit: usize,
+    pub history: bool,
+    pub person: Option<String>,
+    pub actor: Option<String>,
+    pub owner_run: Option<String>,
+    pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner: Option<String>,
+    pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    state: Option<String>,
+    pub state: Option<String>,
     #[serde(default)]
-    native_only: bool,
-    items_digest: String,
+    pub native_only: bool,
+    pub items_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    before_index: Option<u64>,
+    pub before_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    after_key: Option<(u128, String)>,
-    expires_at_unix_ms: u128,
+    pub after_key: Option<(u128, String)>,
+    pub expires_at_unix_ms: u128,
 }
 
 pub fn signal_changed(state: &AppState) {
@@ -369,10 +343,10 @@ mod storage_contention_response_tests;
 
 #[derive(Debug)]
 pub struct ApiError {
-    status: StatusCode,
-    code: String,
-    message: String,
-    details: Box<serde_json::Map<String, Value>>,
+    pub status: StatusCode,
+    pub code: String,
+    pub message: String,
+    pub details: Box<serde_json::Map<String, Value>>,
 }
 
 impl ApiError {
@@ -415,7 +389,7 @@ impl ApiError {
         }
     }
 
-    fn internal(error: impl std::fmt::Display + 'static) -> Self {
+    pub fn internal(error: impl std::fmt::Display + 'static) -> Self {
         let typed = &error as &dyn std::any::Any;
         if let Some(error) = typed.downcast_ref::<read_deadline::WorkError>()
             && let Some(error) = read_deadline::error(error) {
@@ -444,7 +418,7 @@ impl ApiError {
         }
     }
 
-    fn not_found(message: impl Into<String>) -> Self {
+    pub fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             code: "not-found".into(),
@@ -494,7 +468,7 @@ pub fn fabric_router_with(state: AppState, families: &[RouteFamily]) -> Router {
     router_for_transport(state, ClientTransportBoundary::FabricLoopback, families)
 }
 
-fn router_for_transport(state: AppState, transport: ClientTransportBoundary, families: &[RouteFamily]) -> Router {
+pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary, families: &[RouteFamily]) -> Router {
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -509,39 +483,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary, fam
         .route("/v1/notes", axum::routing::put(directive_notes::write))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
-        .route("/v1/client/arrangements", get(client_v0::arrangements::list))
-        .route(
-            "/v1/client/arrangements/{person_name}/{uuid}",
-            get(client_v0::arrangements::get),
-        )
-        .route("/v1/client/glasses", get(client_v0::glasses_list))
-        .route(
-            "/v1/client/glasses/{id}",
-            get(client_v0::glass_get)
-                .put(client_v0::glass_put)
-                .delete(client_v0::glass_delete),
-        )
-        .route(
-            "/v1/client/request-latency",
-            get(client_v0::request_latency),
-        )
         .route("/v1/client/observations", post(client_observations::report)
             .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
-        .route("/v1/client/documents/content", get(client_v0::document_get))
-        .route("/v1/client/usage", get(client_v0::usage_period))
-        .route("/v1/client/slo", get(client_v0::slo_list))
-        .route("/v1/client/slo/history", get(client_v0::slo_history))
         .route("/v1/client/mail-backlog", get(mail_backlog::get))
-        .route("/v1/client/clients", get(client_v0::clients_list))
-        .route(
-            "/v1/client/subject-definition",
-            get(client_v0::subject_definition),
-        )
-        .route("/v1/client/publication-definition", get(client_v0::publication_definition))
-        .route("/v1/client/now", get(client_v0::now))
-        .route("/v1/client/machines", get(client_v0::machines))
-        .route("/v1/client/hosts/{*id}", get(client_v0::host_repositories))
-        .route("/v1/client/devices", get(client_v0::devices))
         .route("/v1/client/attention", get(client_reads::client_attention))
         .route("/v1/client/attention/{*id}", get(client_reads::client_attention_detail))
         // The same rows under the name a person reads.
@@ -582,72 +526,11 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary, fam
         .route("/v1/client/change", get(changes::show))
         .route("/v1/client/work/{*id}", get(client_reads::client_work_detail))
         .route("/v1/client/agents", get(client_reads::client_agents))
-        .route("/v1/client/resources", get(client_v0::resources::list))
         .route("/v1/client/agents/{*id}", get(client_reads::client_agents_detail))
-        .route(
-            "/v1/client/agent-workspaces/{*id}",
-            get(client_v0::agent_workspace),
-        )
-        .route(
-            "/v1/client/agent-declarations/{*id}",
-            get(client_v0::agent_declaration),
-        )
-        .route("/v1/client/agent-queues/{*id}", get(client_v0::agent_queue))
-        .route("/v1/client/status-history/{*id}", get(client_v0::status_history))
-        .route("/v1/client/lanes", get(client_v0::lanes))
-        .route("/v1/client/lanes/{*id}", get(client_v0::lane_detail))
         .route("/v1/client/history", get(client_reads::client_history))
         .route("/v1/client/history/{*id}", get(client_reads::client_history_detail))
-        .route(
-            "/v1/client/conversations/search",
-            get(client_v0::search::search),
-        )
-        .route(
-            "/v1/client/conversations/{id}/content/{reference}/chunk",
-            get(client_v0::conversation_blocks::chunk),
-        )
         .route("/v1/client/sessions", get(client_reads::client_sessions))
         .route("/v1/client/sessions/{*id}", get(client_reads::client_sessions_detail))
-        .route(
-            "/v1/client/conversations/{id}/changes",
-            get(client_v0::conversation_changes),
-        )
-        .route(
-            "/v1/client/conversations/{id}/stream",
-            get(client_v0::conversation_stream),
-        )
-        .route("/v1/client/missions", get(client_v0::missions))
-        .route("/v1/client/missions-tree", get(client_v0::missions_tree))
-        .route("/v1/client/missions/{*id}", get(client_v0::mission_detail))
-        .route("/v1/client/runtimes", get(client_v0::runtimes))
-        .route("/v1/client/runtimes/{*id}", get(client_v0::runtime_detail))
-        .route("/v1/client/observers", get(client_v0::observers))
-        .route(
-            "/v1/client/observers/{*id}",
-            get(client_v0::observer_detail),
-        )
-        .route("/v1/client/subscriptions", get(client_v0::subscriptions))
-        .route(
-            "/v1/client/subscriptions/{*id}",
-            get(client_v0::subscription_detail),
-        )
-        .route("/v1/client/terminals", get(client_v0::terminals))
-        .route("/v1/client/operations", get(client_v0::operations))
-        .route(
-            "/v1/client/operations/{*id}",
-            get(client_v0::operation_detail),
-        )
-        .route("/v1/client/events", get(client_v0::events))
-        .route(
-            "/v1/client/collections/stream",
-            get(client_v0::collection_stream),
-        )
-        .route("/v1/client/actions", post(client_v0::action))
-        .route("/v1/client/assistant/propose", post(client_v0::assistant::propose))
-        .route("/v1/client/assistant/attention-content", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/attention-rich", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/missions-rich", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/agents-rich", get(client_v0::assistant::read_projection))
         .route(
             "/v1/client/blobs",
             post(client_blobs::upload).layer(DefaultBodyLimit::max(client_blobs::UPLOAD_BODY_LIMIT)),
@@ -656,41 +539,6 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary, fam
         .route("/v1/client/blobs/{id}/chunk", get(client_blobs::chunk))
         .route("/v1/client/adapter/import", post(client_adapters::import_message))
         .route("/v1/client/adapter/deliveries", get(client_adapters::deliveries))
-        .route("/v1/client/pairings", post(client_v0::pairing_begin))
-        .route("/v1/client/assistant/grants/{id}", get(client_v0::assistant::inspect))
-        .route("/v1/client/assistant/grants/{id}/revoke", post(client_v0::assistant::revoke))
-        .route("/v1/client/assistant/grants/{id}/read-trust", post(client_v0::assistant::pin_read_trust))
-        .route("/v1/client/assistant/grants/assistant-grant/{id}", get(client_v0::assistant::inspect))
-        .route("/v1/client/assistant/grants/assistant-grant/{id}/revoke", post(client_v0::assistant::revoke))
-        .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(client_v0::assistant::pin_read_trust))
-        .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(client_v0::assistant::update_policy))
-        .route("/v1/client/assistant/summary", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/attention", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/missions", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/agents", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/conversation-content", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/terminal-content", get(client_v0::assistant::read_projection))
-        .route("/v1/client/assistant/grants/{id}/policy", post(client_v0::assistant::update_policy))
-        .route(
-            "/v1/client/pairings/{id}/complete",
-            post(client_v0::pairing_complete),
-        )
-        .route(
-            "/v1/client/terminals/{id}/screen",
-            get(client_v0::terminal_screen),
-        )
-        .route(
-            "/v1/client/terminals/{id}/stream",
-            get(client_v0::terminal_stream),
-        )
-        .route(
-            "/v1/client/terminals/{id}/raw-attachments",
-            post(client_v0::raw_terminal::attachment),
-        )
-        .route(
-            "/v1/client/terminals/{id}/raw-stream",
-            get(client_v0::raw_terminal::stream),
-        )
         .route("/v1/schema", get(schema))
         .route(
             "/v1/schema/registrations",
@@ -1452,7 +1300,7 @@ fn record_work_stage(stage: request_latency::WorkStage, elapsed: Duration) {
 fn record_roster_stage(stage: request_latency::RosterStage, elapsed: Duration) {
     // A poisoned diagnostic lock must not stop the refresher that records into it.
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_roster_stage(stage, elapsed);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     roster_stage_recorded().send_modify(|_| {});
 }
 
@@ -1463,7 +1311,7 @@ pub fn roster_stage_recorded() -> &'static tokio::sync::watch::Sender<()> {
     RECORDED.get_or_init(|| tokio::sync::watch::channel(()).0)
 }
 
-fn request_latency_snapshot() -> Vec<Value> {
+pub fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
@@ -1490,7 +1338,7 @@ fn asks_to_wait(query: &str) -> bool {
 
 /// How a completed request was served, for its target.
 #[derive(Clone, Copy, Default)]
-struct Served {
+pub struct Served {
     long_poll: bool,
     remote: bool,
 }
@@ -1621,13 +1469,13 @@ pub fn client_now_ms() -> u128 {
     now
 }
 
-fn client_snapshot_time(snapshot: &ClientSnapshot) -> u128 {
+pub fn client_snapshot_time(snapshot: &ClientSnapshot) -> u128 {
     chrono::DateTime::parse_from_rfc3339(&snapshot.created_at)
         .map(|time| u128::try_from(time.timestamp_millis()).unwrap_or_default())
         .unwrap_or_default()
 }
 
-fn new_client_snapshot(state: &AppState) -> ClientSnapshot {
+pub fn new_client_snapshot(state: &AppState) -> ClientSnapshot {
     let store_index = state.store.index().unwrap_or_default();
     client_snapshot_at(state, store_index)
 }
@@ -1644,9 +1492,24 @@ fn client_request_snapshot(
         .unwrap_or_else(|| new_client_snapshot(state))
 }
 
-fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot {
-    #[cfg(test)]
-    client_v0::observer_subscription_detail_tests::note_snapshot_construction(state);
+/// Snapshot constructions per store, counted by the observer/subscription detail tests.
+#[cfg(any(test, feature = "test-support"))]
+pub static SNAPSHOT_CONSTRUCTIONS: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn note_snapshot_construction(state: &AppState) {
+    if let Some(count) = SNAPSHOT_CONSTRUCTIONS
+        .lock()
+        .unwrap()
+        .get_mut(&(Arc::as_ptr(&state.store) as usize))
+    {
+        *count += 1;
+    }
+}
+
+pub fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot {
+    #[cfg(any(test, feature = "test-support"))]
+    note_snapshot_construction(state);
     client_snapshot_with_time(
         state,
         store_index,
@@ -1681,11 +1544,11 @@ fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) 
     }
 }
 
-fn client_host_id(node: &str) -> String {
+pub fn client_host_id(node: &str) -> String {
     format!("host/{}", node.replace(char::is_whitespace, "-"))
 }
 
-fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
+pub fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
     let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
         "error_version": "st3.client.error.v0",
@@ -1701,7 +1564,7 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
     envelope
 }
 
-fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
+pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
     // An ended list publishes nothing until the daemon restarts.
     if matches!(code, Some(published_lists::WORK_LIST_ENDED | client_v0::published_missions::ENDED | "runtime-list-ended")) {
         return false;
@@ -1740,7 +1603,7 @@ fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
     )
 }
 
-fn client_error_code(code: Option<&str>) -> String {
+pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
@@ -1859,7 +1722,7 @@ fn client_error_code(code: Option<&str>) -> String {
     }
 }
 
-fn encode_client_cursor(cursor: &ClientPageCursor) -> Result<String, ApiError> {
+pub fn encode_client_cursor(cursor: &ClientPageCursor) -> Result<String, ApiError> {
     let encoded = serde_json::to_vec(cursor).map_err(ApiError::internal)?;
     Ok(format!(
         "page/{}",
@@ -1867,7 +1730,7 @@ fn encode_client_cursor(cursor: &ClientPageCursor) -> Result<String, ApiError> {
     ))
 }
 
-fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> {
+pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> {
     let encoded = cursor.strip_prefix("page/").ok_or_else(|| ApiError {
         status: StatusCode::UNPROCESSABLE_ENTITY,
         code: "validation-failed".into(),
@@ -1898,7 +1761,7 @@ fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiErro
     }
 }
 
-fn client_page_expired(message: impl Into<String>) -> ApiError {
+pub fn client_page_expired(message: impl Into<String>) -> ApiError {
     ApiError {
         status: StatusCode::GONE,
         code: "page-cursor-expired".into(),
@@ -1907,7 +1770,7 @@ fn client_page_expired(message: impl Into<String>) -> ApiError {
     }
 }
 
-fn client_page(
+pub fn client_page(
     state: &AppState,
     snapshot: &ClientSnapshot,
     collection: &str,
@@ -1960,7 +1823,7 @@ fn client_timeline_page_end(
 /// A page of `items`, or of the cached first page a cursor continues. `pinned` says the items
 /// were read in `snapshot` itself, so a commit since then cannot have torn them; otherwise a
 /// first page is refused once the store has moved past the snapshot.
-fn client_page_read(
+pub fn client_page_read(
     state: &AppState,
     snapshot: &ClientSnapshot,
     collection: &str,
@@ -1974,7 +1837,7 @@ fn client_page_read(
 /// Assistant reads supply their real response context so packing includes the
 /// snapshot, request ID, sync notice and the continuation cursor. Other native
 /// lists retain their existing paging policy.
-fn client_page_read_bounded(
+pub fn client_page_read_bounded(
     state: &AppState,
     snapshot: &ClientSnapshot,
     collection: &str,
@@ -2247,7 +2110,7 @@ fn client_page_filters(collection: &str, query: &ClientListQuery) -> BTreeMap<St
 /// A page of `collection` whose first page `read` computes inside one SQLite snapshot. The page
 /// names that snapshot, so a commit that lands while it reads neither tears it nor refuses it;
 /// a later page comes from the first page's cache, as every cached page does.
-async fn client_snapshot_page<F>(
+pub async fn client_snapshot_page<F>(
     state: &AppState,
     snapshot: ClientSnapshot,
     collection: &'static str,
@@ -2278,7 +2141,7 @@ where
 
 /// A host catching up with a peer can show early history as current, and a host whose graph
 /// diverged from a peer's can show it wrong, so each page it serves says so and with whom.
-fn client_sync_notice(state: &AppState) -> Option<ClientSyncNotice> {
+pub fn client_sync_notice(state: &AppState) -> Option<ClientSyncNotice> {
     // Naming the peers reads the fleet view, so skip it on the usual page read.
     if !state.store.replication_catching_up() && !state.store.replication_diverged() {
         return None;
@@ -2331,7 +2194,7 @@ fn client_sync_notice(state: &AppState) -> Option<ClientSyncNotice> {
     })
 }
 
-fn client_detail_id(kind: &str, id: &str) -> String {
+pub fn client_detail_id(kind: &str, id: &str) -> String {
     if id.starts_with(&format!("{kind}/")) {
         id.to_owned()
     } else {
@@ -2339,7 +2202,7 @@ fn client_detail_id(kind: &str, id: &str) -> String {
     }
 }
 
-fn client_detail(items: Vec<Value>, kind: &str, id: &str) -> Result<Json<Value>, ApiError> {
+pub fn client_detail(items: Vec<Value>, kind: &str, id: &str) -> Result<Json<Value>, ApiError> {
     let id = if items
         .iter()
         .any(|item| item.get("id").and_then(Value::as_str) == Some(id))
@@ -2355,7 +2218,7 @@ fn client_detail(items: Vec<Value>, kind: &str, id: &str) -> Result<Json<Value>,
         .ok_or_else(|| ApiError::not_found(format!("{kind} `{id}` does not exist")))
 }
 
-async fn client_capabilities(
+pub async fn client_capabilities(
     State(state): State<AppState>,
     Extension(_snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<client_v0::ClientSession>,
@@ -2406,7 +2269,7 @@ async fn client_capabilities(
     })))
 }
 
-fn client_work_resources(
+pub fn client_work_resources(
     store: &Store,
     actor: Option<&str>,
     history: bool,
@@ -2532,7 +2395,7 @@ fn client_work_history_page_after(
 
 /// One work item, read and rendered alone. Rendering the whole history to pick one item
 /// enriched every step the store had ever run: seconds on a busy host's store.
-fn client_work_item(
+pub fn client_work_item(
     store: &Store,
     id: &str,
     actor: Option<&str>,
@@ -2706,7 +2569,7 @@ pub fn aggregate_usage<'a>(
     Ok(aggregate_usage_values(usages.iter().flatten()))
 }
 
-fn aggregate_usage_values<'a>(
+pub fn aggregate_usage_values<'a>(
     usages: impl Iterator<Item = &'a crate::model::UsageSummary>,
 ) -> Option<crate::model::UsageSummary> {
     let mut aggregate = None::<crate::model::UsageSummary>;
@@ -2772,7 +2635,7 @@ pub fn aggregate_usage_for_runs(
     )
 }
 
-fn client_agent_resources(
+pub fn client_agent_resources(
     store: &Store,
     history: bool,
     at: &str,
@@ -2783,7 +2646,7 @@ fn client_agent_resources(
     Ok(items)
 }
 
-fn client_agent_resources_cached(
+pub fn client_agent_resources_cached(
     store: &Store,
     history: bool,
     snapshot_index: u64,
@@ -2797,7 +2660,7 @@ fn client_agent_resources_cached(
 
 /// One agent's card for an exact agent selector, folded in its own projection rather than
 /// borrowed from the fleet roster.
-fn client_exact_agent_resources(
+pub fn client_exact_agent_resources(
     store: &Store,
     history: bool,
     snapshot_index: u64,
@@ -2818,7 +2681,7 @@ fn client_exact_agent_resources(
 
 // Freeze membership, ordering and the inexpensive declaration/queue metadata. The expensive
 // status, usage, fault and activity reductions are needed only for the returned page.
-fn client_agent_page_refs(store: &Store, history: bool, index: u64) -> anyhow::Result<Vec<Value>> {
+pub fn client_agent_page_refs(store: &Store, history: bool, index: u64) -> anyhow::Result<Vec<Value>> {
     store.cached_agent_page_refs(index, history, || client_agent_page_refs_uncached(store, history, index))
 }
 
@@ -2912,7 +2775,7 @@ fn client_agent_cards_for_page(
 
 /// The cards of `selected` agents at `index`, folding only those not already cached there.
 /// A `chunk` of a roster assembled in short folds refolds no card outside `selected`.
-fn client_agent_cards_selected(
+pub fn client_agent_cards_selected(
     store: &Store,
     history: bool,
     index: u64,
@@ -2980,7 +2843,7 @@ fn client_agent_cards_from_cached(
     Ok(ordered)
 }
 
-fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Result<()> {
+pub fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let subjects = items
             .iter()
@@ -3006,7 +2869,7 @@ pub const AUTHORITY_INDETERMINATE_REASON: &str =
 
 /// Live presentation of already folded cards: freshness, delivery presence, subagents, and the
 /// agent presentation that reads them (docs/clients/ui-contract.md, Agent).
-fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
+pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         for item in items.iter_mut() {
@@ -3060,12 +2923,12 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
 }
 
 /// How long a declared seat may take to show a running session before it is called down.
-const LAUNCH_WINDOW_MS: u64 = 120_000;
+pub const LAUNCH_WINDOW_MS: u64 = 120_000;
 
 /// How old a harness report may be and still show that the seat's driver is alive. A driver at an
 /// empty prompt reports every five minutes, so its report is older than the 90 s freshness window
 /// for most of every interval; two intervals and a minute of slack never call such a seat down.
-const HEARTBEAT_MS: u64 = 661_000;
+pub const HEARTBEAT_MS: u64 = 661_000;
 
 /// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
 /// none re-derives it.
@@ -3075,7 +2938,7 @@ const HEARTBEAT_MS: u64 = 661_000;
 /// idle report has lapsed). With no such report, a seat with a declaration and no session after its
 /// launch window is `down`, since the moment it began waiting, and the steps it holds say so
 /// (their progress was written by a holder that is not running).
-fn overlay_down(
+pub fn overlay_down(
     item: &mut Value,
     launch_since: Option<u64>,
     report_age_ms: Option<u64>,
@@ -3669,14 +3532,14 @@ fn desired_harness_driver(desired: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn managed_session_id(owner: &str, identity: &str) -> String {
+pub fn managed_session_id(owner: &str, identity: &str) -> String {
     let digest = hex::encode(Sha256::digest(format!("{owner}:{identity}").as_bytes()));
     format!("session/{}", &digest[..24])
 }
 
-type ManagedSessionOwner = (String, Option<String>, Option<String>);
+pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 
-fn managed_session_owner_at(
+pub fn managed_session_owner_at(
     store: &Store,
     snapshot_index: u64,
     session_id: &str,
@@ -3695,7 +3558,7 @@ fn managed_session_owner_at(
     })
 }
 
-fn managed_session_owner_for_subject_at(
+pub fn managed_session_owner_for_subject_at(
     store: &Store,
     snapshot_index: u64,
     session_id: &str,
@@ -3717,7 +3580,7 @@ fn managed_session_owner_for_subject_at(
 }
 
 
-fn client_session_resources(
+pub fn client_session_resources(
     store: &Arc<Store>,
     history: bool,
     at: &str,
@@ -3805,7 +3668,7 @@ fn external_session_resource(session: crate::external_sessions::ExternalSession)
     })
 }
 
-fn unresolved_session_resource(
+pub fn unresolved_session_resource(
     unresolved: crate::external_sessions::UnresolvedProcess,
     at: &str,
 ) -> Value {
@@ -4013,7 +3876,7 @@ fn insert_attention_target_states(
     Ok(())
 }
 
-fn client_attention_resources(
+pub fn client_attention_resources(
     store: &Store,
     person: Option<&str>,
     _history: bool,
@@ -4033,7 +3896,7 @@ pub fn client_attention_resources_at(
     client_attention_resources_from_items(store, current)
 }
 
-fn client_attention_resources_fenced_at(
+pub fn client_attention_resources_fenced_at(
     store: &Store,
     person: Option<&str>,
     at_unix_ms: u128,
@@ -4136,7 +3999,7 @@ fn client_attention_resources_from_items(
 }
 
 // Older client-v0 models use closed enums for attention kinds and action names.
-fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
+pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
     if custom_forms {
         return;
     }
@@ -4205,7 +4068,7 @@ fn client_attachment(attachment: &crate::model::MessageAttachment) -> Value {
     })
 }
 
-fn client_message_resources(
+pub fn client_message_resources(
     store: &Store,
     person: Option<&str>,
     history: bool,
@@ -4353,13 +4216,13 @@ fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now
     Ok(delivery)
 }
 
-fn launch_session_id(id: &str) -> &str {
+pub fn launch_session_id(id: &str) -> &str {
     id.strip_prefix("launch/")
         .or_else(|| id.strip_prefix("planning-session/"))
         .unwrap_or(id)
 }
 
-fn client_launch_decision_resources(
+pub fn client_launch_decision_resources(
     store: &Store,
     session: &PlanningSessionView,
 ) -> anyhow::Result<Vec<Value>> {
@@ -4861,7 +4724,7 @@ fn client_launch_resource(
     }))
 }
 
-fn client_launch_resources(state: &AppState, history: bool) -> anyhow::Result<Vec<Value>> {
+pub fn client_launch_resources(state: &AppState, history: bool) -> anyhow::Result<Vec<Value>> {
     let mut resources = state
         .store
         .planning_sessions(history)?
@@ -4879,7 +4742,7 @@ fn client_launch_resources(state: &AppState, history: bool) -> anyhow::Result<Ve
 
 /// Select a visible native session before rendering. A native ID may itself start with
 /// `launch/`; only if it is absent from this listing does the public-ID fallback apply.
-fn client_launch_detail_at(
+pub fn client_launch_detail_at(
     state: &AppState,
     id: &str,
     history: bool,
@@ -5103,7 +4966,7 @@ fn published_work_cursor(
     }
 }
 
-fn agent_roster_not_ready() -> ApiError {
+pub fn agent_roster_not_ready() -> ApiError {
     ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "agent-roster-not-ready".into(),
@@ -5170,7 +5033,7 @@ const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
 /// whose claims changed, and completion is tried again. Readers keep the previous complete
 /// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
 /// refresh fails and is tried again on the next request.
-fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
+pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
     store.begin_agent_roster_fault_retries(history);
     if store.read_snapshot(|index| store.agent_roster_current(index, history))? {
         return Ok(());
@@ -5207,7 +5070,7 @@ fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
 }
 
 /// Every current agent's refs, and the cards of as many as the largest window or page shows.
-fn client_agent_roster_head(store: &Store, index: u64) -> anyhow::Result<()> {
+pub fn client_agent_roster_head(store: &Store, index: u64) -> anyhow::Result<()> {
     let refs = client_agent_page_refs(store, false, index)?;
     let head = refs.iter().take(CLIENT_MAX_PAGE_ITEMS + 1)
         .filter_map(|reference| reference["id"].as_str().map(str::to_owned))
@@ -5402,7 +5265,7 @@ async fn wait_for_agent_roster_cut(store: &Arc<Store>, history: bool, wanted: u6
 }
 
 /// The snapshot of a roster published at `cut`: that cut, its time, and when it was folded.
-fn roster_snapshot(state: &AppState, cut: u64, published_at_unix_ms: u128) -> ClientSnapshot {
+pub fn roster_snapshot(state: &AppState, cut: u64, published_at_unix_ms: u128) -> ClientSnapshot {
     ClientSnapshot {
         published_at: Some(client_timestamp(published_at_unix_ms)),
         ..client_snapshot_at(state, cut)
@@ -5555,7 +5418,7 @@ async fn forward_client_read(
 }
 
 /// A read with no owner to send it to: this node has no relay, or no peer reaches the owner.
-fn remote_unavailable(host: &str) -> ApiError {
+pub fn remote_unavailable(host: &str) -> ApiError {
     let mut details = serde_json::Map::new();
     details.insert("reason".into(), "no-route".into());
     details.insert("owner_host_id".into(), host.into());
@@ -5571,7 +5434,7 @@ fn remote_unavailable(host: &str) -> ApiError {
 }
 
 /// A known dial-out owner syncs outward but has no inbound owner transport.
-fn remote_unavailable_for_owner(state: &AppState, host: &str) -> ApiError {
+pub fn remote_unavailable_for_owner(state: &AppState, host: &str) -> ApiError {
     let dial_out = if let Some(relay) = &state.client_relay {
         relay.is_dial_out_owner(host)
     } else {
@@ -5604,7 +5467,7 @@ fn attempt_hops(attempts: Option<&Value>) -> u64 {
     })
 }
 
-fn remote_read_error(host: &str, error: anyhow::Error) -> ApiError {
+pub fn remote_read_error(host: &str, error: anyhow::Error) -> ApiError {
     let rejected = match error.downcast::<crate::peer::ClientReadRejected>() {
         Ok(rejected) => rejected,
         Err(error) => crate::peer::ClientReadRejected::unreachable(
@@ -5672,7 +5535,7 @@ fn client_launch_session(state: &AppState, id: &str) -> Result<PlanningSessionVi
 
 /// A roster operation on a blocking worker. Its submission-to-start wait is recorded apart
 /// from its execution, and its reader timing is attributed, only when `traced`.
-fn roster_worker<T>(traced: bool, submitted: Option<Instant>, seed: Option<crate::otel::RosterAttributes>, work: impl FnOnce() -> T) -> T {
+pub fn roster_worker<T>(traced: bool, submitted: Option<Instant>, seed: Option<crate::otel::RosterAttributes>, work: impl FnOnce() -> T) -> T {
     if !traced {
         return work();
     }
@@ -5686,7 +5549,7 @@ fn roster_worker<T>(traced: bool, submitted: Option<Instant>, seed: Option<crate
 /// Blocking external work that does not borrow the live-store SQLite writer. Mutation polls
 /// yield while this runs, so provider/RPC/git waits retain no writer capacity.
 /// Keep this explicit: a callback that writes must use the admitted store path.
-async fn blocking_external<T, F>(operation: F) -> Result<T, ApiError>
+pub async fn blocking_external<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
@@ -5701,7 +5564,7 @@ where
     }).await.map_err(ApiError::internal)
 }
 
-async fn blocking_store<T, F>(operation: F) -> Result<T, ApiError>
+pub async fn blocking_store<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
@@ -5743,7 +5606,7 @@ where
 
 /// Run a handler's store work on a blocking thread, so a write waiting for the writer's next
 /// commit never holds an async worker that other requests need.
-async fn blocking_api<T, F>(operation: F) -> Result<T, ApiError>
+pub async fn blocking_api<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, ApiError> + Send + 'static,
@@ -5977,7 +5840,7 @@ async fn serve_unix_inner(socket: &Path, app: Router, bind_harness: bool) -> any
     serve_unix_with_ancestor(socket, None, app, bind_harness, harness_ancestor).await
 }
 
-async fn serve_unix_with_ancestor(
+pub async fn serve_unix_with_ancestor(
     socket: &Path,
     state_socket: Option<&Path>,
     app: Router,
@@ -6451,7 +6314,7 @@ fn record_legacy_poll(
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
-async fn guard_bound_request(
+pub async fn guard_bound_request(
     request: Request<Body>,
     bound_agent: Option<&str>,
 ) -> Result<Request<Body>, ApiError> {
@@ -6662,7 +6525,7 @@ fn descriptor_usage_check(soft: u64, hard: u64, usage: Option<u64>) -> DoctorChe
     }
 }
 
-fn first_readiness_scheduler_check(store: &Store, node: &str) -> DoctorCheck {
+pub fn first_readiness_scheduler_check(store: &Store, node: &str) -> DoctorCheck {
     let (status, message) = match store.open_reconcile_faults(node) {
         Ok(faults) => {
             let reasons = faults
@@ -7167,7 +7030,7 @@ fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
     })
 }
 
-fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
+pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
     let drift = state.store.operation_projection_drift();
     doctor_report_with_operation_drift(state, &drift)
 }
@@ -8228,7 +8091,7 @@ fn valid_launch_decision_response(
     }
 }
 
-fn mission_source(
+pub fn mission_source(
     state: &AppState,
     kdl: &str,
     at_index: Option<u64>,
@@ -8892,11 +8755,11 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
 
 #[derive(Deserialize)]
 pub struct SloHistoryQuery {
-    id: String,
-    since_ms: Option<u64>,
-    until_ms: Option<u64>,
+    pub id: String,
+    pub since_ms: Option<u64>,
+    pub until_ms: Option<u64>,
     /// How many equal steps to answer in; each holds its lowest reading.
-    steps: Option<usize>,
+    pub steps: Option<usize>,
 }
 
 fn default_claim_limit() -> usize {
@@ -9057,7 +8920,7 @@ pub fn accept_message(
 
 /// Accept one message, or find the one its idempotency key already sent. The receipt says which,
 /// so a client that repeats an unanswered send can say that nothing new was sent.
-fn accept_message_receipt(
+pub fn accept_message_receipt(
     state: &AppState,
     request: MessageSendRequest,
     session_id: Option<String>,
@@ -9066,7 +8929,7 @@ fn accept_message_receipt(
     accept_message_receipt_with_upload_owner(state, request, session_id, device_signature, None, None)
 }
 
-fn accept_message_receipt_with_upload_owner(
+pub fn accept_message_receipt_with_upload_owner(
     state: &AppState,
     request: MessageSendRequest,
     session_id: Option<String>,
@@ -9688,7 +9551,7 @@ fn scope_eval_desired_subjects(
     Ok(())
 }
 
-async fn start_mission_run_action(
+pub async fn start_mission_run_action(
     State(state): State<AppState>,
     Json(request): Json<MissionRunRequest>,
 ) -> Result<Json<MissionRunView>, ApiError> {
@@ -9776,7 +9639,7 @@ async fn get_revision_proposal(
         })
 }
 
-async fn approve_revision_proposal(
+pub async fn approve_revision_proposal(
     State(state): State<AppState>,
     AxumPath(proposal): AxumPath<String>,
     Json(request): Json<RevisionApprovalRequest>,
@@ -9794,7 +9657,7 @@ async fn approve_revision_proposal(
     Ok(Json(result))
 }
 
-async fn cancel_revision_proposal(
+pub async fn cancel_revision_proposal(
     State(state): State<AppState>,
     AxumPath(proposal): AxumPath<String>,
     Json(request): Json<RevisionCancelRequest>,
@@ -9871,8 +9734,8 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
 /// the agent its ancestry names.
 #[derive(Clone, Debug)]
 pub struct LocalPeer {
-    pid: u32,
-    ancestor: Option<String>,
+    pub pid: u32,
+    pub ancestor: Option<String>,
 }
 
 fn normalized_agent_actor(actor: &str) -> Option<String> {
@@ -9973,14 +9836,14 @@ async fn work_action_response(
 
 #[derive(Clone, Debug)]
 pub struct LiveSession {
-    runtime_id: String,
-    incarnation_id: String,
-    owner_host_id: String,
-    terminal: bool,
-    driver: Option<String>,
+    pub runtime_id: String,
+    pub incarnation_id: String,
+    pub owner_host_id: String,
+    pub terminal: bool,
+    pub driver: Option<String>,
 }
 
-fn live_session(
+pub fn live_session(
     state: &AppState,
     subject: &str,
     expected_incarnation: Option<&str>,
@@ -10055,7 +9918,7 @@ fn default_log_limit() -> usize {
     64 * 1024
 }
 
-async fn input_session_as(
+pub async fn input_session_as(
     state: &AppState,
     subject: String,
     request: SessionInputRequest,
@@ -10178,7 +10041,7 @@ async fn input_session_as(
     )
 }
 
-async fn signal_session_as(
+pub async fn signal_session_as(
     state: AppState,
     subject: String,
     request: SessionSignalRequest,
@@ -10426,7 +10289,7 @@ async fn host_agent_workspace(
     Ok(Json(json!({ "host_id": host_id, "workspace": workspace })))
 }
 
-fn normalize_message_party(value: &str) -> String {
+pub fn normalize_message_party(value: &str) -> String {
     if value == "requester" {
         "person/requester".into()
     } else if value.contains('/') {
@@ -10450,3 +10313,11 @@ mod message_bodies_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mailbox_tests_shared;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod read_deadline_tests_shared_client_v0_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_client_v0_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tile_endpoint_tests_shared_client_v0_tests;

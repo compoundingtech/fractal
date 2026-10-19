@@ -57,6 +57,62 @@ const errors = (frames: CollectionFrame[]) => frames.filter((frame) => frame.kin
 const screens = (frames: CollectionFrame[]) => frames.filter((frame) => frame.kind === 'screen')
 const event = <T extends SyncEvent>(value: T): T => value
 
+describe('WebSocket wire aliases', () => {
+  it('preserves protocol-free replay socket opens', () => {
+    const h = setup()
+    const opened = { value: false }
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    socket.onopen = () => { opened.value = true }
+    h.clock.advance(0)
+    expect(opened.value).toBe(true)
+  })
+
+  it.each(['st3', 'fractal'])('accepts %s collections and conversation protocols', (family) => {
+    for (const surface of ['collections', 'conversation']) {
+      const h = setup()
+      const opened = { value: false }
+      const socket = h.replay.socket(`ws://scenario.invalid/v1/client/${surface}/stream`, [`${family}.client.${surface}.v0`], {})
+      socket.onopen = () => { opened.value = true }
+      h.clock.advance(0)
+      expect(opened.value).toBe(true)
+    }
+  })
+
+  it.each(['st3', 'fractal'])('accepts %s terminal capabilities and equivalent aliases', async (family) => {
+    const h = setup(base().with({ terminal: 'running' }))
+    const attachment = await h.attach()
+    const url = `ws://scenario.invalid/v1/client/terminals/${encodeURIComponent(attachment.terminal_id)}/stream?incarnation=${encodeURIComponent(attachment.runtime_incarnation)}`
+    for (const capabilities of [[`${family}.cap.${attachment.stream_capability}`],
+      [`st3.cap.${attachment.stream_capability}`, `fractal.cap.${attachment.stream_capability}`]]) {
+      const frames: unknown[] = []
+      const socket = h.replay.socket(url, [`${family}.client.terminal.v0`, ...capabilities], {})
+      socket.onmessage = (event) => frames.push(JSON.parse(String(event.data)))
+      h.clock.advance(0)
+      expect(frames).toContainEqual(expect.objectContaining({ api_version: 'st3.client.v0',
+        value: expect.objectContaining({ kind: 'terminal-screen' }) }))
+    }
+  })
+
+  it.each([
+    ['fractal.client.collections.v1'],
+    ['smalltalk.client.collections.v0'],
+    ['st3.client.terminal.v0', 'fractal.client.collections.v0'],
+    ['fractal.client.terminal.v0', 'st3.cap.first', 'fractal.cap.second'],
+    ['fractal.client.terminal.v0', 'fractal.cap.'],
+    ['fractal.client.terminal.v0', 'unknown.cap.secret'],
+  ].map((protocols) => ({ protocols })))('refuses unknown or ambiguous protocols $protocols', ({ protocols }) => {
+    const h = setup()
+    const opened = { value: false }
+    const closed: number[] = []
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/terminals/test/stream', protocols, {})
+    socket.onopen = () => { opened.value = true }
+    socket.onclose = (event) => closed.push(event.code ?? 0)
+    h.clock.advance(0)
+    expect(opened.value).toBe(false)
+    expect(closed).toEqual([1002])
+  })
+})
+
 describe('collection windows', () => {
   it('dispatches changes and applyWindow equals the roster fold at each clock step', async () => {
     const h = setup()

@@ -259,6 +259,7 @@ order from the same admitted claims.
 | `replica_envelope_signatures` | Shared storage, with stated local fields | Shared signed envelope identity/member-key/signature; stored_at is local receipt time. Authority/signature inventory is distinct from outcome projection digests. |
 | `replica_envelopes` | Shared storage, with stated local fields | Shared authenticated writer/sequence/hash/payload identity; relay, receipt_state/errors and received_at are local. Inventory hashes immutable envelope identity, not physical rows. |
 | `replica_records` | Shared storage, with stated local fields | Shared raw record/position/claim identity and replicated repair meaning; admission status/errors/updated_at are local. Normalize from retained records plus tombstones; never compare physical receipt rows. |
+| `claim_positions` | Shared storage | Each claim's canonical batch position: stored at admission, lowered only by a later record of the same claim, frozen before a claim or record deletion could renumber it, and never deleted. An input of canonical order, not a projection; it is not compared or exchanged. |
 | `replication_peers` | Local | Local connectivity, peer digest observations, receive timings and errors. |
 | `replication_refusals` | Local | Outbound Fabric grant refusals and observation timestamps; route policy state outside shared projections. |
 | `resource_observations` | Shared projection | Latest canonical `resource.observed` claim per resource subject; indexed by resource kind and opener |

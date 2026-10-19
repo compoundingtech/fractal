@@ -18,7 +18,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { ChromeControl, SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
 // Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
 import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
@@ -411,15 +411,9 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" />
     ) : null}
     <footer {...stylex.props(styles.footer)}>
-      <Aria.Button onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} aria-label="Toggle color scheme" {...stylex.props(styles.iconButton)}>
-        {scheme === 'dark' ? '☀' : '☾'}
-      </Aria.Button>
-      <Aria.Button onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} {...stylex.props(styles.textButton)}>
-        Missions
-      </Aria.Button>
-      <Aria.Button onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} {...stylex.props(styles.textButton)}>
-        Usage
-      </Aria.Button>
+      <ChromeControl icon="swap" label="Toggle color scheme" tooltipPlacement="top" onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} />
+      <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} />
+      <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} />
     </footer>
   </>
   // The panes are portalled from outside the shell providers: those values change on every
@@ -436,9 +430,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
               </NarrowSheet> : <>
                 <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
                   <header {...stylex.props(styles.brand)}>
-                    <Aria.Button aria-label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} {...stylex.props(styles.iconButton)}>
-                      {collapsed ? '»' : '«'}
-                    </Aria.Button>
+                    <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} />
                     {collapsed ? null : <strong>Fractal</strong>}
                   </header>
                   {collapsed ? null : sidebarBody}
