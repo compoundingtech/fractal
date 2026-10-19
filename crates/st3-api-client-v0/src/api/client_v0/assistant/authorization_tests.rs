@@ -1,10 +1,11 @@
+#![allow(unused_imports)]
 use super::*;
-use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair as _}};
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair as _};
 
-#[path = "authorization_identifier_agent_tests.rs"]
-mod identifier_agent_tests;
 
 const OWNER: &str = "person/operator";
+
 struct Fixture {
     root: tempfile::TempDir,
     state: AppState,
@@ -14,10 +15,12 @@ struct Fixture {
     attestor: Ed25519KeyPair,
     shim: Ed25519KeyPair,
 }
+
 fn signing_key() -> Ed25519KeyPair {
     let bytes=Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
     Ed25519KeyPair::from_pkcs8(bytes.as_ref()).unwrap()
 }
+
 async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
     let root=tempfile::tempdir().unwrap();
     let state=super::super::super::tests::test_state_named(root.path(),"assistant-proof-tests");
@@ -43,6 +46,7 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
     crate::api::published_attention::refresh_attention_list(&fixture.state.store).unwrap();
     fixture
 }
+
 impl Fixture {
     fn trust_request(&self) -> ReadTrustRequest {
         ReadTrustRequest {api_version:CLIENT_API_VERSION.into(),issuer:"scg/approval-host".into(),
@@ -72,6 +76,7 @@ impl Fixture {
         request(super::super::super::super::fabric_router(self.state.clone()),&self.credential,"GET",path,header).await
     }
 }
+
 async fn request(app: Router, credential: &str, method: &str, path: &str, header: Option<&str>) -> (StatusCode,Value,usize) {
     let mut request=Request::builder().method(method).uri(path)
         .header(AUTHORIZATION,format!("Bearer {credential}"));
@@ -123,6 +128,7 @@ async fn assistant_all_six_reads_require_proof_even_on_native_router() {
         }
     }
 }
+
 #[tokio::test]
 async fn assistant_read_proofs_reject_unpinned_fabricated_shim_expired_and_wrong_filter() {
     let unpinned=fixture(SCOPES,false).await;
@@ -148,6 +154,7 @@ async fn assistant_read_proofs_reject_unpinned_fabricated_shim_expired_and_wrong
     let header=fixture.header(&stale,&fixture.attestor);
     assert_eq!(fixture.request("/v1/client/assistant/summary",Some(&header)).await.0,StatusCode::FORBIDDEN);
 }
+
 #[tokio::test]
 async fn assistant_read_trust_rejects_shim_as_attestor_and_remote_pinning() {
     let fixture=fixture(SCOPES,true).await;
@@ -157,6 +164,7 @@ async fn assistant_read_trust_rejects_shim_as_attestor_and_remote_pinning() {
     assert_eq!(pin(State(fixture.state.clone()),Extension(fixture.session()),AxumPath(fixture.grant.clone()),
         Json(fixture.trust_request())).await.unwrap_err().status,StatusCode::FORBIDDEN);
 }
+
 #[tokio::test]
 async fn assistant_read_nonce_is_atomic_and_private_results_never_replay_after_restart() {
     let fixture=fixture(SCOPES,true).await;
@@ -173,6 +181,7 @@ async fn assistant_read_nonce_is_atomic_and_private_results_never_replay_after_r
     let header=fixture.header(&next_page,&fixture.attestor);
     assert_eq!(fixture.request("/v1/client/assistant/agents?limit=1",Some(&header)).await.0,StatusCode::FORBIDDEN);
 }
+
 #[tokio::test]
 async fn assistant_response_budget_includes_envelope_and_supports_downward_policy() {
     let mut fixture=fixture(SCOPES,true).await;
@@ -212,12 +221,14 @@ async fn assistant_response_budget_includes_envelope_and_supports_downward_polic
     let payload=fixture.payload("summary","?max_response_bytes=1025");let header=fixture.header(&payload,&fixture.attestor);
     assert!(!fixture.request("/v1/client/assistant/summary?max_response_bytes=1025",Some(&header)).await.0.is_success());
 }
+
 fn concrete_path(path:&str)->String {
     let mut output=String::new();let mut parameter=false;
     for character in path.chars() {match character {'{'=>{parameter=true;output.push_str("fixture");},
         '}'=>parameter=false,_ if !parameter=>output.push(character),_=>{}}}
     output
 }
+
 #[tokio::test]
 async fn assistant_four_scopes_forbid_all_other_catalog_routes_and_mutations() {
     let fixture=fixture(&SCOPES[..4],true).await;
@@ -240,6 +251,7 @@ async fn assistant_four_scopes_forbid_all_other_catalog_routes_and_mutations() {
         assert_eq!(status,StatusCode::FORBIDDEN,"{path}: {value}");assert!(value.get("value").is_none());
     }
 }
+
 #[tokio::test]
 async fn assistant_revocation_and_policy_change_invalidate_signed_read_proofs() {
     let fixture=fixture(SCOPES,true).await;
@@ -252,6 +264,7 @@ async fn assistant_revocation_and_policy_change_invalidate_signed_read_proofs() 
         AxumPath(fixture.grant.clone())).await.unwrap();
     assert_eq!(fixture.request("/v1/client/assistant/summary",Some(&header)).await.0,StatusCode::FORBIDDEN);
 }
+
 #[test]
 fn assistant_read_request_digest_is_canonical_and_rejects_duplicate_filters() {
     let left="/v1/client/assistant/agents?limit=1&cursor=a%2Fb".parse::<axum::http::Uri>().unwrap();
@@ -399,6 +412,7 @@ async fn assistant_signed_content_binds_exact_unicode_range_revision_and_no_priv
 }
 
 const AUTH_PTY: &str = "assistant-auth-pty";
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn assistant_signed_terminal_binds_live_screen_revision_and_refuses_replay() {
     use super::super::reads::tests::{fixture_screen,live_terminal};
@@ -639,3 +653,6 @@ agent "worker" { workspace "/tmp"; command "true"; restart always; }
         }
     }
 }
+
+#[path = "authorization_identifier_agent_tests.rs"]
+mod identifier_agent_tests;

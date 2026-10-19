@@ -1,4 +1,6 @@
+#![allow(unused_imports)]
 use super::*;
+
 
 /// Exercise source paging and the real envelope together, not just the generic cached
 /// page helper. In particular a fetched final page must become a resumable prefix.
