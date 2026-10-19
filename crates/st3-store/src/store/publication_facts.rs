@@ -451,7 +451,7 @@ use super::*;
         scratch.execute_batch("CREATE TABLE claims(id TEXT,subject TEXT,kind TEXT,origin TEXT,body TEXT,accepted_at_unix_ms TEXT,batch_id TEXT,store_index INTEGER);
             CREATE INDEX claims_batch_index ON claims(batch_id,store_index);
             CREATE TABLE batches(id TEXT,origin TEXT,replica_sequence INTEGER);
-            CREATE TABLE replica_records(claim_id TEXT,position INTEGER,state TEXT);
+            CREATE TABLE replica_records(claim_id TEXT,position INTEGER,state TEXT); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
             CREATE TABLE local_observations(id INTEGER,subject TEXT,kind TEXT,body TEXT);").unwrap();
         let started = std::time::Instant::now();
         create_schema(&scratch).unwrap();
