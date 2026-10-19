@@ -11,7 +11,19 @@ const matchRows = ({ agents, needsYou, asking, stale }: {
   readonly asking: ReadonlySet<string>
   readonly stale: boolean
 }): ReadonlyMap<string, SidebarMatchRow> =>
-  new Map(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale }).status, needsMe: needsYou.has(agent.ref), asking: asking.has(agent.ref) }]))
+{
+  const rows = new Map<string, SidebarMatchRow>(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale }).status, needsMe: needsYou.has(agent.ref), asking: asking.has(agent.ref) }]))
+  for (const agent of agents) for (const child of agent.subagents ?? []) {
+    rows.set(subagentRowId({ parent: agent.ref, id: child.id }), {
+      workspace: { title: `${child.description ?? ''} ${child.id}`, host: agent.host },
+      agent: undefined, status: 'unobserved', needsMe: false, asking: false,
+    })
+  }
+  return rows
+}
+
+const childDriverMap = (agents: readonly Agent[]): ReadonlyMap<string, string> =>
+  new Map(agents.flatMap(agent => (agent.subagents ?? []).map((child): [string, string] => [subagentRowId({ parent: agent.ref, id: child.id }), child.driver])))
 
 /** Show menu counts: each row passes every filter outside the Show menu (`is:asking` and machines). */
 export const liveShowRows = ({ agents, needsYou, asking, filters, stale }: {
@@ -36,16 +48,8 @@ export const liveSidebarTree = ({ tree, agents, needsYou, asking, filters, stale
   readonly stale: boolean
 }): readonly SidebarNode[] => {
   const query = parseSidebarQuery(filters.query)
-  const rows = new Map(matchRows({ agents, needsYou, asking, stale }))
-  const childDrivers = new Map<string, string>()
-  for (const agent of agents) for (const child of agent.subagents ?? []) {
-    const id = subagentRowId({ parent: agent.ref, id: child.id })
-    childDrivers.set(id, child.driver)
-    rows.set(id, {
-      workspace: { title: `${child.description ?? ''} ${child.id}`, host: agent.host },
-      agent: undefined, status: 'unobserved', needsMe: false, asking: false,
-    })
-  }
+  const rows = matchRows({ agents, needsYou, asking, stale })
+  const childDrivers = childDriverMap(agents)
   const filtering = isSidebarFiltering(filters, query)
   const visit = (nodes: readonly SidebarNode[]): readonly SidebarNode[] => {
     const visible = nodes.flatMap((node): SidebarNode[] => {

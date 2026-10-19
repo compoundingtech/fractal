@@ -1839,7 +1839,7 @@ pub trait MissionsStore {
                 &resource_preparation::Fence,
                 resource_preparation::Prepared<Result<resource_preparation::Inputs, St3Error>>,
             )>,
-        ) -> Result<Option<ResourceObservationOutcome>, St3Error>;
+        ) -> Result<Option<(ResourceObservationOutcome, bool)>, St3Error>;
     fn authoring_review_owner(&self, discovery: &str) -> Result<Option<String>>;
     fn pending_schedule_work_requests(&self, subject: &str) -> Result<Vec<ClaimRecord>>;
     fn schedule_work_start_for_request(
@@ -6586,7 +6586,7 @@ impl MissionsStore for Store {
                 &resource_preparation::Fence,
                 resource_preparation::Prepared<Result<resource_preparation::Inputs, St3Error>>,
             )>,
-        ) -> Result<Option<ResourceObservationOutcome>, St3Error> {
+        ) -> Result<Option<(ResourceObservationOutcome, bool)>, St3Error> {
         let facts = canonical_json_value(facts);
         let operation_hash = canonical_hash(&(
             observer,
@@ -6609,7 +6609,7 @@ impl MissionsStore for Store {
         #[cfg(any(test, feature = "test-support"))]
         let cached = std::sync::atomic::AtomicBool::new(false);
         let result = self.connection
-            .batched(|transaction| -> Result<Option<ResourceObservationOutcome>, St3Error> {
+            .batched(|transaction| -> Result<Option<(ResourceObservationOutcome, bool)>, St3Error> {
                 #[cfg(any(test, feature = "test-support"))]
                 let _measurement = resource_preparation::WriterMeasure::new(&measurement);
                 #[cfg(any(test, feature = "test-support"))]
@@ -6620,7 +6620,7 @@ impl MissionsStore for Store {
                 {
                     #[cfg(any(test, feature = "test-support"))]
                     cached.store(true, std::sync::atomic::Ordering::Relaxed);
-                    return serde_json::from_str(&response).map(Some).map_err(internal);
+                    return serde_json::from_str(&response).map(|outcome| Some((outcome, false))).map_err(internal);
                 }
                 let resource_preparation::Inputs { active_subscriptions, normalized_observation, previous, baseline, repository_facts, legacy_collections, changed_fields, repository_changed_fields, recorded_items, discovered, observer_health_is_current, subscription_states, changed, should_record } = match preparation {
                     Some((fence, mut prepared)) => {
@@ -6640,12 +6640,12 @@ impl MissionsStore for Store {
                 let current_object = facts.as_object()
                     .expect("prepared resource facts are an object");
                 if !should_record {
-                    return Ok(Some(ResourceObservationOutcome {
+                    return Ok(Some((ResourceObservationOutcome {
                         baseline,
                         changed_fields,
                         observation_claim: None,
                         message_subjects: Vec::new(),
-                    }));
+                    }, false)));
                 }
                 let now = write_time(transaction, &self.origin).map_err(internal)?;
                 let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
@@ -7444,7 +7444,7 @@ impl MissionsStore for Store {
                         ],
                     )
                     .map_err(internal)?;
-                Ok(Some(outcome))
+                Ok(Some((outcome, true)))
                 })()?;
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 Ok(outcome)

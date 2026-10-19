@@ -52,7 +52,7 @@ const assertWide = async (canvasElement: HTMLElement) => {
   await expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull()
   await expect(header.queryByRole('button', { name: 'Expand sidebar' })).toBeNull()
   await expect(header.getByRole('button', { name: 'Toggle right panel' })).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Agent actions for WorkbenchShell' })).toBeVisible()
+  await expect(header.getByRole('button', { name: 'Actions for WorkbenchShell' })).toBeVisible()
   await expect(header.getByText('build-host-a')).toBeVisible()
   await expect(header.queryByRole('button', { name: 'Agent details' })).toBeNull()
 }
@@ -80,7 +80,7 @@ export const Drawers: Story = { play: async ({ canvasElement }) => {
   await expect(breadcrumb).toHaveTextContent('build-host-a')
   await expect(breadcrumb).toHaveTextContent('WorkbenchShell')
   await expect(breadcrumb.getBoundingClientRect().right).toBeLessThanOrEqual(opener.getBoundingClientRect().left)
-  for (const name of ['Agent actions for WorkbenchShell', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
+  for (const name of ['Actions for WorkbenchShell', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
 } }
 export const DrawersLight: Story = { ...Drawers, args: { scheme: 'light' } }
 
@@ -101,7 +101,7 @@ export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   const { sheet, opener } = await openDetailsSheet(canvasElement)
   await expect(opener).toHaveAttribute('aria-expanded', 'true')
   const actions = within(sheet).getByRole('toolbar', { name: 'Agent actions' })
-  for (const name of ['Agent actions for WorkbenchShell', 'Resources', 'Conversation menu', 'Terminal']) await expect(within(actions).getByRole('button', { name })).toBeInTheDocument()
+  for (const name of ['Actions for WorkbenchShell', 'Resources', 'Conversation menu', 'Terminal']) await expect(within(actions).getByRole('button', { name })).toBeInTheDocument()
   await expect(within(sheet).getByRole('button', { name: 'Close agent details' })).toBeVisible()
   await expect(canvasElement.querySelector('[data-testid="live-agent-workspace"] > aside[aria-label="Changes"]')).toBeNull()
   // The captured-change rows sit above the 'Captured change' header, never under it.

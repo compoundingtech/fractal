@@ -156,7 +156,7 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{
-    CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
+    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
     CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction,
     CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest,
     CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage,
@@ -3616,11 +3616,11 @@ impl Store {
         input: &ClaimInput,
         desired_revision: &str,
         current: &(dyn Fn() -> bool + Sync),
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<(ClaimRecord, bool), St3Error> {
         append_claim_with_subject_fences(
             &self.graph, input, None, None, None,
             Some((&input.subject, desired_revision, current)),
-        ).map(|(claim, _)| claim)
+        )
     }
 
     pub fn append_claim_outcome(
