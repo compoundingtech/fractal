@@ -2,6 +2,7 @@
 """Focused parser and invariant controls for r15-rename-proof."""
 import importlib.machinery
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -187,6 +188,88 @@ let socket = "/state/st3.sock";
             (tree / 'flake.lock').unlink()
             with self.assertRaisesRegex(ValueError, 'flake.lock is missing'):
                 evaluate_committed_fixture()
+
+    def test_npm_reference_resolution_across_text_formats_and_dependency_selectors(self):
+        old = {'@smalltalk/fractal-ui': '@fractal/ui'}
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'package.json').write_text(json.dumps({
+                'name': 'root', 'dependencies': {'react': '19.0.0'}}))
+            package = tree / 'packages/ui/package.json'
+            package.parent.mkdir(parents=True)
+            package.write_text(json.dumps({'name': '@fractal/ui'}))
+            (tree / 'pnpm-lock.yaml').write_text(
+                "lockfileVersion: '9.0'\npackages:\n"
+                "  '@locked/transitive@1.0.0':\n"
+                "    resolution: {integrity: sha512-YQ==}\n")
+            cases = (
+                ('app.css', "@import '@fractal/ui/tokens.css';", '@fractal/ui', '@smalltalk/fractal-ui'),
+                ('index.html', "<script type='module'>import '@fractal/ui';</script>", '@fractal/ui', '@unknown/pkg'),
+                ('entry.html', "<script type='module' src='@fractal/ui/web'></script>", '@fractal/ui', '@unknown/pkg'),
+                ('tailwind.css', '@source "../../node_modules/@fractal/ui/src";', '@fractal/ui', '@unknown/pkg'),
+                ('vite.config.ts', "export default { externalPackages: ['@fractal/ui'] }", '@fractal/ui', '@unknown/pkg'),
+                ('build.config.js', "export default { dedupe: ['react'] }", 'react', 'unknown-config-package'),
+                ('source.mjs', "export { x } from 'react';", 'react', 'unknown-bare-import'),
+                ('module.vue', "<script>const x = import('react');</script>", 'react', '@unknown/pkg'),
+                ('guide.md', "```js\nimport { x } from '@fractal/ui';\n```", '@fractal/ui', '@unknown/pkg'),
+                ('run', 'pnpm --filter @fractal/ui build', '@fractal/ui', '@unknown/pkg'),
+                ('receipt.json', '{"detail":"API comes from @fractal/ui/tokens"}', '@fractal/ui', '@smalltalk/fractal-ui'),
+                ('fixture.py', "source = \"import '@fractal/ui';\"", '@fractal/ui', '@unknown/pkg'),
+            )
+            for relative, source, before, after in cases:
+                with self.subTest(path=relative):
+                    path = tree / relative
+                    path.write_text(source)
+                    self.assertEqual(proof.npm_resolution_guard(tree, old)['unresolved'], [])
+                    path.write_text(source.replace(before, after))
+                    result = proof.npm_resolution_guard(tree, old)
+                    self.assertEqual(result['result'], 'FAIL')
+                    self.assertTrue(any(item['path'] == relative for item in result['unresolved']))
+                    path.unlink()
+            for selector in ('workspace:*', 'file:../missing', 'link:../missing'):
+                with self.subTest(selector=selector):
+                    package.write_text(json.dumps({
+                        'name': '@fractal/ui', 'dependencies': {'@unknown/missing': selector}}))
+                    self.assertEqual(proof.npm_resolution_guard(tree, old)['result'], 'FAIL')
+            package.write_text(json.dumps({
+                'name': '@fractal/ui', 'dependencies': {'@smalltalk/fractal-ui': '^1.0.0'}}))
+            self.assertEqual(proof.npm_resolution_guard(tree, old)['result'], 'FAIL')
+
+    def test_npm_registry_aliases_builtins_and_nonconsumer_scopes(self):
+        old = {'@smalltalk/fractal-ui': '@fractal/ui'}
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'package.json').write_text(json.dumps({
+                'name': '@fractal/ui', 'dependencies': {'react': '^19.0.0'}}))
+            (tree / 'pnpm-lock.yaml').write_text(
+                "lockfileVersion: '9.0'\npackages:\n"
+                "  '@locked/transitive@1.0.0':\n"
+                "    resolution: {integrity: sha512-YQ==}\n")
+            (tree / 'tsconfig.json').write_text(json.dumps({
+                '$schema': 'https://example.invalid/tsconfig.json',
+                'compilerOptions': {'paths': {'@local/*': ['./src/*']}}}))
+            (tree / 'source.ts').write_text(
+                "import fs from 'node:fs'; import path from 'path';\n"
+                "import { x } from '@locked/transitive/subpath';\n"
+                "import { y } from '@local/module';\n"
+                "import { buildIdentity } from 'virtual:build-identity';\n")
+            (tree / 'source.rs').write_text(
+                'use exports::st2::resource_provider::provider_api;\n'
+                '#[attribute]\nlet team = "@acme/gardeners";\n'
+                'let email = "person@smalltalk/example.com";\n'
+                'let url = "https://github.com/@smalltalk/fractal-ui";\n')
+            scripts = tree / 'scripts'
+            scripts.mkdir()
+            (scripts / 'r15-rename-client.py').write_text(
+                "PACKAGES = {'@smalltalk/fractal-ui': '@fractal/ui'}\n"
+                'source = "import \'@unknown/real-consumer\';"\n')
+            result = proof.npm_resolution_guard(tree, old)
+            self.assertEqual(result['declaration_literals'], 1)
+            self.assertEqual(len(result['unresolved']), 1)
+            self.assertEqual(result['unresolved'][0]['reference'], '@unknown/real-consumer')
+            (scripts / 'r15-rename-client.py').write_text(
+                "PACKAGES = {'@smalltalk/fractal-ui': '@fractal/ui'}\n")
+            self.assertEqual(proof.npm_resolution_guard(tree, old)['result'], 'PASS')
 
 
 if __name__ == '__main__':

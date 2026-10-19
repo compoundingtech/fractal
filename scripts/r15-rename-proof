@@ -5,7 +5,10 @@ Run: nix develop -c python3 scripts/r15-rename-proof --base origin/main --head H
 The script reads Git trees, not uncommitted files. Cargo/Nix evaluation does not build.
 """
 import argparse
+import ast
 from collections import Counter
+import fnmatch
+import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
@@ -183,6 +186,194 @@ def nix_output_names(tree, revision, repository=ROOT):
     return outputs
 
 
+NPM_NAME = r'(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*'
+NODE_BUILTINS = set(('assert async_hooks buffer child_process cluster console constants crypto dgram '
+                     'diagnostics_channel dns domain events fs http http2 https inspector module net os '
+                     'path perf_hooks process punycode querystring readline repl sea sqlite stream '
+                     'string_decoder sys test timers tls trace_events tty url util v8 vm wasi worker_threads zlib').split())
+
+
+def npm_package(reference):
+    reference = reference.removeprefix('~')
+    if 'node_modules/' in reference:
+        reference = reference.split('node_modules/', 1)[1]
+    reference = reference.removeprefix('npm:')
+    if reference.startswith(('.', '/', '#')) or re.match(r'[A-Za-z][\w+.-]*:', reference):
+        return None
+    match = re.match(NPM_NAME + r'(?=[/@?#]|$)', reference)
+    return match[0] if match else None
+
+
+def npm_declaration_mask(text, relative, old_packages):
+    """Only migration operands and this guard's negative fixture data are declarations.
+
+    Do not exempt a directory, language, test file or even a whole rewrite script.
+    Old exact package-name operands in the four one-shot migration scripts are
+    intentionally retained. In this guard's own test_npm_* methods, Python string
+    constants describe synthetic trees, not imports by the test runner.
+    """
+    migrations = {'scripts/r15-rename-client.py', 'scripts/r15-rename-docs.py',
+                  'scripts/r15-rename-scripts.py', 'scripts/r15-rename-build.py'}
+    if relative not in migrations and relative != 'scripts/r15-rename-proof-test.py':
+        return text, 0
+    parsed = ast.parse(text)
+    candidates = ast.walk(parsed) if relative in migrations else (
+        node for method in ast.walk(parsed)
+        if isinstance(method, ast.FunctionDef) and method.name.startswith('test_npm_')
+        for node in ast.walk(method))
+    lines = text.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    masked = list(text)
+    count = 0
+    for node in candidates:
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if relative in migrations and node.value not in old_packages:
+            continue
+        # Python AST columns are UTF-8 byte offsets.
+        start = offsets[node.lineno - 1] + len(lines[node.lineno - 1].encode()[:node.col_offset].decode())
+        end = offsets[node.end_lineno - 1] + len(lines[node.end_lineno - 1].encode()[:node.end_col_offset].decode())
+        masked[start:end] = ['\n' if char == '\n' else ' ' for char in text[start:end]]
+        count += 1
+    return ''.join(masked), count
+
+
+def npm_references(text, relative, internal_scopes):
+    """Recognize consumer syntax in any text file, not an extension allowlist."""
+    patterns = [
+        r'''(?<![@\w])(?:import|export)\s+(?:(?:type\s+)?[\w*$,\s{}]+\s+from\s*)?['"]([^'"\n]+)['"]''',
+        r'''\b(?:import|require(?:\.resolve)?|import\.meta\.resolve|(?:vi|jest)\.(?:mock|doMock))\s*\(\s*['"]([^'"\n]+)['"]''',
+        r'''@(?:import|source|use|forward)\s+(?:url\(\s*)?['"]([^'"\n]+)['"]''',
+        r'''<script\b[^>]*\bsrc\s*=\s*['"]([^'"\n]+)['"]''',
+        r'''\bpnpm\s+(?:--?[\w-]+\s+)*--filter[=\s]+['"]?([@a-z0-9][^\s'"`;)]+)''',
+    ]
+    # Configuration package selectors (externalPackages, Vite include/dedupe,
+    # Storybook addons, etc.) can be values rather than import statements.
+    if re.search(r'(?:config(?:\.[^/]*)?|package\.json\.genie)\.[^/]+$', relative):
+        patterns.append(r'''['"](@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*)['"]''')
+    found = {}
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.I):
+            found[match.start(1)] = match[1]
+    for block in re.finditer(
+            r'\b(?:externalPackages|dedupe|external|addons)\s*:\s*\[([^\]]*)\]', text):
+        for match in re.finditer(r'''['"]([^'"\n]+)['"]''', block[1]):
+            found[block.start(1) + match.start(1)] = match[1]
+    # Source citations and shell selectors of internal packages must not retain
+    # retired identities even outside executable import syntax. Other prose
+    # @org/team mentions, emails, URL scopes and Rust attributes are not imports.
+    for match in re.finditer(r'(?<![\w./:@-])(@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*)', text):
+        if match[1].split('/')[0] in internal_scopes:
+            found[match.start(1)] = match[1]
+    return sorted(found.items())
+
+
+def npm_resolution_guard(tree, old_packages):
+    files = []
+    for path in sorted(tree.rglob('*')):
+        if path.is_symlink() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if b'\0' in data:
+            continue
+        try:
+            files.append((path, data.decode('utf-8')))
+        except UnicodeDecodeError:
+            continue
+    manifests = {path.parent: json.loads(text) for path, text in files if path.name == 'package.json'}
+    workspace = {data['name'] for data in manifests.values() if isinstance(data.get('name'), str)}
+    internal_scopes = {name.split('/')[0] for name in workspace | set(old_packages) if name.startswith('@')}
+    registry = set()
+    aliases = set()
+    errors = []
+    checked = 0
+    declarations = 0
+    # Reuse the repository's fail-closed pnpm-v9 registry projection, including
+    # transitive packages, rather than guessing registry names from source imports.
+    loader = importlib.machinery.SourceFileLoader('r15_npm_lock', str(ROOT / 'scripts/ci-fractal-web-licenses'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    lock = importlib.util.module_from_spec(spec)
+    loader.exec_module(lock)
+    for path, text in files:
+        if path.name == 'pnpm-lock.yaml':
+            registry.update(name for name, _ in lock.lock_packages(text))
+            # Optional peer declarations need not have an installed package node.
+            for block in re.finditer(r'^    peerDependencies:\n((?:      .*\n)+)', text, re.M):
+                registry.update(match[1] for match in re.finditer(
+                    r'''^      ['"]?(''' + NPM_NAME + r''')['"]?:''', block[1], re.M))
+            importers = text.split('\npackages:', 1)[0]
+            for dependency in re.finditer(
+                    r'''^      ['"]?(''' + NPM_NAME + r''')['"]?:\n        specifier: ([^\n]+)''',
+                    importers, re.M):
+                name, selector = dependency.groups()
+                checked += 1
+                if ((name.split('/')[0] in internal_scopes or selector.startswith('workspace:'))
+                        and name not in workspace):
+                    errors.append({'path': path.relative_to(tree).as_posix(), 'reference': name,
+                                   'selector': selector, 'reason': 'lock importer has no workspace package'})
+        if path.name.startswith('tsconfig') and path.suffix == '.json':
+            # Preserve URL strings while accepting the JSONC comments/trailing
+            # commas used by TypeScript configs.
+            uncommented = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/',
+                                 lambda match: match[0] if match[0].startswith('"') else '',
+                                 text, flags=re.S)
+            config = json.loads(re.sub(r',\s*([}\]])', r'\1', uncommented))
+            aliases.update(config.get('compilerOptions', {}).get('paths', {}))
+    for directory, manifest in manifests.items():
+        aliases.update(manifest.get('imports', {}))
+        for kind in ('dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'):
+            for name, selector in manifest.get(kind, {}).items():
+                checked += 1
+                reason = None
+                if not isinstance(selector, str):
+                    reason = 'dependency selector is not a string'
+                elif selector.startswith('workspace:'):
+                    target = selector.removeprefix('workspace:')
+                    target = npm_package(target) if target.startswith('@') or re.match(r'[a-z].*@', target) else name
+                    if target not in workspace:
+                        reason = 'workspace dependency has no package manifest'
+                elif selector.startswith(('file:', 'link:')):
+                    target = (directory / selector.split(':', 1)[1]).resolve()
+                    if target not in manifests or manifests[target].get('name') != name:
+                        reason = 'local dependency target is missing or has a different name'
+                elif name.split('/')[0] in internal_scopes and name not in workspace:
+                    reason = 'retired or missing internal dependency name'
+                else:
+                    registry.add(name)
+                    if selector.startswith('npm:'):
+                        target = npm_package(selector)
+                        if target is None:
+                            reason = 'invalid npm alias target'
+                        else:
+                            registry.add(target)
+                if reason:
+                    errors.append({'path': (directory / 'package.json').relative_to(tree).as_posix(),
+                                   'reference': name, 'selector': selector, 'reason': reason})
+    for path, text in files:
+        relative = path.relative_to(tree).as_posix()
+        if path.name == 'pnpm-lock.yaml':
+            continue  # Structured lock authorities/importers were validated above.
+        text, count = npm_declaration_mask(text, relative, old_packages)
+        declarations += count
+        for position, reference in npm_references(text, relative, internal_scopes):
+            package = npm_package(reference)
+            if package is None or package.split('/')[0] in NODE_BUILTINS:
+                continue
+            checked += 1
+            if package.split('/')[0] not in internal_scopes and any(
+                    fnmatch.fnmatchcase(reference, alias) for alias in aliases):
+                continue
+            allowed = workspace if package.split('/')[0] in internal_scopes else workspace | registry
+            if package not in allowed:
+                errors.append({'path': relative, 'line': text.count('\n', 0, position) + 1,
+                               'reference': reference, 'package': package, 'reason': 'unresolved npm package'})
+    return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'text_files': len(files),
+            'workspace_names': sorted(workspace), 'registry_names': len(registry),
+            'declaration_literals': declarations, 'unresolved': errors}
+
+
 def source_mapping():
     spec = importlib.util.spec_from_file_location('rename_docs', ROOT / 'scripts/r15-rename-docs.py')
     module = importlib.util.module_from_spec(spec)
@@ -271,7 +462,7 @@ def hunk_kinds(patch):
             return
         if path.endswith(('Cargo.toml', 'package.json', 'package.json.genie.ts')):
             kind = 'Cargo.toml/package.json names'
-        elif path.endswith('.md') or path.startswith('docs/'):
+        elif path.endswith('.md') or path.startswith(('docs/', 'apps/fractal-web/.changelog/')):
             kind = 'docs'
         elif changed and all(re.search(r'\b(?:use|import|export|extern)\b|(?:st3|st2|stui|st_|fractal)[A-Za-z0-9_]*::', line) for line in changed):
             kind = 'use or import paths'
@@ -332,6 +523,9 @@ def main():
             tree.mkdir()
             snapshot(revision, tree)
         guards = {}
+        guards['npm_references'] = npm_resolution_guard(trees[1], packages)
+        differences.extend({'category': 'npm_reference_resolution', **error}
+                           for error in guards['npm_references']['unresolved'])
         guards['head_symlinks'] = symlink_guard(trees[1])
         guards['head_symlinks']['result'] = 'FAIL' if guards['head_symlinks']['dangling'] else 'PASS'
         differences.extend({'category': 'dangling_symlink', **link}
@@ -394,7 +588,8 @@ def main():
         comparisons = [('R', old, new) for old, new in recovered]
         comparisons += [item for item in pairs if item[1] not in recovered_old and item[2] not in recovered_new]
         for code, old, new in comparisons:
-            if code == 'R100' or new.startswith(('scripts/r15-rename-', 'docs/', 'release-notes/')):
+            if code == 'R100' or new.startswith(('scripts/r15-rename-', 'docs/', 'release-notes/',
+                                                 'apps/fractal-web/.changelog/')):
                 continue
             if not (Path(new).suffix in SOURCE_SUFFIXES or new.startswith('scripts/')):
                 continue
