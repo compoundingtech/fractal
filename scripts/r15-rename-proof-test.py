@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Focused parser and invariant controls for r15-rename-proof."""
+import ast
 import importlib.machinery
 import importlib.util
 import json
@@ -16,6 +17,32 @@ loader.exec_module(proof)
 
 
 class RenameProof(unittest.TestCase):
+    def test_client_rewrite_selects_non_ts_sources_but_not_recorded_data(self):
+        source = ast.parse((ROOT / 'scripts/r15-rename-client.py').read_text())
+        (ROOT / 'tmp/r15').mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / 'tmp/r15') as directory:
+            tree = Path(directory)
+            namespace = {'ROOT': tree, 'Path': Path}
+            for node in source.body:
+                if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+                    name = node.targets[0].id
+                    if name in {'SOURCE_SUFFIXES', 'GENERATED', 'EXCLUDED_ROOTS'}:
+                        namespace[name] = ast.literal_eval(node.value)
+            selected = next(node for node in source.body
+                            if isinstance(node, ast.FunctionDef) and node.name == 'selected')
+            exec(compile(ast.Module(body=[selected], type_ignores=[]), '<client-selection>', 'exec'), namespace)
+            for relative in ('apps/web/app.css', 'apps/web/index.html', 'apps/web/vite.config.ts',
+                             'apps/web/tailwind.config.json', 'apps/web/tsconfig.json',
+                             'apps/web/tsconfig.jsonc', 'apps/ios/scripts/fixture.py',
+                             'release-notes/source-package.json'):
+                with self.subTest(path=relative):
+                    self.assertTrue(namespace['selected'](tree / relative))
+            for relative in ('clients/typescript/fractal-scenarios/recordings/session.normalized.json',
+                             'clients/typescript/fractal-scenarios/recordings/session.recording.jsonl',
+                             'fixtures/scenarios/session.json'):
+                with self.subTest(path=relative):
+                    self.assertFalse(namespace['selected'](tree / relative))
+
     def test_rust_lexing_keeps_raw_values_and_ignores_comments_and_lifetimes(self):
         source = '''// "ignored"
 fn f<'a>(x: &'a str) { let a = r##"st3.v1"##; let b = b"ST_AGENT"; }

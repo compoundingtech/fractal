@@ -36,7 +36,7 @@ GENERATED = {
     'clients/swift/FractalClient/Sources/FractalClient/Contract.generated.swift',
 }
 SOURCE_SUFFIXES = {
-    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.swift', '.py', '.json',
+    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.swift', '.py',
     '.css', '.scss', '.sass', '.less', '.html', '.htm', '.vue', '.svelte',
     '.astro', '.mdx',
 }
@@ -55,7 +55,11 @@ def selected(path: Path) -> bool:
         return relative.parts[1] == 'fractal-client-codegen' and path.suffix in {'.rs', '.in'}
     if path.name == 'package.json':
         return not path.with_name('package.json.genie.ts').exists()
-    return path.suffix in SOURCE_SUFFIXES or (path.name.startswith('tsconfig') and path.suffix == '.json')
+    if path.suffix in {'.json', '.jsonc'}:
+        # Configuration and release documentation contain source references.
+        # Serialized recordings/fixtures are data, not rewrite inputs.
+        return relative.parts[0] == 'release-notes' or 'config' in path.stem
+    return path.suffix in SOURCE_SUFFIXES
 
 
 def rewrite(text: str, path: Path) -> str:
