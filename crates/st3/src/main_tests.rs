@@ -12,22 +12,40 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
         };
         assert_eq!(agent_environment_present(), case != "instance");
         let root_command = cli_command();
-        let command = root_command.find_subcommand("work").unwrap()
-            .find_subcommand("start").unwrap().clone();
-        let parsed = command.clone().try_get_matches_from(["start", "task"])
+        let command = root_command
+            .find_subcommand("work")
+            .unwrap()
+            .find_subcommand("start")
+            .unwrap()
+            .clone();
+        let parsed = command
+            .clone()
+            .try_get_matches_from(["start", "task"])
             .and_then(|matches| WorkStartArgs::from_arg_matches(&matches));
         assert_eq!(parsed.ok().map(|args| args.actor).as_deref(), expected);
-        let matches = command.try_get_matches_from([
-            "start", "task", "--as", "person/explicit",
-        ]).unwrap();
+        let matches = command
+            .try_get_matches_from(["start", "task", "--as", "person/explicit"])
+            .unwrap();
         let explicit = WorkStartArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(explicit.actor, "person/explicit");
         if case == "instance" {
             let arguments = vec![std::ffi::OsString::from("st")];
-            assert_eq!(st3::instance::requested(&arguments).as_deref(), Some("alias-test"));
-            let matches = cli_command().try_get_matches_from([
-                "st", "--instance", "flag-test", "work", "start", "task", "--as", "person/explicit",
-            ]).unwrap();
+            assert_eq!(
+                st3::instance::requested(&arguments).as_deref(),
+                Some("alias-test")
+            );
+            let matches = cli_command()
+                .try_get_matches_from([
+                    "st",
+                    "--instance",
+                    "flag-test",
+                    "work",
+                    "start",
+                    "task",
+                    "--as",
+                    "person/explicit",
+                ])
+                .unwrap();
             let parsed = Cli::from_arg_matches(&matches).unwrap();
             assert_eq!(parsed.instance.as_deref(), Some("flag-test"));
         }
@@ -42,7 +60,12 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
         ("instance", None, None),
     ] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "tests::cli_environment_aliases_are_normalized_before_parsing", "--nocapture"])
+        command
+            .args([
+                "--exact",
+                "tests::cli_environment_aliases_are_normalized_before_parsing",
+                "--nocapture",
+            ])
             .env(CHILD, case);
         for (name, new) in CLI_ENVIRONMENT_NAMES {
             command.env_remove(name).env_remove(new);
@@ -50,14 +73,31 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
                 command.env_remove(legacy);
             }
         }
-        if let Some(value) = old { command.env("ST_AGENT", value); }
-        if let Some(value) = new { command.env("FRACTAL_AGENT", value); }
-        if case == "instance" { command.env("FRACTAL_INSTANCE", "alias-test"); }
+        if let Some(value) = old {
+            command.env("ST_AGENT", value);
+        }
+        if let Some(value) = new {
+            command.env("FRACTAL_AGENT", value);
+        }
+        if case == "instance" {
+            command.env("FRACTAL_INSTANCE", "alias-test");
+        }
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{case}: {stderr}\n{}", String::from_utf8_lossy(&output.stdout));
-        assert_eq!(stderr.contains("conflicting environment variables"), case == "conflict", "{case}: {stderr}");
-        assert!(!stderr.contains("agent/old") && !stderr.contains("agent/new"), "{case}: {stderr}");
+        assert!(
+            output.status.success(),
+            "{case}: {stderr}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            stderr.contains("conflicting environment variables"),
+            case == "conflict",
+            "{case}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("agent/old") && !stderr.contains("agent/new"),
+            "{case}: {stderr}"
+        );
     }
 }
 
@@ -75,13 +115,28 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
     ];
     let list = render_slo_list(&rows);
     let lines = list.lines().collect::<Vec<_>>();
-    assert_eq!(lines[0], "OBJECTIVES  a target with windows and an error budget · 2");
-    assert!(lines[1].starts_with("STATUS   ID           TARGET"), "{}", lines[1]);
-    assert!(lines[2].starts_with("met      person-read  p99 ≤ 100 ms"), "{}", lines[2]);
+    assert_eq!(
+        lines[0],
+        "OBJECTIVES  a target with windows and an error budget · 2"
+    );
+    assert!(
+        lines[1].starts_with("STATUS   ID           TARGET"),
+        "{}",
+        lines[1]
+    );
+    assert!(
+        lines[2].starts_with("met      person-read  p99 ≤ 100 ms"),
+        "{}",
+        lines[2]
+    );
     assert!(lines[2].ends_with("1h      50%"), "{}", lines[2]);
     assert!(lines[3].ends_with("1h      -"), "{}", lines[3]);
     assert_eq!(lines[5], "BUDGETS  an allowance that resets · 1");
-    assert!(lines[7].contains("ada/claude/weekly") && lines[7].ends_with("60%"), "{}", lines[7]);
+    assert!(
+        lines[7].contains("ada/claude/weekly") && lines[7].ends_with("60%"),
+        "{}",
+        lines[7]
+    );
     assert_eq!(render_slo_list(&[]), "No objectives or budgets.\n");
 
     let explained = render_slo_explanation(&rows[1]);
@@ -105,9 +160,16 @@ fn slo_chart_draws_the_lowest_reading_of_each_column_and_marks_gaps() {
     assert_eq!(lines[5], " 50% │██  ");
     assert_eq!(lines[8], "  0% │██·▁");
     assert_eq!(lines[9], "     └────");
-    assert!(lines[10].starts_with("      01-01 00:00 UTC "), "{}", lines[10]);
+    assert!(
+        lines[10].starts_with("      01-01 00:00 UTC "),
+        "{}",
+        lines[10]
+    );
     assert!(lines[10].ends_with("01-02 00:00"), "{}", lines[10]);
-    assert_eq!(lines[11], "LOW 0% · LATEST 0% · 3 readings · a column is its lowest reading");
+    assert_eq!(
+        lines[11],
+        "LOW 0% · LATEST 0% · 3 readings · a column is its lowest reading"
+    );
     let empty = render_slo_chart(&row, &json!({"samples": 0, "steps": [null]}), "1h");
     assert!(empty.contains("No readings in this period"));
 }
@@ -158,7 +220,9 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
 
 #[test]
 fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
-    let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
+    let seats: Vec<String> = (0..120)
+        .map(|n| format!("agent/example/seat-{n}"))
+        .collect();
     let mut renewals_per_second = [0usize; 60];
     for seat in &seats {
         let offset = renewal_offset_secs(seat);
@@ -193,8 +257,15 @@ fn omp_pending_ask_retry_is_bound_to_the_expected_call_and_sent_once_across_reex
     let frame = json!({"type":"retry_pending_ask","toolCallId":"X"});
     assert!(state.take_pending_ask_retry(&frame, None).is_none());
     assert!(state.take_pending_ask_retry(&frame, Some("Y")).is_none());
-    assert!(state.take_pending_ask_retry(&json!({"type":"state","toolCallId":"X"}), Some("X")).is_none());
-    assert_eq!(state.take_pending_ask_retry(&frame, Some("X")).as_deref(), Some("X"));
+    assert!(
+        state
+            .take_pending_ask_retry(&json!({"type":"state","toolCallId":"X"}), Some("X"))
+            .is_none()
+    );
+    assert_eq!(
+        state.take_pending_ask_retry(&frame, Some("X")).as_deref(),
+        Some("X")
+    );
     assert!(state.take_pending_ask_retry(&frame, Some("X")).is_none());
     let mut restored: PiChannelResume =
         serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
@@ -204,13 +275,24 @@ fn omp_pending_ask_retry_is_bound_to_the_expected_call_and_sent_once_across_reex
 #[test]
 fn omp_delivery_readiness_does_not_clear_the_reopened_human_block() {
     let mut state = PiChannelResume::default();
-    assert!(state.accept_frame(r#"{"type":"state","state":"active","blockedOn":"human","ask":"question"}"#));
+    assert!(
+        state.accept_frame(
+            r#"{"type":"state","state":"active","blockedOn":"human","ask":"question"}"#
+        )
+    );
     assert!(!state.first_idle_seen);
     assert!(!state.accept_frame(r#"{"type":"delivery_ready"}"#));
     assert!(state.first_idle_seen);
     assert_eq!(state.pending.blocked_on.as_deref(), Some("human"));
     assert_eq!(state.pending.ask.as_deref(), Some("question"));
-    assert_eq!(state.pending.state.as_ref().map(|(status, _)| status.as_str()), Some("working"));
+    assert_eq!(
+        state
+            .pending
+            .state
+            .as_ref()
+            .map(|(status, _)| status.as_str()),
+        Some("working")
+    );
     assert!(state.accept_frame(r#"{"type":"state","state":"idle"}"#));
     assert!(state.pending.blocked_on.is_none());
 }
@@ -237,11 +319,20 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let shown = render_clients(&found, now);
     assert!(shown.contains("CLIENTS  2 on host/example"), "{shown}");
     assert!(shown.contains("smalltalk-ios 1.0 (42)  person/avery (Pocket)  via gateway  connected now, since 2m ago"), "{shown}");
-    assert!(shown.contains("  follows: agents, conversation:agent/example/harbor"), "{shown}");
-    assert!(shown.contains("(unnamed client)  person/avery  via local  last seen 3m ago"), "{shown}");
+    assert!(
+        shown.contains("  follows: agents, conversation:agent/example/harbor"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("(unnamed client)  person/avery  via local  last seen 3m ago"),
+        "{shown}"
+    );
     let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: st devices --as person/avery revoke device/001122\n";
     let marked = with_device_presence(devices, Some(&found), now);
-    assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
+    assert!(
+        marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"),
+        "{marked}"
+    );
     assert_eq!(with_device_presence(devices, None, now), devices);
 }
 
@@ -259,7 +350,8 @@ fn harness_todo_graph_channel_rehydrates_and_spools_only_current_binding() {
         "observed_at":"2026-10-03T15:00:00Z","phases":[],
         "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0},
         "truncated":false
-    }).to_string();
+    })
+    .to_string();
     assert!(!state.accept_frame(&frame));
     assert!(state.accept_frame(r#"{"type":"ready","sessionId":"native-a"}"#));
     assert!(state.accept_frame(&frame));
@@ -270,7 +362,12 @@ fn harness_todo_graph_channel_rehydrates_and_spools_only_current_binding() {
         serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert!(resumed.accept_frame(r#"{"type":"session","sessionId":"native-b"}"#));
     assert!(!resumed.accept_frame(&frame));
-    assert_eq!(st_drivers::harness_events::pending(root.path(), 100).unwrap().len(), 1);
+    assert_eq!(
+        st_drivers::harness_events::pending(root.path(), 100)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -294,9 +391,18 @@ fn harness_todo_spool_reconnect_preserves_sequence_and_next_incarnation_cleans_o
     prepare_channel_todo_outbox(root.path(), "agent/one", "runtime-c").unwrap();
     assert!(!current.exists());
     assert!(unrelated.exists());
-    assert!(!todo_runtime_has_ended(&json!({"incarnation_id":"a","status":"running"}), "a"));
-    assert!(todo_runtime_has_ended(&json!({"incarnation_id":"a","status":"exited"}), "a"));
-    assert!(todo_runtime_has_ended(&json!({"incarnation_id":"b","status":"running"}), "a"));
+    assert!(!todo_runtime_has_ended(
+        &json!({"incarnation_id":"a","status":"running"}),
+        "a"
+    ));
+    assert!(todo_runtime_has_ended(
+        &json!({"incarnation_id":"a","status":"exited"}),
+        "a"
+    ));
+    assert!(todo_runtime_has_ended(
+        &json!({"incarnation_id":"b","status":"running"}),
+        "a"
+    ));
     assert!(!todo_runtime_has_ended(&json!({}), "a"));
 }
 
@@ -308,96 +414,215 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
     fs::write(dir.join("pending"), b"unpublished todo").unwrap();
     let store = std::sync::Arc::new(Store::open_memory("todo-liveness").unwrap());
     let observe = |status: &str| {
-        store.append_claim(&ClaimInput {
-            subject: "agent/seat".into(), kind: "runtime.observed".into(), actor: None,
-            fields: serde_json::from_value(json!({
-                "incarnation_id":"current", "status":status,
-            })).unwrap(),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
-        }).unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/seat".into(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({
+                    "incarnation_id":"current", "status":status,
+                }))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
     };
     let state = st3::api::AppState {
         owning_person: None,
-        store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        store: store.clone(),
+        notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
-        node: "todo-liveness".into(), state_dir: root.path().into(),
-        pty_root: root.path().join("pty"), pty_binary: "pty".into(),
-        fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(),
+        node: "todo-liveness".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
     };
     let path = root.path().join("api.sock");
     let socket = path.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&socket, st3::api::router(state)).await.unwrap();
+        st3::api::serve_unix(&socket, st3::api::router(state))
+            .await
+            .unwrap();
     });
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !path.exists() { tokio::task::yield_now().await; }
-    }).await.unwrap();
+        while !path.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let client = Client::unix(&path);
     tokio::time::pause();
     // Keep socket I/O from automatically advancing the paused clock to unrelated timers.
     let clock_guard = tokio::spawn(async {
-        loop { tokio::task::yield_now().await; }
+        loop {
+            tokio::task::yield_now().await;
+        }
     });
     let mut end_seen = None;
     observe("vanished");
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     assert_eq!(fs::read(dir.join("pending")).unwrap(), b"unpublished todo");
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     tokio::time::advance(Duration::from_secs(58)).await;
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     assert!(dir.join("pending").exists());
     observe("running");
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     observe("stopped");
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/missing", "current", &dir, &mut end_seen,
-    ).await.unwrap());
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/missing",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     let unavailable = Client::unix(&root.path().join("unavailable.sock"));
-    assert!(remove_confirmed_ended_channel_todo_outbox(
-        &unavailable, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.is_err());
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        remove_confirmed_ended_channel_todo_outbox(
+            &unavailable,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     assert!(dir.join("pending").exists());
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     tokio::time::advance(Duration::from_secs(59)).await;
-    assert!(remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     assert!(!dir.exists());
     fs::create_dir(&dir).unwrap();
     fs::write(dir.join("pending"), b"unpublished EOF todo").unwrap();
     end_seen = None;
-    assert!(!remove_confirmed_ended_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        !remove_confirmed_ended_channel_todo_outbox(
+            &client,
+            "agent/seat",
+            "current",
+            &dir,
+            &mut end_seen,
+        )
+        .await
+        .unwrap()
+    );
     let first_seen = end_seen.unwrap();
     tokio::time::advance(Duration::from_secs(1)).await;
     clock_guard.abort();
     let _ = clock_guard.await;
-    assert!(finish_channel_todo_outbox(
-        &client, "agent/seat", "current", &dir, &mut end_seen,
-    ).await.unwrap());
+    assert!(
+        finish_channel_todo_outbox(&client, "agent/seat", "current", &dir, &mut end_seen,)
+            .await
+            .unwrap()
+    );
     assert!(first_seen.elapsed() >= CHANNEL_TODO_END_CONFIRMATION_GAP);
     assert!(!dir.exists());
     server.abort();
@@ -500,8 +725,8 @@ fn a_wait_counts_only_exchanges_since_it_began() {
         ..Default::default()
     };
     // An in-sync measurement from before the wait, as after a restart, proves nothing.
-    let error = caught_up_since(&status(vec![with("alder", "up", Some((9_000, 0)))]), since)
-        .unwrap_err();
+    let error =
+        caught_up_since(&status(vec![with("alder", "up", Some((9_000, 0)))]), since).unwrap_err();
     assert_eq!(error, "no exchange with alder yet");
     let error = caught_up_since(
         &status(vec![with("alder", "up", Some((11_000, 300)))]),
@@ -521,8 +746,7 @@ fn a_wait_counts_only_exchanges_since_it_began() {
     assert_eq!(caught_up.peers, vec![("alder".to_owned(), 11_000)]);
     assert_eq!(caught_up.not_checked, vec!["birch (last-seen)".to_owned()]);
     assert!(
-        render_caught_up(&caught_up, 12_000)
-            .contains("not checked, since they are not up: birch")
+        render_caught_up(&caught_up, 12_000).contains("not checked, since they are not up: birch")
     );
     let error =
         caught_up_since(&status(vec![with("birch", "last-seen", None)]), since).unwrap_err();
@@ -537,13 +761,19 @@ fn fleet_wait_refuses_only_on_admissions_the_fleet_fenced() {
         envelopes: 2,
     };
     assert_eq!(render_fenced_admissions(&[]), None);
-    assert_eq!(render_fenced_admissions(&[residue("admitted-unsigned")]), None);
+    assert_eq!(
+        render_fenced_admissions(&[residue("admitted-unsigned")]),
+        None
+    );
     let refused = render_fenced_admissions(&[
         residue("admitted-unsigned"),
         residue("admitted-beyond-high-water"),
     ])
     .unwrap();
-    assert!(refused.contains("admitted 2 envelopes from willow beyond the writer's high water"), "{refused}");
+    assert!(
+        refused.contains("admitted 2 envelopes from willow beyond the writer's high water"),
+        "{refused}"
+    );
 }
 
 #[test]
@@ -566,7 +796,10 @@ fn mixed_build_status_reports_log_verification_and_waiting_projections() {
     let rendered = render_replication_peers(&[peer], "local-graph", 0);
     assert!(rendered.contains("same envelopes"));
     assert!(rendered.contains("waiting because sample reason"));
-    assert!(rendered.contains("projection comparison waits for a settled exchange or a compatible build"));
+    assert!(
+        rendered
+            .contains("projection comparison waits for a settled exchange or a compatible build")
+    );
     assert!(!rendered.contains("graphs differ"));
     assert!(!rendered.contains("diverged"));
 }
@@ -622,6 +855,13 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
 
     status.peers[1].authority_digest = Some("mine".into());
     assert_eq!(leave_confirmation(&status, None).unwrap(), Some("c".into()));
+    // Matching digest is sufficient only before writing leave, never before the receipt ACK.
+    assert_eq!(leave_receipt_confirmation(None).unwrap(), None);
+    assert_eq!(
+        leave_receipt_confirmation(Some(&left)).unwrap(),
+        Some("a".into())
+    );
+    assert!(leave_receipt_confirmation(Some(&removed)).is_err());
 }
 
 #[test]
@@ -631,7 +871,8 @@ fn missions_tree_fixture_renders_all_sections() {
             .expect("valid missions tree fixture");
     assert_eq!(
         render_missions_tree(&fixture),
-        /* sqlite-large-value: allow-for-now lv-h42e40a77235e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.txt")
+        /* sqlite-large-value: allow-for-now lv-h42e40a77235e owner=st3::main_tests TODO=trace-statement-and-value-representation */
+        include_str!("../tests/fixtures/missions-tree.txt")
     );
     let cli = Cli::try_parse_from(["st", "missions", "tree", "--json"])
         .expect("missions tree --json parses");
@@ -657,21 +898,34 @@ fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
         false,
         st3_conversation_ui::Density::Full,
     );
-    assert!(pretty.starts_with("CONVERSATION  session/example"), "{pretty}");
+    assert!(
+        pretty.starts_with("CONVERSATION  session/example"),
+        "{pretty}"
+    );
     assert!(pretty.contains("Please check why the n"), "{pretty}");
     // The harness's own wrappers are cleaned away, as in stui; no escapes without colour.
     for noise in ["<task-notification>", "<channel", "<command-name>", "\x1b["] {
         assert!(!pretty.contains(noise), "{noise}: {pretty}");
     }
     let raw = timeline_entries_text("session/example", &items);
-    assert!(raw.contains("<task-notification>"), "raw keeps what was stored");
+    assert!(
+        raw.contains("<task-notification>"),
+        "raw keeps what was stored"
+    );
 }
 
 #[test]
 fn documents_get_renders_markdown_on_a_terminal_and_leaves_data_alone() {
-    let rendered = render_document(b"# Title\n\nSome **bold** words.\n\n- one\n- two\n", 60).unwrap();
-    assert!(rendered.contains("Title") && rendered.contains("\x1b["), "{rendered:?}");
-    assert!(rendered.contains("bold") && !rendered.contains("**bold**"), "{rendered:?}");
+    let rendered =
+        render_document(b"# Title\n\nSome **bold** words.\n\n- one\n- two\n", 60).unwrap();
+    assert!(
+        rendered.contains("Title") && rendered.contains("\x1b["),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.contains("bold") && !rendered.contains("**bold**"),
+        "{rendered:?}"
+    );
     // Data and binaries print as stored.
     assert!(render_document(br#"{"a": 1}"#, 60).is_none());
     assert!(render_document(b"version 2\nmission \"x\" {}", 60).is_none());
@@ -708,7 +962,10 @@ fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
         false,
         st3_conversation_ui::Density::Full,
     );
-    assert!(orphan.lines().any(|line| line.trim() == "## Messages"), "{orphan}");
+    assert!(
+        orphan.lines().any(|line| line.trim() == "## Messages"),
+        "{orphan}"
+    );
     assert!(
         orphan.contains("<smalltalk-message>, followed by a bounded preview."),
         "{orphan}"
@@ -759,10 +1016,14 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
     ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": []}});
     let output_exempt = render_usage_report(&exempt, 24, None);
-    assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
+    assert!(
+        output_exempt.contains("codex/aaaa  exempt\n"),
+        "{output_exempt}"
+    );
     assert!(output_exempt.contains("claude/bbbb\n"), "{output_exempt}");
     assert!(
-        output_exempt.contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
+        output_exempt
+            .contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
         "{output_exempt}"
     );
     let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));
@@ -782,8 +1043,7 @@ fn usage_report_labels_the_daily_proxy_and_unknown_share() {
     assert!(rendered.contains("daily estimate"));
     assert!(rendered.contains("includes useful work"));
     assert!(
-        rendered
-            .contains("1970-01-01 (partial)  2  $0.44–$0.66  unknown (no priced usage)  1/2"),
+        rendered.contains("1970-01-01 (partial)  2  $0.44–$0.66  unknown (no priced usage)  1/2"),
         "{rendered}"
     );
 }
@@ -857,7 +1117,10 @@ fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
          "measured_at_unix_ms": 1_799_000_000_000_u64},
     ]});
     let output = render_usage_report(&report, 24, None);
-    assert!(output.contains("  ada/claude-1 (claude/aaaa)  stale\n"), "{output}");
+    assert!(
+        output.contains("  ada/claude-1 (claude/aaaa)  stale\n"),
+        "{output}"
+    );
     assert!(output.contains("  claude/bbbb\n"), "{output}");
 }
 
@@ -899,8 +1162,7 @@ fn conversations_ls_accepts_the_read_spelling_of_its_mailbox() {
     };
     assert_eq!(args.actor.as_deref(), Some("agent/run-1/worker"));
     assert!(
-        Cli::try_parse_from(["st3", "conversations", "ls", "agent/a", "--as", "agent/b"])
-            .is_err()
+        Cli::try_parse_from(["st3", "conversations", "ls", "agent/a", "--as", "agent/b"]).is_err()
     );
 }
 
@@ -960,11 +1222,19 @@ fn conversations_ls_accepts_sender_and_literal_subject_filters() {
     );
     for flag in ["--subject", "--subject-prefix"] {
         let error = Cli::try_parse_from([
-            "st3", "conversations", "ls", "agent/reviewer", flag, "Review",
+            "st3",
+            "conversations",
+            "ls",
+            "agent/reviewer",
+            flag,
+            "Review",
         ])
         .err()
         .expect("subject filters need a sender filter");
-        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
         assert!(error.to_string().contains("--from"));
     }
 }
@@ -1156,9 +1426,7 @@ fn a_harness_cannot_act_as_another_agent() {
     assert!(foreign_agent_actor("requester", own, run).is_none());
     assert!(foreign_agent_actor("exec/run-1/controller", own, run).is_none());
     assert!(foreign_agent_actor("agent/run-1/wake.codex", None, run).is_none());
-    assert!(
-        foreign_agent_actor("agent/run-1/wake.codex", Some("person/operator"), run).is_none()
-    );
+    assert!(foreign_agent_actor("agent/run-1/wake.codex", Some("person/operator"), run).is_none());
 }
 
 #[test]
@@ -1169,16 +1437,36 @@ fn mission_start_requires_an_explicit_actor() {
 #[test]
 fn a_harness_cannot_mutate_as_a_peer_or_person() {
     let cases: &[&[&str]] = &[
-        &["st3", "work", "done", "step-run/example/ask", "--as", "person/avery", "--summary", "Friday"],
-        &["st3", "conversations", "archive", "message/notice", "--as", "person/avery"],
-        &["st3", "work", "delegation", "--for", "person/avery", "--as", "person/avery", "--evidence", "claim/decision"],
         &[
             "st3",
-            "apply",
-            "mission.kdl",
+            "work",
+            "done",
+            "step-run/example/ask",
             "--as",
-            "agent/peer",
+            "person/avery",
+            "--summary",
+            "Friday",
         ],
+        &[
+            "st3",
+            "conversations",
+            "archive",
+            "message/notice",
+            "--as",
+            "person/avery",
+        ],
+        &[
+            "st3",
+            "work",
+            "delegation",
+            "--for",
+            "person/avery",
+            "--as",
+            "person/avery",
+            "--evidence",
+            "claim/decision",
+        ],
+        &["st3", "apply", "mission.kdl", "--as", "agent/peer"],
         &[
             "st3",
             "missions",
@@ -1243,8 +1531,8 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
             "accepted {arguments:?}"
         );
     }
-    let own = Cli::try_parse_from(["st3", "work", "wake", "step-run/x/y", "--as", "agent/own"])
-        .unwrap();
+    let own =
+        Cli::try_parse_from(["st3", "work", "wake", "step-run/x/y", "--as", "agent/own"]).unwrap();
     assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
     assert!(guard_mutating_cli_actor(&own.command, None, None).is_ok());
 }
@@ -1342,8 +1630,13 @@ fn pi_family_channel_logs_unhandled_frames_without_claiming_or_panicking() {
             );
         });
         let output = String::from_utf8(
-            capture.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
-        ).unwrap();
+            capture
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .unwrap();
         assert!(
             output.contains("unhandled pi-family channel frame"),
             "{output}"
@@ -1359,8 +1652,7 @@ fn pi_family_channel_logs_unhandled_frames_without_claiming_or_panicking() {
 }
 
 #[tokio::test]
-async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed_mail()
-{
+async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed_mail() {
     // The two providers share this pump but load their own native receipt ledgers.
     for driver in ["codex", "opencode"] {
         let root = tempfile::tempdir().unwrap();
@@ -1419,12 +1711,13 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
             };
             // Replay requires no backward staging or invented consumption receipt.
             mailbox.pump(&client, &agent_dir, receipts).await.unwrap();
-            let queued = st_drivers::push_mailbox::messages(
-                &agent_dir,
-                &agent_dir.join("resources/inbox"),
-            )
-            .unwrap();
-            let mut ids = queued.iter().map(|message| message.filename.as_str()).collect::<Vec<_>>();
+            let queued =
+                st_drivers::push_mailbox::messages(&agent_dir, &agent_dir.join("resources/inbox"))
+                    .unwrap();
+            let mut ids = queued
+                .iter()
+                .map(|message| message.filename.as_str())
+                .collect::<Vec<_>>();
             ids.sort_unstable();
             assert_eq!(ids, ["message/legacy", "message/pending"], "{driver}");
         }
@@ -1571,7 +1864,10 @@ fn a_human_ask_survives_channel_replacement_until_an_answered_state_frame() {
     assert_eq!(resumed.pending.state, Some(("working".into(), 1)));
     assert_eq!(resumed.pending.blocked_on.as_deref(), Some("human"));
     assert_eq!(resumed.pending.ask.as_deref(), Some("question"));
-    assert_eq!(resumed.pending.reason.as_deref(), Some("Which deployment target?"));
+    assert_eq!(
+        resumed.pending.reason.as_deref(),
+        Some("Which deployment target?")
+    );
     // The extension only emits an unblocked state for the matching ask's result.
     // An unrelated tool result is timeline data, not a new harness observation.
     assert!(!resumed.accept_frame(
@@ -1632,8 +1928,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             settle: ResumeSettle::resumed(),
         },
     };
-    let back: DriverResume =
-        serde_json::from_slice(&serde_json::to_vec(&resume).unwrap()).unwrap();
+    let back: DriverResume = serde_json::from_slice(&serde_json::to_vec(&resume).unwrap()).unwrap();
     assert_eq!(back.session, resume.session);
     assert_eq!(back.incarnation, resume.incarnation);
     assert!(back.loop_state.ready);
@@ -1654,14 +1949,12 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
 fn a_delivery_report_names_the_process_and_its_channel() {
     let root = tempfile::tempdir().unwrap();
     let report: Value =
-        serde_json::from_str(&native_delivery_report("claude-channel", Some(root.path())))
-            .unwrap();
+        serde_json::from_str(&native_delivery_report("claude-channel", Some(root.path()))).unwrap();
     assert_eq!(report["transport"], "claude-channel");
     assert_eq!(report["pid"], std::process::id());
     assert!(report["image"].is_string());
     assert!(report["channel"].is_null(), "no channel has reported yet");
-    let codex: Value =
-        serde_json::from_str(&native_delivery_report("app-server", None)).unwrap();
+    let codex: Value = serde_json::from_str(&native_delivery_report("app-server", None)).unwrap();
     assert!(codex.get("channel").is_none());
 }
 
@@ -1685,28 +1978,42 @@ fn agent_card_todo_preserves_snapshot_and_reports_active_blocked_empty_truncated
                 "truncated":true
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let card = render_client_agent(&agent, &[], 0);
     assert!(card.contains("Todo         ▶ Compile · 3/10 done · 1 blocked · truncated\n"));
     assert!(!card.contains("▶ Later"));
     let value = serde_json::to_value(&agent).unwrap();
-    assert_eq!(value["todo"]["snapshot"]["phases"][0]["tasks"][1]["blocker"], "Approval");
+    assert_eq!(
+        value["todo"]["snapshot"]["phases"][0]["tasks"][1]["blocker"],
+        "Approval"
+    );
     assert_eq!(value["todo"]["claim_id"], "claim/todo");
     agent.todo.as_mut().unwrap().snapshot.phases[0].tasks[0].content =
         "\u{1b}[31mCompile\u{1b}[0m\nnext\tstep\u{1b}]0;spoofed title\u{7}\u{8}".into();
-    assert!(render_client_agent(&agent, &[], 0)
-        .contains("Todo         ▶ Compile next step · 3/10 done · 1 blocked · truncated\n"));
+    assert!(
+        render_client_agent(&agent, &[], 0)
+            .contains("Todo         ▶ Compile next step · 3/10 done · 1 blocked · truncated\n")
+    );
     agent.todo.as_mut().unwrap().snapshot.totals.abandoned = 2;
-    assert!(render_client_agent(&agent, &[], 0)
-        .contains("3/10 done · 1 blocked · 2 abandoned · truncated"));
+    assert!(
+        render_client_agent(&agent, &[], 0)
+            .contains("3/10 done · 1 blocked · 2 abandoned · truncated")
+    );
     let todo = agent.todo.as_mut().unwrap();
     todo.stale = true;
     todo.snapshot.phases.clear();
     todo.snapshot.truncated = false;
     todo.snapshot.totals = st3_client::HarnessTodoTotals {
-        pending: 0, in_progress: 0, completed: 0, blocked: 0, abandoned: 0,
+        pending: 0,
+        in_progress: 0,
+        completed: 0,
+        blocked: 0,
+        abandoned: 0,
     };
-    assert!(render_client_agent(&agent, &[], 0).contains("Todo         0/0 done · 0 blocked · stale\n"));
+    assert!(
+        render_client_agent(&agent, &[], 0).contains("Todo         0/0 done · 0 blocked · stale\n")
+    );
     agent.todo = None;
     assert!(!render_client_agent(&agent, &[], 0).contains("Todo"));
     assert!(serde_json::to_value(agent).unwrap()["todo"].is_null());
@@ -1736,7 +2043,8 @@ fn agent_card_names_a_pending_codex_approval() {
         "state": "running", "reachability": "local", "runtime_ids": [],
         "driver": "codex", "harness_state": "blocked", "blocked_on": "human",
         "ask": "permission", "reason": "waitingOnApproval"
-    })).unwrap();
+    }))
+    .unwrap();
     let card = render_client_agent(&agent, &[], 0);
     assert!(card.contains("HARNESS      codex · blocked\n"));
     assert!(card.contains("AWAITING     approval\n"));
@@ -1922,7 +2230,10 @@ fn a_down_agent_card_says_since_when_and_marks_the_step_its_holder_cannot_work()
     }))
     .unwrap();
     let card = render_client_agent(&agent, &[step], 360_000);
-    assert!(card.contains("STATE        down · no session since 2026-09-23T21:00:00.000Z\n"), "{card}");
+    assert!(
+        card.contains("STATE        down · no session since 2026-09-23T21:00:00.000Z\n"),
+        "{card}"
+    );
     assert!(
         card.contains("CURRENT STEP Build the parser · working · held by a seat with no session since 2026-09-23T21:00:00.000Z\n"),
         "{card}"
@@ -1986,19 +2297,18 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
     let socket = root.path().join("st3.sock");
     let store = Arc::new(Store::open_memory("pi-delivery-test").unwrap());
     let seat = "agent/run-1/wake.omp";
-    let claim =
-        |subject: &str, kind: &str, actor: &str, fields: Vec<(&str, &str)>| ClaimInput {
-            subject: subject.into(),
-            kind: kind.into(),
-            actor: Some(actor.into()),
-            fields: fields
-                .into_iter()
-                .map(|(key, value)| (key.to_owned(), Value::String(value.into())))
-                .collect(),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        };
+    let claim = |subject: &str, kind: &str, actor: &str, fields: Vec<(&str, &str)>| ClaimInput {
+        subject: subject.into(),
+        kind: kind.into(),
+        actor: Some(actor.into()),
+        fields: fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), Value::String(value.into())))
+            .collect(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
     for subject in ["message/held", "message/pending"] {
         store
             .append_claim(&claim(
@@ -2416,18 +2726,66 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
-        ("agents", /* sqlite-large-value: allow-for-now lv-h64e7bce424cc owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
-        ("attention", /* sqlite-large-value: allow-for-now lv-h894830f2da6e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
-        ("change", /* sqlite-large-value: allow-for-now lv-hf9512b75213b owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
-        ("conversations", /* sqlite-large-value: allow-for-now lv-hce9b519c20da owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
-        ("doctor", /* sqlite-large-value: allow-for-now lv-h4ef68d330bf0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
-        ("driver", /* sqlite-large-value: allow-for-now lv-h6901be108db9 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
-        ("fleet", /* sqlite-large-value: allow-for-now lv-hc13e13e1dcef owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
-        ("launch", /* sqlite-large-value: allow-for-now lv-h65740c83118e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
-        ("replication", /* sqlite-large-value: allow-for-now lv-ha35371b1cf0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
-        ("terminals", /* sqlite-large-value: allow-for-now lv-hc9c07b4d9f7f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
-        ("uninstall", /* sqlite-large-value: allow-for-now lv-haa99fd7b7bb0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
-        ("work", /* sqlite-large-value: allow-for-now lv-h76caa29e91f6 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
+        (
+            "agents",
+            /* sqlite-large-value: allow-for-now lv-h64e7bce424cc owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("agents_cli.rs"),
+        ),
+        (
+            "attention",
+            /* sqlite-large-value: allow-for-now lv-h894830f2da6e owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("attention_cli.rs"),
+        ),
+        (
+            "change",
+            /* sqlite-large-value: allow-for-now lv-hf9512b75213b owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("change_cli.rs"),
+        ),
+        (
+            "conversations",
+            /* sqlite-large-value: allow-for-now lv-hce9b519c20da owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("conversations_cli.rs"),
+        ),
+        (
+            "doctor",
+            /* sqlite-large-value: allow-for-now lv-h4ef68d330bf0 owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("doctor_cli.rs"),
+        ),
+        (
+            "driver",
+            /* sqlite-large-value: allow-for-now lv-h6901be108db9 owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("driver_cli.rs"),
+        ),
+        (
+            "fleet",
+            /* sqlite-large-value: allow-for-now lv-hc13e13e1dcef owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("fleet_cli.rs"),
+        ),
+        (
+            "launch",
+            /* sqlite-large-value: allow-for-now lv-h65740c83118e owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("launch_cli.rs"),
+        ),
+        (
+            "replication",
+            /* sqlite-large-value: allow-for-now lv-ha35371b1cf0f owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("replication_cli.rs"),
+        ),
+        (
+            "terminals",
+            /* sqlite-large-value: allow-for-now lv-hc9c07b4d9f7f owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("terminals_cli.rs"),
+        ),
+        (
+            "uninstall",
+            /* sqlite-large-value: allow-for-now lv-haa99fd7b7bb0 owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("uninstall_cli.rs"),
+        ),
+        (
+            "work",
+            /* sqlite-large-value: allow-for-now lv-h76caa29e91f6 owner=st3::main_tests TODO=trace-statement-and-value-representation */
+            include_str!("work_cli.rs"),
+        ),
     ];
     let main_source = /* sqlite-large-value: allow-for-now lv-h4403a9330a0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
     let declared: BTreeSet<&str> = main_source
@@ -2436,7 +2794,10 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         .collect();
     assert_eq!(
         declared,
-        command_files.iter().map(|(name, _)| *name).collect::<BTreeSet<_>>(),
+        command_files
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<BTreeSet<_>>(),
         "every command file main.rs declares is scanned"
     );
     let cli_source = std::iter::once(main_source)
@@ -2638,16 +2999,28 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
         stale: true,
         ..behind(None, None, None)
     });
-    assert!(output.contains(&summary("estimating time to catch up")), "{output}");
-    assert!(output.contains("  stale: no exchange since the measurement below"), "{output}");
+    assert!(
+        output.contains(&summary("estimating time to catch up")),
+        "{output}"
+    );
+    assert!(
+        output.contains("  stale: no exchange since the measurement below"),
+        "{output}"
+    );
     assert!(
         output.contains("  estimating time to catch up (arrival only; measured 2s ago)"),
         "{output}"
     );
-    assert!(!output.contains("receiving") && !output.contains("closing at"), "{output}");
+    assert!(
+        !output.contains("receiving") && !output.contains("closing at"),
+        "{output}"
+    );
     // Positive: the forecast names the closing rate it divides by.
     let output = render(behind(Some(142.5), Some(140.0), Some(889)));
-    assert!(output.contains(&summary("caught up in about 15m")), "{output}");
+    assert!(
+        output.contains(&summary("caught up in about 15m")),
+        "{output}"
+    );
     assert!(
         output.contains(
             "  receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m \
@@ -2665,8 +3038,14 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
     };
     let output = render(nothing_missing.clone());
     assert!(!output.contains("catching up"), "{output}");
-    assert!(!output.contains("caught up in") && !output.contains("closing at"), "{output}");
-    assert!(!output.contains("nothing was missing at the last measurement"), "{output}");
+    assert!(
+        !output.contains("caught up in") && !output.contains("closing at"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("nothing was missing at the last measurement"),
+        "{output}"
+    );
     // The same measurement gone stale: view() withdrew its rates and its zero forecast, and
     // the status says only what the last measurement found, whether or not this node held
     // envelopes the peer lacked. The graph comparison lines are unchanged.
@@ -2701,33 +3080,32 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
 fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes() {
     let now = 1_000_000;
     let local = "1111111111111111aaaa";
-    let peer =
-        |name: &str, graph: Option<&str>, sync: Option<st3::model::ReplicationPeerSync>| {
-            ReplicationPeerStatus {
-                last_successful_exchange: None,
-                last_failed_exchange: None,
-                worker: None,
-                projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
-                incompatible_projection_tables: Vec::new(),
-                differing_tables: Vec::new(),
-                projection_comparison_waiting: false,
-                projection_comparison_waiting_reason: None,
-                projection_graphs_equal: None,
-                projection_compared_at_unix_ms: None,
-                peer: name.into(),
-                status: "up".into(),
-                last_success_at_unix_ms: Some(now - 2_000),
-                last_error: None,
-                last_failure_at_unix_ms: None,
-                refusal_reason: None,
-                schema_digest: None,
-                projection_registry_digest: None,
-                projection_versions: Default::default(),
-                authority_digest: None,
-                graph_digest: graph.map(str::to_owned),
-                sync,
-            }
-        };
+    let peer = |name: &str, graph: Option<&str>, sync: Option<st3::model::ReplicationPeerSync>| {
+        ReplicationPeerStatus {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
+            worker: None,
+            projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
+            incompatible_projection_tables: Vec::new(),
+            differing_tables: Vec::new(),
+            projection_comparison_waiting: false,
+            projection_comparison_waiting_reason: None,
+            projection_graphs_equal: None,
+            projection_compared_at_unix_ms: None,
+            peer: name.into(),
+            status: "up".into(),
+            last_success_at_unix_ms: Some(now - 2_000),
+            last_error: None,
+            last_failure_at_unix_ms: None,
+            refusal_reason: None,
+            schema_digest: None,
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
+            authority_digest: None,
+            graph_digest: graph.map(str::to_owned),
+            sync,
+        }
+    };
     let same_envelopes = |compared: Option<u128>, differs: Option<u128>, diverged| {
         Some(st3::model::ReplicationPeerSync {
             measured_at_unix_ms: now,
@@ -2986,9 +3364,7 @@ fn product_renderers_have_exact_empty_and_mixed_now_output() {
     );
     // An attention item leads with its kind and title, then who it is from and how long ago
     // (which moves with the clock) and its priority when it is not normal.
-    let (head, rest) = mixed
-        .split_once("  action: st alerts show")
-        .expect(&mixed);
+    let (head, rest) = mixed.split_once("  action: st alerts show").expect(&mixed);
     assert!(
         head.starts_with("NOW  3\n\nrequest   Review release\n          "),
         "{mixed}"
@@ -3104,7 +3480,10 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     update.alert = Some(false);
     let now = render_now_page(&updates, "st now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
-    assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
+    assert!(
+        !now.contains("1 alert\n") && !now.contains("0 alerts"),
+        "{now}"
+    );
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
         render_now_page(&fixture_product_page(&[], false), "st now"),
@@ -3114,7 +3493,10 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let mut mixed = page.clone();
     mixed.items.extend(updates.items.clone());
     let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "st alerts ls");
-    assert!(listed.starts_with("ALERTS FOR person/alex  1\n"), "{listed}");
+    assert!(
+        listed.starts_with("ALERTS FOR person/alex  1\n"),
+        "{listed}"
+    );
     assert!(listed.contains("\nUPDATES  1\n"), "{listed}");
     // A daemon that predates alerts says nothing: an update is still not an alert.
     let ClientResource::Attention(update) = &mut mixed.items[1] else {
@@ -3323,8 +3705,10 @@ async fn renewal_retry_empty_selection_retires_an_expired_lease_bound() {
     // This is the production selector, called only after the work read succeeds.
     update_renewal_retry_lease(&mut retry, &[], "agent/worker", 1_000);
     retry.succeeded();
-    assert!((Duration::from_secs(15)..=Duration::from_secs(30))
-        .contains(&repeated_timeout_pause(&mut retry)));
+    assert!(
+        (Duration::from_secs(15)..=Duration::from_secs(30))
+            .contains(&repeated_timeout_pause(&mut retry))
+    );
 }
 
 #[tokio::test]
@@ -3359,8 +3743,10 @@ async fn renewal_retry_selects_live_leases_and_replaces_the_old_bound() {
     let replacement = [retry_lease_step("claimed", "agent/worker", Some(101_000))];
     update_renewal_retry_lease(&mut retry, &replacement, "agent/worker", 1_000);
     retry.succeeded();
-    assert!((Duration::from_secs(15)..=Duration::from_secs(30))
-        .contains(&repeated_timeout_pause(&mut retry)));
+    assert!(
+        (Duration::from_secs(15)..=Duration::from_secs(30))
+            .contains(&repeated_timeout_pause(&mut retry))
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -3450,12 +3836,17 @@ fn machine_and_device_renderers_have_exact_operational_output() {
         )
     );
     let mut assistant = fixture_product_page(&["device"], false);
-    let ClientResource::Device(device) = &mut assistant.items[0] else { panic!("device fixture"); };
+    let ClientResource::Device(device) = &mut assistant.items[0] else {
+        panic!("device fixture");
+    };
     device.person_id = None;
     device.grant_id = Some("assistant-grant/0123456789abcdef01234567".into());
-    device.session_actor = "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
+    device.session_actor =
+        "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
     let shown = render_product_page("DEVICES", &assistant, "st devices");
-    assert!(shown.contains("action: st devices grant revoke assistant-grant/0123456789abcdef01234567"));
+    assert!(
+        shown.contains("action: st devices grant revoke assistant-grant/0123456789abcdef01234567")
+    );
     assert!(!shown.contains("--as person/"));
 }
 
@@ -3678,9 +4069,9 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
             Reason::AdmissionNativeConsumption,
             Source::AdmissionProbe,
         );
-        let observed = st_drivers::driver_diagnostic::read(
-            &st_drivers::driver_diagnostic::path(directory.path()),
-        );
+        let observed = st_drivers::driver_diagnostic::read(&st_drivers::driver_diagnostic::path(
+            directory.path(),
+        ));
         let claim = admission_diagnostic("agent/node.fixture", "first", &observed).unwrap();
         assert_eq!(claim.fields["code"], "harness-admission-failed");
         assert_eq!(claim.fields["severity"], severity);
@@ -3689,7 +4080,10 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let reason = claim.fields["reason"].as_str().unwrap();
         assert!(reason.contains("admissionNativeConsumption") && reason.contains("99.42.7"));
         assert!(reason.contains(driver.as_str()));
-        assert!(reason.contains(&format!("st admission override {} --binary", driver.as_str())));
+        assert!(reason.contains(&format!(
+            "st admission override {} --binary",
+            driver.as_str()
+        )));
         assert_eq!(
             claim.idempotency_key,
             admission_diagnostic("agent/node.fixture", "first", &observed)
@@ -3726,9 +4120,8 @@ fn harness_diagnostic_requires_and_derives_the_agent_identity() {
 #[test]
 fn every_extension_harness_has_a_hidden_native_channel_driver() {
     for driver in ["pi-channel", "omp-channel"] {
-        let cli =
-            Cli::try_parse_from(["st3", "driver", driver, "--subject", "agent/run/worker"])
-                .unwrap_or_else(|error| panic!("{driver} did not parse: {error}"));
+        let cli = Cli::try_parse_from(["st3", "driver", driver, "--subject", "agent/run/worker"])
+            .unwrap_or_else(|error| panic!("{driver} did not parse: {error}"));
         let Command::Driver(args) = cli.command else {
             panic!("{driver} did not select the hidden driver command");
         };
@@ -3810,7 +4203,9 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         idempotency_key: Some("refuse-a-person".into()),
     };
     for to in ["person/ada", "requester"] {
-        let error = send_message(&client, args(to), Vec::new()).await.unwrap_err();
+        let error = send_message(&client, args(to), Vec::new())
+            .await
+            .unwrap_err();
         let text = format!("{error:#}");
         assert!(
             text.starts_with("people do not have inboxes: print your answer in the chat"),
@@ -3916,7 +4311,12 @@ fn machine_read_inventory_comes_from_the_live_clap_graph() {
 
 #[test]
 fn machine_read_inventory_probe_is_exclusive_before_actions() {
-    let args = |words: &[&str]| words.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+    let args = |words: &[&str]| {
+        words
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
         read_contract_inventory_request(&args(&["st", "--read-contract-inventory-json"])),
         Some(true)
@@ -3937,15 +4337,28 @@ fn machine_read_inventory_probe_is_exclusive_before_actions() {
             None
         );
         assert_eq!(
-            read_contract_inventory_request(&args(&["st", "driver", "run", "--", "codex", literal])),
+            read_contract_inventory_request(&args(&[
+                "st", "driver", "run", "--", "codex", literal
+            ])),
             None
         );
-        assert!(Cli::try_parse_from([
-            "st", "documents", "put", "--as", "doc/example", "--", literal,
-        ])
-        .is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "st",
+                "documents",
+                "put",
+                "--as",
+                "doc/example",
+                "--",
+                literal,
+            ])
+            .is_ok()
+        );
     }
-    assert_eq!(read_contract_inventory_request(&args(&["st", "documents", "put"])), None);
+    assert_eq!(
+        read_contract_inventory_request(&args(&["st", "documents", "put"])),
+        None
+    );
 }
 
 #[test]
@@ -3959,7 +4372,10 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
         .render_help()
         .to_string();
     assert!(help.contains("`mission-run/release/demo/1`"), "{help}");
-    assert!(help.contains("A bare ID is placed under the mission"), "{help}");
+    assert!(
+        help.contains("A bare ID is placed under the mission"),
+        "{help}"
+    );
     assert!(!help.contains("`mission-run/1`"), "{help}");
 }
 
@@ -4425,21 +4841,36 @@ fn mission_show_accepts_follow() {
     assert_eq!(args.limit, 50);
     assert!(args.cursor.is_none());
     let continued = Cli::try_parse_from([
-        "st3", "missions", "show", "mission-run/release/demo", "--cursor", "child-run",
-        "--limit", "20",
+        "st3",
+        "missions",
+        "show",
+        "mission-run/release/demo",
+        "--cursor",
+        "child-run",
+        "--limit",
+        "20",
     ])
     .unwrap();
     let Command::Missions {
         command: MissionViewCommand::Show(continued),
-    } = continued.command else {
+    } = continued.command
+    else {
         panic!("mission show pagination did not parse");
     };
     assert_eq!(continued.cursor.as_deref(), Some("child-run"));
     assert_eq!(continued.limit, 20);
-    assert!(Cli::try_parse_from([
-        "st3", "missions", "show", "mission-run/release/demo", "--follow", "--cursor", "child-run",
-    ])
-    .is_err());
+    assert!(
+        Cli::try_parse_from([
+            "st3",
+            "missions",
+            "show",
+            "mission-run/release/demo",
+            "--follow",
+            "--cursor",
+            "child-run",
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -4616,14 +5047,9 @@ fn an_ended_harness_uses_the_registered_state() {
 
 #[test]
 fn typed_claude_accepts_tui_options_and_rejects_headless_protocol_options() {
-    reject_noninteractive_claude_argv(&["claude".into(), "--model".into(), "opus".into()])
+    reject_noninteractive_claude_argv(&["claude".into(), "--model".into(), "opus".into()]).unwrap();
+    reject_noninteractive_claude_argv(&["claude".into(), "--remote-control".into(), "cos".into()])
         .unwrap();
-    reject_noninteractive_claude_argv(&[
-        "claude".into(),
-        "--remote-control".into(),
-        "cos".into(),
-    ])
-    .unwrap();
 
     for argv in [
         vec!["claude".into(), "-p".into()],
@@ -4787,8 +5213,7 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
     );
 
     let explicit =
-        Cli::try_parse_from(["st3", "conversations", "ls", "agent/explicit", "--archive"])
-            .unwrap();
+        Cli::try_parse_from(["st3", "conversations", "ls", "agent/explicit", "--archive"]).unwrap();
     let Command::Conversations {
         command: MessageCommand::Ls(explicit),
     } = explicit.command
@@ -5185,8 +5610,8 @@ async fn message_read_returns_the_committed_lifecycle_state() {
 fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() {
     assert!(Cli::try_parse_from(["st3", "agents"]).is_err());
 
-    let cli = Cli::try_parse_from(["st3", "agents", "ls", "--status", "running", "--enrich"])
-        .unwrap();
+    let cli =
+        Cli::try_parse_from(["st3", "agents", "ls", "--status", "running", "--enrich"]).unwrap();
     let Command::Agents {
         command: AgentsCommand::Ls(args),
     } = cli.command
@@ -5237,7 +5662,11 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     };
     let kdl = agent_start_document(&args, None).unwrap();
     let intent = st3::parse_intent(&kdl, "node").unwrap();
-    assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
+    assert!(
+        intent
+            .subjects
+            .contains_key("agent/example/cos/standing/cos")
+    );
     assert!(
         intent.subjects["agent/example/cos/standing/cos"]
             .owner_run
@@ -5310,10 +5739,7 @@ fn agent_new_cli_declares_checkout_and_preserves_plain_workspace() {
     let document: KdlDocument = source.parse().unwrap();
     let body = document.get("agent").unwrap().children().unwrap();
     let checkout = body.get("checkout").unwrap();
-    assert_eq!(
-        checkout.get(0).unwrap().as_string(),
-        Some("/work/repo")
-    );
+    assert_eq!(checkout.get(0).unwrap().as_string(), Some("/work/repo"));
     assert_eq!(
         checkout.get("branch").unwrap().as_string(),
         Some("example/parser")
@@ -5337,12 +5763,9 @@ fn agent_new_cli_declares_checkout_and_preserves_plain_workspace() {
     for flag in ["--base", "--branch"] {
         assert!(Cli::try_parse_from(["st", "agents", "new", "parser", flag, "main"]).is_err());
     }
+    assert!(Cli::try_parse_from(["st", "agents", "new", "parser", "--remove-at-run-end"]).is_err());
     assert!(
-        Cli::try_parse_from(["st", "agents", "new", "parser", "--remove-at-run-end"]).is_err()
-    );
-    assert!(
-        Cli::try_parse_from(["st", "agents", "repos", "--host", "host/example", "--json"])
-            .is_ok()
+        Cli::try_parse_from(["st", "agents", "repos", "--host", "host/example", "--json"]).is_ok()
     );
 }
 
@@ -5443,7 +5866,6 @@ fn a_new_claude_agent_is_the_fleet_claude_seat() {
         "--channels plugin:st-channel@st",
         "--model claude-opus-5-5",
         "--effort high",
-
     ] {
         assert!(
             joined.contains(expected),
@@ -5495,10 +5917,7 @@ fn a_new_codex_agent_is_the_fleet_codex_seat() {
         panic!("a harness seat launches an argv");
     };
     let joined = argv.join(" ");
-    for expected in [
-        "--model gpt-example",
-        "-c model_reasoning_effort=medium",
-    ] {
+    for expected in ["--model gpt-example", "-c model_reasoning_effort=medium"] {
         assert!(
             joined.contains(expected),
             "{expected} is missing from {joined}"
@@ -5523,8 +5942,7 @@ fn a_new_agent_needs_its_own_identity_inside_a_harness() {
         .command;
     guard_mutating_cli_actor(&command, Some("agent/seat"), None).unwrap();
     assert!(
-        Cli::try_parse_from(["st3", "agents", "new", "site", "--attach", "--print-kdl"])
-            .is_err()
+        Cli::try_parse_from(["st3", "agents", "new", "site", "--attach", "--print-kdl"]).is_err()
     );
 }
 
@@ -5599,8 +6017,7 @@ fn human_mutations_reject_missing_or_shorthand_identity() {
 #[test]
 fn full_control_device_pairing_is_an_explicit_cli_choice() {
     let limited =
-        Cli::try_parse_from(["st3", "devices", "--as", "person/alex", "pair", "iPhone"])
-            .unwrap();
+        Cli::try_parse_from(["st3", "devices", "--as", "person/alex", "pair", "iPhone"]).unwrap();
     let Command::Devices(DevicesArgs {
         command: Some(DevicesCommand::Pair { full_control, .. }),
         ..
@@ -5671,17 +6088,47 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
 #[test]
 fn assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets() {
     let cli = Cli::try_parse_from([
-        "st3", "devices", "--as", "person/operator", "grant", "read-trust",
-        "assistant-grant/fixture", "--issuer", "scg/approval-host", "--key-id",
-        "approval-key/fixture", "--attestor-public-key", "attestor-fixture",
-        "--shim-public-key", "shim-fixture", "--default-response-bytes", "1024",
-        "--max-response-bytes", "2048",
-    ]).unwrap();
+        "st3",
+        "devices",
+        "--as",
+        "person/operator",
+        "grant",
+        "read-trust",
+        "assistant-grant/fixture",
+        "--issuer",
+        "scg/approval-host",
+        "--key-id",
+        "approval-key/fixture",
+        "--attestor-public-key",
+        "attestor-fixture",
+        "--shim-public-key",
+        "shim-fixture",
+        "--default-response-bytes",
+        "1024",
+        "--max-response-bytes",
+        "2048",
+    ])
+    .unwrap();
     assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
-    let Command::Devices(DevicesArgs { command: Some(DevicesCommand::Grant {
-        command: AssistantGrantCommand::ReadTrust { grant, issuer, key_id,
-            attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes },
-    }), .. }) = cli.command else { panic!("expected assistant read trust"); };
+    let Command::Devices(DevicesArgs {
+        command:
+            Some(DevicesCommand::Grant {
+                command:
+                    AssistantGrantCommand::ReadTrust {
+                        grant,
+                        issuer,
+                        key_id,
+                        attestor_public_key,
+                        shim_public_key,
+                        default_response_bytes,
+                        max_response_bytes,
+                    },
+            }),
+        ..
+    }) = cli.command
+    else {
+        panic!("expected assistant read trust");
+    };
     assert_eq!(grant, "assistant-grant/fixture");
     assert_eq!(issuer, "scg/approval-host");
     assert_eq!(key_id, "approval-key/fixture");
@@ -5692,8 +6139,24 @@ fn assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets() {
 #[test]
 fn assistant_grant_cli_rejects_harness_person_impersonation() {
     for argv in [
-        vec!["st3", "devices", "--as", "person/operator", "pair", "--assistant", "assistant/chatgpt"],
-        vec!["st3", "devices", "--as", "person/operator", "grant", "inspect", "assistant-grant/demo"],
+        vec![
+            "st3",
+            "devices",
+            "--as",
+            "person/operator",
+            "pair",
+            "--assistant",
+            "assistant/chatgpt",
+        ],
+        vec![
+            "st3",
+            "devices",
+            "--as",
+            "person/operator",
+            "grant",
+            "inspect",
+            "assistant-grant/demo",
+        ],
     ] {
         let cli = Cli::try_parse_from(argv).unwrap();
         assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
@@ -5705,7 +6168,12 @@ fn assistant_grant_cli_rejects_harness_person_impersonation() {
 fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
     let argv = |extra: &[&'static str]| {
         let mut argv = vec![
-            "st3", "devices", "--as", "person/operator", "pair", "--assistant",
+            "st3",
+            "devices",
+            "--as",
+            "person/operator",
+            "pair",
+            "--assistant",
             "assistant/chatgpt",
         ];
         argv.extend_from_slice(extra);
@@ -5738,9 +6206,14 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
     };
     assert!(device_name.is_none());
     assert_eq!(grant.expires_in, Some(3_600));
-    let sealed = SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), grant).unwrap();
+    let sealed =
+        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), grant)
+            .unwrap();
     assert_eq!(sealed.scopes.len(), 2);
-    assert_eq!(sealed.consent_evidence, "axe decision ask recorded by the owning person");
+    assert_eq!(
+        sealed.consent_evidence,
+        "axe decision ask recorded by the owning person"
+    );
 
     for rejected in [
         argv(&["--expires-in", "0"]),
@@ -5749,9 +6222,20 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
         argv(&["--scope", "read.everything"]),
         argv(&["--full-control"]),
         argv(&["--read-only"]),
-        vec!["st3", "devices", "--as", "person/operator", "pair", "--assistant", "assistant/other"],
+        vec![
+            "st3",
+            "devices",
+            "--as",
+            "person/operator",
+            "pair",
+            "--assistant",
+            "assistant/other",
+        ],
     ] {
-        assert!(Cli::try_parse_from(&rejected).is_err(), "accepted {rejected:?}");
+        assert!(
+            Cli::try_parse_from(&rejected).is_err(),
+            "accepted {rejected:?}"
+        );
     }
 
     let terms = |scopes: Vec<AssistantScope>, consent: bool| AssistantGrantTerms {
@@ -5761,18 +6245,36 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
         consent_evidence: Some("axe decision ask recorded by the owning person".into()),
     };
     let summary = parse_assistant_scope("read.assistant.summary").unwrap();
-    assert!(SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![], true)).is_err());
     assert!(
-        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![summary.clone()], false))
-            .is_err()
+        SealedAssistantGrantTerms::from_cli(
+            "person/operator",
+            Some("person/operator"),
+            terms(vec![], true)
+        )
+        .is_err()
     );
     assert!(
-        SealedAssistantGrantTerms::from_cli("person/other", Some("person/operator"), terms(vec![summary.clone()], true))
-            .is_err()
+        SealedAssistantGrantTerms::from_cli(
+            "person/operator",
+            Some("person/operator"),
+            terms(vec![summary.clone()], false)
+        )
+        .is_err()
     );
-    let defaulted =
-        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![summary], true))
-            .unwrap();
+    assert!(
+        SealedAssistantGrantTerms::from_cli(
+            "person/other",
+            Some("person/operator"),
+            terms(vec![summary.clone()], true)
+        )
+        .is_err()
+    );
+    let defaulted = SealedAssistantGrantTerms::from_cli(
+        "person/operator",
+        Some("person/operator"),
+        terms(vec![summary], true),
+    )
+    .unwrap();
     assert_eq!(defaulted.expires_in_seconds, 3_600);
     assert!(require_assistant_grant_owner("person/operator", None).is_err());
     assert!(require_assistant_grant_owner("person/operator", Some("operator")).is_err());
@@ -5780,7 +6282,12 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
 
     let complete = |extra: &[&'static str]| {
         let mut argv = vec![
-            "st3", "devices", "complete", "https://member.example", "pairing/demo", "--assistant",
+            "st3",
+            "devices",
+            "complete",
+            "https://member.example",
+            "pairing/demo",
+            "--assistant",
         ];
         argv.extend_from_slice(extra);
         Cli::try_parse_from(argv)
@@ -5793,15 +6300,17 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
         panic!("expected an assistant completion command")
     };
     assert!(assistant);
-    assert!(complete(&["--unpinned"]).is_err(), "assistant sessions carry no person root");
+    assert!(
+        complete(&["--unpinned"]).is_err(),
+        "assistant sessions carry no person root"
+    );
     assert!(complete(&["--fingerprint", "sha256:demo"]).is_err());
 }
 
 #[test]
 fn legacy_publish_is_not_a_public_alias() {
     assert!(
-        Cli::try_parse_from(["st3", "publish", "mission.kdl", "--as", "agent/operator"])
-            .is_err()
+        Cli::try_parse_from(["st3", "publish", "mission.kdl", "--as", "agent/operator"]).is_err()
     );
 }
 
@@ -5957,8 +6466,7 @@ fn work_wake_is_explicit_and_terminal_ding_is_not_a_driver() {
 
 #[test]
 fn review_commands_parse_a_filter_and_an_owner_target() {
-    let list =
-        Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
+    let list = Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
     let Command::Attention {
         command: AttentionCommand::Ls { actor, .. },
     } = list.command
@@ -5987,8 +6495,7 @@ fn review_commands_parse_a_filter_and_an_owner_target() {
 
 #[test]
 fn attention_commands_parse_list_request_and_resolution() {
-    let list =
-        Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
+    let list = Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
     let Command::Attention {
         command: AttentionCommand::Ls { actor, .. },
     } = list.command
@@ -6253,10 +6760,16 @@ fn graph_delivery_idle_and_deliberate_hold_keep_mailbox_ready() {
         assert!(report["reason"].is_null());
     }
     gate.update(true, DELIVERY_CONTROL_LEASE);
-    assert!(gate.held(), "a deliberate hold must still block native input");
+    assert!(
+        gate.held(),
+        "a deliberate hold must still block native input"
+    );
     for transport in ["app-server", "opencode-server"] {
         let report = native_delivery_control_report(transport, &gate);
-        assert_eq!(report["ready"], true, "a deliberate hold is healthy control");
+        assert_eq!(
+            report["ready"], true,
+            "a deliberate hold is healthy control"
+        );
         assert!(report["reason"].is_null());
     }
 }
@@ -6264,8 +6777,8 @@ fn graph_delivery_idle_and_deliberate_hold_keep_mailbox_ready() {
 #[tokio::test]
 async fn graph_delivery_control_retries_once_and_keeps_late_reads_closed() {
     use axum::{Json, Router, routing::get};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use st_drivers::session_control::{DeliveryBlockReason, DeliveryGate};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     for delayed_reads in [1, usize::MAX] {
         let root = tempfile::tempdir().unwrap();
@@ -6277,41 +6790,50 @@ async fn graph_delivery_control_retries_once_and_keeps_late_reads_closed() {
         let handler_gate = gate.clone();
         let retry_held = Arc::new(AtomicBool::new(false));
         let handler_retry_held = retry_held.clone();
-        let app = Router::new().route("/v1/delivery/hold", get(move || {
-            let count = count.clone();
-            let gate = handler_gate.clone();
-            let retry_held = handler_retry_held.clone();
-            async move {
-                let attempt = count.fetch_add(1, Ordering::SeqCst);
-                if attempt == 1 {
-                    retry_held.store(gate.held(), Ordering::SeqCst);
+        let app = Router::new().route(
+            "/v1/delivery/hold",
+            get(move || {
+                let count = count.clone();
+                let gate = handler_gate.clone();
+                let retry_held = handler_retry_held.clone();
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 1 {
+                        retry_held.store(gate.held(), Ordering::SeqCst);
+                    }
+                    if attempt < delayed_reads {
+                        tokio::time::sleep(Duration::from_millis(350)).await;
+                    }
+                    Json(json!({"api_version":"st3.v1", "value": {
+                        "subject":"agent/eval/gated", "active":false,
+                        "until_unix_ms":null, "reason":null, "actor":null, "claim":null,
+                    }}))
                 }
-                if attempt < delayed_reads {
-                    tokio::time::sleep(Duration::from_millis(350)).await;
-                }
-                Json(json!({"api_version":"st3.v1", "value": {
-                    "subject":"agent/eval/gated", "active":false,
-                    "until_unix_ms":null, "reason":null, "actor":null, "claim":null,
-                }}))
-            }
-        }));
+            }),
+        );
         let server_socket = socket.clone();
         let server = tokio::spawn(async move { serve_unix(&server_socket, app).await.unwrap() });
         for _ in 0..100 {
-            if socket.exists() { break; }
+            if socket.exists() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         assert!(socket.exists());
         let client = Client::unix(&socket);
         let mut reported = Vec::new();
         let started = Instant::now();
-        let result = refresh_graph_delivery_gate_with_report(
-            &client, "agent/eval/gated", &gate,
-            |gate| reported.push(gate.blocked_reason()),
-        ).await;
+        let result =
+            refresh_graph_delivery_gate_with_report(&client, "agent/eval/gated", &gate, |gate| {
+                reported.push(gate.blocked_reason())
+            })
+            .await;
         assert!(started.elapsed() < DELIVERY_CONTROL_LEASE);
         assert_eq!(reads.load(Ordering::SeqCst), 2, "exactly one retry");
-        assert!(retry_held.load(Ordering::SeqCst), "native input must be closed during the retry");
+        assert!(
+            retry_held.load(Ordering::SeqCst),
+            "native input must be closed during the retry"
+        );
         if delayed_reads == 1 {
             result.unwrap();
             assert_eq!(reported, [None], "a recovered retry must not flap health");
@@ -6321,7 +6843,10 @@ async fn graph_delivery_control_retries_once_and_keeps_late_reads_closed() {
             assert_eq!(reported, [Some(DeliveryBlockReason::ControlUnavailable)]);
             assert!(gate.held());
             tokio::time::sleep(Duration::from_millis(400)).await;
-            assert!(gate.held(), "cancelled reads must never grant a permit later");
+            assert!(
+                gate.held(),
+                "cancelled reads must never grant a permit later"
+            );
         }
         server.abort();
     }
@@ -6596,14 +7121,26 @@ async fn legacy_native_mailbox_replays_delivered_unread_once_and_keeps_read_clos
         assert_eq!(subjects, ["message/delivered"]);
         let filename = &messages[0].filename;
         if let Some(first) = &first_filename {
-            assert_eq!(filename, first, "replay must retain the native handoff identity");
+            assert_eq!(
+                filename, first,
+                "replay must retain the native handoff identity"
+            );
         } else {
             first_filename = Some(filename.clone());
         }
     }
-    assert_eq!(store.message("message/delivered").unwrap().unwrap().status, "delivered");
-    assert_eq!(store.message("message/read").unwrap().unwrap().status, "read");
-    assert_eq!(store.message("message/closed").unwrap().unwrap().status, "closed");
+    assert_eq!(
+        store.message("message/delivered").unwrap().unwrap().status,
+        "delivered"
+    );
+    assert_eq!(
+        store.message("message/read").unwrap().unwrap().status,
+        "read"
+    );
+    assert_eq!(
+        store.message("message/closed").unwrap().unwrap().status,
+        "closed"
+    );
     server.abort();
 }
 
@@ -7174,10 +7711,7 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
         async move {
             tokio::time::sleep(Duration::from_millis(600)).await;
             let exchange = publisher
-                .export_replication_exchange(
-                    FLEET,
-                    &st3::model::ReplicationInventory::default(),
-                )
+                .export_replication_exchange(FLEET, &st3::model::ReplicationInventory::default())
                 .unwrap();
             starter
                 .receive_replication_exchange("publisher", FLEET, &exchange)
@@ -7301,9 +7835,8 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
     };
     let root = tempfile::tempdir().unwrap();
     st_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
-    let seq =
-        st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
-            .unwrap();
+    let seq = st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
+        .unwrap();
     let mut writer = st_drivers::harness_state::Writer::new(
         root.path(),
         "example/seat",
@@ -7413,7 +7946,9 @@ async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() 
     for delivery_tick in 0..3 {
         // This is the production control-arm wake and eligibility result: local delivery
         // keeps ticking, but the report body cannot run or record success/failure yet.
-        let settled = settle.control_tick(&mut control, &mut control_interval).await;
+        let settled = settle
+            .control_tick(&mut control, &mut control_interval)
+            .await;
         let expected = Duration::from_secs(delivery_tick * 10);
         let elapsed = tokio::time::Instant::now() - started;
         assert!(elapsed >= expected && elapsed <= expected + Duration::from_millis(5));
@@ -7425,12 +7960,19 @@ async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() 
     }
     assert_eq!(attempts, 0);
     // Even the work interval's initial immediate tick stays unconsumed before eligibility.
-    assert!(tokio::time::timeout(
-        Duration::from_secs(9), settle.retry_tick(&mut work, &mut work_interval)
-    ).await.is_err());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(9),
+            settle.retry_tick(&mut work, &mut work_interval)
+        )
+        .await
+        .is_err()
+    );
     assert!(!settle.passed());
     tokio::time::advance(Duration::from_secs(1)).await;
-    let settled = settle.control_tick(&mut control, &mut control_interval).await;
+    let settled = settle
+        .control_tick(&mut control, &mut control_interval)
+        .await;
     assert!(settled && control.ready());
     attempts += 1;
     assert_eq!(attempts, 1);
@@ -7441,10 +7983,19 @@ async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() 
     let pause = control.failed(&anyhow::anyhow!("control deadline"));
     assert!((Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&pause));
     let failed_at = tokio::time::Instant::now();
-    assert!(tokio::time::timeout(
-        pause / 2, settle.control_tick(&mut control, &mut control_interval)
-    ).await.is_err());
-    assert!(settle.control_tick(&mut control, &mut control_interval).await);
+    assert!(
+        tokio::time::timeout(
+            pause / 2,
+            settle.control_tick(&mut control, &mut control_interval)
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        settle
+            .control_tick(&mut control, &mut control_interval)
+            .await
+    );
     let elapsed = tokio::time::Instant::now() - failed_at;
     assert!(elapsed >= pause && elapsed <= pause + Duration::from_millis(5));
 }
@@ -7460,9 +8011,14 @@ async fn resumed_driver_settle_does_not_fire_or_reset_an_existing_retry() {
     // polling it during settle would make this timeout return early.
     retry.failed(&anyhow::anyhow!("control deadline"));
     retry.failed(&anyhow::anyhow!("control deadline"));
-    assert!(tokio::time::timeout(
-        Duration::from_secs(4), settle.control_tick(&mut retry, &mut interval)
-    ).await.is_err());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(4),
+            settle.control_tick(&mut retry, &mut interval)
+        )
+        .await
+        .is_err()
+    );
     assert!(!settle.passed());
     tokio::time::advance(Duration::from_secs(26)).await;
     assert!(settle.control_tick(&mut retry, &mut interval).await);
@@ -7481,9 +8037,8 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
     use std::sync::{Arc, Mutex};
     let root = tempfile::tempdir().unwrap();
     st_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
-    let seq =
-        st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
-            .unwrap();
+    let seq = st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
+        .unwrap();
     let mut writer = st_drivers::harness_state::Writer::new(
         root.path(),
         "example/seat",
@@ -7728,10 +8283,18 @@ async fn reading_the_outbox_does_not_wake_an_idle_driver() {
             .await
             .is_err()
     );
-    st_drivers::harness_events::write_channel_todo(root.path(), "runtime", &json!({
-        "harness":"omp", "session_id":"native", "incarnation_id":"runtime",
-        "observed_at":"2026-10-03T15:00:00Z", "source_op":"hydrate", "phases":[],
-        "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
-    })).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), observations.recv()).await.unwrap().unwrap();
+    st_drivers::harness_events::write_channel_todo(
+        root.path(),
+        "runtime",
+        &json!({
+            "harness":"omp", "session_id":"native", "incarnation_id":"runtime",
+            "observed_at":"2026-10-03T15:00:00Z", "source_op":"hydrate", "phases":[],
+            "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
+        }),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), observations.recv())
+        .await
+        .unwrap()
+        .unwrap();
 }
