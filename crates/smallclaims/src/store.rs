@@ -66,6 +66,10 @@ pub mod events;
 pub mod idempotency;
 mod inventory_generation;
 mod checkpoint_capture_epoch;
+mod checkpoint_space;
+pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
+#[cfg(feature = "test-support")]
+pub use checkpoint_space::checkpoint_test_fixture_headroom;
 pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
@@ -812,6 +816,8 @@ pub struct Store {
     /// transaction. Only tests change them.
     pub trim_fault: Mutex<Option<checkpoint_trim::TrimFault>>,
     pub trim_chunk_envelopes: AtomicUsize,
+    /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
+    pub trim_pause_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
     /// The runtime whose projections this store keeps.
@@ -948,6 +954,11 @@ impl Store {
             [],
             |row| row.get(0),
         )?;
+        if fresh {
+            // Only before the first table. Pages a trim frees can then go back to the
+            // filesystem; an existing store switches with one VACUUM (docs/st3/retention.md).
+            connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")?;
+        }
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
@@ -1070,6 +1081,7 @@ impl Store {
             shared_memory,
             trim_fault: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
+            trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
             runtime,
         })
@@ -1710,6 +1722,15 @@ impl CompactReplicationInventory {
             .map(|range| self.bucket(range))
             .collect()
     }
+}
+
+/// Who decides whether a pending envelope may be admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionAuthority {
+    /// The fleet membership this store has admitted so far.
+    Membership,
+    /// The store a backup came from, which admitted every envelope it archived.
+    Source,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -6784,6 +6805,25 @@ impl Store {
     }
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
+        self.admit_replication_backlog(AdmissionAuthority::Membership)
+    }
+
+    /// Admit the envelopes of a backup being restored. A backup holds only envelopes its source
+    /// admitted, and admission is final: a membership claim that arrived later does not revoke
+    /// history admitted before it. Restore receives the log in writer order, not in the order
+    /// its source admitted it, so judging each envelope by the membership claims replayed ahead
+    /// of it would hold history the source admitted. A member migrated without a writer floor
+    /// is keyed from sequence 1, and its unsigned pre-migration envelopes would wait for
+    /// signatures that never come. Hashes and claims are checked as in normal admission, and
+    /// restore verified every archived signature as it received it.
+    pub fn admit_restored_backlog(&self) -> Result<ReplicationAdmission> {
+        self.admit_replication_backlog(AdmissionAuthority::Source)
+    }
+
+    fn admit_replication_backlog(
+        &self,
+        authority: AdmissionAuthority,
+    ) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it.
@@ -6926,7 +6966,12 @@ impl Store {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    let hold = fleet_admission_hold(&pass, prepared_membership, envelope)?;
+                    let hold = match authority {
+                        AdmissionAuthority::Membership => {
+                            fleet_admission_hold(&pass, prepared_membership, envelope)?
+                        }
+                        AdmissionAuthority::Source => None,
+                    };
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;

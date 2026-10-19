@@ -1,4 +1,5 @@
 //! Which windows a collection socket reads again, and when: only those whose inputs changed.
+use crate::PublishedViewsAttentionStore;
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};

@@ -5,8 +5,8 @@ use serde::Deserialize;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-pub use st3_store::store::runtime_starts::*;
-pub use st3_store::store::runtime_starts::{RuntimeStartOperation, create_schema};
+pub use st3_missions::store::runtime_starts::*;
+pub use st3_missions::store::runtime_starts::{RuntimeStartOperation, create_schema};
 
 /// Physical captures are synchronous and thread-scoped. Never carry the witness
 /// to another thread or allow a nested capture to erase its predecessor.
@@ -1100,8 +1100,8 @@ impl RuntimeStartsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::runtime_starts_tests_shared_seats::*;
-    use st3_store::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+    use st3_missions::store::runtime_starts_tests_shared_seats::*;
+    use st3_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
 
     #[test]
     fn retirement_proof_requires_the_exact_subject_operation_request_and_incarnation() {

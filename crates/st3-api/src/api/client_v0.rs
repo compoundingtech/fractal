@@ -1,3 +1,16 @@
+use crate::AttentionListStore;
+use crate::AttentionStore;
+use crate::SummaryListStore;
+use crate::ConversationReadsStore;
+use crate::CustomStore;
+use crate::GlassesStore;
+use crate::ArrangementsStore;
+use crate::DeclarationsStore;
+use crate::LanesStore;
+use crate::MissionListStore;
+use crate::MissionsStore;
+use crate::PersonWorkStore;
+use crate::WorkListStore;
 use crate::AccountsStore;
 use crate::EvidenceSeatsStore;
 use crate::RetirementsStore;
@@ -3399,6 +3412,24 @@ pub fn mission_list_cards_with(
             "run_generations":generations,"must_act":must_act,
             "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
     }).collect()
+}
+
+/// Assistant mission metadata keeps the native card's mission-level semantics,
+/// but selects its relevant run independently of the bounded history preview.
+/// Every step contributes scalar counts and agent IDs, even beyond step twenty.
+pub fn assistant_mission_list_cards_with(
+    store: &Store,
+    ids: &[String],
+    at_unix_ms: u128,
+) -> anyhow::Result<Vec<Value>> {
+    let mut cards = mission_list_cards_with(store, ids, at_unix_ms, &BTreeSet::new())?;
+    for (id, card) in ids.iter().zip(&mut cards) {
+        card["run_details"] = json!(
+            store.assistant_mission_run_metadata_at(id, at_unix_ms)?
+                .into_iter().collect::<Vec<_>>()
+        );
+    }
+    Ok(cards)
 }
 
 pub fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
@@ -16181,6 +16212,7 @@ mission "differential" state="ready" {
 
     #[tokio::test]
     async fn fleet_operational_commands_are_bounded_and_report_slow_queries() {
+        use crate::OperationsFixtureStore;
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.seed_operational_fleet();
@@ -18669,6 +18701,58 @@ mission "example/looped" state="ready" {
             bounded["truncated"],
             json!({"unstarted_missions": {"shown": 2, "total": 3}})
         );
+    }
+
+    #[test]
+    fn assistant_mission_cards_keep_older_live_run_and_all_step_scalars() {
+        for status in ["running", "standing"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "live-run-node");
+            let steps = (0..24).map(|i| format!(
+                "  step \"step-{i:02}\" {{ assigned-to \"agent/worker-{i:02}\" }}\n"
+            )).collect::<String>();
+            let source = format!(
+                "version 2\nmission \"example/live\" state=\"ready\" {{\n  goal \"Keep live metadata.\"\n  concurrent-runs max=10\n{steps}}}"
+            );
+            let intent = crate::graph::parse_intent(&source, "live-run-node").unwrap();
+            let preview = state.store.mission(&intent, crate::model::IntentInput {
+                kdl: source.clone(), source_name: None,
+            }).unwrap();
+            state.store.apply_as(&intent, &preview.subject_tokens, "publish-live", Some("person/operator")).unwrap();
+            let mut live = None;
+            for i in 0..4 {
+                let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
+                    mission: "example/live".into(), revision: None,
+                    workspace: root.path().display().to_string(),
+                    requester: Some("person/operator".into()), mode: None,
+                    inputs: BTreeMap::new(), idempotency_key: format!("live-{i}"),
+                }).unwrap();
+                if i == 0 {
+                    state.store.set_mission_run_state(&run.id, status, status, None).unwrap();
+                    for step in &run.steps {
+                        state.store.set_step_state(&step.subject,
+                            if step.step == "step-23" { "blocked" } else { "completed" }, None).unwrap();
+                    }
+                    live = Some(run.subject);
+                } else {
+                    state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+                }
+            }
+            let ids = ["mission/example/live".to_owned()];
+            let native = mission_list_cards_with(&state.store, &ids, client_now_ms(), &BTreeSet::new()).unwrap();
+            assert_eq!(native[0]["run_details"].as_array().unwrap().len(), 3);
+            assert!(native[0]["run_details"].as_array().unwrap().iter().all(|run| run["status"] == "completed"));
+            let cards = assistant_mission_list_cards_with(&state.store, &ids, client_now_ms()).unwrap();
+            assert_eq!(cards.len(), 1);
+            let run = &cards[0]["run_details"][0];
+            assert_eq!(run["id"], json!(live.unwrap()));
+            assert_eq!(run["status"], status);
+            assert_eq!(run["progress"], json!({"total": 24, "done": 23}));
+            let steps = run["steps"].as_array().unwrap();
+            assert_eq!(steps.iter().filter(|step| step["state"] == "blocked").count(), 1);
+            assert!(steps.iter().any(|step| step["assignee"] == "agent/live-run-node.worker-23"));
+            assert!(assistant_mission_list_cards_with(&state.store, &[], client_now_ms()).unwrap().is_empty());
+        }
     }
 
     /// Historical steps stay lightweight; detail enriches only open runs and the latest finish.
