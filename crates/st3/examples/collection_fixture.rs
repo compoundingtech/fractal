@@ -1,6 +1,7 @@
 //! Generate invented benchmark data for the ignored cold-open snapshot harness.
 //! This starts no reconciler or agent runtime, and reads no production store.
 #![allow(dead_code, unused_imports)]
+use st3::PersonWorkStore;
 #[path = "../tests/daemon_bench.rs"]
 mod daemon_bench;
 

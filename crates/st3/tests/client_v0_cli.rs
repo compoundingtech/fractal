@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+use st3::MissionsStore;
+use st3::LimitsStore;
+use st3::SeatsStore;
+use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;

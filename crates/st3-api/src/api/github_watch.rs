@@ -62,7 +62,7 @@ fn bad(code: &'static str, message: impl Into<String>) -> ApiError {
 const DEFAULT_WATCH_DURATION_MS: u128 = 14 * 24 * 60 * 60 * 1_000;
 
 /// GitHub alias policy only; existing declarations retain their stored deadline.
-fn deadline(until: Option<&str>) -> Result<Option<u128>, ApiError> {
+pub fn deadline(until: Option<&str>) -> Result<Option<u128>, ApiError> {
     deadline_at(until, smallclaims::store::now_ms())
 }
 
@@ -166,6 +166,7 @@ pub async fn watch(
     let until = deadline(request.until.as_deref())?;
     let github = read_thread(&thread).await?;
     watchable(&thread, &github)?;
+    let thread = thread.followed(github.get("html_url").and_then(Value::as_str));
     let store = state.store.clone();
     let actor = request.actor.clone();
     let view = blocking_action(move || {
@@ -389,7 +390,7 @@ pub async fn comment(
     let store = state.store.clone();
     let actor = request.actor.clone();
     let watch = request.watch;
-    let recorded_thread = thread.clone();
+    let recorded_thread = thread.clone().followed(Some(&posted.url));
     let (record, view) = blocking_action(move || {
         let record = store.record_github_post(
             &actor,
@@ -756,6 +757,63 @@ mod tests {
                 .unwrap_err()
                 .code,
             "github-thread-not-found"
+        );
+    }
+
+    #[test]
+    fn a_thread_of_a_renamed_repository_is_watched_under_its_current_name() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        let store = state.store.clone();
+        let intent = crate::graph::parse_internal_intent(
+            "version 2\nagent \"example.planner\" { workspace \"/tmp\"; command \"true\" }\n",
+            "node",
+        )
+        .unwrap();
+        store.apply_internal(&intent, "watch-seat").unwrap();
+        let planner = "agent/example.planner";
+        let observers = || {
+            store
+                .github_watch_declarations()
+                .unwrap()
+                .into_iter()
+                .filter(|declared| {
+                    declared.kind == "observer"
+                        && crate::graph::observer_spec(&declared.desired)
+                            .is_some_and(|spec| !spec.stopped)
+                })
+                .map(|declared| declared.subject)
+                .collect::<Vec<_>>()
+        };
+        store
+            .declare_watch(&ThreadRef::parse("acme/greenhouse#3").unwrap(), planner, None)
+            .unwrap();
+        assert_eq!(observers(), ["observer/github/acme/greenhouse"]);
+
+        // acme/garden was renamed acme/greenhouse. GitHub still answers the old name and links
+        // the thread under the new one, as the issue read and a posted comment both do.
+        let old = ThreadRef::parse("acme/garden#12").unwrap();
+        for link in [
+            "https://github.com/acme/greenhouse/pull/12",
+            "https://github.com/acme/greenhouse/pull/12#issuecomment-501",
+        ] {
+            let thread = old.clone().followed(Some(link));
+            assert_eq!(thread.to_string(), "acme/greenhouse#12");
+            let view = store.declare_watch(&thread, planner, None).unwrap();
+            assert_eq!(view["thread"], "acme/greenhouse#12");
+            assert_eq!(observers(), ["observer/github/acme/greenhouse"]);
+        }
+        assert_eq!(old.clone().followed(None).to_string(), "acme/garden#12");
+        assert_eq!(
+            old.clone().followed(Some("https://example.com/x")).to_string(),
+            "acme/garden#12"
+        );
+
+        // Watched under the old name, the same thread starts a second observer of the repository.
+        store.declare_watch(&old, planner, None).unwrap();
+        assert_eq!(
+            observers(),
+            ["observer/github/acme/garden", "observer/github/acme/greenhouse"]
         );
     }
 

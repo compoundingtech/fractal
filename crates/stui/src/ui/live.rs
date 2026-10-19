@@ -6,6 +6,8 @@
 //! preview, the fleet), and carries out the actions the screens queue. A refresh replaces
 //! data in place: it never empties a list or a conversation while the fresh copy is on its way.
 
+#[cfg(test)]
+use st3::MissionsStore;
 use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
@@ -3624,7 +3626,7 @@ mod tests {
             let mut world = super::super::demo::world();
             let mut assistant = world.agents.items()[0].clone();
             assistant.id = "agent/st/assistant".into();
-            assistant.name = "Smalltalk Assistant".into();
+            assistant.name = "Fractal Assistant".into();
             let other = world.agents.items()[0].id.clone();
             let mut ui = Ui::new(world.clone());
             if spaces {

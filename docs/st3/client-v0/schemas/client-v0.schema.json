@@ -3,6 +3,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://st3.local/schemas/client-v0.schema.json",
   "title": "st3 client v0",
+  "$comment": "LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: receivers accept st3.* and fractal.*; senders retain st3.*. Sunset 60 days after the first release shipping this bridge. x-st annotations are not wire vocabulary.",
   "oneOf": [
     { "$ref": "#/$defs/ObservationReport" },
     { "$ref": "#/$defs/ObservationResponse" },
@@ -50,13 +51,13 @@
     "ObservationSample": {"oneOf": [{"$ref": "#/$defs/ObservationLatency"}, {"$ref": "#/$defs/ObservationLiveShare"}]},
     "ObservationReport": {"type": "object", "additionalProperties": false, "required": ["report_id", "samples"], "properties": {"report_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "minLength": 36, "maxLength": 36}, "samples": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/ObservationSample"}}}},
     "ObservationAccepted": {"type": "object", "additionalProperties": false, "required": ["accepted"], "properties": {"accepted": {"const": true}}},
-    "ObservationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"const": "st3.client.v0"}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/ObservationAccepted"}}},
+    "ObservationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/ObservationAccepted"}}},
     "PairingAdvertisement": {
       "description": "Static unauthenticated pairing preflight; no envelope, presence update or graph information.",
       "type": "object", "additionalProperties": false,
       "required": ["api_version", "capabilities"],
       "properties": {
-        "api_version": {"const": "st3.client.v0"},
+        "api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]},
         "capabilities": {"type": "array", "minItems": 1, "maxItems": 1, "items": {
           "type": "object", "additionalProperties": false, "required": ["id", "version", "state"],
           "properties": {"id": {"const": "device-key-proofs"}, "version": {"const": 1}, "state": {"const": "granted"}}
@@ -82,6 +83,7 @@
     "TimelineEntryId": {"type": "string", "pattern": "^(?:timeline-entry)/[^\\s]+$", "x-st-ref": "timeline-entry"},
     "ActorRef": {"type": "string", "pattern": "^(?:agent|daemon|person)/[^\\s]+$", "x-st-ref": ["agent", "daemon", "person"]},
     "ParticipantRef": {"type": "string", "pattern": "^(?:agent|person|step)/[^\\s]+$", "x-st-ref": ["agent", "person", "step"]},
+    "SenderRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Message sender, including an authorized external assistant principal. Not a recipient or actor."},
     "MissionState": {"anyOf": [{"enum": [
       "draft",
       "ready",
@@ -278,7 +280,7 @@
       "additionalProperties": false,
       "required": ["api_version", "request_id", "snapshot", "value"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "request_id": { "$ref": "#/$defs/RequestId" },
         "snapshot": { "$ref": "#/$defs/Snapshot" },
         "value": {
@@ -662,7 +664,7 @@
       "additionalProperties": false,
       "required": ["version", "views", "nodes", "edges", "groups", "timeline", "swimlanes", "goals", "constraints", "gates", "resources", "decisions", "revision", "diffs", "risk", "live_progress"],
       "properties": {
-        "version": { "const": "st3.visualization.v0" },
+        "version": { "enum": ["st3.visualization.v0", "fractal.visualization.v0"] },
         "views": {
           "type": "array",
           "items": { "enum": ["graph", "timeline", "swimlane", "revision", "risk", "live-progress"] },
@@ -830,7 +832,7 @@
         "cost": { "type": "number", "minimum": 0 },
         "currency": { "type": "string" },
         "incarnation_count": { "type": "integer", "minimum": 0 },
-        "aggregation": { "const": "cumulative-per-incarnation-else-response-deltas" },
+        "aggregation": { "enum": ["cumulative-per-incarnation-else-response-deltas", "rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas"] },
         "context": { "$ref": "#/$defs/UsageContext" }
       }
     },
@@ -2306,11 +2308,12 @@
         { "if": { "properties": { "type": { "const": "truncation" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/TimelineTruncationBody" } } } }
       ]
     },
-    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/ParticipantRef"}, "to": {"$ref": "#/$defs/ParticipantRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
+    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/SenderRef"}, "to": {"$ref": "#/$defs/ParticipantRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "MessageProvenance": {
       "type": "object", "additionalProperties": false, "required": ["verdict"],
       "description": "Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not.",
       "properties": {
+        "authorization_model": { "enum": ["legacy", "candidate"], "description": "The complete local authorization model supplying this judgment. Absent on older producers; the label alone does not certify candidate migration or authority." },
         "verdict": { "enum": ["verified", "unsigned", "held", "invalid"], "description": "What every member concluded when the claim arrived: `verified` its chain reaches a trust root, `unsigned` it carries no signature (written before signing), `held` a delegation in its chain has not arrived yet, `invalid` it is not acceptable (see reason)." },
         "reason": { "type": "string", "description": "Why a held or invalid signature is so." },
         "signer": { "$ref": "#/$defs/ParticipantRef", "description": "The person who signed, which may be a device that speaks for them." },
@@ -2423,7 +2426,7 @@
       "additionalProperties": false,
       "required": ["api_version", "id", "type", "idempotency_key", "fence", "parameters"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "id": { "$ref": "#/$defs/Id" },
         "type": {
           "enum": [
@@ -2600,8 +2603,12 @@
         "ask": {"$ref": "#/$defs/Id"},
         "status": {"enum": ["completed", "cancelled"]},
         "summary": {"type": "string"},
-        "respondent": {"$ref": "#/$defs/Id"},
+        "respondent": {"$ref": "#/$defs/SenderRef", "description": "The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner."},
         "acted_for": {"$ref": "#/$defs/Id", "description": "The person whose prior instruction the agent respondent recorded."},
+        "sender_class": {"type": "string", "description": "External assistant attribution when the response was submitted through an assistant grant."},
+        "assistant_grant_id": {"$ref": "#/$defs/Id", "description": "The assistant grant that authorized the response."},
+        "assistant_owner": {"$ref": "#/$defs/PersonId", "description": "Server-owned provenance naming the person who owns the assistant grant, not the respondent or delegated person authority."},
+        "assistant_session_actor": {"type": "string", "description": "Server-owned grant-bound assistant session audit actor, separate from the answering principal."},
         "answered_at_unix_ms": {"type": "integer", "minimum": 0},
         "answer": {"$ref": "#/$defs/PersonAnswer"},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/Id"}}
@@ -2879,7 +2886,8 @@
       "read.assistant.conversation",
       "read.assistant.terminal",
       "write.assistant.messages",
-      "write.assistant.custom-reply"
+      "write.assistant.custom-reply",
+      "write.assistant.answers"
     ] },
     "AssistantMinimalReadMode": { "enum": ["approval-once", "caller-bound-allow"] },
     "AssistantGrant": {
@@ -2899,7 +2907,7 @@
         "expires_at": { "$ref": "#/$defs/Timestamp" },
         "policy_revision": { "type": "integer", "minimum": 1 },
         "minimal_read_mode": { "$ref": "#/$defs/AssistantMinimalReadMode" },
-        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" } },
+        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" }, "description": "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." },
         "disclosure_consent": { "type": "boolean" },
         "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
         "revoked": { "type": "boolean" },
@@ -2911,12 +2919,12 @@
       "additionalProperties": false,
       "required": ["api_version", "scopes", "disclosure_consent", "consent_evidence", "minimal_read_mode"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
         "expires_in_seconds": { "type": "integer", "minimum": 1, "maximum": 2592000, "default": 3600 },
         "disclosure_consent": { "const": true },
         "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" } },
+        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" }, "description": "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." },
         "minimal_read_mode": { "$ref": "#/$defs/AssistantMinimalReadMode" }
       }
     },
@@ -2941,7 +2949,7 @@
       "description": "Owner-only trusted-local provisioning at the grant's authoritative origin; accepting it increments policy_revision. Omitted budgets pin 4096 and 16384; default_response_bytes <= max_response_bytes.",
       "required": ["api_version", "issuer", "key_id", "attestor_public_key", "shim_public_key"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "issuer": { "$ref": "#/$defs/PersonId" },
         "key_id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "attestor_public_key": { "$ref": "#/$defs/Ed25519PublicKey" },
@@ -3187,7 +3195,7 @@
       "additionalProperties": false,
       "required": ["api_version", "device_name", "assistant_id", "scopes", "disclosure_consent", "consent_evidence"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "assistant_id": { "$ref": "#/$defs/AssistantPrincipal" },
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
@@ -3205,7 +3213,7 @@
       "additionalProperties": false,
       "required": ["api_version", "device_name", "person_id"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "person_id": { "type": "string", "pattern": "^person/[^/]+$" },
         "full_control": { "type": "boolean" },
@@ -3245,7 +3253,7 @@
       "additionalProperties": false,
       "required": ["api_version", "code", "device_public_key"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "device_public_key": { "type": "string", "minLength": 32 },
         "key_storage": { "enum": ["secure-enclave", "software"] }
@@ -3257,7 +3265,7 @@
       "required": ["kind", "api_version", "principal", "sender_class", "device_id", "session_actor", "credential", "scopes", "expires_at", "grant"],
       "properties": {
         "kind": { "const": "assistant-paired-session" },
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "principal": { "$ref": "#/$defs/AssistantPrincipal" },
         "sender_class": { "$ref": "#/$defs/AssistantSenderClass" },
         "device_id": { "$ref": "#/$defs/Id" },
@@ -3443,8 +3451,8 @@
       "additionalProperties": false,
       "required": ["api_version", "error_version", "request_id", "code", "message", "retryable", "details"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
-        "error_version": { "const": "st3.client.error.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
+        "error_version": { "enum": ["st3.client.error.v0", "fractal.client.error.v0"] },
         "request_id": { "$ref": "#/$defs/Id" },
         "code": {"$ref": "#/$defs/ErrorCode"},
         "message": { "type": "string" },

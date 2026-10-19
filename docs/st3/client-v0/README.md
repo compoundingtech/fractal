@@ -21,6 +21,19 @@ generated file (`git checkout --theirs -- clients crates/st3-client/src/contract
 crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
 
+Client transport receivers accept the deployed `st3.client.*` names and matching
+`fractal.client.*` aliases, including error and visualization version fields.
+The generated sender constants and request defaults remain `st3.*`. A sender
+cutover must offer both WebSocket subprotocols, Fractal first: servers select
+`fractal.*` only when offered, and clients retain the WebSocket library's
+offered-protocol guard. Rust and Swift models keep their existing lossless string
+decoding behavior; accepting aliases does not reject previously tolerated versions.
+The legacy terminal route likewise selects either `st3.terminal.v1` or
+`fractal.terminal.v1` and still permits upgrades with no supported subprotocol.
+This transport vocabulary does not rename signed peer envelope tags, signature
+domains, durable identities, JSON Schema annotations or local provenance labels.
+
+
 `ResourceHeader.operational` describes current versus historical state, actionability, reasons,
 and optional owner-generation/runtime-incarnation identities. Work also exposes `agentless`,
 claim expiry, execution start/elapsed time, and timeout in milliseconds. These fields are optional
@@ -77,6 +90,17 @@ Launch delivery, change notifications, and UI authoring are outside this read-pa
 Paired sessions can send bounded disjoint UTC minute diagnostics with
 [`observations.report`](observations.md). This command has no action receipt, replication
 or snapshot fence. Live-share is typed foreground/live time, separate from latency histograms.
+
+### Person ask respondents
+
+Work `person_answers[].respondent` uses `SenderRef`: `agent/...`, `assistant/...`,
+`person/...`, or `step/...`. An assistant answer identifies `assistant/chatgpt` as
+the respondent, never the grant's owning person. Optional `sender_class`,
+`assistant_grant_id`, `assistant_owner`, and `assistant_session_actor` carry
+server-owned provenance separately; `assistant_owner` is a concrete `PersonId`.
+These fields do not confer person authority or replace an agent's `acted_for`
+delegation proof. `ActorRef`, `ParticipantRef`, and recipient contracts remain
+narrower; accepting an assistant respondent does not make assistants recipients.
 
 ### Mission run timing
 
@@ -522,6 +546,20 @@ Missing recipient allowances use the $0.22–$0.33 API-equivalent fleet allowanc
 fallback for every recipient and reports no calibration. Recalibration changes future reads
 of historical counts; the pinned document makes an exported report reproducible. Older daemons
 omit the entire estimate, which clients treat as unavailable.
+
+An agent's `usage` summary selects the newest response rollup in each incarnation/model/account/
+run/step/host slot. Selected rollups take precedence over legacy cumulative or response records
+for that incarnation, for both tokens and cost. Known `cost_microusd` values are summed once and
+exposed as USD in `usage.cost`; `reported_cost_microusd` is already included, not added again.
+Clients accept both `cumulative-per-incarnation-else-response-deltas` and
+`rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas` for `aggregation`.
+The daemon still emits the old literal in this client-first rollout. Only after dual-literal
+clients are deployed will a separate PR switch daemon emission to the new literal; acceptance
+of the old literal will be removed later, after old daemons are retired.
+Any contributing tokens without a price, or selected costs in different currencies, leaves the
+combined cost/currency unknown, including legacy cumulative and response records. A newer priced
+rollup replaces an unpriced one in the same slot. This summary is not period spend, native session
+lifetime accounting, or a child-agent total.
 
 `GET /v1/client/usage?since_ms=…&until_ms=…` reads token spend over a period: the last 24 hours
 when both are omitted, ending now when `until_ms` is omitted. It requires `read.projections`. The
@@ -1270,13 +1308,13 @@ effect for every subsequent request, including a new bounded terminal WebSocket 
 ### External assistant grants
 
 External assistants use a separate, closed principal namespace, never person delegation.
-See [External assistants](../external-assistants.md) for the staged A/B contract and dormant
-future send/kill requirements. No live issuance is authorized by merging this implementation.
+See [External assistants](../external-assistants.md) for the grant, read, scoped native write,
+and coordinated kill requirements. No live issuance is authorized by merging this implementation.
 
 `PairingBegin` and `PairedSession` are disjoint untagged unions of person and assistant variants. Person
 wire fields and historical claims are unchanged; typed person clients use `PersonPairingBegin`
 and `PersonPairedSession`. Assistant begin names only `assistant/chatgpt`, seals explicit
-assistant read scopes, requires disclosure consent and its evidence, and uses the same
+assistant scopes, requires disclosure consent and its evidence, and uses the same
 five-minute single-use challenge. Grant duration defaults to one hour and cannot exceed
 30 days; it is independent of challenge expiry. Completion returns `assistant-paired-session`,
 not a person session, and never creates a person signing chain. Assistant credentials and keys
@@ -1292,8 +1330,24 @@ increment the policy revision. The standalone ChatGPT adapter requires
 `minimal_read_mode=caller-bound-allow`: the scoped bearer grant and its disclosure consent
 authorize reads without a per-read signature or approval key. Grant projections include exact
 scope, consent, issuer as a concrete `PersonId` and revoked status, never the bearer or credential
-digest. `key_id` is the public-key SHA-256 digest. The owner may configure exact agent recipient
-IDs and `write.assistant.messages` / `write.assistant.custom-reply` scopes for low-risk writes.
+digest. `key_id` is the public-key SHA-256 digest. The owner must explicitly grant
+`write.assistant.answers`, `write.assistant.messages`, or `write.assistant.custom-reply`
+for the corresponding native writes. Read scopes and disclosure consent never imply write authority.
+
+Assistant collection reads materialize only the requested page. Missions seek through the
+native mission keyset and build cards for those IDs; agents slice the published roster or
+use the native shallow-reference pager when no refresher runs. Attention slices a published
+owner-specific list. These cursors bind the projection's metadata/content class, grant,
+policy revision, snapshot and page size. A changed or unavailable publication returns
+`page-cursor-expired`; before the first attention or agent publication, reads requiring it
+return the corresponding view-not-ready error. Summary reads count grouped mission states
+and published attention/agent state inputs, without building collection cards.
+Mission cursors also bind the store claim cut: changed mission inputs or more than 512
+intervening claims expire the sequence with `page-cursor-expired`, because mutable sort
+keys can cross the cursor. Read receipts alone do not invalidate a continuation.
+Mission metadata retains the relevant live run even outside the native recent-run preview.
+Summary agent states include
+delivery-presence downgrades, and rich attention/content preserve update request payloads.
 
 The issuer is sealed from the configured owner at trusted-local begin and preserved through
 gateway completion; remote callers cannot select or replace it. Assistant clients validate
@@ -1320,20 +1374,22 @@ default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an
 The adapter uses `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
 under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
 the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only
-closed typed actions. `work.done` creates a daemon-owned structured owner ask whose digest
-binds the whole request, including alert ID, episode, option, fence and idempotency key. The
-owner answers with `st work done <approval-id> --as person/ada --answer approve --episode ...`;
-an identical MCP retry executes through the existing fenced, idempotent action path.
-`message.send` is low-risk: it requires its explicit grant scope and an exact owner-allowlisted
-agent recipient. Its non-read-only tool annotation asks ChatGPT to show a confirmation card;
-the daemon does not treat the advisory card as execution authorization or create another
-st approval. `custom.reply` is likewise grant-scoped at the daemon boundary.
+closed typed actions. `work.done` requires `write.assistant.answers` and immediately answers
+supported owner alerts through the existing fenced, idempotent action path, without creating
+another owner approval ask. The request binds the alert ID, episode, option, fence and idempotency
+key. `read.assistant.attention` only authorizes reads; answering changes authoritative owner work
+and can release waiting work, so existing read-only grants must explicitly add the write scope.
+`message.send` requires `write.assistant.messages` and accepts any existing agent recipient,
+whether or not listed in `recipient_allowlist`; person recipients remain refused. That list is
+stored metadata, not an enforced restriction. The non-read-only tool annotation asks ChatGPT
+to show a confirmation card, but the card is advisory and creates no additional daemon approval.
+`custom.reply` requires `write.assistant.custom-reply` at the daemon boundary.
 
 Execution carries the original assistant grant and policy revision through typed action dispatch.
 The message append, person-answer transaction, and custom-reply transaction recheck the
-authoritative grant, revocation, expiry, exact scope, policy revision, recipient, and owner
-approval where required. Revocation or recipient removal between handler preflight and the
-writer transaction denies the synchronous send without appending a message claim.
+authoritative grant, revocation, expiry, exact scope, policy revision and relevant owner/recipient
+binding. Revocation between handler preflight and the writer transaction denies the synchronous
+write. Agent recipient existence remains required; allowlist membership is not checked.
 
 `crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
 Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.

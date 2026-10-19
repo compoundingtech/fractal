@@ -4,6 +4,13 @@
 //! refolds only the rows whose claims changed; a fold from nothing reads in short snapshots. A
 //! read serves the newest publication under its own cut and never folds.
 
+use crate::AttentionStore;
+use crate::PublishedListStore;
+use crate::PublishedViewsAttentionStore;
+use crate::MissionListStore;
+use crate::MissionsStore;
+use crate::WorkListStore;
+use crate::SeatsStore;
 use crate::EvidenceStore;
 use crate::PublishedViewsStore;
 use super::*;
@@ -392,7 +399,7 @@ fn claims_from(base_cut: u64, base_frontier: u64, cut: u64, frontier: u64) -> Op
 /// Fold the missions list at the current cut: from `base` when there is one, refolding only the
 /// missions whose claims, leases, attention or recent end changed, else from nothing in chunks.
 /// `None` when `base` already is current; with each publication, whether any row changed.
-fn fold_missions(
+pub fn fold_missions(
     store: &Store,
     base: Option<&Publication<MissionRows>>,
 ) -> anyhow::Result<Option<(Publication<MissionRows>, bool)>> {
@@ -519,7 +526,7 @@ fn missions_from_nothing(store: &Store) -> anyhow::Result<Publication<MissionRow
 /// queued or unstaffed) goes without one rather than claim it; an empty published roster is not
 /// that, since then no agent queues anything. A card it cannot read goes without one too; it
 /// never fails the fold.
-fn present(card: &mut Value, gates: &[st3_ui_model::missions::Gate], fleet: Option<&RosterFleet>) {
+pub fn present(card: &mut Value, gates: &[st3_ui_model::missions::Gate], fleet: Option<&RosterFleet>) {
     use st3_ui_model::missions::Word;
     let none = RosterFleet::default();
     let presentation = <st3_client::Mission as serde::Deserialize>::deserialize(&*card)
@@ -1006,3 +1013,6 @@ pub fn work_window(rows: &WorkRows, actor: Option<&str>, limit: usize) -> (Vec<V
         }
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_client_v0_tests;

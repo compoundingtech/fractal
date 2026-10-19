@@ -30,6 +30,23 @@ mod read_admission_tests;
 use transaction_finalizer::TransactionFinalizers;
 pub use transaction_finalizer::WriterTransaction;
 
+/// Aggregate-only samples for the isolated, serial benchmark process.
+#[cfg(feature = "transport-bench")]
+pub mod transport_bench {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    static SAMPLES: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(duration: Duration) {
+        SAMPLES.lock().expect("benchmark sample mutex").push(duration);
+    }
+
+    pub fn take() -> Vec<Duration> {
+        std::mem::take(&mut *SAMPLES.lock().expect("benchmark sample mutex"))
+    }
+}
+
 pub(crate) mod writer_observer;
 pub use writer_observer::WriterObserver;
 
@@ -105,6 +122,28 @@ fn configured_read_cache_kib(value: Option<&str>) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| (1..=i32::MAX as usize).contains(value))
         .unwrap_or(READ_CACHE_KIB)
+}
+
+/// How much of the store file each reader maps, in MiB. In WAL mode SQLite drops a reader's whole
+/// page cache when its next transaction sees any commit, so on a busy store every request
+/// fetched every page it touched again with one `read()` call each: 87,500 calls a second
+/// across 73 readers on dev3 (#3343). A mapped page is the kernel's one shared copy and costs
+/// no call. The default covers any store; the bundled SQLite's ceiling is raised to match.
+pub const READ_MMAP_MIB: u64 = 1 << 20;
+
+pub fn read_mmap_mib() -> u64 {
+    static MMAP: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        configured_read_mmap_mib(std::env::var("SMALLCLAIMS_READ_MMAP_MIB").ok().as_deref())
+    });
+    *MMAP
+}
+
+/// `SMALLCLAIMS_READ_MMAP_MIB=0` turns mapping off; invalid values use the default.
+fn configured_read_mmap_mib(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value <= READ_MMAP_MIB)
+        .unwrap_or(READ_MMAP_MIB)
 }
 
 /// Idle retention ceiling, not a limit on concurrent reads or open connections.
@@ -334,6 +373,7 @@ pub struct WriterConnection {
     finalizers: Arc<TransactionFinalizers>,
     background: Arc<writer_queue::BackgroundAdmission>,
     workers: Arc<Semaphore>,
+    worker_queue: Arc<writer_admission::WorkerQueue>,
     handler_policy: Arc<Mutex<Option<Arc<writer_budget::OwnedHandlerPolicy>>>>,
     mutation_observer: Option<Arc<writer_observer::MutationState>>,
     /// Transactions the writer committed for batched writes, and the batched writes in them.
@@ -470,6 +510,7 @@ impl WriterConnection {
             finalizers,
             background,
             workers: Arc::new(Semaphore::new(writer_admission::constructor_write_limit())),
+            worker_queue: writer_admission::WorkerQueue::new(),
             handler_policy,
             mutation_observer,
             batches,
@@ -809,7 +850,7 @@ fn write_queue(
                 let next = run_write_batch(
                     &mut connection,
                     batched,
-                    &admission.queue,
+                    (&admission.queue, WRITE_BATCH_WINDOW),
                     committed_index,
                     batches,
                     callbacks,
@@ -823,12 +864,13 @@ fn write_queue(
 
 /// Run `first` and the batched writes queued behind it in one transaction, each in its own
 /// savepoint, then commit once and answer every caller. The batch stops taking writes when it
-/// reaches `WRITE_BATCH_LIMIT`, has run for `WRITE_BATCH_WINDOW`, fails, or meets a lending write,
-/// which it returns to run next.
+/// reaches `WRITE_BATCH_LIMIT`, has run for the intake's window (`WRITE_BATCH_WINDOW` in the
+/// writer), fails, or meets a lending write, which it returns to run next.
 fn run_write_batch(
     connection: &mut Connection,
     first: WriterJob,
-    queue: &std::sync::mpsc::Receiver<WriterJob>,
+    // Where the batch takes more writes from, and for how long.
+    intake: (&std::sync::mpsc::Receiver<WriterJob>, std::time::Duration),
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
     callbacks: (
@@ -839,6 +881,7 @@ fn run_write_batch(
     ),
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
+    let (queue, window) = intake;
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
@@ -950,7 +993,7 @@ fn run_write_batch(
         answers.push(done);
         if failure.is_none()
             && answers.len() < WRITE_BATCH_LIMIT
-            && started.elapsed() < WRITE_BATCH_WINDOW
+            && started.elapsed() < window
         {
             job = queue.try_recv().ok();
         }
@@ -992,6 +1035,8 @@ fn run_write_batch(
         drop(transaction_timer);
         // Observe COMMIT before post-commit callbacks can unwind; no changed-row or ACK claim.
         if committed.is_ok() {
+            #[cfg(feature = "transport-bench")]
+            transport_bench::record(started.elapsed());
             crate::profile::managed_commit_succeeded();
         }
         telemetry::METRICS.batch.record(started.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
@@ -2017,6 +2062,7 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
          PRAGMA query_only = ON;",
     )?;
     connection.pragma_update(None, "cache_size", -(read_cache_kib() as i64))?;
+    connection.pragma_update(None, "mmap_size", (read_mmap_mib() << 20) as i64)?;
     configure_read_cancellation(&connection);
     Ok(connection)
 }
@@ -2325,7 +2371,9 @@ mod tests {
         let thread = std::thread::spawn(move || {
             let batches = (AtomicU64::new(0), AtomicU64::new(0));
             assert!(run_write_batch(
-                &mut connection, first, &receiver, &AtomicU64::new(0), &batches,
+                // Both jobs are queued before the batch begins; how long the first one runs
+                // must not decide whether the second shares its batch.
+                &mut connection, first, (&receiver, std::time::Duration::MAX), &AtomicU64::new(0), &batches,
                 (&CommitObservers::default(), &TransactionFinalizers::default(), None, Some(&writer_for_batch)),
                 &fifo,
             ).is_none());
@@ -2458,6 +2506,60 @@ mod tests {
                 .unwrap();
             assert_eq!(cache, -(read_cache_kib() as i64));
         }
+    }
+
+    #[test]
+    fn reader_mmap_override_accepts_zero_and_rejects_values_past_the_ceiling() {
+        for invalid in [None, Some(""), Some("bad"), Some("-1"), Some("1048577")] {
+            assert_eq!(configured_read_mmap_mib(invalid), READ_MMAP_MIB);
+        }
+        assert_eq!(configured_read_mmap_mib(Some("0")), 0);
+        assert_eq!(configured_read_mmap_mib(Some("4096")), 4096);
+    }
+
+    /// #3343: in WAL mode any commit empties every reader's page cache. A reader must then get
+    /// its pages from its mapping of the store, not with one `read()` call per page.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reader_after_a_commit_maps_the_store_instead_of_reading_each_page() {
+        fn thread_reads() -> u64 {
+            std::fs::read_to_string("/proc/thread-self/io")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("syscr: "))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE payload(id INTEGER PRIMARY KEY, value BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)
+                 INSERT INTO payload SELECT i, randomblob(3000) FROM n;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let reader = open_read_connection(&path, false).unwrap();
+        // The bundled SQLite must allow the whole default, not clamp it to its 2 GiB default.
+        let mapped: i64 = reader.query_row("PRAGMA mmap_size", [], |row| row.get(0)).unwrap();
+        assert_eq!(mapped as u64, read_mmap_mib() << 20);
+        let scan = || {
+            let total: i64 = reader
+                .query_row("SELECT sum(length(value)) FROM payload", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(total, 2000 * 3000);
+        };
+        scan();
+        writer.execute("UPDATE payload SET value=randomblob(3000) WHERE id=1", []).unwrap();
+        let before = thread_reads();
+        scan();
+        let reads = thread_reads() - before;
+        // About 2,000 pages: one read() each without the mapping, a few WAL frames with it.
+        assert!(reads < 50, "a scan after one commit made {reads} read() calls");
     }
 
     #[test]

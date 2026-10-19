@@ -2,6 +2,11 @@
 //! path and publishes them; collection windows serve the newest publication under its own cut
 //! and never fold attention while it runs. See `store::attention_list`.
 
+use crate::AttentionListStore;
+use crate::OwnerListsStore;
+use crate::PublishedViewsAttentionStore;
+use crate::SummaryListStore;
+use crate::SeatsStore;
 use super::*;
 use crate::store::attention_list::{AttentionDelta, AttentionPublication};
 use crate::store::owner_lists::OwnerView;
@@ -274,6 +279,11 @@ pub fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
         let changed = previous
             .as_ref()
             .is_none_or(|previous| !Arc::ptr_eq(&previous.rows, &rows));
+        let owners = if let Some(previous) = previous.as_ref().filter(|_| !changed) {
+            previous.owners.clone()
+        } else {
+            AttentionPublication::index_owners(&rows)
+        };
         let published_at_unix_ms = client_now_ms();
         store.publish_attention_list(
             generation,
@@ -285,6 +295,7 @@ pub fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
                 future_after,
                 published_at_unix_ms,
                 rows,
+                owners,
             },
             changed,
         );
@@ -364,6 +375,23 @@ pub fn published_attention_rows(
         .take(keep)
         .cloned()
         .collect();
+    Some((publication.cut, publication.published_at_unix_ms, rows))
+}
+
+/// Shared owner-indexed attention rows: no scan or content cloning on the read path.
+pub fn published_assistant_attention_rows(
+    store: &Store,
+    index: u64,
+    person: &str,
+) -> Option<(u64, u128, Arc<Vec<Value>>)> {
+    let Some(publication) = store.published_attention_list() else {
+        store.request_attention_list_refresh();
+        return None;
+    };
+    if publication.cut < index {
+        store.request_attention_list_refresh();
+    }
+    let rows = publication.owners.get(person).cloned().unwrap_or_default();
     Some((publication.cut, publication.published_at_unix_ms, rows))
 }
 

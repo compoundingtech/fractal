@@ -673,7 +673,7 @@ mod tests {
             .join("; ")
     }
 
-    fn fixture() -> Connection {
+    pub fn fixture() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(
             "CREATE TABLE claims(id TEXT NOT NULL UNIQUE,subject TEXT,kind TEXT,origin TEXT,

@@ -8,7 +8,7 @@ use super::*;
 pub mod health_capture;
 
 /// Subjects per statement, so that no single statement holds the reader for the whole fleet.
-const CHUNK: usize = 256;
+pub const CHUNK: usize = 256;
 
 /// What one fold has read at its snapshot, kept across its view and status passes.
 pub struct CardReads {

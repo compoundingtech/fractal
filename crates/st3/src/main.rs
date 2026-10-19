@@ -3,6 +3,11 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::CoordinationStore;
+use st3::MissionsStore;
+use st3::LimitsStore;
+use st3::SeatsStore;
+use st3::StopDeferralStore;
 use st3::PublicationFactsStore;
 use st3::GitChangesStore;
 use st3::cli_output;
@@ -119,6 +124,8 @@ use presentation::{
 struct Cli {
     #[arg(long, global = true, hide = true)]
     read_contract_inventory_json: bool,
+    #[arg(long, global = true, hide = true)]
+    checkpoint_space_gate_capabilities: bool,
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate st on this machine: its own state, config, sockets, node
@@ -301,6 +308,11 @@ enum Command {
     Repair {
         #[command(subcommand)]
         command: RepairCommand,
+    },
+    /// Maintain an existing store offline, without contacting the daemon.
+    Store {
+        #[command(subcommand)]
+        command: StoreCommand,
     },
     /// Remove st3 from this machine: leave its fleet, then its services, state, and settings.
     Uninstall(UninstallArgs),
@@ -1908,6 +1920,9 @@ struct AssistantGrantTerms {
     #[arg(long, value_parser = parse_assistant_grant_expiry)]
     expires_in: Option<u64>,
     /// One exact assistant scope; repeat for each scope. Nothing is granted implicitly.
+    /// Add write.assistant.answers to answer supported owner alerts immediately;
+    /// read.assistant.attention only permits reads. write.assistant.messages permits
+    /// messages to any existing agent, never a person.
     #[arg(long = "scope", value_parser = parse_assistant_scope)]
     scopes: Vec<AssistantScope>,
     /// Consent that every assistant read is disclosed to OpenAI.
@@ -1929,7 +1944,7 @@ enum AssistantGrantCommand {
         grant: String,
         #[command(flatten)]
         terms: AssistantGrantTerms,
-        /// Exact agent IDs permitted as low-risk assistant message recipients.
+        /// Stored recipient metadata; does not restrict sends to existing agents.
         #[arg(long = "allow-recipient")]
         recipients: Vec<String>,
     },
@@ -2069,6 +2084,16 @@ enum RepairCommand {
     DryRun,
     /// Apply exactly the plan identified by a dry-run token.
     Apply { token: String },
+}
+
+#[derive(Subcommand)]
+enum StoreCommand {
+    /// Build and verify mandatory owner indexes offline; stop all store writers first.
+    PrepareIndexes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3786,7 +3811,7 @@ enum MessageCommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Show one conversation as stui shows it: messages, folded tools, Small Talk. `--raw`
+    /// Show one conversation as stui shows it: messages, folded tools, Fractal. `--raw`
     /// prints every normalized entry (ids, message boundaries, tool JSON); `--json` the page.
     Timeline {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Session)))]
@@ -4282,6 +4307,15 @@ fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<b
     present.then(|| arguments.len() == 2 && arguments[1] == FLAG)
 }
 
+fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
+    const FLAG: &str = "--checkpoint-space-gate-capabilities";
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == FLAG)
+        .then(|| arguments.len() == 2 && arguments[1] == FLAG)
+}
+
 fn main() -> ExitCode {
     cli_output::finish(cli_main())
 }
@@ -4292,6 +4326,23 @@ fn cli_main() -> ExitCode {
         st3::recorder::run(program);
     }
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    match checkpoint_space_gate_capabilities_request(&arguments) {
+        Some(true) => {
+            println!(
+                "{}",
+                json!({
+                    "kind": "checkpoint-space-gate-capabilities",
+                    "version": st3::store::CHECKPOINT_SPACE_GATE_VERSION,
+                })
+            );
+            return ExitCode::SUCCESS;
+        }
+        Some(false) => {
+            eprintln!("st: --checkpoint-space-gate-capabilities must be used alone");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
     if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
         return fractal::web(&arguments);
     }
@@ -4802,6 +4853,11 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Evidence(args) = cli.command {
         return st3::evidence::cli::run(args);
     }
+    if let Command::Store {
+        command: StoreCommand::PrepareIndexes { ref store },
+    } = cli.command {
+        return st3::owner_indexes::prepare(store, &mut cli_output::stdout());
+    }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
         let code = st3::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
@@ -4971,6 +5027,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Doctor(args) => run_doctor(&immediate, args, cli.json, &unknown_config_keys).await,
         Command::Recorder { command } => run_recorder(command, &config, cli.json),
         Command::Repair { command } => run_repair(&client, command, cli.json).await,
+        Command::Store {
+            command: StoreCommand::PrepareIndexes { store },
+        } => st3::owner_indexes::prepare(&store, &mut cli_output::stdout()),
         Command::Backup { command } => match command {
             BackupCommand::Create {
                 file,
@@ -5913,7 +5972,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    tokio::spawn(st3::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
@@ -6067,6 +6128,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 }
             }));
             spawn_publication_evidence(store.clone());
+            tokio::spawn(build_transport_observation_index(store.clone()));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -12825,6 +12887,18 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
             "Person answer: {typed}: {} ({}, {})",
             response.summary, response.respondent, response.ask
         );
+        if let Some(sender_class) = &response.sender_class {
+            let _ = writeln!(output, "  Sender class: {sender_class}");
+        }
+        if let Some(grant) = &response.assistant_grant_id {
+            let _ = writeln!(output, "  Assistant grant: {grant}");
+        }
+        if let Some(owner) = &response.assistant_owner {
+            let _ = writeln!(output, "  Assistant owner: {owner}");
+        }
+        if let Some(session_actor) = &response.assistant_session_actor {
+            let _ = writeln!(output, "  Assistant session actor: {session_actor}");
+        }
     }
     if let Some(usage) = &work.usage {
         let _ = writeln!(output, "Usage: {}", render_usage(usage));
@@ -17898,6 +17972,113 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
     }
 }
 
+/// This starts only after both APIs serve. Each 128-source-row page joins the
+/// managed background writer queue, releases its loan, then yields for 100 ms.
+async fn build_transport_observation_index(store: Arc<Store>) {
+    use smallclaims::store::transport_observation_index as index;
+    let started = Instant::now();
+    st3::otel::record_index_migration(index::NAME, false, None, None);
+    loop {
+        let page_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<index::Page>> {
+            if index::ready(&page_store.readers.get())? {
+                return Ok(None);
+            }
+            index::advance(&page_store.connection).map(Some)
+        }).await;
+        match result {
+            Ok(Ok(None)) => {
+                st3::otel::record_index_migration(index::NAME, true, None, None);
+                return;
+            }
+            Ok(Ok(Some(page))) => {
+                st3::otel::record_index_migration(
+                    index::NAME,
+                    page.ready,
+                    Some(page.write_hold),
+                    page.ready.then(|| started.elapsed()),
+                );
+                if page.ready {
+                    return;
+                }
+            }
+            Ok(Err(error)) if maintenance_contention(&error) => {}
+            error => {
+                eprintln!("st: transport observation index build stopped: {error:?}");
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// A finite bootstrap job: committed pages yield the background writer to live requests.
+/// Local corruption is persisted and visible through doctor/faults; it stops this job.
+/// Background inventory/judgment gets one quiet unit per unit of page wall time.
+/// This bounds duty to 50%; it neither retries nor suppresses a local failure.
+const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
+
+async fn migrate_signature_candidates(store: Arc<Store>) {
+    let worker = store.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let initial = worker.signature_migration()?;
+        let mut phase = initial.phase.clone();
+        if !initial.done() { eprintln!("st3: signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description()); }
+        loop {
+            let page_started = std::time::Instant::now();
+            let report = worker.advance_signature_migration()?;
+            if report.phase != phase {
+                eprintln!("st3: signature bootstrap phase {}: {}",report.phase,report.progress_description());
+                phase = report.phase.clone();
+            }
+            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
+                anyhow::bail!("{reason}");
+            }
+            if report.phase == "judging" {
+                worker.advance_signature_judgment()?;
+            }
+            // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
+            // each page gets an equally long quiet interval (at most 50% worker duty).
+            let page_elapsed = page_started.elapsed();
+            std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+            if worker.signature_migration()?.done() {
+                let complete = worker.signature_migration()?;
+                if !initial.done() { eprintln!("st3: signature candidate authority activated: {}",complete.progress_description()); }
+                loop {
+                    let retired_started = std::time::Instant::now();
+                    if !worker.retire_legacy_signature_page()? { break; }
+                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                }
+                return Ok(());
+            }
+        }
+    }).await;
+    if !matches!(result, Ok(Ok(()))) {
+        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
+            eprintln!("st3: signature migration fault could not be persisted: {error:#}");
+        }
+        eprintln!("st3: signature candidate migration stopped: {result:?}");
+    }
+}
+
+/// Checkpoint tombstones recorded before the retired-identity ledger union into it after
+/// startup: a page per background writer loan, with its cursor, resting outside the loan
+/// (`retired::import_rest`). Later recordings and deletions reach the ledger by trigger, so an
+/// unfinished import loses nothing. A failed import retries, including after a daemon restart.
+async fn import_retired_identities(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || worker.import_retired_identities_paced(std::thread::sleep))).await;
+        match result {
+            Ok(Ok(())) => return,
+            error => {
+                eprintln!("st3: retired identity import failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
 /// Old payloads convert after startup; each page joins the normal writer queue and commits
 /// its own cursor. A failed page retries, including after a daemon restart.
 async fn convert_envelope_payloads(store: Arc<Store>) {
@@ -18226,6 +18407,28 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
             Ok(Err(error)) => eprintln!("st3: local observation trim failed: {error:#}"),
             Err(error) => eprintln!("st3: local observation trim stopped: {error}"),
         }
+        // What these trims, checkpoints and response expiry freed goes back to the filesystem,
+        // one short write at a time so other writes run between them.
+        let mut released = 0;
+        loop {
+            let vacuum_store = store.clone();
+            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(pages)) => released += pages,
+                Ok(Err(error)) => {
+                    eprintln!("st3: giving free pages back failed: {error:#}");
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("st3: giving free pages back stopped: {error}");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if released > 0 {
+            eprintln!("st3: gave {released} free pages back to the filesystem");
+        }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
         match size_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
@@ -18238,17 +18441,17 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
 }
 
 /// Seal and verify checkpoints every ten minutes. The proof copies the store and replays it, so
-/// it runs on a blocking thread, and a copy left by a crash is removed first.
+/// it runs on a blocking thread, and an owned copy left by a crash is swept first.
 async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    // A proof copy is only ever useful to the proof that made it. A staged capture is kept: it
-    // resumes where it stopped while its store-index cut still holds (#2492).
-    if let Ok(entries) = std::fs::read_dir(&context.scratch) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("proof-") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+    // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
+    // proof or a cleanup error stays visible and prevents a later proof from consuming space.
+    let sweep_store = store.clone();
+    let sweep_dir = context.scratch.clone();
+    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("st3: checkpoint proof startup cleanup failed: {error:#}"),
+        Err(error) => eprintln!("st3: checkpoint proof startup cleanup stopped: {error}"),
     }
     loop {
         let store = store.clone();

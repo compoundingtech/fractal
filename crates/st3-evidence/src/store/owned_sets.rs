@@ -4,10 +4,10 @@ use super::*;
 use crate::model::MemberSpec;
 use serde::Deserialize;
 use std::cell::RefCell;
-pub use st3_store::store::owned_sets::*;
-pub use st3_store::store::owned_sets::{Member, Options, Plan, Preview, Request, Revision, Source, View, claim, commit_tx, conflicts_at, desired_at};
-pub use st3_store::store::owned_sets::{effective_members, guard_member, guard_mission_start, manual_member, manual_member_at, one_shot_retirement_owner, owner, owners_at, plan_tx, project_tx, refuse_unmanaged, selected};
-pub use st3_store::store::owned_sets::{subject, validate_apply, validate_receipt};
+pub use st3_attention::store::owned_sets::*;
+pub use st3_attention::store::owned_sets::{Member, Options, Plan, Preview, Request, Revision, Source, View, claim, commit_tx, conflicts_at, desired_at};
+pub use st3_attention::store::owned_sets::{effective_members, guard_member, guard_mission_start, manual_member, manual_member_at, one_shot_retirement_owner, owner, owners_at, plan_tx, project_tx, refuse_unmanaged, selected};
+pub use st3_attention::store::owned_sets::{subject, validate_apply, validate_receipt};
 
 pub const STAGED_SUBJECTS_QUERY: &str =
     "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.owned_set') IS NOT NULL";
