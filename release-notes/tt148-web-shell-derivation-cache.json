@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Key the fractal-web CI shell closure by its isolated definition and declared transitive web lock inputs without evaluating Nix, preserving cache hits for unrelated Rust changes. Protected-main upkeep verifies that each key still denotes the recorded derivation. Log runner CPU, cores, name and available region once per web job.",
+  "summary": "Key the fractal-web CI shell closure by its isolated definition, offline literal web declarations and complete transitive web lock inputs without loading the flake graph, preserving cache hits for unrelated Rust changes. Protected-main upkeep verifies that each key still denotes the recorded derivation and treats incomplete metadata as a miss. Log runner CPU, cores, name and available region once per web job.",
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No database or wire schema changes." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },

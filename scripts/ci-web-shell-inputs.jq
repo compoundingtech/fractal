@@ -1,5 +1,6 @@
-# Run with jq -cS --slurpfile spec nix/web-shell-inputs.json -f this-file flake.lock.
-# Expand only declared inputs; lock-node names and source bookkeeping are not identity.
+# Pass --argjson declarations "$(nix eval --offline --json --file flake.nix inputs)"
+# and --slurpfile spec nix/web-shell-inputs.json, then apply to flake.lock with -cS.
+# Expand only declared inputs; lock-node aliases are not identity.
 def nonempty_string: type == "string" and length > 0;
 
 def node($nodes; $name):
@@ -62,6 +63,23 @@ def project($nodes; $root; $name; $ancestors):
       end
   end;
 
+# Include literal declarations as well as the lock: a changed URL/flake/follows with an
+# unchanged lock must never restore the old shell. Follows can make another root input relevant.
+def declared_roots($declarations; $pending; $seen):
+  if ($pending | length) == 0 then $seen
+  else $pending[0] as $name
+    | if ($seen | index($name)) != null then
+        declared_roots($declarations; $pending[1:]; $seen)
+      elif ($declarations[$name] | type) != "object" then
+        error("missing or malformed declared web input: \($name)")
+      else
+        [$declarations[$name] | .. | objects | select(has("follows")) | .follows
+          | if nonempty_string then split("/")[0]
+            else error("malformed declared follows") end] as $followed
+        | declared_roots($declarations; $pending[1:] + $followed; $seen + [$name])
+      end
+  end;
+
 . as $lock
 | if ($lock.nodes | type != "object") or ($lock.root | nonempty_string | not) then
     error("missing or malformed lock graph")
@@ -77,6 +95,9 @@ def project($nodes; $root; $name; $ancestors):
   else
     {
       system: $shell.system,
+      declarations: (declared_roots($declarations; $shell.inputs; []) | map(
+        . as $name | {key: $name, value: $declarations[$name]}
+      ) | from_entries),
       inputs: ($shell.inputs | map(
         . as $input
         | input($lock.nodes; $lock.root; $input) as $ref

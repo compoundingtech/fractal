@@ -985,10 +985,17 @@ jobs:
       - name: Verify web key completeness against the shell derivation
         id: web-shell-verify
         shell: bash
-        run: bash scripts/ci-web-shell verify
+        run: |
+          if bash scripts/ci-web-shell verify; then
+            exit 0
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then exit "$status"; fi
+          fi
         env:
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
           CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
+          CI_WEB_SHELL_CACHE_HIT: ${{ steps.web-shell.outputs.cache-hit }}
       - name: Fetch the locked packages
         shell: bash
         run: "nix develop '.#web' -c pnpm fetch"
@@ -1008,13 +1015,13 @@ jobs:
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
           CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
           CI_WEB_SHELL_IDENTITY: ${{ steps.web-shell-verify.outputs.identity }}
-        if: steps.web-shell.outputs.cache-hit != 'true'
+        if: steps.web-shell-verify.outputs.cache-complete != 'true'
       - name: Save the web shell closure
         uses: actions/cache/save@v4
         with:
           path: "${{ runner.temp }}/web-shell"
           key: ${{ steps.web-shell-key.outputs.key }}
-        if: steps.web-shell.outputs.cache-hit != 'true'
+        if: steps.web-shell-verify.outputs.cache-complete != 'true'
       - name: Report job cache coverage
         if: always()
         shell: bash

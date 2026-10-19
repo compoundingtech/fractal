@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise cheap production web-shell keys and cache trust boundaries without Nix.
+"""Exercise production web-shell keys and cache trust boundaries.
 
 Run with: python3 scripts/ci-web-shell-test
-Only upkeep verification is simulated with a deliberately strict fake nix.
+Key fixtures permit only offline literal declarations, never flake graph evaluation.
 """
 import copy
 import hashlib
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -31,7 +32,7 @@ def clean_env():
     env = dict(os.environ)
     for name in ('CI_WEB_SHELL_DIR', 'CI_WEB_SHELL_IDENTITY', 'CI_WEB_SHELL_KEY',
                  'CI_WEB_SHELL_SOURCE_HASH', 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY',
-                 'RUNNER_OS', 'WEB_CACHE_TEST'):
+                 'RUNNER_OS', 'WEB_CACHE_TEST', 'CI_WEB_SHELL_CACHE_HIT'):
         env.pop(name, None)
     return env
 
@@ -75,14 +76,26 @@ class WebShellKeyTest(unittest.TestCase):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(REPO / relative, destination)
             flake = root / 'flake.nix'
-            flake.write_text('{ rustVersion = "1"; }\n')
+            original_flake = '''{
+              inputs.effect-utils.url = "github:fixture/web1";
+              inputs.nixpkgs.url = "github:fixture/rust1";
+              inputs.fenix.url = "github:fixture/fenix1";
+              rustVersion = "1";
+            }'''
+            flake.write_text(original_flake)
             lock = fixture_lock()
             lock_path = root / 'flake.lock'
             bin_dir = root / 'bin'
             bin_dir.mkdir()
             nix_log = root / 'nix-invocations'
             fake_nix = bin_dir / 'nix'
-            fake_nix.write_text('#!/bin/sh\nprintf called >> "$NIX_TEST_LOG"\nexit 99\n')
+            real_nix = shutil.which('nix')
+            self.assertIsNotNone(real_nix)
+            literal_args = 'eval --offline --json --file flake.nix inputs'
+            fake_nix.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$NIX_TEST_LOG"\n'
+                f'[ "$*" = "{literal_args}" ] || exit 99\n'
+                f'exec {shlex.quote(real_nix)} "$@"\n')
             fake_nix.chmod(0o755)
             env = clean_env()
             env.update(PATH=str(bin_dir) + os.pathsep + env['PATH'],
@@ -111,14 +124,19 @@ class WebShellKeyTest(unittest.TestCase):
                     ['bash', str(root / 'scripts/ci-web-shell'), 'key'],
                     cwd=root, env=command_env, text=True, capture_output=True,
                 )
-                self.assertFalse(nix_log.exists(), 'key must never invoke nix, even on failure')
+                if nix_log.exists():
+                    self.assertEqual(set(nix_log.read_text().splitlines()), {literal_args},
+                                     'Only offline literal extraction is allowed: no fetch or flake loading')
                 if not success:
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertEqual(output.read_text(), 'existing=value\n')
                     return
                 self.assertEqual(result.returncode, 0, result.stderr)
+                declarations = subprocess.check_output(
+                    [real_nix, *literal_args.split()], cwd=root, text=True)
                 projection = subprocess.check_output([
-                    'jq', '-cS', '--slurpfile', 'spec', 'nix/web-shell-inputs.json',
+                    'jq', '-cS', '--argjson', 'declarations', declarations,
+                    '--slurpfile', 'spec', 'nix/web-shell-inputs.json',
                     '-f', 'scripts/ci-web-shell-inputs.jq', 'flake.lock',
                 ], cwd=root)
                 digest = hashlib.sha256(source_hash().encode() + b'\n' + projection).hexdigest()
@@ -134,8 +152,26 @@ class WebShellKeyTest(unittest.TestCase):
             self.assertEqual(key(runner_os=''), initial)
             self.assertNotEqual(key(runner_os='Darwin'), initial)
             key(supplied_hash=False, success=False)
-            flake.write_text('{ rustVersion = "2"; }\n')
+            flake.write_text(original_flake.replace('rustVersion = "1"', 'rustVersion = "2"')
+                             .replace('fixture/rust1', 'fixture/rust2'))
             self.assertEqual(key(), initial, 'Rust-only flake edits must preserve the key')
+            for changed in (
+                original_flake.replace('fixture/web1', 'fixture/web2'),
+                original_flake.replace('inputs.effect-utils.url', 'inputs.effect-utils.flake = false; inputs.effect-utils.url'),
+                original_flake.replace('inputs.effect-utils.url = "github:fixture/web1";',
+                                       'inputs.effect-utils.follows = "nixpkgs";'),
+            ):
+                flake.write_text(changed)
+                self.assertNotEqual(key(), initial,
+                                    'Web declarations must invalidate even with an unchanged lock')
+            followed = original_flake.replace(
+                'inputs.effect-utils.url = "github:fixture/web1";',
+                'inputs.effect-utils.url = "github:fixture/web1"; inputs.effect-utils.inputs.nixpkgs.follows = "nixpkgs";')
+            flake.write_text(followed)
+            followed_key = key()
+            flake.write_text(followed.replace('fixture/rust1', 'fixture/rust2'))
+            self.assertNotEqual(key(), followed_key, 'Followed root declarations are web dependencies')
+            flake.write_text(original_flake)
             lock['nodes']['rust-pkgs']['locked']['rev'] = 'rust2'
             lock['nodes']['fenix']['locked']['rev'] = 'fenix2'
             lock['nodes']['rust-pkgs']['locked']['lastModified'] = 2
@@ -307,11 +343,20 @@ printf '%s\\n' "$NIX_TEST_IDENTITY"
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertIn('identity=' + evaluated, output.read_text().splitlines())
                     else:
-                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(result.returncode, 1, 'Identity drift is a fatal error, not a miss')
                         diagnostic = result.stdout + result.stderr
                         for text in (expected, recorded, evaluated,
                                      'add the missing path or input to the hashed set and bump the format version'):
                             self.assertIn(text, diagnostic)
+            (root / 'identity').unlink()
+            env.update(CI_WEB_SHELL_CACHE_HIT='true', NIX_TEST_IDENTITY=recorded)
+            output.write_text('')
+            result = subprocess.run(['bash', str(SCRIPT), 'verify'], cwd=root,
+                                    env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('cache-complete=false', output.read_text().splitlines())
+            self.assertIn('identity=' + recorded, output.read_text().splitlines())
+            self.assertIn('verification failed, treating entry as a miss', result.stderr)
 
     def test_generated_workflows_share_exact_key_and_protected_publisher(self):
         cache_steps = []
@@ -358,6 +403,9 @@ printf '%s\\n' "$NIX_TEST_IDENTITY"
                 if 'bash scripts/ci-web-shell fill' in job:
                     self.assertEqual(workflow.name, 'main-upkeep.yml')
                     self.assertIn('bash scripts/ci-web-shell verify', job)
+                    self.assertIn("steps.web-shell-verify.outputs.cache-complete != 'true'", job)
+                    self.assertIn('if [ "$status" -ne 2 ]; then exit "$status"; fi', job)
+                    self.assertNotIn('continue-on-error', job)
             self.assertNotRegex(source, r'fractal-web-shell[12]-')
         self.assertTrue(cache_steps, 'No generated web-shell cache steps were checked')
         self.assertTrue(key_steps, 'No generated web-shell key steps were checked')

@@ -155,8 +155,13 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           name: 'Verify web key completeness against the shell derivation',
           id: 'web-shell-verify',
           shell: 'bash',
-          run: 'bash scripts/ci-web-shell verify',
-          env: fractalWebShellEnv,
+          run: `if bash scripts/ci-web-shell verify; then
+  exit 0
+else
+  status=$?
+  if [ "$status" -ne 2 ]; then exit "$status"; fi
+fi`,
+          env: { ...fractalWebShellEnv, CI_WEB_SHELL_CACHE_HIT: '${{ steps.web-shell.outputs.cache-hit }}' },
         },
         ...[
           { ...nixDevelopStep({ name: 'Fetch the locked packages', flake: '.#web', command: ['pnpm', 'fetch'] }), env: pnpmStoreEnv },
@@ -170,7 +175,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
             env: { ...fractalWebShellEnv, CI_WEB_SHELL_IDENTITY: '${{ steps.web-shell-verify.outputs.identity }}' },
           },
           { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
-        ].map((step) => ({ ...step, if: "steps.web-shell.outputs.cache-hit != 'true'" })),
+        ].map((step) => ({ ...step, if: "steps.web-shell-verify.outputs.cache-complete != 'true'" })),
       ],
     },
     // This check never ran in merge_group; keep its main measurements and generated-store cache.

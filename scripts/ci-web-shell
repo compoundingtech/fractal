@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cache the fractal-web devShell (`.#web`) and its print-dev-env script as a complete closure.
-# `key` hashes the declared shell sources and transitive web lock inputs, never invoking Nix.
+# `key` evaluates only literal input declarations offline, never loading the flake/input graph.
 # Protected-main upkeep verifies the evaluated derivation against existing metadata for that key.
 # Bump the format version in `key` whenever the cached representation or restore semantics change.
 # Only protected-main upkeep fills the shared entry.
@@ -10,7 +10,12 @@ cmd=${1:?usage: scripts/ci-web-shell key|verify|fill|run COMMAND...}
 shift
 if [ "$cmd" = key ]; then
   source_hash=${CI_WEB_SHELL_SOURCE_HASH:?CI_WEB_SHELL_SOURCE_HASH is not set}
-  inputs=$(jq -cS --slurpfile spec nix/web-shell-inputs.json -f scripts/ci-web-shell-inputs.jq flake.lock)
+  declarations_start=$EPOCHREALTIME
+  declarations=$(nix eval --offline --json --file flake.nix inputs)
+  declarations_end=$EPOCHREALTIME
+  awk -v start="$declarations_start" -v end="$declarations_end" \
+    'BEGIN { printf "Web input declaration extraction: %.6fs (offline; no flake loading)\n", end - start }' >&2
+  inputs=$(jq -cS --argjson declarations "$declarations" --slurpfile spec nix/web-shell-inputs.json -f scripts/ci-web-shell-inputs.jq flake.lock)
   digest=$(printf '%s\n%s\n' "$source_hash" "$inputs" | sha256sum)
   cache_key="fractal-web-shell3-${RUNNER_OS:-Linux}-${digest%% *}"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
@@ -33,19 +38,33 @@ case "$cmd" in
     : "${CI_WEB_SHELL_KEY:?CI_WEB_SHELL_KEY is not set}"
     system=$(jq -er '.system' nix/web-shell-inputs.json)
     identity=$(nix eval --raw ".#devShells.$system.web.drvPath")
-    if [ -s "$identity_file" ]; then
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+      printf 'identity=%s\n' "$identity" >> "$GITHUB_OUTPUT"
+    fi
+    complete=false
+    if [ -s "$identity_file" ] && [ -s "$cache_key_file" ] \
+      && [ -s "$shell_file" ] && [ -s "$env_file" ]; then
+      complete=true
+    elif [ "${CI_WEB_SHELL_CACHE_HIT:-false}" = true ] \
+      || [ -e "$identity_file" ] || [ -e "$cache_key_file" ]; then
+      if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        printf 'cache-complete=false\n' >> "$GITHUB_OUTPUT"
+      fi
+      printf '::warning::Web shell cache key %s: missing identity or environment metadata; verification failed, treating entry as a miss.\n' "$expected_key" >&2
+      exit 2
+    fi
+    if [ "$complete" = true ]; then
       recorded=$(cat "$identity_file")
-      if [ ! -s "$cache_key_file" ] || [ "$(cat "$cache_key_file")" != "$expected_key" ] \
-        || [ "$recorded" != "$identity" ]; then
+      if [ "$(cat "$cache_key_file")" != "$expected_key" ] || [ "$recorded" != "$identity" ]; then
         printf '::error::Web shell cache key %s: recorded drvPath %s, evaluated drvPath %s; add the missing path or input to the hashed set and bump the format version.\n' \
           "$expected_key" "$recorded" "$identity" >&2
         exit 1
       fi
     fi
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
-      printf 'identity=%s\n' "$identity" >> "$GITHUB_OUTPUT"
+      printf 'cache-complete=%s\n' "$complete" >> "$GITHUB_OUTPUT"
     fi
-    printf 'Web shell cache key %s: verified drvPath %s\n' "$expected_key" "$identity"
+    printf 'Web shell cache key %s: evaluated drvPath %s, complete cached entry=%s\n' "$expected_key" "$identity" "$complete"
     ;;
   fill)
     : "${CI_WEB_SHELL_KEY:?CI_WEB_SHELL_KEY is not set}"

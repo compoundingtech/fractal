@@ -666,7 +666,11 @@ workflow-level path filters. `linux-gate` does not depend on them.
   Metadata such as `lastModified` is retained because flake `sourceInfo` exposes it to
   derivations (including the upstream Genie's build stamp); future locked fields also affect keys.
   Root Rust inputs and unrelated `flake.nix` edits do not invalidate the entry.
-  No Nix evaluation, input fetch or IFD runs during key computation or cache-hit lookup.
+  `nix eval --offline --json --file flake.nix inputs` reads only literal declarations;
+  the projection hashes web roots and every root referenced by their `follows`, so changed
+  web URLs, follows or flake flags invalidate even with an unchanged lock file.
+  This offline extraction never loads the flake graph, fetches inputs or evaluates IFD.
+  Its elapsed time is logged separately in every key step.
   Both publishers and consumers use the same exact key, with no prefix restoration.
   `run` requires matching `cache-key` metadata and complete identity/environment records,
   copies the closure into the store (`--no-check-sigs`) and sources `print-dev-env`.
@@ -674,6 +678,8 @@ workflow-level path filters. `linux-gate` does not depend on them.
   Protected-main upkeep restores the exact entry and evaluates the current drvPath before
   saving. A different drvPath for an existing key fails loudly, naming both paths and
   requiring the missing path/input to be added to the hashed set and the format bumped.
+  A restored entry missing identity/environment metadata fails verification and is treated
+  as a miss for fill; only this explicit miss is recoverable, never a derivation mismatch.
   The shell imports no repository source beyond its hashed definition: its upstream
   Buck capability IFD reads immutable effect-utils/dependency sources covered by the lock
   projection, not this checkout. Removing that upstream IFD is independent of cache lookup.
