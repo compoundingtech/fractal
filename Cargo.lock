@@ -5610,6 +5610,7 @@ dependencies = [
  "serde",
  "serde_json",
  "st3-client",
+ "st3-schema",
 ]
 
 [[package]]

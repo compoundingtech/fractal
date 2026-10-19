@@ -3,7 +3,7 @@
  * keep their slot, which one is evicted, and what each consumer's stream sees.
  */
 import type { Capability, CollectionFrame, CollectionSocket } from '@smalltalk/st3-client'
-import type { CollectionName, Mission, Snapshot } from '@smalltalk/st3-client'
+import type { CollectionName, Mission, ResourceCollectionName, Snapshot } from '@smalltalk/st3-client'
 import { decodeUnknownSync, Mission as MissionCodec } from '@smalltalk/st3-client/schema'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
@@ -106,7 +106,7 @@ class FakeGateway {
     this.socket?.onmessage?.({ data: JSON.stringify(frame) })
   }
 
-  window(collection: CollectionName, hasMore: boolean) {
+  window(collection: ResourceCollectionName, hasMore: boolean) {
     this.send({
       kind: 'snapshot',
       id: this.idOf(collection),

@@ -10,7 +10,7 @@ impl Store {
             return resource_references::referrers_from_declarations(&connection, subject);
         }
         let mut statement = connection.prepare_cached(
-            "SELECT owner, name, reason FROM declared_resource_edges WHERE target=?1 ORDER BY owner, name",
+            "SELECT owner, name, reason FROM declared_resource_edges WHERE target=?1 AND relation='declared-resource' ORDER BY owner, name",
         )?;
         let rows = statement.query_map([subject], |row| {
             Ok(json!({

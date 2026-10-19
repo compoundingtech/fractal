@@ -11,6 +11,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case agentStop = "agent.stop"
     case agentSuspend = "agent.suspend"
     case arrangementEdit = "arrangement.edit"
+    case arrangementMembershipEdit = "arrangement.membership.edit"
     case attentionResolve = "attention.resolve"
     case customReply = "custom.reply"
     case laneApprove = "lane.approve"
@@ -124,6 +125,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case terminalScreen = "terminal.screen"
     case arrangementsList = "arrangements.list"
     case arrangementsGet = "arrangements.get"
+    case arrangementsMemberships = "arrangements.memberships"
     case glassesList = "glasses.list"
     case glassesGet = "glasses.get"
     case assistantSummary = "assistant.summary"
@@ -197,6 +199,7 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .terminalScreen: "/v1/client/terminals/{id}/screen",
     .arrangementsList: "/v1/client/arrangements",
     .arrangementsGet: "/v1/client/arrangements/{person_name}/{uuid}",
+    .arrangementsMemberships: "/v1/client/arrangements/{person_name}/{uuid}/memberships",
     .glassesList: "/v1/client/glasses",
     .glassesGet: "/v1/client/glasses/{id}",
     .assistantSummary: "/v1/client/assistant/summary",

@@ -1,4 +1,7 @@
-import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementOperation } from '../../clients/typescript/st3-client';
+import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementBodyV1, type ArrangementOperation } from '../../clients/typescript/st3-client';
+
+/** The sidebar edits version 1 layouts; version 2 arrangements are folder-only and ordered by membership. */
+export type SidebarArrangement = Arrangement & { body: ArrangementBodyV1 };
 
 /** What a person reads when their Sidebar was removed and no older one exists to edit. */
 export const SIDEBAR_RETIRED = 'This Sidebar was removed; restoring a removed Sidebar is not available yet.';
@@ -11,7 +14,7 @@ export function sidebarSubject(person: string): string { return `arrangement/${p
 
 /** The reserved subject whatever its name, else the oldest live arrangement named "Sidebar",
  *  which clients created before the reserved id. Every client picks the same one. */
-export function sidebarArrangement(arrangements: Arrangement[]): Arrangement | undefined {
+export function sidebarArrangement(arrangements: SidebarArrangement[]): SidebarArrangement | undefined {
   const live = arrangements.filter(a => !a.deleted);
   return live.find(a => a.id.endsWith(`/${SIDEBAR_ARRANGEMENT_UUID}`))
     ?? live.filter(a => a.body.name.value === 'Sidebar').sort((a, b) => compare(a.id, b.id))[0];
@@ -72,7 +75,7 @@ function insertion(keys: string[], index: number): { key: string; rekeys: Array<
     return { key: positioned[index], rekeys: keys.map((_, n) => [n, positioned[n < index ? n : n + 1]]) };
   }
 }
-export const folderLocation = (a: Arrangement | undefined, subject: string): string | null => {
+export const folderLocation = (a: SidebarArrangement | undefined, subject: string): string | null => {
   const resolved = a?.resolved?.folders;
   const folder = resolved && subject in resolved ? resolved[subject] : a?.body.placements[subject]?.value.folder;
   return folder && a?.body.folders[folder] && !a.body.folders[folder].tombstone ? folder : null;
@@ -81,13 +84,13 @@ export function folderName(name: string): string {
   if (!name.trim() || /[\u0000-\u001f\u007f-\u009f]/u.test(name) || [...name.trim()].reduce((n, char) => n + (char.codePointAt(0)! < 128 ? 1 : char.codePointAt(0)! < 2048 ? 2 : char.codePointAt(0)! < 65536 ? 3 : 4), 0) > 256) throw new Error('Use a folder name of at most 256 bytes without control characters.');
   return name.trim();
 }
-export function folderCreate(a: Arrangement | undefined, id: string, name: string): ArrangementOperation[] {
+export function folderCreate(a: SidebarArrangement | undefined, id: string, name: string): ArrangementOperation[] {
   name = folderName(name);
   const siblings = Object.values(a?.body.folders ?? {}).filter(f => !f.tombstone).map(f => f.position.value.key).sort(compare);
   return [{ op: 'folder.create', id, name: name.trim(), parent: null, key: keyBetween(siblings.at(-1) ?? null, null) }];
 }
 /** Place before an anchor or append, including dormant placement keys so they never collide. */
-export function placeResource(a: Arrangement | undefined, subject: string, folder: string | null, before?: string, after?: string): ArrangementOperation[] {
+export function placeResource(a: SidebarArrangement | undefined, subject: string, folder: string | null, before?: string, after?: string): ArrangementOperation[] {
   const siblings = Object.entries(a?.body.placements ?? {}).filter(([id]) => id !== subject && folderLocation(a, id) === folder).sort(([ai, av], [bi, bv]) => compare(av.value.key, bv.value.key) || compare(ai, bi));
   const anchors: ArrangementOperation[] = [];
   const anchor = before ?? after;
@@ -107,7 +110,7 @@ export function placeResource(a: Arrangement | undefined, subject: string, folde
   operations.set(subject, { op: 'subject.place', subject, folder, key: placed.key });
   return [...operations.values()];
 }
-export function moveFolder(a: Arrangement, id: string, before?: string): ArrangementOperation[] {
+export function moveFolder(a: SidebarArrangement, id: string, before?: string): ArrangementOperation[] {
   const siblings = Object.entries(a.body.folders).filter(([key, f]) => key !== id && !f.tombstone).sort(([ai, av], [bi, bv]) => compare(av.position.value.key, bv.position.value.key) || compare(ai, bi));
   const index = before ? siblings.findIndex(([key]) => key === before) : siblings.length;
   if (index < 0) throw new Error('The destination changed; choose it again.');

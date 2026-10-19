@@ -32,6 +32,7 @@ pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
+pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
 #[cfg(test)]
@@ -3639,6 +3640,7 @@ impl Store {
                 }
                 if receipt_attached { repair_operations_tx(transaction,&[opaque_cache_key(idempotency_key)]).map_err(internal)?; }
                 owned_sets::project_tx(transaction)?;
+                ordered_membership::flush(transaction).map_err(internal)?;
                 let store_index = current_index_tx(transaction).map_err(internal)?;
                 let response = ApplyResponse {
                     changed: true,
@@ -5764,6 +5766,7 @@ impl Store {
             kind,
             "lane.approved"
                 | "arrangement.edited"
+                | "ordered-membership.edited"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -19709,6 +19712,7 @@ pub fn append_claim_with_commit_context(
                     // Layout edits merge, but retiring a folded duplicate must not lose
                     // an edit accepted after the client read it.
                     if subject == &input.subject
+                        && input.kind != "ordered-membership.edited"
                         && !(input.kind == "arrangement.edited"
                             && input.fields.get("operations").and_then(Value::as_array)
                                 .is_some_and(|operations| operations.iter().any(|operation| operation["op"] == "retire")))
@@ -19757,7 +19761,7 @@ pub fn append_claim_with_commit_context(
                 }
             }
             if let Some(expected) = &input.expected_subject {
-                let actual = if input.kind == "arrangement.edited" {
+                let actual = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                     transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_,String>(0)).optional().map_err(internal)?
                 } else {
                     latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
@@ -19802,6 +19806,7 @@ pub fn append_claim_with_commit_context(
                 stored_fields = Some(fields);
             }
             arrangements::prepare(transaction, input)?;
+            ordered_membership::prepare(transaction, input)?;
             // A leave names its own batch as the last sequence of its window. The sequence is only
             // known here, under the writer lock, so a zero high water stands for "this batch".
             if input.kind == "fleet.member-left"
@@ -19837,7 +19842,7 @@ pub fn append_claim_with_commit_context(
                     })?;
                 return Ok((latest, false));
             }
-            let predecessor = if input.kind == "arrangement.edited" {
+            let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                 transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?
             } else {
                 latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
@@ -20082,6 +20087,10 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
     ("declared_resource_edges", &[]),
+    ("ordered_membership_heads", &[]),
+    ("ordered_membership_live", &[]),
+    ("ordered_membership_counts", &["changed_index"]),
+    ("ordered_membership_lifecycle", &[]),
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),

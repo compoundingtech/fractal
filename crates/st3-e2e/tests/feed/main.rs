@@ -127,14 +127,16 @@ async fn sidebar_arrangements_follow_the_explicit_person_and_remote_register_upd
     );
     let items = next_window(&rx, Window::Arrangements).await;
     assert!(
-        matches!(&items[0], Resource::Arrangement(a) if a.owner == "person/avery" && a.body.folders.values().next().unwrap().name.value == "Builds")
+        matches!(&items[0], Resource::Arrangement(a) if a.owner == "person/avery"
+            && matches!(&a.body, st3_client::ArrangementBody::V1(body) if body.folders.values().next().unwrap().name.value == "Builds"))
     );
     append(
         json!([{"op":"folder.rename","id":"019a0000-0000-7000-8000-000000000010","name":"Renamed"}]),
     );
     let items = next_window(&rx, Window::Arrangements).await;
     assert!(
-        matches!(&items[0], Resource::Arrangement(a) if a.body.folders.values().next().unwrap().name.value == "Renamed")
+        matches!(&items[0], Resource::Arrangement(a)
+            if matches!(&a.body, st3_client::ArrangementBody::V1(body) if body.folders.values().next().unwrap().name.value == "Renamed"))
     );
     append(json!([{"op":"retire"}]));
     assert!(next_window(&rx, Window::Arrangements).await.is_empty());

@@ -17,6 +17,7 @@ export type ActionCommon = {
 };
   type: 
   "arrangement.edit"
+  | "arrangement.membership.edit"
   | "custom.reply"
   | "prompt.respond"
   | "attention.resolve"
@@ -80,6 +81,7 @@ export type ActionResult = {
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
   kind: "action-result";
+  membership_revision?: Revision;
   operation_id: Id;
   snapshot_id: Id;
   status: "accepted" | "completed" | "rejected";
@@ -400,7 +402,9 @@ export type Arrangement = ResourceHeader & {
   resolved?: ArrangementResolved;
 };
 
-export type ArrangementBody = {
+export type ArrangementBody = (ArrangementBodyV1 | ArrangementBodyV2);
+
+export type ArrangementBodyV1 = {
   folders: {
   [key: string]: ArrangementFolder;
 };
@@ -411,10 +415,19 @@ export type ArrangementBody = {
   version: 1;
 };
 
+export type ArrangementBodyV2 = {
+  folders: {
+  [key: string]: ArrangementFolder;
+};
+  name: ArrangementNameRegister;
+  version: 2;
+};
+
 export type ArrangementEditParameters = {
   operations: Array<ArrangementOperation>;
   owner: ArrangementPerson;
   subject: ArrangementId;
+  version?: number;
 };
 
 export type ArrangementFolder = {
@@ -428,6 +441,12 @@ export type ArrangementFolderId = string;
 export type ArrangementId = string;
 
 export type ArrangementKey = string;
+
+export type ArrangementMembershipEditParameters = {
+  operations: Array<OrderedMembershipOperation>;
+  owner: ArrangementPerson;
+  subject: ArrangementId;
+};
 
 export type ArrangementName = string;
 
@@ -1008,6 +1027,13 @@ export type CollectionCommand = ({
   person: ArrangementPerson;
   subject?: ArrangementId;
 } | {
+  collection: "ordered-memberships";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person: ArrangementPerson;
+  subject: ArrangementId;
+} | {
   capability: string;
   collection: "terminal";
   id: string;
@@ -1025,7 +1051,7 @@ export type CollectionCommand = ({
 });
 
 export type CollectionFrame = ({
-  collection: CollectionName;
+  collection: ResourceCollectionName;
   has_more: boolean;
   id: string;
   items: Array<Resource>;
@@ -1033,7 +1059,7 @@ export type CollectionFrame = ({
   order: Array<Id>;
   snapshot: Snapshot;
 } | {
-  collection: CollectionName;
+  collection: ResourceCollectionName;
   has_more: boolean;
   id: string;
   kind: "changes";
@@ -1041,6 +1067,25 @@ export type CollectionFrame = ({
   removes: Array<Id>;
   snapshot: Snapshot;
   upserts: Array<Resource>;
+} | {
+  collection: "ordered-memberships";
+  has_more: boolean;
+  id: string;
+  items: Array<OrderedMembership>;
+  kind: "snapshot";
+  membership: OrderedMembershipState;
+  order: Array<Id>;
+  snapshot: Snapshot;
+} | {
+  collection: "ordered-memberships";
+  has_more: boolean;
+  id: string;
+  kind: "changes";
+  membership: OrderedMembershipState;
+  order: Array<Id>;
+  removes: Array<Id>;
+  snapshot: Snapshot;
+  upserts: Array<OrderedMembership>;
 } | {
   collection: "terminal";
   id: string;
@@ -1079,6 +1124,7 @@ export type CollectionName =
   | "work"
   | "glasses"
   | "arrangements"
+  | "ordered-memberships"
   | "summary"
   | "clients"
   | "usage"
@@ -1274,7 +1320,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -1296,6 +1342,15 @@ export type ErrorCode = (
   | "invalid-arrangement-folder"
   | "invalid-arrangement-name"
   | "invalid-arrangement-key"
+  | "invalid-arrangement-version"
+  | "invalid-arrangement-body"
+  | "unsupported-membership-container"
+  | "membership-owner-forbidden"
+  | "invalid-membership-member"
+  | "invalid-membership-bucket"
+  | "invalid-membership-key"
+  | "invalid-membership-operations"
+  | "membership-edit-too-large"
   | "invalid-subject-reference"
   | "not-found"
   | "forbidden"
@@ -1961,6 +2016,47 @@ export type Operational = {
   runtime_incarnation?: string | null;
 };
 
+export type OrderedMembership = {
+  container: ArrangementId;
+  id: ArrangementSubject;
+  member: ArrangementSubject;
+  position: OrderedMembershipPosition;
+  revision: Revision;
+};
+
+export type OrderedMembershipOperation = ({
+  bucket: string | null;
+  key: ArrangementKey;
+  member: ArrangementSubject;
+  op: "place";
+} | {
+  member: ArrangementSubject;
+  op: "remove";
+});
+
+export type OrderedMembershipPage = {
+  collection: "ordered-memberships";
+  filters: {
+  [key: string]: string;
+};
+  items: Array<OrderedMembership>;
+  kind: "page";
+  page: PageInfo;
+  replicated?: ReplicatedNotice;
+  sync?: SyncNotice;
+};
+
+export type OrderedMembershipPosition = {
+  bucket: string | null;
+  key: ArrangementKey;
+};
+
+export type OrderedMembershipState = {
+  changed_index: number;
+  container: ArrangementId;
+  live_count: number;
+};
+
 export type OwnedSet = ResourceHeader & {
   blockers: Array<string>;
   claim: string;
@@ -2220,6 +2316,22 @@ export type RequestSubject = {
 };
 
 export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
+
+export type ResourceCollectionName = 
+  "missions"
+  | "attention"
+  | "agents"
+  | "work"
+  | "glasses"
+  | "arrangements"
+  | "summary"
+  | "clients"
+  | "usage"
+  | "machines"
+  | "devices"
+  | "sessions"
+  | "terminals"
+;
 
 export type ResourceHeader = {
   id: Id;
@@ -3338,6 +3450,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.stop'; parameters: AgentStopParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.membership.edit'; parameters: ArrangementMembershipEditParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.resolve'; parameters: {
   attention_id: Id;
   outcome: string;

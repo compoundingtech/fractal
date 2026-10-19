@@ -1720,6 +1720,7 @@ impl SeatsStore for Store {
                 .query_map([run_id], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
+        st3_store::store::ordered_membership::flush(&transaction)?;
         transaction.commit()?;
         Ok(residue)
     }

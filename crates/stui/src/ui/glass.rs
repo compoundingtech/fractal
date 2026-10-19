@@ -4329,7 +4329,7 @@ mod tests {
         let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).expect("drag files the tab's subject");
         assert!(matches!(&write.operations[..], [st3_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &first));
         assert_eq!(tabs(&ui), tabs_before, "filing does not close a space tab");
-        assert!(ui.resource_sidebar.arrangement().unwrap().body.placements.is_empty(), "only the stream updates the arrangement projection");
+        assert!({ use super::resource_sidebar::ArrangementV1 as _; ui.resource_sidebar.arrangement().unwrap().v1().placements.is_empty() }, "only the stream updates the arrangement projection");
         ui.resource_sidebar.saved(&write, true); ui.effects.clear(); screen(&ui);
         // A resource row can be dragged back into the sidebar as well as out to a tab.
         let rows = ui.resource_sidebar.rows();

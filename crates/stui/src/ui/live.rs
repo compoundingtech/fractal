@@ -11,6 +11,7 @@ use st3::MissionsStore;
 use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
+use super::resource_sidebar::ArrangementV1 as _;
 use super::view::{Load, MissionPreview};
 use super::{AgentControl, Effect, Guard, Ui};
 use crate::feed::{self, Command, Inventories, Inventory, TerminalUpdate, Window};
@@ -735,10 +736,11 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
                     ui.resource_sidebar.writable = true;
                     ui.resource_sidebar.arrangements = items.into_iter().filter_map(|item| match item {
-                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted => Some(arrangement),
+                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted
+                            && matches!(arrangement.body, st3_client::ArrangementBody::V1(_)) => Some(arrangement),
                         _ => None,
                     }).collect();
-                    if ui.resource_sidebar.arrangements.iter().any(|a| a.body.folders.values().any(|folder| folder.tombstone.is_none()))
+                    if ui.resource_sidebar.arrangements.iter().any(|a| a.v1().folders.values().any(|folder| folder.tombstone.is_none()))
                         && let Some(glasses) = ui.glasses.as_mut()
                         && !glasses.sidebar.configured {
                         glasses.sidebar.shown = true;
@@ -2645,7 +2647,7 @@ async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -
     let reply = client.arrangement_edit(
         format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
         Fence { snapshot_id: snapshot.id, ..Default::default() },
-        st3_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
+        st3_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone(), version: None },
     ).await?;
     anyhow::ensure!(matches!(reply.value.status, st3_client::ActionStatus::Completed), "Sidebar edit is not completed.");
     Ok(())
@@ -3858,19 +3860,19 @@ mod tests {
         // Exact retry of the accepted create does not replace later register winners.
         save_sidebar(&client, &creation).await.unwrap();
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].position.value.key < found.body.folders[&first].position.value.key);
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].position.value.key < found.v1().folders[&first].position.value.key);
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], Some(second.clone()));
         save_sidebar(&client, &write(vec![Op::FolderDelete { id: second.clone() }])).await.unwrap();
         server.abort(); let _ = server.await; drop(store);
         let _ = std::fs::remove_file(&socket);
         let (_store, server) = serve(root.path(), &socket).await;
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].tombstone.is_some());
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].tombstone.is_some());
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
         // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
-        assert!(found.body.placements.contains_key("agent/example/atlas"));
+        assert!(found.v1().placements.contains_key("agent/example/atlas"));
         server.abort();
     }
 

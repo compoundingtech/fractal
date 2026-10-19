@@ -91,12 +91,15 @@ pub fn build(
     if arrangement.deleted {
         return Err(ProjectionError::ArrangementUnavailable);
     }
-    if arrangement.body.version != 1 {
-        return Err(ProjectionError::Unsupported {
-            required: 1,
-            advertised: arrangement.body.version,
-        });
-    }
+    let body = match &arrangement.body {
+        st3_schema::arrangements::VersionedBody::V1(body) => body,
+        other => {
+            return Err(ProjectionError::Unsupported {
+                required: 1,
+                advertised: other.version(),
+            });
+        }
+    };
     let resolved = arrangement
         .resolved
         .as_ref()
@@ -107,7 +110,7 @@ pub fn build(
         arrangement_revision: arrangement.header.revision.clone(),
         deleted_folders: Vec::new(),
     };
-    for (id, folder) in &arrangement.body.folders {
+    for (id, folder) in &body.folders {
         if folder.tombstone.is_some() {
             tree.deleted_folders.push(id.clone());
             continue;
@@ -127,7 +130,7 @@ pub fn build(
             },
         );
     }
-    for (subject, register) in &arrangement.body.placements {
+    for (subject, register) in &body.placements {
         let shown_under = resolved
             .folders
             .get(subject)
@@ -463,6 +466,26 @@ mod tests {
         Parent::Folder { id: id.into() }
     }
 
+    trait V1Body {
+        fn v1(&mut self) -> &mut st3_schema::arrangements::Body;
+    }
+
+    impl V1Body for Arrangement {
+        fn v1(&mut self) -> &mut st3_schema::arrangements::Body {
+            match &mut self.body {
+                st3_schema::arrangements::VersionedBody::V1(body) => body,
+                other => panic!("expected a version 1 body, found version {}", other.version()),
+            }
+        }
+    }
+
+    fn as_v2(body: &st3_schema::arrangements::VersionedBody) -> st3_schema::arrangements::VersionedBody {
+        let st3_schema::arrangements::VersionedBody::V1(body) = body else { panic!("expected version 1") };
+        st3_schema::arrangements::VersionedBody::V2(st3_schema::arrangements::BodyV2 {
+            version: 2, name: body.name.clone(), folders: body.folders.clone(),
+        })
+    }
+
     fn arrangement() -> Arrangement {
         serde_json::from_value(json!({
             "id": "arrangement/person/test/id", "kind": "arrangement",
@@ -478,7 +501,7 @@ mod tests {
     }
 
     fn add_folder(arrangement: &mut Arrangement, id: &str, parent: Option<&str>, key: &str) {
-        arrangement.body.folders.insert(
+        arrangement.v1().folders.insert(
             id.into(),
             serde_json::from_value(json!({
                 "name": {"value": id, "revision": "opaque/name"},
@@ -498,7 +521,7 @@ mod tests {
     }
 
     fn place(arrangement: &mut Arrangement, id: &str, parent: Option<&str>, key: &str) {
-        arrangement.body.placements.insert(
+        arrangement.v1().placements.insert(
             id.into(),
             serde_json::from_value(json!({
                 "value": {"folder": parent, "key": key}, "revision": "opaque/placement"
@@ -554,7 +577,8 @@ mod tests {
     fn rejects_unavailable_unsupported_and_incomplete_projection() {
         let mut arrangement = arrangement();
         arrangement.deleted = true;
-        arrangement.body.version = 2;
+        let original = arrangement.body.clone();
+        arrangement.body = as_v2(&original);
         arrangement.resolved = None;
         assert_eq!(
             build(&arrangement, &[]),
@@ -568,7 +592,7 @@ mod tests {
                 advertised: 2
             })
         );
-        arrangement.body.version = 1;
+        arrangement.body = original;
         assert_eq!(build(&arrangement, &[]), Err(ProjectionError::NotReady));
         arrangement.resolved = Some(st3_client::ArrangementResolved {
             parents: BTreeMap::new(),
@@ -577,7 +601,7 @@ mod tests {
         add_folder(&mut arrangement, "a", None, "a0");
         arrangement.resolved.as_mut().unwrap().parents.clear();
         assert_eq!(build(&arrangement, &[]), Err(ProjectionError::NotReady));
-        arrangement.body.folders.clear();
+        arrangement.v1().folders.clear();
         place(&mut arrangement, "dormant", None, "a0");
         arrangement.resolved.as_mut().unwrap().folders.clear();
         assert_eq!(build(&arrangement, &[]), Err(ProjectionError::NotReady));
@@ -612,7 +636,7 @@ mod tests {
             .unwrap()
             .parents
             .insert("a".into(), None);
-        arrangement.body.folders.get_mut("a").unwrap().tombstone =
+        arrangement.v1().folders.get_mut("a").unwrap().tombstone =
             Some(st3_client::ArrangementRegister {
                 value: true,
                 revision: "opaque/delete".into(),
@@ -621,7 +645,7 @@ mod tests {
             build(&arrangement, &[]),
             Err(ProjectionError::InvalidResolution)
         );
-        arrangement.body.folders.clear();
+        arrangement.v1().folders.clear();
         place(&mut arrangement, "subject", Some("missing"), "a0");
         assert_eq!(
             build(&arrangement, &[]),
@@ -774,7 +798,7 @@ mod tests {
     fn lifted_parent_is_actionable_and_deleted_parent_is_distinct() {
         let mut arrangement = arrangement();
         add_folder(&mut arrangement, "gone", None, "a0");
-        arrangement.body.folders.get_mut("gone").unwrap().tombstone =
+        arrangement.v1().folders.get_mut("gone").unwrap().tombstone =
             Some(st3_client::ArrangementRegister {
                 value: false,
                 revision: "opaque/delete".into(),
@@ -810,7 +834,7 @@ mod tests {
             );
         }
         arrangement
-            .body
+            .v1()
             .placements
             .get_mut("leaf")
             .unwrap()

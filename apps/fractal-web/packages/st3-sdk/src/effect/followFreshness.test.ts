@@ -5,7 +5,7 @@
  */
 import { it as effectIt } from '@effect/vitest'
 import type { CollectionFrame, CollectionSocket } from '@smalltalk/st3-client'
-import type { CollectionName, Snapshot } from '@smalltalk/st3-client'
+import type { CollectionName, ResourceCollectionName, Snapshot } from '@smalltalk/st3-client'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
 import type * as Scope from 'effect/Scope'
@@ -112,7 +112,7 @@ class FakeGateway {
     this.socket?.onmessage?.({ data: JSON.stringify(frame) })
   }
 
-  window(collection: CollectionName) {
+  window(collection: ResourceCollectionName) {
     this.send({
       kind: 'snapshot',
       id: this.idOf(collection),

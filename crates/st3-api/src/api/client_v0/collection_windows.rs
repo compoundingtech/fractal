@@ -12,13 +12,14 @@ const STORES: usize = 64;
 pub const WINDOWS: usize = 64;
 pub const SESSION_WINDOWS: usize = 16;
 const KIND_LIMIT: usize = 10_000;
-pub const COLLECTIONS: [&str; 14] = [
+pub const COLLECTIONS: [&str; 15] = [
     "missions",
     "attention",
     "agents",
     "work",
     "glasses",
     "arrangements",
+    "ordered-memberships",
     "summary",
     "summary-missions",
     "clients", "usage", "machines", "devices", "sessions", "terminals",
@@ -39,6 +40,7 @@ pub struct Cached {
     pub valid_until: Option<u128>,
     pub items: Vec<Value>,
     pub has_more: bool,
+    pub membership: Option<st3_schema::ordered_membership::State>,
 }
 
 #[derive(Default)]
@@ -241,9 +243,11 @@ impl Windows {
                 || kinds.is_empty()
                 || kinds.len() > KIND_LIMIT;
             let arrangements = store.arrangements_changed(revisions.index, index)?;
+            let memberships = store.ordered_memberships_changed(revisions.index, index)?;
             for (position, name) in COLLECTIONS.iter().enumerate() {
                 if all
                     || (*name == "arrangements" && arrangements)
+                    || (*name == "ordered-memberships" && memberships)
                     || kinds.iter().any(|kind| !collection_ignores(name, kind))
                 {
                     revisions.values[position] = revisions.values[position].wrapping_add(1);
@@ -352,8 +356,8 @@ impl Windows {
         session: &ClientSession,
         request: &CollectionSubscribe,
         fence: ReadFence,
-        compute: impl FnOnce() -> anyhow::Result<(Vec<Value>, bool, Option<u128>)>,
-    ) -> anyhow::Result<(Vec<Value>, bool)> {
+        compute: impl FnOnce() -> anyhow::Result<(Vec<Value>, bool, Option<u128>, Option<st3_schema::ordered_membership::State>)>,
+    ) -> anyhow::Result<(Vec<Value>, bool, Option<st3_schema::ordered_membership::State>)> {
         let ReadFence {
             index,
             now,
@@ -365,29 +369,29 @@ impl Windows {
             self.builds.fetch_add(1, Ordering::SeqCst);
             compute()
         };
-        if matches!(request.collection.as_str(), "summary" | "clients" | "usage" | "machines" | "devices" | "sessions") { return compute().map(|(items, more, _)| (items, more)); }
+        if matches!(request.collection.as_str(), "summary" | "clients" | "usage" | "machines" | "devices" | "sessions") { return compute().map(|(items, more, _, membership)| (items, more, membership)); }
         // A published view is already the shared copy, and it can be published anew without a
         // commit (a deadline passing): caching it by commit revision would serve the older one.
         if state.store.collection_view_published(&request.collection) {
-            return compute().map(|(items, more, _)| (items, more));
+            return compute().map(|(items, more, _, membership)| (items, more, membership));
         }
         let Some(prepared) = prepared else {
-            return compute().map(|(items, more, _)| (items, more));
+            return compute().map(|(items, more, _, membership)| (items, more, membership));
         };
         // Authority can change while async admission waits. The current snapshot's key
         // must still match; otherwise this read computes without publishing a cache entry.
         if prepared.key != Self::key(state, session, request) {
-            return compute().map(|(items, more, _)| (items, more));
+            return compute().map(|(items, more, _, membership)| (items, more, membership));
         }
         // A commit after this reader began can update local tables without advancing the
         // claim index. Such a snapshot cannot reuse/cache a newer local-state generation.
         if self.commits() != snapshot_commits {
-            return compute().map(|(items, more, _)| (items, more));
+            return compute().map(|(items, more, _, membership)| (items, more, membership));
         }
         let Some(revision) =
             self.revision(&state.store, index, &request.collection, snapshot_commits)?
         else {
-            return compute().map(|(items, more, _)| (items, more));
+            return compute().map(|(items, more, _, membership)| (items, more, membership));
         };
         // Work uses its selected projection time. Missions and attention use exact
         // transition fences, not a coarse shared wall-clock bucket.
@@ -415,9 +419,9 @@ impl Windows {
                 .and_then(|v| v["evaluated_at"].as_str()).and_then(|s| s.parse::<u128>().ok())
                 .is_some_and(|evaluated| evaluated <= now))
         {
-            return Ok((cached.items.clone(), cached.has_more));
+            return Ok((cached.items.clone(), cached.has_more, cached.membership));
         }
-        let (items, has_more, valid_until) = compute()?;
+        let (items, has_more, valid_until, membership) = compute()?;
         let valid_until = if request.collection == "agents" {
             state.store.agent_roster_valid_until(index, request.agent.as_deref())
         } else if request.collection == "summary-missions" {
@@ -434,6 +438,7 @@ impl Windows {
                 valid_until,
                 items: items.clone(),
                 has_more,
+                membership,
             })
         });
         *prepared
@@ -441,7 +446,7 @@ impl Windows {
             .cached
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = cached;
-        Ok((items, has_more))
+        Ok((items, has_more, membership))
     }
 
     #[cfg(any(test, feature = "test-support"))]

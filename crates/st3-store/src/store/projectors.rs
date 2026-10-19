@@ -101,15 +101,32 @@ pub const APPEND: &[AppendProjector] = &[
         takes: Takes::Kinds(&["arrangement.edited"]),
         project: arrangements::project,
     },
+    AppendProjector {
+        name: "ordered-membership",
+        takes: Takes::Kinds(&["ordered-membership.edited"]),
+        project: ordered_membership::project,
+    },
+    AppendProjector {
+        name: "ordered-membership-flush",
+        takes: Takes::Every,
+        project: |transaction, _| ordered_membership::flush(transaction),
+    },
 ];
 
 /// Projects a replicated claim the incremental projection extends the graph with, after every
 /// claim of the range has its event row.
-pub const REPLICATED: &[AppendProjector] = &[AppendProjector {
-    name: "arrangement-project",
-    takes: Takes::Kinds(&["arrangement.edited"]),
-    project: arrangements::project_replicated,
-}];
+pub const REPLICATED: &[AppendProjector] = &[
+    AppendProjector {
+        name: "arrangement-project",
+        takes: Takes::Kinds(&["arrangement.edited"]),
+        project: arrangements::project_replicated,
+    },
+    AppendProjector {
+        name: "ordered-membership-project",
+        takes: Takes::Kinds(&["ordered-membership.edited"]),
+        project: ordered_membership::project,
+    },
+];
 
 /// Catches each domain up with the claims a projection pass admitted.
 pub const FLUSH: &[Hook] = &[
@@ -120,6 +137,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "agent-messages", run: agent_messages::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
     Hook { name: "arrangements", run: arrangements::flush },
+    Hook { name: "ordered-membership", run: ordered_membership::flush },
 ];
 
 /// Rebuilds the claim-derived domain tables from the claims, after the operations: the explicit
@@ -131,6 +149,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "glass-heads", run: glass_heads::rebuild },
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
+    Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 
 /// The domain stages of the full graph replay, after the mission runs are replayed.
@@ -141,6 +160,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/directive-notes", run: directive_notes::rebuild },
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
+    ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];
 

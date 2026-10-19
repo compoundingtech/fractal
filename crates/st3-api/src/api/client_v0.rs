@@ -94,6 +94,14 @@ fn collection_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
     Ok(if name == "alerts" { "attention".into() } else { name })
 }
 
+/// What a collection read pins beside its rows in the snapshot it read them in: an owner-wide
+/// arrangement inventory counter, or an ordered-membership container's state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionRevision {
+    Owner(u64),
+    Membership(st3_schema::ordered_membership::State),
+}
+
 pub struct CollectionSubscription {
     pub request: CollectionSubscribe,
     pub generation: u64,
@@ -106,8 +114,9 @@ pub struct CollectionSubscription {
     pub cursor: Option<collection_ivm::Delivered>,
     pub order: Vec<String>,
     pub has_more: bool,
-    /// Same-snapshot owner projection counter; only owner-wide arrangements use it.
-    pub owner_revision: Option<u64>,
+    /// Same-snapshot projection state: the owner counter of owner-wide arrangements, or an
+    /// ordered-membership container's state.
+    pub pinned: Option<CollectionRevision>,
     /// The roster publication revision when this window's last read began. An agents window
     /// rereads once a later roster is published, even at the same graph index.
     pub roster_revision: u64,
@@ -166,6 +175,11 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
         "harness.timeline" | "harness.usage" | "harness.todo.observed" | "harness.session-file") {
         return true;
     }
+    // The projection's revision includes container edits and registry-selected member
+    // lifecycle changes; do not duplicate that registry with a list of claim kinds here.
+    if collection == "ordered-memberships" {
+        return !matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked");
+    }
     matches!(kind, "daemon.diagnostic" | "transport.observed" | "workspace.observed")
         || (kind == "harness.usage" && collection != "agents")
 }
@@ -214,6 +228,7 @@ pub const ALL_SCOPES: &[&str] = &[
 ];
 const ACTIONS: &[&str] = &[
     "arrangement.edit",
+    "arrangement.membership.edit",
     "attention.resolve",
     "review.approve",
     "review.reject",
@@ -274,6 +289,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "custom.reply",
     "prompt.respond",
     "arrangement.edit",
+    "arrangement.membership.edit",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -467,7 +483,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"owned-sets", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
-    capabilities.push(json!({"id":"arrangements", "version":1, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
+    capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
         let scope = action_scope(action).expect("registered client action has a scope");
         let state = if !AVAILABLE_ACTIONS.contains(action) {

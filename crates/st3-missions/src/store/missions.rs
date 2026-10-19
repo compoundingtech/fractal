@@ -3967,6 +3967,7 @@ impl MissionsStore for Store {
                 params![retired.id, retired.revision, mission_state_name(&retired.state), claim.id],
             )
             .map_err(internal)?;
+        st3_store::store::ordered_membership::flush(&transaction).map_err(internal)?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h6bf4751081a7 owner=st3_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",

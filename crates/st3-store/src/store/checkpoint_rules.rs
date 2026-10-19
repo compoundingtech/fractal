@@ -39,7 +39,9 @@ pub use staged::plan_staged;
 /// Version 17 included selected rollup costs and complete, single-currency legacy costs in usage proofs (#1473).
 /// Version 18 adds harness-question lifecycle retention. Version 19 is both together: #1473 landed after version 18
 /// and renumbered from its allocated 17 as the version 18 note asked.
-pub const RULES_VERSION: u32 = 19;
+/// Version 20 covers ordered membership heads, live ordering, counters and lifecycle dependencies;
+/// it adds no drop rule and retains absent/hidden membership winners.
+pub const RULES_VERSION: u32 = 20;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -74,8 +76,8 @@ pub const REQUEST_CLOSERS: [&str; 3] = [
 const ENGINE_DESCRIPTION: &str = "\
 sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
 proof=the-sealed-claims-and-the-blobs-they-reference
-graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
-replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
+graph=shared-projection-tables-including-arrangements,arrangement_registers,ordered-membership-raw/live/counts/lifecycle-and-shared-reverse-edges-even-when-empty
+replay=clear-arrangements,arrangement_registers-and-ordered-membership-projections,rebuild-from-retained-claims
 reader-usage=rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas,cost-complete-single-currency
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot-but-harness-questions
@@ -954,8 +956,14 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
 }
 
 /// Tables projected from claims, children before the tables their foreign keys name.
-pub const PROJECTION_TABLES: [&str; 26] = [
+pub const PROJECTION_TABLES: [&str; 32] = [
     "operations",
+    "ordered_membership_live",
+    "ordered_membership_heads",
+    "ordered_membership_counts",
+    "ordered_membership_lifecycle",
+    "local_ordered_membership_pending",
+    "declared_resource_edges",
     "arrangement_registers",
     "arrangements",
     "resource_observations",
@@ -1046,6 +1054,7 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
         let person = st3_schema::arrangements::owner(subject).map_err(anyhow::Error::new)?;
         answers.insert("arrangements".into(), json!(super::arrangements::arrangements_at(connection, person, i64::MAX as u64)?));
         answers.insert("arrangement".into(), json!(super::arrangements::arrangement_at(connection, subject, i64::MAX as u64)?));
+        answers.insert("ordered_membership".into(), super::ordered_membership::witness(connection, subject)?);
     }
     answers.insert(
         "actual".into(),

@@ -29,6 +29,23 @@ tolerant per-row decoding. Unknown kinds and additive fields remain available to
 Malformed framing and exceptions from `onFrame` or `onOpen` close the socket and reach `onEnd(error)`
 once instead of escaping the WebSocket event handler.
 
+Create a new folder-only arrangement using `arrangementEdit` with `parameters.version: 2`;
+omitting the version keeps v1 creation. `ArrangementBody` is a version-discriminated v1/v2
+union, including strict rich-schema decoding. `arrangementMembershipEdit` accepts typed
+place/remove operations (`bucket: null` means root). `arrangementsMemberships` takes the
+arrangement's person name and UUID plus its owning `person/NAME`, returning a typed
+snapshot-bound keyset page. `subscribeOrderedMemberships` requires person and arrangement
+subject and follows lifecycle-aware held-window changes. Existing v1 placements are not
+implicitly migrated.
+Narrow collection frames by `collection === "ordered-memberships"` before passing them to
+`applyWindow` with a `CollectionWindow<OrderedMembership>`; those rows expose the member and
+position directly, and the window keeps the frame's required `membership` state for the whole
+container, replacing it even when a `changes` frame leaves rows and order alone.
+`membership.changed_index` is an opaque host-local invalidation frontier scoped by
+`snapshot.host_id`, not a canonical revision or cross-host value. Other collections keep
+resource windows without membership state. Rich-schema decoding validates membership frames
+and response envelopes, including empty pages, as disjoint variants.
+
 Run the client checks from the repository root with Node 24 and Corepack:
 
 ```sh

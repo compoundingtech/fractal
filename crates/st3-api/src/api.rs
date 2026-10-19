@@ -224,7 +224,7 @@ impl ClientTransportBoundary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientSnapshot {
     pub id: String,
-    host_id: String,
+    pub host_id: String,
     pub store_index: u64,
     projection_version: String,
     pub created_at: String,
@@ -1575,6 +1575,11 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-arrangement-subject" | "invalid-arrangement-action"
         | "invalid-arrangement-operations" | "invalid-arrangement-folder"
         | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference"
+        | "invalid-arrangement-version" | "invalid-arrangement-body"
+        | "unsupported-membership-container" | "membership-owner-forbidden"
+        | "invalid-membership-member" | "invalid-membership-bucket"
+        | "invalid-membership-key" | "invalid-membership-operations"
+        | "membership-edit-too-large"
     )) { return false; }
     matches!(
         code,
@@ -1626,6 +1631,15 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-arrangement-name"
         | "invalid-arrangement-key"
         | "invalid-subject-reference"
+        | "invalid-arrangement-version"
+        | "invalid-arrangement-body"
+        | "unsupported-membership-container"
+        | "membership-owner-forbidden"
+        | "invalid-membership-member"
+        | "invalid-membership-bucket"
+        | "invalid-membership-key"
+        | "invalid-membership-operations"
+        | "membership-edit-too-large"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"

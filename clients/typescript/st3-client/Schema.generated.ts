@@ -182,6 +182,7 @@ export const ActionCommon = /*#__PURE__*/ (() => Schema.Struct({
   "parameters": Schema.Record(Schema.String, Schema.Unknown),
   "type": Schema.Literals([
   "arrangement.edit",
+  "arrangement.membership.edit",
   "custom.reply",
   "prompt.respond",
   "attention.resolve",
@@ -336,10 +337,26 @@ export type ArrangementPersonEncoded = typeof ArrangementPerson.Encoded
 export const ArrangementEditParameters = /*#__PURE__*/ (() => Schema.Struct({
   "operations": Schema.Array(ArrangementOperation).check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)),
   "owner": ArrangementPerson,
-  "subject": ArrangementId
+  "subject": ArrangementId,
+  "version": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255)))
 }).annotate({ identifier: "ArrangementEditParameters" }))()
 export type ArrangementEditParameters = typeof ArrangementEditParameters.Type
 export type ArrangementEditParametersEncoded = typeof ArrangementEditParameters.Encoded
+
+export const OrderedMembershipOperation = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "bucket": Schema.OptionFromNullOr(Schema.String), "key": ArrangementKey, "member": ArrangementSubject, "op": Schema.Literal("place") }),
+  Schema.Struct({ "member": ArrangementSubject, "op": Schema.Literal("remove") })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("op")).annotate({ identifier: "OrderedMembershipOperation" }))()
+export type OrderedMembershipOperation = typeof OrderedMembershipOperation.Type
+export type OrderedMembershipOperationEncoded = typeof OrderedMembershipOperation.Encoded
+
+export const ArrangementMembershipEditParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "operations": Schema.Array(OrderedMembershipOperation).check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)),
+  "owner": ArrangementPerson,
+  "subject": ArrangementId
+}).annotate({ identifier: "ArrangementMembershipEditParameters" }))()
+export type ArrangementMembershipEditParameters = typeof ArrangementMembershipEditParameters.Type
+export type ArrangementMembershipEditParametersEncoded = typeof ArrangementMembershipEditParameters.Encoded
 
 export const AttachmentInput = /*#__PURE__*/ (() => Schema.Struct({
   "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
@@ -496,6 +513,7 @@ export type TerminalCreateParametersEncoded = typeof TerminalCreateParameters.En
 
 export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": ArrangementEditParameters, "type": Schema.Literal("arrangement.edit") }),
+  Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": ArrangementMembershipEditParameters, "type": Schema.Literal("arrangement.membership.edit") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": CustomReplyParameters, "type": Schema.Literal("custom.reply") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PromptRespondParameters, "type": Schema.Literal("prompt.respond") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentCreateParameters, "type": Schema.Literal("agent.create") }),
@@ -586,6 +604,7 @@ export const ActionResult = /*#__PURE__*/ (() => Schema.Struct({
   "affected_ids": Schema.Array(Id).check(Schema.isUnique()),
   "arrangement_revision": optionalKey(Revision),
   "kind": Schema.Literal("action-result"),
+  "membership_revision": optionalKey(Revision),
   "operation_id": Id,
   "snapshot_id": Id,
   "status": Schema.Literals(["accepted","completed","rejected"]),
@@ -1155,12 +1174,27 @@ export const ArrangementPlacementRegister = /*#__PURE__*/ (() => Schema.Struct({
 export type ArrangementPlacementRegister = typeof ArrangementPlacementRegister.Type
 export type ArrangementPlacementRegisterEncoded = typeof ArrangementPlacementRegister.Encoded
 
-export const ArrangementBody = /*#__PURE__*/ (() => Schema.Struct({
+export const ArrangementBodyV1 = /*#__PURE__*/ (() => Schema.Struct({
   "folders": Schema.Record(Schema.String, ArrangementFolder).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(ArrangementFolderId)), { expected: "property names matching the schema" })),
   "name": ArrangementNameRegister,
   "placements": Schema.Record(Schema.String, ArrangementPlacementRegister).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(ArrangementSubject)), { expected: "property names matching the schema" })),
   "version": Schema.Literal(1)
-}).annotate({ identifier: "ArrangementBody" }))()
+}).annotate({ identifier: "ArrangementBodyV1" }))()
+export type ArrangementBodyV1 = typeof ArrangementBodyV1.Type
+export type ArrangementBodyV1Encoded = typeof ArrangementBodyV1.Encoded
+
+export const ArrangementBodyV2 = /*#__PURE__*/ (() => Schema.Struct({
+  "folders": Schema.Record(Schema.String, ArrangementFolder).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(ArrangementFolderId)), { expected: "property names matching the schema" })),
+  "name": ArrangementNameRegister,
+  "version": Schema.Literal(2)
+}).annotate({ identifier: "ArrangementBodyV2" }))()
+export type ArrangementBodyV2 = typeof ArrangementBodyV2.Type
+export type ArrangementBodyV2Encoded = typeof ArrangementBodyV2.Encoded
+
+export const ArrangementBody = /*#__PURE__*/ (() => Schema.Union([
+  ArrangementBodyV1,
+  ArrangementBodyV2
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("version")).annotate({ identifier: "ArrangementBody" }))()
 export type ArrangementBody = typeof ArrangementBody.Type
 export type ArrangementBodyEncoded = typeof ArrangementBody.Encoded
 
@@ -1802,30 +1836,13 @@ export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
 "agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
+  Schema.Struct({ "collection": Schema.Literal("ordered-memberships"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, "subject": ArrangementId }),
   Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
   Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe") }),
   Schema.Struct({ "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("unsubscribe") })
 ], { mode: "oneOf" }).annotate({ identifier: "CollectionCommand" }))()
 export type CollectionCommand = typeof CollectionCommand.Type
 export type CollectionCommandEncoded = typeof CollectionCommand.Encoded
-
-export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
-  "missions",
-  "attention",
-  "agents",
-  "work",
-  "glasses",
-  "arrangements",
-  "summary",
-  "clients",
-  "usage",
-  "machines",
-  "devices",
-  "sessions",
-  "terminals"
-]).annotate({ identifier: "CollectionName" }))()
-export type CollectionName = typeof CollectionName.Type
-export type CollectionNameEncoded = typeof CollectionName.Encoded
 
 /** One conversation header field: its latest value, where it came from and when. */
 export const ConversationHeaderField = /*#__PURE__*/ (() => Schema.Struct({
@@ -1859,6 +1876,32 @@ export const ConversationHeader = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ConversationHeader", description: "Optional conversation header on timeline pages and delta responses (conversation-blocks.v1). A field is absent when neither source has it; `working` comes only from the register and the register wins over the transcript once live." }))()
 export type ConversationHeader = typeof ConversationHeader.Type
 export type ConversationHeaderEncoded = typeof ConversationHeader.Encoded
+
+export const OrderedMembershipPosition = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket": Schema.OptionFromNullOr(Schema.String),
+  "key": ArrangementKey
+}).annotate({ identifier: "OrderedMembershipPosition" }))()
+export type OrderedMembershipPosition = typeof OrderedMembershipPosition.Type
+export type OrderedMembershipPositionEncoded = typeof OrderedMembershipPosition.Encoded
+
+export const OrderedMembership = /*#__PURE__*/ (() => Schema.Struct({
+  "container": ArrangementId,
+  "id": ArrangementSubject,
+  "member": ArrangementSubject,
+  "position": OrderedMembershipPosition,
+  "revision": Revision
+}).annotate({ identifier: "OrderedMembership" }))()
+export type OrderedMembership = typeof OrderedMembership.Type
+export type OrderedMembershipEncoded = typeof OrderedMembership.Encoded
+
+/** Always-observable state of a whole membership container, not only the held window. `live_count` counts live members; `changed_index` is an opaque host-local monotonic invalidation frontier scoped by `snapshot.host_id`: a larger value on the same host means the container may have changed. It is not a canonical revision, a count of global history, or comparable across hosts. */
+export const OrderedMembershipState = /*#__PURE__*/ (() => Schema.Struct({
+  "changed_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "container": ArrangementId,
+  "live_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "OrderedMembershipState", description: "Always-observable state of a whole membership container, not only the held window. `live_count` counts live members; `changed_index` is an opaque host-local monotonic invalidation frontier scoped by `snapshot.host_id`: a larger value on the same host means the container may have changed. It is not a canonical revision, a count of global history, or comparable across hosts." }))()
+export type OrderedMembershipState = typeof OrderedMembershipState.Type
+export type OrderedMembershipStateEncoded = typeof OrderedMembershipState.Encoded
 
 export const ConnectedClient = /*#__PURE__*/ (() => Schema.Struct({
   "actor": Schema.String,
@@ -2855,6 +2898,25 @@ export const Resource = /*#__PURE__*/ (() => Schema.Union([
 export type Resource = typeof Resource.Type
 export type ResourceEncoded = typeof Resource.Encoded
 
+/** Collections whose windows hold resources. */
+export const ResourceCollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "missions",
+  "attention",
+  "agents",
+  "work",
+  "glasses",
+  "arrangements",
+  "summary",
+  "clients",
+  "usage",
+  "machines",
+  "devices",
+  "sessions",
+  "terminals"
+]).annotate({ identifier: "ResourceCollectionName", description: "Collections whose windows hold resources." }))()
+export type ResourceCollectionName = typeof ResourceCollectionName.Type
+export type ResourceCollectionNameEncoded = typeof ResourceCollectionName.Encoded
+
 /** The complete projected state at one local store index and projection version. */
 export const Snapshot = /*#__PURE__*/ (() => Schema.Struct({
   "created_at": Timestamp,
@@ -3536,16 +3598,37 @@ export type TimelineEntry = typeof TimelineEntry.Type
 export type TimelineEntryEncoded = typeof TimelineEntry.Encoded
 
 export const CollectionFrame = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot }),
-  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(Resource) }),
+  Schema.Struct({ "collection": ResourceCollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot }),
+  Schema.Struct({ "collection": ResourceCollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(Resource) }),
+  Schema.Struct({ "collection": Schema.Literal("ordered-memberships"), "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(OrderedMembership), "kind": Schema.Literal("snapshot"), "membership": OrderedMembershipState, "order": Schema.Array(Id), "snapshot": Snapshot }),
+  Schema.Struct({ "collection": Schema.Literal("ordered-memberships"), "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "membership": OrderedMembershipState, "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(OrderedMembership) }),
   Schema.Struct({ "collection": Schema.Literal("terminal"), "id": Schema.String, "kind": Schema.Literal("screen"), "snapshot": Snapshot, "value": TerminalScreen }),
   Schema.Struct({ "collection": Schema.Literal("conversation"), "has_more": optionalKey(Schema.Boolean), /** Present when conversation-blocks.v1 is negotiated and at least one header field is available */
 "header": optionalKey(ConversationHeader), "id": Schema.String, "items": Schema.Array(TimelineEntry), "kind": Schema.Literal("conversation"), "replace": Schema.Boolean, "session_id": Id }),
   Schema.Struct({ "code": optionalKey(Schema.String), "collection": optionalKey(Schema.String), "id": Schema.String, "kind": Schema.Literal("resync"), "message": optionalKey(Schema.String), "retryable": optionalKey(Schema.Boolean) }),
   Schema.Struct({ "code": optionalKey(Schema.String), "collection": optionalKey(Schema.String), "id": optionalKey(Schema.String), "kind": Schema.Literal("error"), "message": Schema.String, "retryable": optionalKey(Schema.Boolean) })
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "CollectionFrame" }))()
+], { mode: "oneOf" }).annotate({ identifier: "CollectionFrame" }))()
 export type CollectionFrame = typeof CollectionFrame.Type
 export type CollectionFrameEncoded = typeof CollectionFrame.Encoded
+
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "missions",
+  "attention",
+  "agents",
+  "work",
+  "glasses",
+  "arrangements",
+  "ordered-memberships",
+  "summary",
+  "clients",
+  "usage",
+  "machines",
+  "devices",
+  "sessions",
+  "terminals"
+]).annotate({ identifier: "CollectionName" }))()
+export type CollectionName = typeof CollectionName.Type
+export type CollectionNameEncoded = typeof CollectionName.Encoded
 
 export const ConversationChanges = /*#__PURE__*/ (() => Schema.Struct({
   /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
@@ -3659,8 +3742,20 @@ export const MailBacklog = /*#__PURE__*/ (() => Schema.Struct({
 export type MailBacklog = typeof MailBacklog.Type
 export type MailBacklogEncoded = typeof MailBacklog.Encoded
 
+export const OrderedMembershipPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("ordered-memberships"),
+  "filters": Schema.Record(Schema.String, Schema.String),
+  "items": Schema.Array(OrderedMembership),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo,
+  "replicated": optionalKey(ReplicatedNotice),
+  "sync": optionalKey(SyncNotice)
+}).annotate({ identifier: "OrderedMembershipPage" }))()
+export type OrderedMembershipPage = typeof OrderedMembershipPage.Type
+export type OrderedMembershipPageEncoded = typeof OrderedMembershipPage.Encoded
+
 export const Page = /*#__PURE__*/ (() => Schema.Struct({
-  "collection": Schema.String.check(Schema.makeFilter((value: string) => !new RegExp("^(?:resources|assistant\\.(?:attention|missions|agents))$", "u").test(value), { expected: "a string not matching ^(?:resources|assistant\\.(?:attention|missions|agents))$" })),
+  "collection": Schema.String.check(Schema.makeFilter((value: string) => !new RegExp("^(?:resources|ordered-memberships|assistant\\.(?:attention|missions|agents))$", "u").test(value), { expected: "a string not matching ^(?:resources|ordered-memberships|assistant\\.(?:attention|missions|agents))$" })),
   "filters": Schema.Record(Schema.String, Schema.String),
   "items": Schema.Array(Resource),
   "kind": Schema.Literal("page"),
@@ -3823,12 +3918,12 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, OrderedMembershipPage, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
-/** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
+/** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
 export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "recipient-retired",
   "lifecycle-unavailable",
@@ -3848,6 +3943,15 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "invalid-arrangement-folder",
   "invalid-arrangement-name",
   "invalid-arrangement-key",
+  "invalid-arrangement-version",
+  "invalid-arrangement-body",
+  "unsupported-membership-container",
+  "membership-owner-forbidden",
+  "invalid-membership-member",
+  "invalid-membership-bucket",
+  "invalid-membership-key",
+  "invalid-membership-operations",
+  "membership-edit-too-large",
   "invalid-subject-reference",
   "not-found",
   "forbidden",
@@ -3885,7 +3989,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "response-budget-exceeded",
   "content-not-text",
   "internal"
-]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
+]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 

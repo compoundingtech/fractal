@@ -2345,15 +2345,15 @@ sekret.refused slot=subject keep=newest min-age-before-cut=5d
 sekret.changed slot=subject keep=newest min-age-before-cut=5d
 sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
 proof=the-sealed-claims-and-the-blobs-they-reference
-graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
-replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
+graph=shared-projection-tables-including-arrangements,arrangement_registers,ordered-membership-raw/live/counts/lifecycle-and-shared-reverse-edges-even-when-empty
+replay=clear-arrangements,arrangement_registers-and-ordered-membership-projections,rebuild-from-retained-claims
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 19);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 20);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),

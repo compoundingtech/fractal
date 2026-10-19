@@ -11,6 +11,30 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
+/// The sidebar edits version 1 arrangement layouts. Version 2 arrangements are folder-only and
+/// ordered by membership, so the window loader drops them before this accessor is reached.
+pub(super) trait ArrangementV1 {
+    fn v1(&self) -> &st3_schema::arrangements::Body;
+    #[cfg(test)]
+    fn v1_mut(&mut self) -> &mut st3_schema::arrangements::Body;
+}
+
+impl ArrangementV1 for st3_client::Arrangement {
+    fn v1(&self) -> &st3_schema::arrangements::Body {
+        match &self.body {
+            st3_client::ArrangementBody::V1(body) => body,
+            st3_client::ArrangementBody::V2(_) => unreachable!("version 2 arrangements are not loaded into the sidebar"),
+        }
+    }
+    #[cfg(test)]
+    fn v1_mut(&mut self) -> &mut st3_schema::arrangements::Body {
+        match &mut self.body {
+            st3_client::ArrangementBody::V1(body) => body,
+            st3_client::ArrangementBody::V2(_) => unreachable!("version 2 arrangements are not loaded into the sidebar"),
+        }
+    }
+}
+
 pub(super) fn folder_name(name: &str) -> Result<&str, String> {
     if name.trim().is_empty() || name.trim().len() > 256 || name.chars().any(char::is_control) {
         return Err("Use a folder name of at most 256 bytes without control characters.".into());
@@ -118,20 +142,20 @@ impl Sidebar {
             .find(|a| a.header.id.ends_with(&reserved))
             .or_else(|| {
                 live()
-                    .filter(|a| a.body.name.value == "Sidebar")
+                    .filter(|a| a.v1().name.value == "Sidebar")
                     .min_by(|a, b| a.header.id.cmp(&b.header.id))
             })
     }
     pub(super) fn location(&self, subject: &str) -> Option<&str> {
         let a = self.arrangement()?;
-        let placement = a.body.placements.get(subject)?;
+        let placement = a.v1().placements.get(subject)?;
         let folder = a
             .resolved
             .as_ref()
             .and_then(|r| r.folders.get(subject))
             .unwrap_or(&placement.value.folder);
         folder.as_deref().filter(|id| {
-            a.body
+            a.v1()
                 .folders
                 .get(*id)
                 .is_some_and(|f| f.tombstone.is_none())
@@ -147,7 +171,7 @@ impl Sidebar {
             return Vec::new();
         };
         let mut folders = a
-            .body
+            .v1()
             .folders
             .iter()
             .filter(|(_, f)| f.tombstone.is_none())
@@ -168,7 +192,7 @@ impl Sidebar {
         let mut siblings = self
             .arrangement()
             .into_iter()
-            .flat_map(|a| a.body.placements.iter())
+            .flat_map(|a| a.v1().placements.iter())
             .filter(|(id, _)| id.as_str() != subject && self.location(id) == folder)
             .map(|(id, p)| (id.clone(), p.value.key.clone()))
             .collect::<Vec<_>>();
@@ -237,12 +261,12 @@ impl Sidebar {
             .arrangement()
             .ok_or("The sidebar has not loaded yet.")?;
         let folder = a
-            .body
+            .v1()
             .folders
             .get(id)
             .ok_or("That folder no longer exists.")?;
         let mut siblings = a
-            .body
+            .v1()
             .folders
             .iter()
             .filter(|(other, f)| other.as_str() != id && f.tombstone.is_none())
@@ -381,7 +405,7 @@ impl Sidebar {
         let arrangement = self.arrangement();
         let mut catalog = self.seen.clone();
         if let Some(a) = arrangement {
-            for id in a.body.placements.keys() {
+            for id in a.v1().placements.keys() {
                 catalog.entry(id.clone()).or_insert_with(|| ResourceRow {
                     id: id.clone(),
                     kind: "Unavailable".into(),
@@ -393,7 +417,7 @@ impl Sidebar {
         }
         let mut folders = arrangement
             .map(|a| {
-                a.body
+                a.v1()
                     .folders
                     .iter()
                     .filter(|(_, f)| f.tombstone.is_none())
@@ -404,14 +428,14 @@ impl Sidebar {
         // One level: nested folders remain visible, and their placements keep their real folder.
         let location = |id: &str| {
             arrangement.and_then(|a| {
-                a.body.placements.get(id).and_then(|placement| {
+                a.v1().placements.get(id).and_then(|placement| {
                     let folder = a
                         .resolved
                         .as_ref()
                         .and_then(|r| r.folders.get(id))
                         .unwrap_or(&placement.value.folder);
                     folder.as_deref().filter(|folder| {
-                        a.body
+                        a.v1()
                             .folders
                             .get(*folder)
                             .is_some_and(|f| f.tombstone.is_none())
@@ -475,7 +499,7 @@ impl Sidebar {
                 .collect::<Vec<_>>();
             if let Some(a) = arrangement {
                 resources
-                    .sort_by_key(|row| (&a.body.placements[&row.id].value.key, row.id.clone()));
+                    .sort_by_key(|row| (&a.v1().placements[&row.id].value.key, row.id.clone()));
             }
             append(
                 format!("folder/{id}"),
@@ -492,7 +516,7 @@ impl Sidebar {
         unfiled.sort_by_key(|row| {
             (
                 arrangement
-                    .and_then(|a| a.body.placements.get(&row.id))
+                    .and_then(|a| a.v1().placements.get(&row.id))
                     .map(|p| p.value.key.clone())
                     .unwrap_or_else(|| "~".into()),
                 row.title.clone(),
@@ -652,7 +676,7 @@ impl Ui {
             .resource_sidebar
             .arrangement()
             .into_iter()
-            .flat_map(|a| a.body.folders.values())
+            .flat_map(|a| a.v1().folders.values())
             .filter(|f| f.tombstone.is_none())
             .map(|f| f.position.value.key.as_str())
             .max();
@@ -941,7 +965,7 @@ mod tests {
                 .any(|row| matches!(row, Row::Group { title, .. } if title == "Agents"))
         );
         sidebar.arrangements[0]
-            .body
+            .v1_mut()
             .folders
             .get_mut("first")
             .unwrap()
@@ -961,7 +985,7 @@ mod tests {
         let named = |uuid: &str, name: &str| {
             let mut a = arrangement();
             a.header.id = format!("arrangement/person/avery/{uuid}");
-            a.body.name.value = name.into();
+            a.v1_mut().name.value = name.into();
             a
         };
         let picked = |sidebar: &Sidebar| sidebar.arrangement().map(|a| a.header.id.clone());
@@ -1078,7 +1102,7 @@ mod tests {
     fn placements_rekey_collisions_and_can_anchor_unfiled_rows_without_losing_subjects() {
         let mut sidebar = Sidebar::default();
         let mut a = arrangement();
-        a.body.placements.get_mut("agent/atlas").unwrap().value.key = "a0".into();
+        a.v1_mut().placements.get_mut("agent/atlas").unwrap().value.key = "a0".into();
         sidebar.arrangements.push(a);
         let ops = sidebar
             .placement("agent/new", Some("first"), Some("mission/build"))

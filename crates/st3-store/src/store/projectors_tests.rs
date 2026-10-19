@@ -35,17 +35,18 @@ fn open_installs_each_domain_in_order() {
 #[test]
 fn append_projects_each_claim_kind_in_order() {
     for (kind, expected) in [
-        ("resource.observed", &["custom", "resources"][..]),
-        ("glass.upserted", &["custom", "glass-heads"]),
-        ("glass.deleted", &["custom", "glass-heads"]),
-        ("agent.retired", &["custom", "retirements"]),
-        ("person.directive-note-set", &["custom", "directive-notes"]),
-        ("message.sent", &["custom", "agent-messages"]),
-        ("harness.limits", &["custom", "limits"]),
-        ("arrangement.edited", &["custom", "arrangements"]),
-        ("intent.desired", &["custom"]),
-        ("work.claimed", &["custom"]),
-        ("message.read", &["custom"]),
+        ("resource.observed", &["custom", "resources", "ordered-membership-flush"][..]),
+        ("glass.upserted", &["custom", "glass-heads", "ordered-membership-flush"]),
+        ("glass.deleted", &["custom", "glass-heads", "ordered-membership-flush"]),
+        ("agent.retired", &["custom", "retirements", "ordered-membership-flush"]),
+        ("person.directive-note-set", &["custom", "directive-notes", "ordered-membership-flush"]),
+        ("message.sent", &["custom", "agent-messages", "ordered-membership-flush"]),
+        ("harness.limits", &["custom", "limits", "ordered-membership-flush"]),
+        ("arrangement.edited", &["custom", "arrangements", "ordered-membership-flush"]),
+        ("ordered-membership.edited", &["custom", "ordered-membership", "ordered-membership-flush"]),
+        ("intent.desired", &["custom", "ordered-membership-flush"]),
+        ("work.claimed", &["custom", "ordered-membership-flush"]),
+        ("message.read", &["custom", "ordered-membership-flush"]),
     ] {
         assert_eq!(taking(projectors::APPEND, kind), expected, "append order for {kind}");
     }
@@ -60,13 +61,19 @@ fn append_projects_each_claim_kind_in_order() {
             "agent-messages",
             "limits",
             "arrangements",
+            "ordered-membership",
+            "ordered-membership-flush",
         ]
     );
 }
 
 #[test]
-fn replicated_claims_project_arrangements_only() {
+fn replicated_claims_project_arrangements_and_ordered_memberships_only() {
     assert_eq!(taking(projectors::REPLICATED, "arrangement.edited"), ["arrangement-project"]);
+    assert_eq!(
+        taking(projectors::REPLICATED, "ordered-membership.edited"),
+        ["ordered-membership-project"]
+    );
     for kind in ["intent.desired", "glass.upserted", "message.sent", "harness.limits"] {
         assert!(taking(projectors::REPLICATED, kind).is_empty(), "{kind}");
     }
@@ -76,7 +83,10 @@ fn replicated_claims_project_arrangements_only() {
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "resources", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements"]
+        [
+            "custom", "resources", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements",
+            "ordered-membership",
+        ]
     );
 }
 
@@ -84,7 +94,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "resources", "glass-heads", "directive-notes", "arrangements"]
+        ["planning", "resources", "glass-heads", "directive-notes", "arrangements", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -95,7 +105,28 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/directive-notes",
             "full-replay/custom",
             "full-replay/arrangements",
+            "full-replay/ordered-membership",
             "full-replay/flush",
         ]
+    );
+}
+
+#[test]
+fn ordered_membership_is_registered_last_in_every_phase_that_projects_it() {
+    // Its pair records depend on the arrangement and declared-resource tables the earlier
+    // entries keep, so it follows them in append, flush and rebuild order.
+    assert_eq!(projectors::APPEND.last().map(|p| p.name), Some("ordered-membership-flush"));
+    assert_eq!(
+        projectors::APPEND.iter().rev().nth(1).map(|p| p.name),
+        Some("ordered-membership")
+    );
+    assert_eq!(projectors::REPLICATED.last().map(|p| p.name), Some("ordered-membership-project"));
+    assert_eq!(projectors::FLUSH.last().map(|hook| hook.name), Some("ordered-membership"));
+    assert_eq!(projectors::REBUILD.last().map(|hook| hook.name), Some("ordered-membership"));
+    // The full replay's final stage resets publication facts after every domain rebuild.
+    let phases = projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>();
+    assert_eq!(
+        &phases[phases.len() - 2..],
+        ["full-replay/ordered-membership", "full-replay/flush"]
     );
 }

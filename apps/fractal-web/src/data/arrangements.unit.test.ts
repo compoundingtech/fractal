@@ -68,6 +68,7 @@ const harness = () => {
       const stream: CollectionStream = {
         subscribeGlasses: () => undefined,
         subscribeArrangements: (...args) => { socket.subscribed.push(args) },
+        subscribeOrderedMemberships: () => undefined,
         subscribe: () => undefined,
         subscribeAgent: async () => undefined,
         subscribeTerminal: () => undefined,

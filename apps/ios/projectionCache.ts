@@ -1,4 +1,5 @@
-import type { Agent, Arrangement, Attention, Device, Glass, Launch, Mission } from '../../clients/typescript/st3-client';
+import type { Agent, Attention, Device, Glass, Launch, Mission } from '../../clients/typescript/st3-client';
+import type { SidebarArrangement } from './sidebarEdits';
 import type { KeptAttention, SessionView } from '@smalltalk/st3-views';
 
 export type MachineView = { id: string; kind: 'machine'; name: string; state: string; occupancy: { running_runtimes: number }; capacity: { state: string }; transports: Array<{ protocol: string; status: string }> };
@@ -15,7 +16,7 @@ const LIMITS: Record<keyof Data, number> = { attention: 50, agents: 100, mission
 const kinds: Record<keyof Data, string> = { attention: 'attention', agents: 'agent', missions: 'mission', launches: 'launch', machines: 'machine', devices: 'device', sessions: 'session' };
 const sensitiveKey = /credential|authorization|token|secret|private.?key|stream.?capability|stream.?url/i;
 
-export type WorkspaceData = { glasses: Glass[]; arrangements: Arrangement[] };
+export type WorkspaceData = { glasses: Glass[]; arrangements: SidebarArrangement[] };
 export const emptyWorkspace: WorkspaceData = { glasses: [], arrangements: [] };
 const WORKSPACE_LIMIT = 100;
 
