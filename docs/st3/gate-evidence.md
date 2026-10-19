@@ -419,6 +419,17 @@ the principal it claims, it is a full-tier single-note commit about this commit 
 is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
 accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
 
+### Shadow verification
+
+After publishing, the aggregate note job runs `scripts/ci-evidence-shadow` (from the base commit, fail-soft,
+skipped while the base has none). For every lane it published or should have published it fetches only that
+lane's record from the remote at depth 1 into an empty scratch repository and runs the standalone verifier
+there with the base commit's key list. That is what a later gate that fetched the refs would see, not this job's
+own local refs. A lane prints `ok`, or `would-reject` with the verifier's reason (`no_note` for a lane this run did
+not sign, `not_on_remote`, `check_failed`, `untrusted_level`, `stale_tree` and the rest of the verifier's reasons). The job summary carries the table and a
+total (`lanes`, `ok`, `would_reject`, `refs_added`, seconds); each line is also in the log as
+`evidence-shadow v1 ...`. It gates nothing and never changes the job's result.
+
 ### What reaches the signing environment
 
 Only the merge queue and `main` reach the `evidence-signing` environment: every signing job's
