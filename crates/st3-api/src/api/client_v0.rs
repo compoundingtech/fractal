@@ -344,6 +344,7 @@ pub struct ClientSession {
     pub conversation_blocks: bool,
     /// Internal assistant projection option, never negotiated by native clients.
     pub assistant_content_handles: bool,
+    pub messages_paging: bool,
     pub scopes: std::collections::BTreeSet<String>,
 }
 
@@ -361,6 +362,7 @@ impl ClientSession {
             custom_forms: true,
             conversation_blocks: false,
             assistant_content_handles: false,
+            messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
     }
@@ -399,6 +401,7 @@ impl ClientSession {
                 custom_forms,
                 conversation_blocks: false,
                 assistant_content_handles: false,
+                messages_paging: false,
                 scopes: ["read.projections", "terminal.read"]
                     .into_iter()
                     .map(str::to_owned)
@@ -418,11 +421,12 @@ impl ClientSession {
             custom_forms,
             conversation_blocks: false,
             assistant_content_handles: false,
+            messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
         })
     }
 
-    fn pairing() -> Self {
+    pub fn pairing() -> Self {
         Self {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
@@ -434,6 +438,7 @@ impl ClientSession {
             custom_forms: false,
             conversation_blocks: false,
             assistant_content_handles: false,
+            messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
     }
@@ -492,6 +497,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"messages-paging", "version":2, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"assistant.grants.v1", "version":1,
         "state":if assistant::trusted_issuer(state, session).is_ok() {"granted"} else {"ungranted"}}));
     // Agent rows carry st's presentation (docs/clients/ui-contract.md, Agent).
@@ -562,6 +568,15 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "conversation-blocks.v1")
         });
+    let messages_paging = request
+        .headers()
+        .get("x-st3-features")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|features| {
+            features
+                .split(',')
+                .any(|feature| feature.trim() == "messages-paging.v2")
+        });
     let Some(value) = request.headers().get(AUTHORIZATION) else {
         if transport == "unix" {
             let person = request
@@ -579,6 +594,7 @@ pub fn authenticate(
             }
             session.custom_forms = custom_forms;
             session.conversation_blocks = conversation_blocks;
+            session.messages_paging = messages_paging;
             return Ok(session);
         }
         let pairing_completion = request.method() == axum::http::Method::POST
@@ -616,6 +632,7 @@ pub fn authenticate(
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
+    session.messages_paging = messages_paging;
     if request.method() == axum::http::Method::GET {
         let scope = if request
             .uri()
@@ -673,6 +690,7 @@ pub fn paired_client_session(
         custom_forms,
         conversation_blocks: false,
         assistant_content_handles: false,
+        messages_paging: false,
         scopes,
     })
 }
@@ -697,6 +715,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
     }).ok_or_else(|| forbidden("the client session grant is absent"))?;
     let mut current = paired_client_session(state, paired, session.transport, session.custom_forms)?;
     current.conversation_blocks = session.conversation_blocks;
+    current.messages_paging = session.messages_paging;
     if current.authority_actor != session.authority_actor {
         return Err(forbidden("the client session authority changed"));
     }
