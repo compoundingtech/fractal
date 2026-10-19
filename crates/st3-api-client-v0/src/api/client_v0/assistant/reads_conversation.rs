@@ -106,7 +106,8 @@ async fn timeline(
     let (limit, max_bytes) = capacity;
     let agent_id = agent(parameters)?.to_owned();
     let current = state.store.index().map_err(ApiError::internal)?;
-    let owner = state.store.conversation_owner_at(&agent_id, current).map_err(ApiError::internal)?;
+    let owner = state.store.conversation_owner_at(&agent_id, current).map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("the agent has no current conversation"))?;
     let incarnation = owner.incarnation.as_deref().or(owner.runtime.as_deref())
         .ok_or_else(|| ApiError::not_found("the agent has no current conversation"))?;
     let session_id = client_session_id(&agent_id, incarnation);
