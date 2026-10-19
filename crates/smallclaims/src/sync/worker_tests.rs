@@ -1727,8 +1727,9 @@ mod retry_tests {
     }
 
     /// `fabric dial` never connects, so a member's refusal reaches the worker as a tunnel that
-    /// closes. The worker then asks `fabric probe --json`, and only a refusal class puts the
-    /// route to sleep.
+    /// closes. The worker then asks `fabric probe --json`, and only a refusal class reports the
+    /// peer `refused`. A refused route keeps normal peer backoff (docs/st3/replication.md), so the
+    /// probe is asked once per attempt and never faster than that backoff allows.
     #[tokio::test]
     async fn a_tunnel_that_closes_is_a_refusal_only_when_the_probe_says_so() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1779,6 +1780,7 @@ mod retry_tests {
                 protocol: "st3-peer-v1".into(),
             }]);
             let wake = watch::channel(0).0;
+            let started = std::time::Instant::now();
             let worker = tokio::spawn(dial_peer(
                 Local(store.clone()),
                 "indigo".into(),
@@ -1801,12 +1803,25 @@ mod retry_tests {
             })
             .await
             .unwrap_or_else(|_| panic!("{probe}: the probe was never asked"));
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let peer = store
-                .replication_status(true, Some(fleet_id), &["amber".into()])
-                .unwrap()
-                .peers
-                .remove(0);
+            // Then until it has recorded what the probe said, rather than for a fixed time.
+            let status = || {
+                store
+                    .replication_status(true, Some(fleet_id), &["amber".into()])
+                    .unwrap()
+                    .peers
+                    .remove(0)
+            };
+            let peer = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let peer = status();
+                    if peer.last_failed_exchange.is_some() {
+                        return peer;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{probe}: the failed exchange was never recorded"));
             let failed = peer
                 .last_failed_exchange
                 .as_ref()
@@ -1823,10 +1838,22 @@ mod retry_tests {
                         .unwrap()
                         .contains("that member's Fabric grants")
                 );
-                // Asleep: more time passes and the probe is not asked again.
+                // No hot loop: one probe per attempt, and attempts no closer together than the
+                // backoff's shortest jitter allows. A slow runner only makes fewer attempts.
                 tokio::time::sleep(Duration::from_millis(600)).await;
+                let elapsed = started.elapsed();
                 let asked = std::fs::read_to_string(&probes).unwrap().lines().count();
-                assert_eq!(asked, 1, "{probe}");
+                let mut allowed = 1;
+                let mut earliest = Duration::ZERO;
+                loop {
+                    earliest += PeerBackoff::delay(allowed as u32 - 1, 0);
+                    if earliest > elapsed {
+                        break;
+                    }
+                    allowed += 1;
+                }
+                assert!((1..=allowed).contains(&asked), "{probe}: {asked} probes in {elapsed:?}");
+                assert_eq!(status().status, "refused", "{probe}");
             } else {
                 assert_ne!(peer.status, "refused", "{probe}");
                 assert!(peer.refusal_reason.is_none(), "{probe}");
