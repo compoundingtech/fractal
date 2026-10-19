@@ -9,7 +9,12 @@ const native = new URL('../../ios/', import.meta.url);
 // Its updates override is recreated/deleted by pod install, so do not use that file.
 const updates = new URL('.xcode.env.local', native);
 const previous = existsSync(updates) ? readFileSync(updates, 'utf8') : '';
-if (!previous.includes('# ST3 offline Debug proof')) writeFileSync(updates, previous + '\n# ST3 offline Debug proof\nif [[ "${FORCE_BUNDLING:-}" == "1" ]]; then unset SKIP_BUNDLING; export ST3_FABRIC_OFFLINE_DEBUG=1; fi\n');
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — also upgrade an existing generated override.
+const offlineExport = 'export FRACTAL_FABRIC_OFFLINE_DEBUG=1 ST3_FABRIC_OFFLINE_DEBUG=1';
+const next = previous.includes('# ST3 offline Debug proof')
+  ? previous.replace('export ST3_FABRIC_OFFLINE_DEBUG=1', offlineExport)
+  : previous + `\n# ST3 offline Debug proof\nif [[ "\${FORCE_BUNDLING:-}" == "1" ]]; then unset SKIP_BUNDLING; ${offlineExport}; fi\n`;
+if (next !== previous) writeFileSync(updates, next);
 const delegate = new URL('smalltalk/AppDelegate.swift', native);
 let source = readFileSync(delegate, 'utf8');
 const original = '#if DEBUG\n    return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: ".expo/.virtual-metro-entry")';

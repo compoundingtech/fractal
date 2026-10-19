@@ -22,11 +22,30 @@ import type {
 
 const PROTOCOL = 1;
 
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+// Kept inline in both channel assets: each is embedded and published as a standalone file.
+const preferredName = (name: string) => `FRACTAL_${name.slice(3)}`;
 const legacyName = (name: string) => `ST2_${name.slice(3)}`;
-const readEnv = (name: string) => process.env[name] ?? process.env[legacyName(name)];
+const readEnv = (name: string, identity = false) => {
+  const preferred = preferredName(name);
+  const value = process.env[preferred];
+  const legacy = process.env[name] !== undefined ? name : legacyName(name);
+  const legacyValue = process.env[legacy];
+  if (identity && value && legacyValue !== undefined && legacyValue !== value) {
+    console.error(`Conflicting identity environment variables: ${preferred} and ${legacy}`);
+    return undefined;
+  }
+  return value ?? legacyValue;
+};
 const removeEnv = (name: string) => {
+  delete process.env[preferredName(name)];
   delete process.env[name];
   delete process.env[legacyName(name)];
+};
+const writeEnv = (env: NodeJS.ProcessEnv, name: string, value: string | undefined) => {
+  if (value === undefined) return;
+  env[preferredName(name)] = value;
+  env[name] = value;
 };
 
 const BIN = "ST_PI_CHANNEL_BIN";
@@ -145,10 +164,11 @@ const stash = (): Stash => {
     globals.__stPiChannel = {
       bin: readEnv(BIN),
       catalog: readEnv(CATALOG),
-      identity: readEnv(IDENTITY),
-      runtimeId: readEnv(RUNTIME_ID),
-      session: readEnv(SESSION),
-      seq: readEnv(SEQ),
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      identity: readEnv(IDENTITY, true),
+      runtimeId: readEnv(RUNTIME_ID, true),
+      session: readEnv(SESSION, true),
+      seq: readEnv(SEQ, true),
     };
   }
   removeEnv(BIN);
@@ -217,9 +237,10 @@ export default function (pi: ExtensionAPI) {
     if (!reconnecting) state.lastCostUsd = undefined;
 
     const channelEnv: NodeJS.ProcessEnv = { ...process.env };
-    if (runtimeId) channelEnv[RUNTIME_ID] = runtimeId;
-    if (session) channelEnv[SESSION] = session;
-    if (seq) channelEnv[SEQ] = seq;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    writeEnv(channelEnv, RUNTIME_ID, runtimeId);
+    writeEnv(channelEnv, SESSION, session);
+    writeEnv(channelEnv, SEQ, seq);
     const child = childProcess.spawn(
       bin,
       ["--catalog", catalog, "driver", "pi-channel", "--identity", identity],

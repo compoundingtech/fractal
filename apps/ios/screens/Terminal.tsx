@@ -82,7 +82,8 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
         if (!incarnation.current) {
           incarnation.current = next.runtime_incarnation;
           // Debug builds type these once, for headless checks: the simulator has no keyboard to drive.
-          const keys = __DEV__ ? process.env.EXPO_PUBLIC_ST3_TEST_TERMINAL_KEYS : undefined;
+          // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+          const keys = __DEV__ ? (process.env.EXPO_PUBLIC_FRACTAL_TEST_TERMINAL_KEYS ?? process.env.EXPO_PUBLIC_ST3_TEST_TERMINAL_KEYS) : undefined;
           if (keys) setTimeout(() => queue.push(JSON.parse(`"${keys}"`)), 1500);
         }
         setScreen(next);

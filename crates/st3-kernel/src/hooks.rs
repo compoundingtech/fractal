@@ -314,7 +314,7 @@ mod tests {
             let text = std::str::from_utf8(bytes).unwrap();
             assert!(!mentions_st2_surface(text), "{name} reaches st2:\n{text}");
             assert!(
-                text.contains("exec \"$ST3_BIN\" driver-hook "),
+                text.contains("exec \"${FRACTAL_BIN-${ST3_BIN-}}\" driver-hook "),
                 "{name} does not hand its event to st3"
             );
             assert!(!text.contains("command -v"), "{name} looks a program up");
