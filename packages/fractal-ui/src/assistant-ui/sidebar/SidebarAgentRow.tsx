@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Icon } from '../composition/Icons'
-import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, Text, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { matchPositions, usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
@@ -152,7 +152,7 @@ export function AgentRowActions({ row, now, actions, onOpen, onMarkRead, anchorR
   return <>
     <DialogTrigger>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover triggerRef={anchorRef} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} now={now} /></Dialog></Popover></DialogTrigger>
     <MenuTrigger><Button ref={menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${title}`} className={menuButtonClassName}><Icon name="gear" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
-      <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={styles.menuItemFocus}>Open conversation{!canOpen && ` — ${row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}`}</MenuItem>
+      <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={styles.menuItemFocus}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={styles.menuItemFocus}>Open in split right</MenuItem>}
       {actions?.split !== undefined && <MenuItem id="split-below" onAction={() => actions.split?.(row.ref, 'below')} style={styles.menuItemFocus}>Open in split below</MenuItem>}
       <MenuItem id="reported-details" onAction={() => { requestAnimationFrame(() => detailsTrigger.current?.click()) }} style={styles.menuItemFocus}>Reported agent details</MenuItem>
@@ -278,5 +278,6 @@ const styles = stylex.create({
   detailLabel: { margin: s.zero, color: ink.fgSoft },
   detailValue: { margin: s.zero, minWidth: 0, color: ink.fg },
   menuItemFocus: { outlineColor: { ':is([data-focus-visible])': ink.fgMuted } },
+  menuReason: { display: 'block', whiteSpace: 'normal', fontSize: t.metaSize, lineHeight: t.metaLeading, paddingBlockEnd: s.xs },
   mark: { backgroundColor: surface.rowActive, color: ink.fg, fontWeight: t.weightSemibold }, children: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.border },
 })
