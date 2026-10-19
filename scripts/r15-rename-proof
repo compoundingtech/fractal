@@ -240,10 +240,35 @@ def npm_declaration_mask(text, relative, old_packages):
     return ''.join(masked), count
 
 
+def npm_recorded_payload(text, suffix):
+    """Recognize data-only recording/slice schemas, never arbitrary JSON or docs.
+
+    Commands and source snippets inside captured conversations are serialized
+    evidence, not modules loaded by this checkout. Preserve their bytes/identities.
+    """
+    if suffix not in ('.json', '.jsonl'):
+        return False
+    if suffix == '.json' and not any(
+            marker in text for marker in ('"st3.scenario.slice.v1"', '"receive_ms"', '"id_map"')):
+        return False
+    value = ([json.loads(line) for line in text.splitlines() if line.strip()]
+             if suffix == '.jsonl' else json.loads(text))
+    if isinstance(value, dict):
+        return (value.get('format') == 'st3.scenario.slice.v1'
+                and value.get('source', {}).get('_tag') in ('recorded', 'synthetic')
+                and 'state' in value) or (
+                    value.get('format_version') == 2
+                    and {'agent', 'anchor', 'reads', 'turns', 'world', 'id_map'} <= value.keys())
+    return bool(value) and isinstance(value, list) and all(
+        isinstance(row, dict) and {'kind', 'ordinal', 'receive_ms', 'socket_id', 'value'} <= row.keys()
+        for row in value)
+
+
 def npm_references(text, relative, internal_scopes):
     """Recognize consumer syntax in any text file, not an extension allowlist."""
     patterns = [
-        r'''(?<![@\w])(?:import|export)\s+(?:(?:type\s+)?[\w*$,\s{}]+\s+from\s*)?['"]([^'"\n]+)['"]''',
+        r'''(?<![@\w(])import\s*['"]([^'"\n]+)['"]''',
+        r'''\b(?:import|export)\s+(?:type\s+)?[\w*$,\s{}]+\s+from\s*['"]([^'"\n]+)['"]''',
         r'''\b(?:import|require(?:\.resolve)?|import\.meta\.resolve|(?:vi|jest)\.(?:mock|doMock))\s*\(\s*['"]([^'"\n]+)['"]''',
         r'''@(?:import|source|use|forward)\s+(?:url\(\s*)?['"]([^'"\n]+)['"]''',
         r'''<script\b[^>]*\bsrc\s*=\s*['"]([^'"\n]+)['"]''',
@@ -254,19 +279,45 @@ def npm_references(text, relative, internal_scopes):
     if re.search(r'(?:config(?:\.[^/]*)?|package\.json\.genie)\.[^/]+$', relative):
         patterns.append(r'''['"](@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*)['"]''')
     found = {}
+    # A string containing source/commands is data, not a static dependency of
+    # the enclosing JS module. Actual import statements begin outside strings.
+    # Keep template literals conservative: interpolated import(...) expressions
+    # execute and must remain visible to the guard.
+    strings = ([(start, end) for _, start, end in literals(text, '.ts', spans=True)
+                if text[start] != '`']
+               if Path(relative).suffix in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.mts', '.cjs', '.cts')
+               else [])
+
+    def embedded(position):
+        for start, end in strings:
+            if not start < position < end:
+                continue
+            prefix = text[max(0, start - 200):start]
+            execution = r'(?:exec(?:Sync|FileSync|File)?|spawn(?:Sync)?|execa|eval|Function|runIn(?:New)?Context)'
+            if re.search(r'\b' + execution + r'\s*\(\s*$', prefix):
+                return False
+            variable = re.search(r'\b(?:const|let|var)\s+(\w+)\s*=\s*$', prefix)
+            if variable and re.search(
+                    r'\b' + execution + r'\s*\(\s*' + re.escape(variable[1]) + r'\b', text):
+                return False
+            return True
+        return False
+
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.I):
-            found[match.start(1)] = match[1]
+            if not embedded(match.start()):
+                found[match.start(1)] = match[1]
     for block in re.finditer(
             r'\b(?:externalPackages|dedupe|external|addons)\s*:\s*\[([^\]]*)\]', text):
         for match in re.finditer(r'''['"]([^'"\n]+)['"]''', block[1]):
-            found[block.start(1) + match.start(1)] = match[1]
+            if not embedded(block.start()):
+                found[block.start(1) + match.start(1)] = match[1]
     # Source citations and shell selectors of internal packages must not retain
     # retired identities even outside executable import syntax. Other prose
     # @org/team mentions, emails, URL scopes and Rust attributes are not imports.
     for match in re.finditer(r'(?<![\w./:@-])(@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*)', text):
-        if match[1].split('/')[0] in internal_scopes:
-            found[match.start(1)] = match[1]
+        if match[1].split('/')[0] in internal_scopes and not embedded(match.start()):
+            found.setdefault(match.start(1), match[1].rstrip('.,'))
     return sorted(found.items())
 
 
@@ -283,13 +334,28 @@ def npm_resolution_guard(tree, old_packages):
         except UnicodeDecodeError:
             continue
     manifests = {path.parent: json.loads(text) for path, text in files if path.name == 'package.json'}
-    workspace = {data['name'] for data in manifests.values() if isinstance(data.get('name'), str)}
+    # Only the root manifest's declared members form the production workspace.
+    # Eval seed-graph manifests are isolated fixtures, not aliases/import
+    # authorities for production modules elsewhere in the repository.
+    member_patterns = manifests.get(tree, {}).get('workspaces', [])
+    if isinstance(member_patterns, dict):
+        member_patterns = member_patterns.get('packages', [])
+    members = {tree} if tree in manifests else set()
+    for pattern in member_patterns:
+        matches = [path for path in tree.glob(pattern) if path in manifests]
+        if not matches:
+            raise ValueError('workspace pattern has no package manifests: ' + pattern)
+        members.update(matches)
+    workspace = {manifests[path]['name'] for path in members if 'name' in manifests[path]}
     internal_scopes = {name.split('/')[0] for name in workspace | set(old_packages) if name.startswith('@')}
+    isolated = {directory: {data['name']} if 'name' in data else set()
+                for directory, data in manifests.items() if directory not in members}
     registry = set()
     aliases = set()
     errors = []
     checked = 0
     declarations = 0
+    payloads = 0
     # Reuse the repository's fail-closed pnpm-v9 registry projection, including
     # transitive packages, rather than guessing registry names from source imports.
     loader = importlib.machinery.SourceFileLoader('r15_npm_lock', str(ROOT / 'scripts/ci-fractal-web-licenses'))
@@ -341,13 +407,13 @@ def npm_resolution_guard(tree, old_packages):
                 elif name.split('/')[0] in internal_scopes and name not in workspace:
                     reason = 'retired or missing internal dependency name'
                 else:
-                    registry.add(name)
+                    (registry if directory in members else isolated[directory]).add(name)
                     if selector.startswith('npm:'):
                         target = npm_package(selector)
                         if target is None:
                             reason = 'invalid npm alias target'
                         else:
-                            registry.add(target)
+                            (registry if directory in members else isolated[directory]).add(target)
                 if reason:
                     errors.append({'path': (directory / 'package.json').relative_to(tree).as_posix(),
                                    'reference': name, 'selector': selector, 'reason': reason})
@@ -355,6 +421,9 @@ def npm_resolution_guard(tree, old_packages):
         relative = path.relative_to(tree).as_posix()
         if path.name == 'pnpm-lock.yaml':
             continue  # Structured lock authorities/importers were validated above.
+        if npm_recorded_payload(text, path.suffix):
+            payloads += 1
+            continue
         text, count = npm_declaration_mask(text, relative, old_packages)
         declarations += count
         for position, reference in npm_references(text, relative, internal_scopes):
@@ -365,13 +434,22 @@ def npm_resolution_guard(tree, old_packages):
             if package.split('/')[0] not in internal_scopes and any(
                     fnmatch.fnmatchcase(reference, alias) for alias in aliases):
                 continue
-            allowed = workspace if package.split('/')[0] in internal_scopes else workspace | registry
+            local = next((isolated[parent] for parent in path.parents if parent in isolated), set())
+            # Type-only imports resolve DefinitelyTyped packages without a
+            # runtime package named e.g. "hast". Runtime imports do not.
+            prefix = text[max(0, position - 500):position]
+            type_only = re.search(r'''\b(?:import|export)\s+type\s+[\w*$,\s{}]+\s+from\s*['"]$''', prefix)
+            types_name = '@types/' + package.removeprefix('@').replace('/', '__')
+            if type_only and types_name in registry | local:
+                continue
+            allowed = workspace if package.split('/')[0] in internal_scopes else workspace | registry | local
             if package not in allowed:
                 errors.append({'path': relative, 'line': text.count('\n', 0, position) + 1,
                                'reference': reference, 'package': package, 'reason': 'unresolved npm package'})
     return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'text_files': len(files),
             'workspace_names': sorted(workspace), 'registry_names': len(registry),
-            'declaration_literals': declarations, 'unresolved': errors}
+            'declaration_literals': declarations, 'recorded_payloads': payloads,
+            'isolated_manifests': len(isolated), 'unresolved': errors}
 
 
 def source_mapping():

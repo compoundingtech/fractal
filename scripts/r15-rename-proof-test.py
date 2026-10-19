@@ -194,7 +194,7 @@ let socket = "/state/st3.sock";
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)
             (tree / 'package.json').write_text(json.dumps({
-                'name': 'root', 'dependencies': {'react': '19.0.0'}}))
+                'name': 'root', 'workspaces': ['packages/*'], 'dependencies': {'react': '19.0.0'}}))
             package = tree / 'packages/ui/package.json'
             package.parent.mkdir(parents=True)
             package.write_text(json.dumps({'name': '@fractal/ui'}))
@@ -270,6 +270,71 @@ let socket = "/state/st3.sock";
             (scripts / 'r15-rename-client.py').write_text(
                 "PACKAGES = {'@smalltalk/fractal-ui': '@fractal/ui'}\n")
             self.assertEqual(proof.npm_resolution_guard(tree, old)['result'], 'PASS')
+
+    def test_npm_recorded_and_synthetic_payloads_do_not_become_module_imports(self):
+        old = {'@smalltalk/fractal-ui': '@fractal/ui'}
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'package.json').write_text(json.dumps({'name': '@fractal/ui'}))
+            payload = "import { x } from '@atlas/api'; pnpm --filter @atlas/api test"
+            row = {'kind': 'http', 'ordinal': 1, 'receive_ms': 0, 'socket_id': None,
+                   'value': {'body': payload}}
+            (tree / 'capture.jsonl').write_text(json.dumps(row) + '\n')
+            (tree / 'normalized.json').write_text(json.dumps([row]))
+            (tree / 'conversation.json').write_text(json.dumps({
+                'format': 'st3.scenario.slice.v1', 'source': {'_tag': 'recorded'},
+                'state': {'text': payload}}))
+            (tree / 'script.json').write_text(json.dumps({
+                'format_version': 2, 'agent': 'a', 'anchor': 'a', 'reads': [],
+                'turns': [payload], 'world': 'w', 'id_map': {}}))
+            world = tree / 'world.ts'
+            world.write_text(
+                "import { x } from '@fractal/ui';\n"
+                "const command = 'pnpm --filter @atlas/api test';\n"
+                'const snippet = "import { x } from \'@atlas/api\'";\n')
+            (tree / 'module.wat').write_text(
+                '(module (memory (export "memory") 1) (import "host" "alloc" (func)))')
+            baseline = proof.npm_resolution_guard(tree, old)
+            self.assertEqual(baseline['result'], 'PASS')
+            self.assertEqual(baseline['recorded_payloads'], 4)
+            original = world.read_text()
+            for consumer in (
+                "import { x } from '@unknown/actual';",
+                "// source package: @smalltalk/fractal-ui",
+                "execSync('pnpm --filter @unknown/actual test');",
+                "const cmd = 'pnpm --filter @unknown/actual test'; execSync(cmd);",
+            ):
+                with self.subTest(consumer=consumer):
+                    world.write_text(original + consumer)
+                    self.assertEqual(proof.npm_resolution_guard(tree, old)['result'], 'FAIL')
+            world.write_text(original)
+            # Ordinary JSON is not a recording just because it contains a snippet.
+            (tree / 'config.json').write_text(json.dumps({'source': "import '@unknown/actual';"}))
+            self.assertEqual(proof.npm_resolution_guard(tree, old)['result'], 'FAIL')
+
+    def test_npm_workspace_authority_does_not_leak_from_isolated_fixture_manifests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'package.json').write_text(json.dumps({
+                'name': 'root', 'workspaces': ['packages/*'],
+                'devDependencies': {'@types/hast': '^3.0.0'}}))
+            package = tree / 'packages/ui/package.json'
+            package.parent.mkdir(parents=True)
+            package.write_text(json.dumps({'name': '@fractal/ui'}))
+            fixture = tree / 'evals/seed/package.json'
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text(json.dumps({'name': '@acme/signal'}))
+            (fixture.parent / 'index.js').write_text("import { x } from '@acme/signal';\n")
+            source = tree / 'packages/ui/index.ts'
+            source.write_text("import type { Root } from 'hast';\n")
+            result = proof.npm_resolution_guard(tree, {})
+            self.assertEqual(result['result'], 'PASS')
+            self.assertEqual(result['workspace_names'], ['@fractal/ui', 'root'])
+            self.assertEqual(result['isolated_manifests'], 1)
+            for mutation in ("import { x } from '@acme/signal';", "import { x } from 'hast';"):
+                with self.subTest(mutation=mutation):
+                    source.write_text(mutation)
+                    self.assertEqual(proof.npm_resolution_guard(tree, {})['result'], 'FAIL')
 
 
 if __name__ == '__main__':

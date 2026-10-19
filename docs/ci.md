@@ -446,6 +446,9 @@ When a crate is split out of another one, the new crate's warnings are the origi
 `.github/clippy-splits.json` (`{"fractal-daemon": "st3"}`), and against a base that lacks the new crate the
 two are compared together, so the split can move warnings between them and never add any. Once the base has the
 new crate it is an ordinary crate and the entry has no effect; `--update` applies the same rule.
+A source package rename uses the same one-to-one ancestry rule, for example
+`{"fractal-daemon": "st3-daemon"}`. Historical edges retain the names stored in
+older Git baselines. They are not Cargo aliases, and they do not permit extra warnings.
 The first rollout permits a base without the file. There is no new required check:
 `linux-gate` already requires `linux-clippy`.
 
