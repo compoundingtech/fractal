@@ -1,5 +1,17 @@
 use super::*;
 
+#[path = "reads_cursor_tests.rs"]
+mod cursor_tests;
+
+#[path = "reads_envelope_tests.rs"]
+mod envelope_tests;
+
+#[path = "reads_identifier_mission_tests.rs"]
+mod identifier_mission_tests;
+
+#[path = "reads_identifier_agent_tests.rs"]
+mod identifier_agent_tests;
+
 const OWNER: &str = "person/operator";
 const AGENT: &str = "agent/reads-fixture.worker";
 const MISSION: &str = "mission/reads-fixture-mission";
@@ -29,10 +41,11 @@ fn assert_no_source_text(value: &Value) {
 
 /// A declared agent, a running mission naming it, and an open ask to the owner whose
 /// authored texts all carry secrets, injected instructions and Unicode.
-fn fleet(state: &AppState, root: &std::path::Path) {
+fn fleet(state: &AppState, root: &std::path::Path, published_agents: bool) {
     let source = format!(
         r#"version 2
 agent "reads-fixture.worker" {{ workspace "/tmp"; command "true"; restart always; }}
+agent "reads-fixture.second" {{ workspace "/tmp"; command "true"; restart always; }}
 mission "reads-fixture-mission" state="ready" {{
     goal "{SECRET} {INJECTION} Entscheidung 決定";
     step "build" {{ assigned-to "{AGENT}"; goal "{SECRET} {INJECTION}"; }}
@@ -66,10 +79,16 @@ mission "reads-fixture-second" state="ready" {{ goal "{SECRET} {INJECTION}"; }}
             .unwrap(),
         )
         .unwrap();
+    if published_agents {
+        state.store.start_agent_roster_refresher().unwrap();
+    }
+    crate::api::refresh_agent_roster(&state.store, false).unwrap();
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
 }
 
 async fn read(state: &AppState, projection: &str, query: &[(&str, &str)], max: usize) -> Result<Value, ApiError> {
-    project(state, &new_client_snapshot(state), projection, &params(query), max)
+    project(state, &new_client_snapshot(state), projection, &params(query), max, "test-grant:1")
         .await
         .map(|(_, value)| value)
 }
@@ -83,11 +102,116 @@ fn page_items<'a>(page: &'a Value, collection: &str) -> &'a Vec<Value> {
     page["items"].as_array().unwrap()
 }
 
+/// Compare assistant reads against one retained, deterministic synthetic store.
+/// The default scale is three times the historical busy-host mission/run/message counts
+/// documented in `crates/st3/tests/daemon_bench.rs`, not a current production measurement.
+/// Publications warm outside the measured calls; only counts and timings print.
+#[tokio::test]
+#[ignore = "assistant read timing; set ST_ASSISTANT_READ_STORE; run with --ignored --nocapture"]
+async fn assistant_collection_read_timing_on_a_store_copy() {
+    let database = std::env::var_os("ST_ASSISTANT_READ_STORE")
+        .map(std::path::PathBuf::from)
+        .expect("set ST_ASSISTANT_READ_STORE to a retained synthetic database path");
+    let seed = !database.exists();
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.store = std::sync::Arc::new(crate::store::Store::open(&database, "bench-host").unwrap());
+    if seed {
+        seed_assistant_timing_store(&state);
+    }
+    state.store.start_agent_roster_refresher().unwrap();
+    crate::api::refresh_agent_roster(&state.store, false).unwrap();
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+    crate::api::client_v0::summary::refresh_published(&state, 0, false).unwrap();
+
+    for projection in ["attention", "attention-rich", "missions", "missions-rich", "agents", "agents-rich"] {
+        let started = std::time::Instant::now();
+        let (snapshot, first) = project(&state, &new_client_snapshot(&state), projection,
+            &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "timing:1").await.unwrap();
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let rows = first["items"].as_array().expect("collection items").len();
+        println!("assistant read {projection} first: rows={rows} ms={ms:.3}");
+        let cursor = first["page"]["next_cursor"].as_str()
+            .expect("representative store must have a next collection page");
+        let started = std::time::Instant::now();
+        let (_, next) = project(&state, &snapshot, projection,
+            &params(&[("limit", "1"), ("cursor", cursor)]), MAX_RESPONSE_BYTES, "timing:1").await.unwrap();
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let rows = next["items"].as_array().expect("collection items").len();
+        println!("assistant read {projection} next: rows={rows} ms={ms:.3}");
+    }
+    let started = std::time::Instant::now();
+    let (_, summary) = project(&state, &new_client_snapshot(&state), "summary",
+        &BTreeMap::new(), MAX_RESPONSE_BYTES, "timing:1").await.unwrap();
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let counts = &summary["counts"];
+    let attention = counts["attention"].as_u64().expect("attention count");
+    let count_states = |key: &str| counts[key].as_object().expect("state counts")
+        .values().map(|count| count.as_u64().expect("state count")).sum::<u64>();
+    println!("assistant read summary: rows=1 attention_rows={attention} mission_rows={} agent_rows={} ms={ms:.3}",
+        count_states("mission_states"), count_states("agent_states"));
+}
+
+fn seed_assistant_timing_store(state: &AppState) {
+    use std::fmt::Write as _;
+    let scale = std::env::var("ST_ASSISTANT_READ_SCALE").unwrap_or_else(|_| "3".into())
+        .parse::<usize>().expect("scale must be a positive integer");
+    assert!(scale > 0);
+    let missions = 355 * scale;
+    let runs = 1545 * scale;
+    let agents = 200 * scale;
+    let asks = 200 * scale;
+    let messages = 5000 * scale;
+    let mut source = String::from("version 2\n");
+    for number in 0..agents {
+        writeln!(source, "agent \"bench-host.worker-{number}\" {{ workspace \"/srv/assistant-timing\"; command \"true\"; restart always; }}").unwrap();
+    }
+    for number in 0..missions {
+        writeln!(source, "mission \"assistant-timing-{number}\" state=\"ready\" {{ goal \"Invented goal\"; concurrent-runs max=1000000").unwrap();
+        for step in 0..3 {
+            writeln!(source, "step \"step-{step}\" {{ assigned-to \"agent/bench-host.worker-{}\"; goal \"Invented work\"; }}", (number + step) % agents).unwrap();
+        }
+        source.push_str("}\n");
+    }
+    let intent = crate::graph::parse_internal_intent(&source, "bench-host").unwrap();
+    state.store.apply_internal(&intent, "assistant-timing-publication").unwrap();
+    for number in 0..runs {
+        state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: format!("assistant-timing-{}", number % missions),
+            revision: None, workspace: "/srv/assistant-timing".into(),
+            requester: Some(OWNER.into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: format!("assistant-timing-run-{number}"),
+        }).unwrap();
+    }
+    for number in 0..asks {
+        state.store.ask_person(&serde_json::from_value(json!({
+            "person": OWNER, "actor": format!("agent/bench-host.worker-{}", number % agents),
+            "title": "Invented question", "reason": "Invented decision",
+            "new_run": format!("assistant-timing-ask-{number}"),
+            "idempotency_key": format!("assistant-timing-ask-{number}"),
+        })).unwrap()).unwrap();
+    }
+    for number in 0..messages {
+        state.store.append_claim(&crate::model::ClaimInput {
+            subject: format!("message/assistant-timing-{number}"), kind: "message.sent".into(),
+            actor: Some(OWNER.into()), fields: serde_json::from_value(json!({
+                "from": OWNER, "to": format!("agent/bench-host.worker-{}", number % agents),
+                "title": "Invented update", "content": "Invented conversational background",
+                "status": "sent",
+            })).unwrap(), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("assistant-timing-message-{number}")),
+        }).unwrap();
+    }
+    println!("assistant seed: mission_rows={missions} run_rows={runs} work_rows={} agent_rows={agents} attention_rows={asks} message_rows={messages}",
+        runs * 3);
+}
+
 #[tokio::test]
 async fn metadata_projections_carry_only_allowlisted_identifiers_enums_and_counts() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    fleet(&state, root.path());
+    fleet(&state, root.path(), true);
 
     let attention = read(&state, "attention", &[], MAX_RESPONSE_BYTES).await.unwrap();
     assert_no_source_text(&attention);
@@ -160,11 +284,149 @@ fn unknown_source_values_become_closed_enums_and_prose_identifiers_vanish() {
     assert_eq!(timestamp(&json!(INJECTION)), Value::Null);
 }
 
+#[test]
+fn published_attention_projection_allowlists_metadata_and_keeps_rich_content_on_its_row() {
+    let source = json!({
+        "id": "attention/native",
+        "source_id": "step-run/ask-one",
+        "person_id": OWNER,
+        "episode": INJECTION,
+        "attention_kind": "person-step",
+        "conversation_id": AGENT,
+        "mission_id": MISSION,
+        "mission_run_id": "mission-run/example",
+        "requested_at": client_timestamp(1_700_000_000_000),
+        "title": SECRET,
+        "detail": INJECTION,
+        "request": {"type": "text", "prompt": SECRET},
+        "targets": [INJECTION],
+        "unrecognized": SECRET,
+    });
+    let metadata = attention_row(&source, false).unwrap();
+    assert_no_source_text(&metadata);
+    assert_eq!(metadata["episode"], "");
+    assert_eq!(metadata["revision"], "");
+    assert_eq!(metadata["agent_id"], AGENT);
+    assert_eq!(metadata["mission_id"], MISSION);
+    assert_eq!(metadata["waiting_since"], source["requested_at"]);
+    assert_eq!(keys(&metadata), BTreeSet::from([
+        "id", "attention_kind", "person_id", "agent_id", "mission_id", "mission_run_id",
+        "revision", "episode", "waiting_since",
+    ]));
+    let rich = attention_row(&source, true).unwrap();
+    assert_eq!(rich["title"], SECRET);
+    assert_eq!(rich["detail"], INJECTION);
+    assert_eq!(rich["request"], source["request"]);
+    assert_eq!(rich["target_id"], source["source_id"]);
+    assert_eq!(rich["evidence"], source["targets"]);
+    assert!(rich.get("unrecognized").is_none());
+    assert_eq!(rich["id"], metadata["id"]);
+}
+
+#[tokio::test]
+async fn attention_updates_keep_native_payload_in_rich_and_content_reads_only() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    fleet(&state, root.path(), true);
+    let missions = read(&state, "missions", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    let run = page_items(&missions, "assistant.missions").iter()
+        .find(|item| item["id"] == MISSION).unwrap()["run_id"].as_str().unwrap();
+    let request = json!({"version": 1, "type": "update", "about": run});
+    let update = state.store.ask_person(&serde_json::from_value(json!({
+        "person": OWNER, "actor": AGENT, "title": SECRET, "reason": INJECTION,
+        "idempotency_key": "reads-fixture-update",
+        "request": request,
+    })).unwrap()).unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+    let (_, _, native) = published_assistant_attention_rows(
+        &state.store, state.store.index().unwrap(), OWNER,
+    ).unwrap();
+    let native = native.iter().find(|row| row["source_id"] == update.subject).unwrap();
+    assert!(native.get("request").is_none());
+    assert_eq!(native["update"], request);
+    let rich = read(&state, "attention-rich", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    let rich = page_items(&rich, "assistant.attention-rich").iter()
+        .find(|row| row["target_id"] == update.subject).unwrap();
+    assert_eq!(rich["request"], request);
+    let content = read(&state, "attention-content", &[("alert_id", &update.subject)], MAX_RESPONSE_BYTES)
+        .await.unwrap();
+    assert_eq!(content["request"], request);
+    let metadata = read(&state, "attention", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    assert_no_source_text(&metadata);
+    for row in page_items(&metadata, "assistant.attention") {
+        assert!(row.get("request").is_none());
+        assert!(row.get("update").is_none());
+    }
+}
+
+#[tokio::test]
+async fn summary_agent_states_match_list_delivery_presence_without_building_cards() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.start_agent_roster_refresher().unwrap();
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+    let local = client_host_id(state.store.origin());
+    let now = client_now_ms();
+    let mut cards = Vec::new();
+    for (driver, transport) in [
+        ("claude", "claude-channel"), ("codex", "app-server"),
+        ("opencode", "opencode-server"), ("pi", "pi-channel"), ("omp", "omp-channel"),
+    ] {
+        for host in [local.as_str(), "host/remote-presence-fixture"] {
+            let id = format!("agent/summary-presence.{driver}.{}", if host == local { "local" } else { "remote" });
+            crate::delivery_presence::record(&id, &json!({
+                "transport": transport, "ready": false, "reason": "fixture unavailable",
+            }).to_string());
+            cards.push(json!({
+                "id": id, "driver": driver, "host_id": host, "state": "running",
+                "harness_state": "working", "incarnation_id": "summary-presence",
+                "_status_source": {
+                    "state": "working", "incarnation_id": "summary-presence",
+                    "claim": "claim/summary-presence", "observed_at_unix_ms": now,
+                },
+            }));
+        }
+    }
+    let index = state.store.index().unwrap();
+    state.store.cached_agent_resources_for(index, false, None, |_| Ok(cards)).unwrap();
+    let agents = read(&state, "agents", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    let mut counts = BTreeMap::<String, u64>::new();
+    for agent in page_items(&agents, "assistant.agents") {
+        *counts.entry(agent["runtime_state"].as_str().unwrap().to_owned()).or_default() += 1;
+    }
+    assert_eq!(counts, BTreeMap::from([("running".into(), 5), ("waiting".into(), 5)]));
+    let builds = state.store.agent_resources_builds_for_test();
+    let summary = read(&state, "summary", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    assert_eq!(summary["counts"]["agent_states"], json!(counts));
+    assert_eq!(state.store.agent_resources_builds_for_test(), builds);
+    assert_no_source_text(&summary);
+}
+
+#[test]
+fn summary_mission_counts_read_phases_without_building_cards() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    fleet(&state, root.path(), true);
+    let now = client_now_ms();
+    let counts = state.store.assistant_mission_state_counts_at(now).unwrap();
+    // A standalone person ask is itself a running mission, in addition to the declared run.
+    let ids = state.store.mission_collection_ids_at(false, 0, 10, now).unwrap();
+    assert_eq!(ids.len(), 3);
+    let cards = mission_list_cards_with(&state.store, &ids, now, &BTreeSet::new()).unwrap();
+    let mut native_counts = BTreeMap::<String, u64>::new();
+    for card in cards {
+        *native_counts.entry(card["state"].as_str().unwrap().to_owned()).or_default() += 1;
+    }
+    assert_eq!(counts, native_counts);
+    assert_eq!(counts, BTreeMap::from([("ready".to_owned(), 1), ("running".to_owned(), 2)]));
+}
+
 #[tokio::test]
 async fn queries_admit_only_named_scalar_fields_and_hold_the_byte_ceiling() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    fleet(&state, root.path());
+    fleet(&state, root.path(), true);
     for (projection, query) in [
         ("attention", vec![("person", OWNER)]),
         ("missions", vec![("history", "all")]),
@@ -186,12 +448,12 @@ async fn queries_admit_only_named_scalar_fields_and_hold_the_byte_ceiling() {
     assert_eq!(read(&state, "native", &[], MAX_RESPONSE_BYTES).await.unwrap_err().status, StatusCode::NOT_FOUND);
     // A first page is read in, and returns, a fresh snapshot; its cursor continues in it.
     let admitted = new_client_snapshot(&state);
-    let (snapshot, first) = project(&state, &admitted, "missions", &params(&[("limit", "1")]), MAX_RESPONSE_BYTES)
+    let (snapshot, first) = project(&state, &admitted, "missions", &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "test-grant:1")
         .await
         .unwrap();
     assert!(snapshot.store_index >= admitted.store_index);
     let cursor = first["page"]["next_cursor"].as_str().expect("two fixture missions require a second page");
-    let (continued, second) = project(&state, &snapshot, "missions", &params(&[("cursor", cursor)]), MAX_RESPONSE_BYTES)
+    let (continued, second) = project(&state, &snapshot, "missions", &params(&[("cursor", cursor)]), MAX_RESPONSE_BYTES, "test-grant:1")
         .await
         .unwrap();
     assert_eq!(continued.id, snapshot.id);
@@ -202,6 +464,77 @@ async fn queries_admit_only_named_scalar_fields_and_hold_the_byte_ceiling() {
         .unwrap();
     assert!(serde_json::to_vec(&bounded).unwrap().len() <= DEFAULT_RESPONSE_BYTES);
     assert_eq!(bounded["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn collection_cursors_are_stable_and_bound_to_disclosure_grant_and_policy() {
+    for published_agents in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        fleet(&state, root.path(), published_agents);
+        state.store.ask_person(&serde_json::from_value(json!({
+            "person": OWNER, "actor": AGENT, "title": "second fixture ask",
+            "reason": "fixture", "new_run": "reads-fixture-second-ask",
+            "idempotency_key": "reads-fixture-second-ask",
+        })).unwrap()).unwrap();
+        crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+        for projection in ["attention", "attention-rich", "missions", "missions-rich", "agents", "agents-rich"] {
+            let (snapshot, first) = project(&state, &new_client_snapshot(&state), projection,
+                &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "grant-one:1").await.unwrap();
+            let cursor = first["page"]["next_cursor"].as_str().expect("two source rows");
+            let query = params(&[("cursor", cursor)]);
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/assistant-cursor/{projection}"),
+                kind: "custom.test.marker".into(), actor: None, fields: BTreeMap::new(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let (continued, second) = project(&state, &snapshot, projection, &query,
+                MAX_RESPONSE_BYTES, "grant-one:1").await.unwrap();
+            let (_, repeated) = project(&state, &snapshot, projection, &query,
+                MAX_RESPONSE_BYTES, "grant-one:1").await.unwrap();
+            assert_eq!(continued.id, snapshot.id);
+            assert_eq!(continued.store_index, snapshot.store_index);
+            assert_eq!(second["items"], repeated["items"], "{projection}");
+            assert_eq!(second["items"].as_array().unwrap().len(), 1);
+            assert_ne!(first["items"][0]["id"], second["items"][0]["id"], "{projection}");
+            for binding in ["grant-two:1", "grant-one:2"] {
+                assert_eq!(project(&state, &snapshot, projection, &query, MAX_RESPONSE_BYTES, binding)
+                    .await.unwrap_err().code, "page-cursor-expired");
+            }
+            let other = if projection.ends_with("-rich") {
+                projection.trim_end_matches("-rich").to_owned()
+            } else { format!("{projection}-rich") };
+            assert_eq!(project(&state, &snapshot, &other, &query, MAX_RESPONSE_BYTES, "grant-one:1")
+                .await.unwrap_err().code, "page-cursor-expired");
+            let wrong_limit = params(&[("cursor", cursor), ("limit", "2")]);
+            assert_eq!(project(&state, &snapshot, projection, &wrong_limit, MAX_RESPONSE_BYTES, "grant-one:1")
+                .await.unwrap_err().code, "page-cursor-expired");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cold_agent_pages_fold_only_the_selected_cards() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agents = (0..20).map(|number| format!(
+        "agent \"worker-{number}\" {{ workspace \"/tmp\"; command \"true\"; restart always; }}"
+    )).collect::<Vec<_>>().join("\n");
+    let intent = crate::graph::parse_internal_intent(&format!("version 2\n{agents}"), "reads-fixture").unwrap();
+    state.store.apply_internal(&intent, "cold-agent-page").unwrap();
+    let (snapshot, first) = project(&state, &new_client_snapshot(&state), "agents",
+        &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    let cursor = first["page"]["next_cursor"].as_str().unwrap();
+    let (_, second) = project(&state, &snapshot, "agents", &params(&[("cursor", cursor)]),
+        MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
+    assert_eq!(state.store.agent_resources_largest_fold_for_test(), 1);
+    for projection in ["attention", "summary"] {
+        assert_eq!(read(&state, projection, &[], MAX_RESPONSE_BYTES).await.unwrap_err().status,
+            StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
 
 #[tokio::test]
@@ -490,7 +823,7 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
     ]);
     let snapshot = new_client_snapshot(&state);
     let (returned_snapshot, content) = project(
-        &state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES,
+        &state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES, "test-grant:1",
     ).await.unwrap();
     assert_eq!(returned_snapshot.id, snapshot.id);
     assert_eq!(keys(&content), BTreeSet::from([
@@ -509,7 +842,7 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
     assert!(serde_json::to_vec(&content).unwrap().len() < DEFAULT_RESPONSE_BYTES);
     // This direct projection budget checks text truncation; the route separately accounts
     // for the whole JSON envelope. Four bytes cannot split the second three-byte character.
-    let (_, bounded) = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), 4)
+    let (_, bounded) = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), 4, "test-grant:1")
         .await.unwrap();
     assert_eq!(bounded["text"], "決");
     assert_eq!(bounded["returned_bytes"], 3);
@@ -519,7 +852,7 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
         ("foreign-incarnation", revision.as_str()),
         (incarnation.as_str(), "foreign-screen-revision"),
     ] {
-        let error = project(&state, &snapshot, "terminal-content", &query(incarnation, revision), DEFAULT_RESPONSE_BYTES)
+        let error = project(&state, &snapshot, "terminal-content", &query(incarnation, revision), DEFAULT_RESPONSE_BYTES, "test-grant:1")
             .await.unwrap_err();
         assert_eq!((error.status, error.code.as_str()), (StatusCode::CONFLICT, "stale-fence"));
         assert!(!error.message.contains(SECRET));
@@ -529,11 +862,11 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
         .await.unwrap().unwrap();
     let changed = fixture_screen(&mut screens, "changed:next").await;
     assert_ne!(changed.revision(), revision);
-    let error = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES)
+    let error = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES, "test-grant:1")
         .await.unwrap_err();
     assert_eq!((error.status, error.code.as_str()), (StatusCode::CONFLICT, "stale-fence"));
     let (_, current) = project(
-        &state, &snapshot, "terminal-content", &query(&incarnation, changed.revision()), DEFAULT_RESPONSE_BYTES,
+        &state, &snapshot, "terminal-content", &query(&incarnation, changed.revision()), DEFAULT_RESPONSE_BYTES, "test-grant:1",
     ).await.unwrap();
     assert_eq!(current["screen_revision"], changed.revision());
     assert_eq!(current["incarnation_id"], incarnation);
