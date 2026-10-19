@@ -17,7 +17,7 @@ const run = (args) => new Promise((resolve, reject) => {
 const shellFixtures = {
   'shell-runtime': 'export const live={};export const telemetry={onCommit(){},ux:undefined}',
   'shell-data': 'export const DataSourceProvider=({children})=>children',
-  'shell-workspace': `import {createElement} from 'react';export const LiveAgentWorkspace=({overlayHost})=>createElement('div',{ref:overlayHost,'data-app-overlay-host':''})`,
+  'shell-workspace': 'export const LiveAgentWorkspace=()=>null',
   'shell-meters': 'export const acquireMeasurementEngine=()=>()=>{};export const getDebug=()=>0',
   'shell-build': 'export const buildIdentity={machineVersion:"smoke",dirty:false};export const deploymentId=undefined',
 }
@@ -187,6 +187,13 @@ try {
     const shellHost = await page.evaluate(() => document.querySelector('[data-app-overlay-host]').contains(document.querySelector('[data-changelog-popover]')))
     if (!shellHost) throw new Error('Status-bar changelog escaped registered app host')
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    const shellGeometry = await page.evaluate(() => {
+      const host = document.querySelector('[data-app-overlay-host]')
+      const popover = document.querySelector('[data-changelog-popover]')
+      const bounds = popover.getBoundingClientRect()
+      return { hostPosition: getComputedStyle(host).position, hostZ: getComputedStyle(host).zIndex, popoverZ: getComputedStyle(popover).zIndex, width: bounds.width, height: bounds.height }
+    })
+    if (shellGeometry.hostPosition !== 'static' || shellGeometry.hostZ !== 'auto' || shellGeometry.popoverZ !== '1100' || shellGeometry.width <= 0 || shellGeometry.height <= 0) throw new Error(JSON.stringify(shellGeometry))
     const beforeNoop = await page.evaluate(() => window.shellSamples.length)
     if (beforeNoop < 1) throw new Error('Status-bar real opening produced no sample')
     await page.getByRole('heading', { name: \"What's new\" }).click()
@@ -194,8 +201,8 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     if (await page.evaluate(() => window.shellSamples.length) !== beforeNoop) throw new Error('Status-bar no-op attributed a timer commit')
     await page.evaluate(() => window.stopCapture())
-    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, samples }))
-    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, samples }
+    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, shellGeometry, samples }))
+    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, shellGeometry, samples }
   }`])
 } finally {
   try { await run(['close']) } finally { await vite.close() }

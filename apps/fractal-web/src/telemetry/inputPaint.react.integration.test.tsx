@@ -13,10 +13,8 @@ vi.mock('virtual:build-identity', () => ({ buildIdentity: { machineVersion: 'tes
 vi.mock('./meters.tsx', () => ({ acquireMeasurementEngine: () => () => {}, getDebug: () => 0 }))
 vi.mock('../web/liveRuntime.ts', () => ({ live: {}, telemetry: { onCommit: () => {}, ux: undefined } }))
 vi.mock('../data/react.tsx', () => ({ DataSourceProvider: ({ children }: { children: React.ReactNode }) => children }))
-// Backend workspace content is irrelevant; retain the real App provider, status bar and changelog.
-vi.mock('../web/LiveAgentWorkspace.tsx', () => ({
-  LiveAgentWorkspace: ({ overlayHost }: { overlayHost: React.RefObject<HTMLDivElement | null> }) => createElement('div', { ref: overlayHost, 'data-app-overlay-host': '' }),
-}))
+// Backend workspace content is irrelevant; the App host, status bar and changelog are real.
+vi.mock('../web/LiveAgentWorkspace.tsx', () => ({ LiveAgentWorkspace: () => null }))
 
 const cleanups: Array<() => void> = []
 afterEach(() => {

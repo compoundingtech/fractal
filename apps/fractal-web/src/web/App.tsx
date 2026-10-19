@@ -15,9 +15,10 @@ export const App = () => {
       <DevBar />
       <DataSourceProvider source={live.source} registry={live.registry}>
         <React.Profiler id="workbench" onRender={telemetry.onCommit}>
-          <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} overlayHost={overlayHost} />
+          <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} />
         </React.Profiler>
       </DataSourceProvider>
+      <div ref={overlayHost} data-app-overlay-host="" />
     </UNSAFE_PortalProvider>
   )
 }

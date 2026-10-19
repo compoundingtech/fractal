@@ -110,9 +110,12 @@ commits during their discrete-event dispatch or its microtasks. Capture starts
 observation. Immediately after `createRoot`, the app registers that container
 with telemetry. The optional kit `PortalContainerRegistrationContext` registers
 every production portal container for its mounted lifetime. `App` owns the Aria
-provider above both the status bar and workspace, reusing the existing themed
-workspace host; status-bar overlays therefore cannot fall back to document.body.
-Nested `ThemePortal` hosts, workspace bodies, pane layers and error overlays are
+provider above both the status bar and workspace, with a registered, unstyled
+app-root host. It adds no positioning or stacking context, preserving the
+status-bar changelog's explicit theme and z-index instead of inheriting the
+workspace host's z-index 20. Status overlays cannot fall back to document.body.
+The existing themed workspace host, nested `ThemePortal` hosts, workspace
+bodies, pane layers and error overlays are
 also registered. Shared containers are reference-counted; consumers without this
 context do nothing.
 Same-event completion listeners run after React's native delegated root/portal
