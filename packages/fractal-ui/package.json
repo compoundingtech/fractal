@@ -34,7 +34,8 @@
     "test:tab-strip": "node --experimental-strip-types src/assistant-ui/workbench/tab-strip-layout.unit.test.ts",
     "check:details": "node scripts/details-run-gates.mjs",
     "check:sidebar-fitting": "node scripts/check-sidebar-fitting.mjs",
-    "check:transcript-skeleton-imports": "node scripts/check-transcript-skeleton-imports.mjs"
+    "check:transcript-skeleton-imports": "node scripts/check-transcript-skeleton-imports.mjs",
+    "test:declaration": "node --test --test-force-exit src/assistant-ui/declaration/declaration-tint.unit.test.mjs"
   },
   "dependencies": {
     "react": "19.2.3",

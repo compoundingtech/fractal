@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_store::store::terminal_gate_evidence::*;
+pub use st3_missions::store::terminal_gate_evidence::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::terminal_gate_evidence_shared::*;

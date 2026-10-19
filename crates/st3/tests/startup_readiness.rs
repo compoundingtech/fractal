@@ -2,6 +2,7 @@
 //! A real, isolated daemon pauses inside canonical replay. Observation must work while SQLite
 //! holds its write transaction, then advance to serving only after both listeners bind.
 
+use st3::MissionsStore;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};

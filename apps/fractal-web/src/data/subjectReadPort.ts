@@ -13,6 +13,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 
 import type { Feed } from './source.ts'
 import { observed, unavailable, waiting } from './source.ts'
+import { redactPublicationDefinition } from '../declarations/model.ts'
 
 /** A subject read failed because access, support, or a current native observation is missing. */
 export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{
@@ -346,6 +347,7 @@ export const gatewaySubjectReads = ({
       ),
       registry: registry,
     })
+  const decodePublicationDefinition = Native.decodeUnknownSync(Native.PublicationDefinition)
   return {
     resource,
     launch: fromGetter({
@@ -465,6 +467,16 @@ export const gatewaySubjectReads = ({
       decode: Native.decodeUnknownSync(Native.Glass),
       getter: ({ client, ref }) => client.glassesGet(ref),
     }),
+    agentDeclaration: fromGetter({
+      decode: Native.decodeUnknownSync(Native.AgentDeclaration),
+      // Explicitly redacted: st replaces every env value before rendering the canonical KDL.
+      getter: ({ client, ref }) => client.agentDeclarationGet(ref, undefined, false),
+    }),
+    missionDefinition: fromGetter({
+      // This read has no env switch; values are redacted before any feed or cache holds them.
+      decode: (value) => redactPublicationDefinition(decodePublicationDefinition(value)),
+      getter: ({ client, ref }) => client.publicationDefinition(ref),
+    }),
   }
 }
 
@@ -495,6 +507,9 @@ export interface SubjectReads {
   readonly terminalScreen: SubjectReader<Native.TerminalScreen>
   readonly document: SubjectReader<Native.DocumentContent>
   readonly glass: SubjectReader<Native.Glass>
+  readonly agentDeclaration: SubjectReader<Native.AgentDeclaration>
+  /** Structured mission definition with environment values already redacted. */
+  readonly missionDefinition: SubjectReader<Native.PublicationDefinition>
 }
 /** Effect service providing the source's native subject readers. */
 export class SubjectReadPort extends Context.Service<SubjectReadPort, SubjectReads>()(
@@ -592,5 +607,7 @@ export const fixtureSubjectReads = ({
     terminalScreen: reader({ table: fixtures.terminalScreen, pinned: overrides.terminalScreen }),
     document: reader({ table: fixtures.document, pinned: overrides.document }),
     glass: reader({ table: fixtures.glass, pinned: overrides.glass }),
+    agentDeclaration: reader({ table: fixtures.agentDeclaration, pinned: overrides.agentDeclaration }),
+    missionDefinition: reader({ table: fixtures.missionDefinition, pinned: overrides.missionDefinition }),
   }
 }

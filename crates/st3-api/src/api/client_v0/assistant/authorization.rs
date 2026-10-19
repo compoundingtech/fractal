@@ -272,7 +272,8 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
             grant_subject:grant_subject.into(), actor:current.actor, transport:session.transport,
             policy_revision:fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
             proof_expiry:fields(&policy)?["expires_at_unix_ms"].as_u64().unwrap_or(0), max_response_bytes:requested };
-        let (snapshot,value) = super::reads::project_with_context(&state,&snapshot,projection,&parameters,requested,context).await?;
+        let binding = format!("{}:{}", receipt.grant_subject, receipt.policy_revision);
+        let (snapshot,value) = super::reads::project_with_context(&state,&snapshot,projection,&parameters,requested,&binding,context).await?;
         return Ok((Extension(receipt),Extension(snapshot),Json(value)));
     }
     let authorization = proof(&headers)?;
@@ -290,7 +291,8 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
     }),None).map_err(|error| if error.code=="stale-subject" {
         forbidden("the SCG read approval has already been consumed") } else {error})?;
     receipt.consumed_claim=consumed.id.clone();
-    let (snapshot,value) = match super::reads::project_with_context(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,context).await {
+    let binding = format!("{}:{}", receipt.grant_subject, receipt.policy_revision);
+    let (snapshot,value) = match super::reads::project_with_context(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding,context).await {
         Ok(result) => result,
         Err(error) => {
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
