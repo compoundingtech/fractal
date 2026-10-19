@@ -219,7 +219,7 @@ async fn push_terminal_cleanup_preserves_normal_authentication_and_local_authori
     }
     // A replicated foreign claim must not confer cleanup authority, even with the right digest.
     state.store.connection.write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h651fe84540a1 owner=st3_api::api::client_push::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET origin='foreign-member' WHERE subject=?1", [GRANT]).unwrap();
+        .execute(/* sqlite-large-value: allow-for-now lv-h83c28ee5ecae owner=st3_api_core::api::client_push::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET origin='foreign-member' WHERE subject=?1", [GRANT]).unwrap();
     let (status, response) = send(app, "DELETE", Some(CREDENTIAL), vec![]).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
     let count: u64 = state
@@ -349,7 +349,7 @@ async fn push_cleanup_rejects_malformed_proof_and_redacts_database_failures() {
         assert!(authenticate(&state, &request, "fabric-loopback").is_err());
     }
     state.store.connection.write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h9c44dc6a9d52 owner=st3_api::api::client_push::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE local_push_registrations", []).unwrap();
+        .execute(/* sqlite-large-value: allow-for-now lv-h8e6b38248a08 owner=st3_api_core::api::client_push::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE local_push_registrations", []).unwrap();
     let (status, response) = send(
         fabric_router(state), "DELETE", Some(CREDENTIAL), vec![],
     ).await;
@@ -399,7 +399,7 @@ async fn push_http_logs_and_storage_failures_are_redacted() {
         assert!(send(app.clone(), "POST", Some(CREDENTIAL), serde_json::to_vec(&input).unwrap()).await.0.is_client_error());
         // Make SQLite's error text contain the secret; the HTTP boundary must discard it.
         let connection = state.store.connection.lock().expect("fixture writer");
-        connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h0189c75a3009 owner=st3_api::api::client_push::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER push_failure BEFORE INSERT ON local_push_registrations BEGIN SELECT RAISE(ABORT,'{TOKEN}'); END;")).unwrap();
+        connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h64aa627cd2d7 owner=st3_api_core::api::client_push::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER push_failure BEFORE INSERT ON local_push_registrations BEGIN SELECT RAISE(ABORT,'{TOKEN}'); END;")).unwrap();
         drop(connection);
         let (status, error) = send(app, "POST", Some(CREDENTIAL), serde_json::to_vec(&body()).unwrap()).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
