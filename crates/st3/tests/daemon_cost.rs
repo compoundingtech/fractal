@@ -1698,10 +1698,13 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
     }
 }
 
-/// Every route `api.rs` declares is measured or listed in `NOT_MEASURED`, and nothing is both.
+/// Every route `api.rs` and the route families above it declare is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let mut declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    declared.extend(family_routes(include_str!(
+        "../../st3-api-mailbox/src/api/mailbox.rs"
+    )));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
         .iter()
@@ -1796,10 +1799,23 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
 
 /// `METHOD /path` for every `.route(...)` in the router's source.
 fn declared_routes(source: &str) -> BTreeSet<String> {
-    let mut routes = BTreeSet::new();
-    let router = &source[source
+    routes_in(&source[source
         .find("fn router_for_transport")
-        .expect("api.rs builds its router in router_for_transport")..];
+        .expect("api.rs builds its router in router_for_transport")..])
+}
+
+/// The routes of a route family a crate above st3-api adds to the router (its `routes` fn).
+fn family_routes(source: &str) -> BTreeSet<String> {
+    let start = source
+        .find("pub fn routes(")
+        .expect("a route family is built in its `routes` fn");
+    let end = start + source[start..].find("\n}\n").expect("the `routes` fn closes");
+    routes_in(&source[start..end])
+}
+
+/// `METHOD /path` for every `.route(...)` in `router`.
+fn routes_in(router: &str) -> BTreeSet<String> {
+    let mut routes = BTreeSet::new();
     let mut rest = router;
     while let Some(start) = rest.find(".route(") {
         rest = &rest[start + ".route(".len()..];

@@ -27,7 +27,7 @@ pub const STAGING_PAGE: i64 = 64;
 /// SQLite's page cache for the staging file, in KiB. Its sorter spills past it to disk.
 const STAGING_CACHE_KIB: i64 = 2_048;
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb1622b55b32a owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
+pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb1622b55b32a owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS meta(
     id INTEGER PRIMARY KEY CHECK(id=1),
     identity TEXT NOT NULL,
@@ -157,6 +157,7 @@ impl StagedPlan {
 pub struct StagedSet {
     pub path: PathBuf,
     staging: Connection,
+    space: Option<super::checkpoint_space::SpaceGuard>,
     /// Held for the life of the set: one capture per directory at a time.
     _lock: fs::File,
     pub cut_unix_ms: u128,
@@ -234,6 +235,18 @@ impl Store {
         dir: &Path,
     ) -> Result<StagedSet> {
         self.runtime.checkpoint_preflight()?;
+        // Admit before lock_staging creates the scratch directory or lock file.
+        let space = if self.shared_memory { None } else {
+            Some(super::checkpoint_space::SpaceGuard::admit(&self.path, dir, true)?)
+        };
+        // The startup checkpoint pass sweeps only proof scratch that has lost its owner lock.
+        // A dry-run captures in `scratch/plan`, while the proof files live in `scratch`.
+        let proof_root = if dir.file_name().is_some_and(|name| name == std::ffi::OsStr::new("plan")) {
+            dir.parent().unwrap_or(dir)
+        } else {
+            dir
+        };
+        drop(super::checkpoint_space::ProofOwnership::acquire(proof_root)?);
         let lock = lock_staging(dir)?;
         let seal_rowid = self.register_checkpoint_capture(cut_unix_ms, through_rowid)?;
         let path = dir.join(staging_name(cut_unix_ms, seal_rowid));
@@ -248,14 +261,27 @@ impl Store {
             let staged = StagedSet::open(
                 &path,
                 lock.take().expect("each attempt takes the lock back"),
+                space.clone(),
                 self.staging_identity(cut_unix_ms, seal_rowid, epoch)?,
                 cut_unix_ms,
                 seal_rowid,
                 epoch,
             )?;
-            match staged.capture(self) {
+            let captured = staged.capture(self);
+            let space_failed = space.as_ref().is_some_and(|space| space.failed());
+            let captured = match &space {
+                Some(space) => space.explain(captured),
+                None => captured,
+            };
+            match captured {
                 Err(error) if error.downcast_ref::<CheckpointCaptureChanged>().is_some() => {
                     lock = Some(staged.discard()?);
+                }
+                Err(error) if space_failed => {
+                    // This staged capture is durable and every completed page is committed.
+                    // The admission refusal happened between phases; keep the valid cursor so
+                    // the next attempt resumes after capacity is restored.
+                    return Err(error);
                 }
                 Err(error) => return Err(error),
                 Ok(()) => return Ok(staged),
@@ -397,6 +423,7 @@ impl StagedSet {
     fn open(
         path: &Path,
         lock: fs::File,
+        space: Option<super::checkpoint_space::SpaceGuard>,
         identity: String,
         cut_unix_ms: u128,
         seal_rowid: i64,
@@ -411,6 +438,9 @@ impl StagedSet {
                  PRAGMA cache_size = -{STAGING_CACHE_KIB}; PRAGMA temp_store = FILE;"
             ))?;
             staging.execute_batch(/* sqlite-large-value: allow-for-now lv-h53697c1c92c4 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ SCHEMA)?;
+            // Capture is resumable. Its full-size staging allowance is charged at admission;
+            // a VFS refusal inside a staging transaction could prevent SQLite's rollback and
+            // leave a file that cannot resume. Check between capture phases instead.
             Ok(staging)
         };
         let mut staging = connect()?;
@@ -429,6 +459,7 @@ impl StagedSet {
         Ok(Self {
             path: path.to_owned(),
             staging,
+            space,
             _lock: lock,
             cut_unix_ms,
             seal_rowid,
@@ -468,6 +499,9 @@ impl StagedSet {
     /// Run the capture's phases from where the file stopped.
     fn capture(&self, store: &Store) -> Result<()> {
         loop {
+            if let Some(space) = &self.space {
+                space.check_now()?;
+            }
             let (phase, cursor, bound) = self.position()?;
             match phase {
                 ENVELOPES => self.capture_envelopes(store, cursor)?,
@@ -1191,4 +1225,28 @@ fn remove_file_set(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod headroom_resume_tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_capture_keeps_its_committed_cursor_for_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture-checkpoint-2026-10-16-1.sqlite3");
+        let first = StagedSet::open(
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
+        ).unwrap();
+        first.staging.execute(
+            "UPDATE meta SET phase=?1, cursor=?2 WHERE id=1",
+            params![CLAIMS, 42_i64],
+        ).unwrap();
+        drop(first); // A headroom refusal closes the file without discarding committed pages.
+        let resumed = StagedSet::open(
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
+        ).unwrap();
+        let (phase, cursor, _) = resumed.position().unwrap();
+        assert_eq!((phase, cursor), (CLAIMS, 42));
+    }
 }
