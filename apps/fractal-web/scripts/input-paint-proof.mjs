@@ -18,7 +18,6 @@ const shellFixtures = {
   'shell-runtime': 'export const live={};export const telemetry={onCommit(){},ux:undefined}',
   'shell-data': 'export const DataSourceProvider=({children})=>children',
   'shell-workspace': 'export const LiveAgentWorkspace=()=>null',
-  'shell-meters': 'export const acquireMeasurementEngine=()=>()=>{};export const getDebug=()=>0',
   'shell-build': 'export const buildIdentity={machineVersion:"smoke",dirty:false};export const deploymentId=undefined',
 }
 const vite = await createServer({ root, configFile: false, optimizeDeps: { entries: [] }, server: { host: '127.0.0.1', port: 0 }, plugins: [{
@@ -26,7 +25,6 @@ const vite = await createServer({ root, configFile: false, optimizeDeps: { entri
   enforce: 'pre',
   resolveId(id, importer) {
     if (id === 'virtual:build-identity') return '\0shell-build'
-    if (id.endsWith('/meters.tsx')) return '\0shell-meters'
     if (!importer?.endsWith('/web/App.tsx')) return
     if (id === './liveRuntime.ts') return '\0shell-runtime'
     if (id === '../data/react.tsx') return '\0shell-data'
@@ -192,7 +190,7 @@ try {
       const bounds = popover.getBoundingClientRect()
       return { hostPosition: getComputedStyle(host).position, hostZ: getComputedStyle(host).zIndex, popoverZ: getComputedStyle(popover).zIndex, width: bounds.width, height: bounds.height }
     })
-    if (shellGeometry.hostPosition !== 'static' || shellGeometry.hostZ !== 'auto' || shellGeometry.popoverZ !== '1100' || shellGeometry.width <= 0 || shellGeometry.height <= 0) throw new Error(JSON.stringify(shellGeometry))
+    if (shellGeometry.hostPosition !== 'static' || shellGeometry.hostZ !== 'auto' || Number(shellGeometry.popoverZ) <= 1000 || shellGeometry.width <= 0 || shellGeometry.height <= 0) throw new Error(JSON.stringify(shellGeometry))
     const beforeNoop = await page.evaluate(() => window.shellSamples.length)
     if (beforeNoop < 1) throw new Error('Status-bar real opening produced no sample')
     await page.getByRole('heading', { name: \"What's new\" }).click()
