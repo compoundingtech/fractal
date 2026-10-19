@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Cache the fractal-web devShell (`.#web`) and its print-dev-env script as a complete closure.
-# `key` evaluates only its derivation identity, without realizing the tools. Unrelated Rust flake
-# edits therefore preserve the entry; every transitive shell input and shellHook remains covered.
+# `key` hashes the declared shell sources and transitive web lock inputs, never invoking Nix.
+# Protected-main upkeep verifies the evaluated derivation against existing metadata for that key.
 # Bump the format version in `key` whenever the cached representation or restore semantics change.
 # Only protected-main upkeep fills the shared entry.
 # A missing, incomplete or differently identified entry falls back to `nix develop .#web`.
 set -euo pipefail
-cmd=${1:?usage: scripts/ci-web-shell key|fill|run COMMAND...}
+cmd=${1:?usage: scripts/ci-web-shell key|verify|fill|run COMMAND...}
 shift
 if [ "$cmd" = key ]; then
-  identity=$(nix eval --raw .#devShells.x86_64-linux.web.drvPath)
-  cache_key="fractal-web-shell2-${RUNNER_OS:-Linux}-$(basename "$identity" .drv)"
+  source_hash=${CI_WEB_SHELL_SOURCE_HASH:?CI_WEB_SHELL_SOURCE_HASH is not set}
+  inputs=$(jq -cS --slurpfile spec nix/web-shell-inputs.json -f scripts/ci-web-shell-inputs.jq flake.lock)
+  digest=$(printf '%s\n%s\n' "$source_hash" "$inputs" | sha256sum)
+  cache_key="fractal-web-shell3-${RUNNER_OS:-Linux}-${digest%% *}"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    printf 'key=%s\nidentity=%s\n' "$cache_key" "$identity" >> "$GITHUB_OUTPUT"
+    printf 'key=%s\n' "$cache_key" >> "$GITHUB_OUTPUT"
   fi
   printf '%s\n' "$cache_key"
   exit 0
@@ -23,23 +25,45 @@ key="$dir/key"
 shell_file="$dir/shell-path"
 env_file="$dir/env.sh"
 identity_file="$dir/identity"
+cache_key_file="$dir/cache-key"
+expected_key=${CI_WEB_SHELL_KEY:-}
 
 case "$cmd" in
+  verify)
+    : "${CI_WEB_SHELL_KEY:?CI_WEB_SHELL_KEY is not set}"
+    system=$(jq -er '.system' nix/web-shell-inputs.json)
+    identity=$(nix eval --raw ".#devShells.$system.web.drvPath")
+    if [ -s "$identity_file" ]; then
+      recorded=$(cat "$identity_file")
+      if [ ! -s "$cache_key_file" ] || [ "$(cat "$cache_key_file")" != "$expected_key" ] \
+        || [ "$recorded" != "$identity" ]; then
+        printf '::error::Web shell cache key %s: recorded drvPath %s, evaluated drvPath %s; add the missing path or input to the hashed set and bump the format version.\n' \
+          "$expected_key" "$recorded" "$identity" >&2
+        exit 1
+      fi
+    fi
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+      printf 'identity=%s\n' "$identity" >> "$GITHUB_OUTPUT"
+    fi
+    printf 'Web shell cache key %s: verified drvPath %s\n' "$expected_key" "$identity"
+    ;;
   fill)
+    : "${CI_WEB_SHELL_KEY:?CI_WEB_SHELL_KEY is not set}"
     start=$SECONDS
     identity=${CI_WEB_SHELL_IDENTITY:?CI_WEB_SHELL_IDENTITY is not set}
-    rm -f "$shell_file" "$env_file" "$identity_file"
+    rm -f "$shell_file" "$env_file" "$identity_file" "$cache_key_file"
     mkdir -p "$cache"
     [ -s "$key.sec" ] || nix key generate-secret --key-name st-ci-web-shell-1 > "$key.sec"
     # The profile roots the closure while it is copied; its target is the shell environment path.
     nix print-dev-env .#web --profile "$dir/profile" > "$env_file.tmp"
     shell=$(readlink -f "$dir/profile")
     nix copy --to "file://$cache?secret-key=$key.sec&compression=zstd" --no-check-sigs "$shell"
-    # Written last: a directory without these two files is an incomplete fill and counts as a miss.
+    # Written last: incomplete entries count as misses, never as stale shell environments.
     mv "$env_file.tmp" "$env_file"
     rm -f "$dir"/profile "$dir"/profile-*-link
     printf '%s\n' "$shell" > "$shell_file"
     printf '%s\n' "$identity" > "$identity_file"
+    printf '%s\n' "$expected_key" > "$cache_key_file"
     paths=$(nix path-info --recursive "$shell" | wc -l)
     printf 'Web shell cache: %s store paths, %s MiB, filled in %ss\n' "$paths" \
       "$(( $(du -sk "$cache" | cut -f1) / 1024 ))" "$((SECONDS - start))"
@@ -48,8 +72,8 @@ case "$cmd" in
     [ "$#" -gt 0 ] || { echo "usage: scripts/ci-web-shell run COMMAND..." >&2; exit 2; }
     start=$SECONDS
     # The cache is only usable when it is complete and its closure lands in the store.
-    if [ -n "${CI_WEB_SHELL_IDENTITY:-}" ] && [ -s "$identity_file" ] \
-      && [ "$(cat "$identity_file")" = "$CI_WEB_SHELL_IDENTITY" ] \
+    if [ -s "$cache_key_file" ] && [ "$(cat "$cache_key_file")" = "$expected_key" ] \
+      && [ -s "$identity_file" ] \
       && [ -s "$shell_file" ] && [ -s "$env_file" ] \
       && nix copy --from "file://$cache" --no-check-sigs "$(cat "$shell_file")"; then
       printf 'Web shell: restored from the cache in %ss\n' "$((SECONDS - start))"

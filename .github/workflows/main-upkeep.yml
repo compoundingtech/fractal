@@ -963,9 +963,11 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
-      - name: Identify the web shell derivation
+      - name: Identify the web shell inputs
         id: web-shell-key
         shell: bash
+        env:
+          CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}
         run: bash scripts/ci-web-shell key
       - name: Probe the pnpm store
         id: pnpm-store
@@ -974,13 +976,19 @@ jobs:
           path: "${{ runner.temp }}/pnpm-store"
           key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
           lookup-only: true
-      - name: Probe the web shell closure
+      - name: Restore the web shell closure
         id: web-shell
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/web-shell"
           key: ${{ steps.web-shell-key.outputs.key }}
-          lookup-only: true
+      - name: Verify web key completeness against the shell derivation
+        id: web-shell-verify
+        shell: bash
+        run: bash scripts/ci-web-shell verify
+        env:
+          CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
+          CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
       - name: Fetch the locked packages
         shell: bash
         run: "nix develop '.#web' -c pnpm fetch"
@@ -998,7 +1006,8 @@ jobs:
         run: bash scripts/ci-web-shell fill
         env:
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
-          CI_WEB_SHELL_IDENTITY: ${{ steps.web-shell-key.outputs.identity }}
+          CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
+          CI_WEB_SHELL_IDENTITY: ${{ steps.web-shell-verify.outputs.identity }}
         if: steps.web-shell.outputs.cache-hit != 'true'
       - name: Save the web shell closure
         uses: actions/cache/save@v4
@@ -1010,7 +1019,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_ENTRIES: '[{"name":"Probe the pnpm store","outcome":"${{ steps.pnpm-store.outcome }}","hit":"${{ steps.pnpm-store.outputs.cache-hit }}","matched":"${{ steps.pnpm-store.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Probe the web shell closure","outcome":"${{ steps.web-shell.outcome }}","hit":"${{ steps.web-shell.outputs.cache-hit }}","matched":"${{ steps.web-shell.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true}]'
+          CACHE_ENTRIES: '[{"name":"Probe the pnpm store","outcome":"${{ steps.pnpm-store.outcome }}","hit":"${{ steps.pnpm-store.outputs.cache-hit }}","matched":"${{ steps.pnpm-store.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the web shell closure","outcome":"${{ steps.web-shell.outcome }}","hit":"${{ steps.web-shell.outputs.cache-hit }}","matched":"${{ steps.web-shell.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   perf-cost:
     name: perf-cost

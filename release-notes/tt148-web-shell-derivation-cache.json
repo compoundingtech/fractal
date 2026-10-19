@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "summary": "Key the fractal-web CI shell closure by its exact Nix derivation identity rather than all flake source files, preserving cache hits for unrelated Rust changes. Log runner CPU, cores, name and available region once per web job.",
+  "summary": "Key the fractal-web CI shell closure by its isolated definition and declared transitive web lock inputs without evaluating Nix, preserving cache hits for unrelated Rust changes. Protected-main upkeep verifies that each key still denotes the recorded derivation. Log runner CPU, cores, name and available region once per web job.",
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No database or wire schema changes." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
-  "compatibility": { "status": "none", "detail": "The versioned web-shell cache uses exact derivation keys without prefix restoration. Restored entries must record the expected identity; mismatched or incomplete entries fall back to nix develop. Real transitive web toolchain changes invalidate the cache." },
+  "compatibility": { "status": "none", "detail": "The version-three web-shell cache uses exact source/input keys without prefix restoration. Restored entries must record the expected key and complete identity metadata; mismatched or incomplete entries fall back to nix develop. Real web inputs invalidate the cache. Upkeep fails loudly if an existing key evaluates to a different derivation." },
   "downtime": { "status": "none", "detail": "None." },
   "manual": { "status": "none", "detail": "No manual step; only protected-main upkeep populates the new cache format. Pull requests and merge groups remain restore-only." },
   "recovery": { "status": "none", "detail": "A cache miss evaluates the current web shell normally." }

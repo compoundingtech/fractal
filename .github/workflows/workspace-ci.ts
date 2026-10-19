@@ -647,13 +647,13 @@ export const fractalWebStoreCache = {
 } as const
 
 /**
- * The web lane's complete devShell closure and `print-dev-env` script. An exact derivation
- * identity covers transitive toolchain inputs without invalidating on unrelated flake edits.
+ * The web lane's complete devShell closure and `print-dev-env` script. Hash its isolated
+ * definition and declared transitive lock inputs; only upkeep evaluates/verifies its derivation.
  * No prefix restore: a different identity is always a miss. Only protected-main upkeep fills it.
  */
 export const fractalWebShellEnv = {
   CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell',
-  CI_WEB_SHELL_IDENTITY: '${{ steps.web-shell-key.outputs.identity }}',
+  CI_WEB_SHELL_KEY: '${{ steps.web-shell-key.outputs.key }}',
 } as const
 export const fractalWebShellCache = {
   path: fractalWebShellEnv.CI_WEB_SHELL_DIR,
@@ -661,9 +661,12 @@ export const fractalWebShellCache = {
 } as const
 
 export const fractalWebShellKeyStep = {
-  name: 'Identify the web shell derivation',
+  name: 'Identify the web shell inputs',
   id: 'web-shell-key',
   shell: 'bash',
+  env: {
+    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}",
+  },
   run: 'bash scripts/ci-web-shell key',
 } as const
 

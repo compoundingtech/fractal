@@ -597,7 +597,7 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
-  `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
+  `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
   and `.github/repo-settings.json*`.
@@ -657,18 +657,24 @@ workflow-level path filters. `linux-gate` does not depend on them.
   public cache) and substitute ~1.5 GB for `nix develop .#web`. `scripts/ci-web-shell fill`
   stores `nix print-dev-env .#web` and the shell's complete closure as a local `file://`
   binary cache in the Actions cache entry
-  `fractal-web-shell2-<os>-<web shell derivation basename without .drv>`.
-  Before restoring or probing, `scripts/ci-web-shell key` runs
-  `nix eval --raw .#devShells.x86_64-linux.web.drvPath`. This exact identity includes the
-  shell hook and transitive toolchain inputs, but not unrelated Rust-only flake edits.
-  Both publishers and consumers use the same output key, with no prefix restoration.
-  `run` requires the recorded identity to match, copies the closure into the store
-  (`--no-check-sigs`) and runs the lanes in the sourced `print-dev-env` script, which is the
-  environment `nix develop -c` builds. Only the identity is evaluated on a hit; the shell's
-  tools are not rebuilt. The script writes `env.sh`, `shell-path` and `identity` last, so a
-  partial fill is a miss. A mismatched identity, failed copy or incomplete closure makes
-  `run` exec `nix develop .#web -c ...` instead. Bump the key's format version when changing
-  the cached representation or restore semantics.
+  `fractal-web-shell3-<os>-<source-and-web-lock-inputs-digest>`.
+  `scripts/ci-web-shell key` combines `hashFiles` of `nix/web-shell.nix`,
+  `nix/web-shell-inputs.json`, `scripts/ci-web-shell` and `scripts/ci-web-shell-inputs.jq`
+  with a canonical jq projection of the declared inputs' transitive lock graph and system.
+  `web-shell-inputs.json` declares the root inputs once; the projection resolves follows,
+  includes locked source identities and edges, and rejects malformed references or cycles.
+  Root Rust inputs and unrelated `flake.nix` edits do not invalidate the entry.
+  No Nix evaluation, input fetch or IFD runs during key computation or cache-hit lookup.
+  Both publishers and consumers use the same exact key, with no prefix restoration.
+  `run` requires matching `cache-key` metadata and complete identity/environment records,
+  copies the closure into the store (`--no-check-sigs`) and sources `print-dev-env`.
+  Missing/mismatched metadata or a failed copy falls back to `nix develop .#web -c ...`.
+  Protected-main upkeep restores the exact entry and evaluates the current drvPath before
+  saving. A different drvPath for an existing key fails loudly, naming both paths and
+  requiring the missing path/input to be added to the hashed set and the format bumped.
+  The shell imports no repository source beyond its hashed definition: its upstream
+  Buck capability IFD reads immutable effect-utils/dependency sources covered by the lock
+  projection, not this checkout. Removing that upstream IFD is independent of cache lookup.
   Trust: the restored entry supplies store paths and a shell script that the job executes.
   Only protected-main upkeep's `warm-fractal-web` fills the main-scoped entry. Pull requests
   and merge groups restore that exact entry when available and never publish shell copies.
@@ -681,9 +687,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
-`scripts/ci-web-shell-test`, run after Nix setup in web execution, evaluates dependency-free
-fixture derivations to prove Rust-only edits preserve the key and transitive web-toolchain
-changes invalidate it. Each fractal-web job starts with one runner identity line containing
+`scripts/ci-web-shell-test`, run in web execution, uses cheap lock/source fixtures to prove
+Rust-only flake and lock changes preserve the key while web input changes invalidate it.
+It also enforces the shell's declared argument/import/file-read boundary and upkeep's
+same-key derivation invariant. Each fractal-web job starts with one runner identity line containing
 CPU model, available core count, runner name and region when exposed by the environment
 (`unknown` otherwise).
 
