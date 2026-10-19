@@ -12,6 +12,7 @@ import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { committedTranscriptHistory } from './story-play'
 
 const now = Date.parse('2026-01-15T12:30:00Z')
 const minute = (index: number) => new Date(Date.parse('2026-01-15T12:00:00Z') + index * 60_000).toISOString()
@@ -126,7 +127,7 @@ export const OwnSendFollows: Story = { tags: ['critical'], render: args => <OwnS
   const canvas = within(canvasElement)
   // This play starts with a reader in older history, so reveal the deliberately deferred turns first.
   await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
-  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < historyTurns.length) throw new Error('History not committed'); return found })
+  const viewport = await committedTranscriptHistory(canvasElement, historyTurns.length)
   const jump = canvas.getByText('New messages ↓')
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   // The reader scrolls up into history.

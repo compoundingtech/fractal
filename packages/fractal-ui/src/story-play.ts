@@ -1,5 +1,5 @@
 /** Shared Storybook play helpers for kit stories. */
-import { expect, waitFor } from 'storybook/test'
+import { expect, waitFor, within } from 'storybook/test'
 
 /**
  * The anchor's tooltip, resolved through the anchor's own aria-describedby and asserted to have
@@ -16,4 +16,25 @@ export async function tooltipFor(anchor: HTMLElement, name: string): Promise<HTM
     expect(tooltip).toBeVisible()
     return tooltip
   })
+}
+
+/** Await the final progressive-history commit, not a wall-clock budget for mounting its batches. */
+export async function committedTranscriptHistory(canvasElement: HTMLElement, expectedTurns: number): Promise<HTMLElement> {
+  const canvas = within(canvasElement)
+  const controls = canvas.getByTestId('transcript-history-controls')
+  await new Promise<void>(resolve => {
+    const complete = () => {
+      if (controls.dataset.state !== 'complete') return
+      observer.disconnect()
+      resolve()
+    }
+    const observer = new MutationObserver(complete)
+    observer.observe(controls, { attributes: true, attributeFilter: ['data-state'] })
+    // Also handle a final commit that preceded observer registration.
+    complete()
+  })
+  await expect(controls).toHaveAttribute('aria-busy', 'false')
+  const viewport = canvas.getByTestId('transcript-scroll')
+  await expect(viewport.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(expectedTurns)
+  return viewport
 }
