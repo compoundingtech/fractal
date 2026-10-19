@@ -202,6 +202,7 @@ pub mod summary_list;
     )
 )]
 pub mod attention_ivm;
+pub mod decision_attention;
 pub mod backup;
 pub mod checkpoint_rules;
 pub mod harness_questions;

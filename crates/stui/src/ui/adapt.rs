@@ -423,6 +423,17 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                         images: Vec::new(),
                     },
                 ),
+                "decision" => {
+                    let decision = item.decision.as_ref()?;
+                    (
+                        Tier::Stopped,
+                        AttentionKind::Decision {
+                            state: decision.state.clone(),
+                            source: decision.decision_id.clone(),
+                            question: item.detail.clone(),
+                        },
+                    )
+                }
                 // A prompt the seat's harness shows and waits on. Claude's permission prompts
                 // can be answered here; the others are answered in the seat's terminal.
                 "harness-prompt" => (
@@ -495,6 +506,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                     AttentionKind::Request { from_id, .. } if from_id.starts_with("agent/") => {
                         Some(from_id.clone())
                     }
+                    AttentionKind::Decision { .. } => item.requester_id.clone(),
                     AttentionKind::Update { .. } => item
                         .requester_id
                         .clone()

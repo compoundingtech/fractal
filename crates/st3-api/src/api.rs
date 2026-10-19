@@ -4009,20 +4009,23 @@ fn insert_attention_target_states(
 fn client_attention_resources(
     store: &Store,
     person: Option<&str>,
-    _history: bool,
+    history: bool,
 ) -> anyhow::Result<Vec<Value>> {
-    client_attention_resources_at(store, person, _history, client_now_ms())
+    client_attention_resources_at(store, person, history, client_now_ms())
 }
 
 pub fn client_attention_resources_at(
     store: &Store,
     person: Option<&str>,
-    _history: bool,
+    history: bool,
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    let current = crate::performance::task("attention_collection/snapshot", || {
+    let mut current = crate::performance::task("attention_collection/snapshot", || {
         store.attention_snapshot(person, at_unix_ms)
     })?;
+    if history {
+        current.extend(store.decision_attention_history(person)?);
+    }
     client_attention_resources_from_items(store, current)
 }
 
@@ -4094,6 +4097,30 @@ fn client_attention_resources_from_items(
             resource["revision"] = source["revision"].clone();
             resource["custom_form"] = source["attention"]["reply"].clone();
             resource["action_parameters"] = json!({"custom.reply":{"target_id":item.subject,"registration":source["registration"],"revision":source["revision"],"episode":item.episode}});
+        }
+        if item.kind == "decision" {
+            if let Some(mut decision) = item.request {
+                if let Some(updated_at) = decision["updated_at_unix_ms"].as_u64() {
+                    resource["updated_at"] = json!(client_timestamp(u128::from(updated_at)));
+                }
+                resource["revision"] = decision["source_revision"].clone();
+                resource["state"] = json!(if decision["state"] == "pending" { "open" } else { "resolved" });
+                let actionable = decision["state"] == "pending";
+                resource["operational"] = json!({
+                    "layer": if actionable { "current" } else { "history" },
+                    "actionable": actionable,
+                    "reasons": if decision["source_conflict"] == true { vec!["source-conflict"] }
+                        else if actionable { Vec::<&str>::new() } else { vec!["source-not-pending"] }
+                });
+                if decision["answer_id"].is_string() {
+                    decision["answer_link"] = json!(format!(
+                        "/v1/client/attention/{id}?history=true"
+                    ));
+                }
+                resource["decision"] = decision;
+            }
+            resources.push(resource);
+            continue;
         }
         if item.kind == "person-step" {
             resource["action_parameters"] =

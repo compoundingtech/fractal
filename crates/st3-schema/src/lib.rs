@@ -5,6 +5,7 @@ pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
 pub mod glasses;
+pub mod decision_attention;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
@@ -552,6 +553,9 @@ impl Registry {
         harness_questions::validate(kind, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
+        }
+        if kind == "decision.observed" {
+            decision_attention::validate(fields)?;
         }
         if kind == "terminal.launch-geometry" {
             for name in ["rows", "columns"] {
@@ -1255,6 +1259,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
 
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
+        (
+            "decision.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            Some("attention"),
+            false,
+            &[],
+        ),
         (
             "person.delegation-set",
             &["person"],
@@ -2661,6 +2674,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("host", required_string()),
             ("workspace", required_string()),
             ("repository", string()),
+        ],
+        "decision.observed" => &[
+            ("decision_id", required_reference_to(&["resource"])),
+            ("request_id", required_string()),
+            ("q", required_integer()),
+            ("source_sequence", required_integer()),
+            ("source_revision", required_string()),
+            ("person", required_reference_to(&["person"])),
+            ("decision_kind", required_enum(&["blocker", "refinement"])),
+            ("state", required_enum(&["pending", "gated", "answered", "moot", "undecidable"])),
+            ("answer_id", string()),
+            ("revived", required_boolean()),
+            ("activation", required_string()),
+            ("native_ask", object()),
         ],
         "harness.todo.observed" => &[
             ("harness", required_string()),
@@ -4390,6 +4417,7 @@ mod tests {
                 "checkpoint.verified",
                 "daemon.diagnostic",
                 "daemon.started",
+                "decision.observed",
                 "delivery.hold",
                 "doc.bound",
                 "eval.verdict",

@@ -830,6 +830,7 @@ export type Attention = ResourceHeader & {
   | "fault"
   | "harness-login"
   | "harness-prompt"
+  | "decision"
  | string);
   because?: string;
   blocked?: AttentionBlocked;
@@ -838,6 +839,7 @@ export type Attention = ResourceHeader & {
   custom_form?: {
 
 };
+  decision?: DecisionAttention;
   detail: string;
   episode?: string;
   fix?: {
@@ -1172,6 +1174,35 @@ export type CustomReplyParameters = {
   registration: string;
   revision: string;
   target_id: Id;
+};
+
+export type DecisionAttention = {
+  activation: string;
+  answer_id?: string;
+  answer_link?: string;
+  answer_source_revision?: string;
+  claim_id: string;
+  decision_id: Id;
+  decision_kind: "blocker" | "refinement";
+  native_ask?: DecisionNativeAsk;
+  native_asks: Array<DecisionNativeAsk>;
+  person: Id;
+  q: number;
+  request_id: string;
+  revived: boolean;
+  source_conflict: boolean;
+  source_revision: string;
+  source_sequence: number;
+  state: "pending" | "gated" | "answered" | "moot" | "undecidable";
+  updated_at_unix_ms: number;
+};
+
+export type DecisionNativeAsk = {
+  episode?: string;
+  key: string;
+  run?: MissionRunId;
+  status: string;
+  subject: StepRunId;
 };
 
 export type DecisionOption = {

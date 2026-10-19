@@ -264,6 +264,12 @@ pub enum AttentionKind {
         /// The images it carries, read from st through the ask.
         images: Vec<st3_conversation_ui::MailImage>,
     },
+    /// A source-owned decision; this projection never offers a person-step answer action.
+    Decision {
+        state: String,
+        source: String,
+        question: String,
+    },
     /// Information the person asked an agent for (`st work update`): it asks nothing, and it
     /// clears once they read it.
     Update {
@@ -293,6 +299,7 @@ impl AttentionKind {
             AttentionKind::Prompt { .. } => "prompt",
             AttentionKind::Login { .. } => "login",
             AttentionKind::Request { .. } => "request",
+            AttentionKind::Decision { .. } => "decision",
             AttentionKind::Update { .. } => "update",
         }
     }
