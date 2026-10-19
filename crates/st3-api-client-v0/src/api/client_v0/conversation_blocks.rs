@@ -6,8 +6,8 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use ring::aead;
 use std::io::Read as _;
 use std::sync::LazyLock;
-pub use st3_api::api::client_v0::conversation_blocks::*;
-pub use st3_api::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, legacy, prepare, prepare_one, read, read_slice, source};
+pub use st3_api_core::api::client_v0::conversation_blocks::*;
+pub use st3_api_core::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, legacy, prepare, prepare_one, read, read_slice, source};
 #[cfg(test)]
 mod conformance_tests;
 

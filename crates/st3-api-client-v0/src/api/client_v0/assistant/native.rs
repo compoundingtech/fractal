@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::PersonWorkStore;
 use super::*;
-pub use st3_api::api::client_v0::assistant::native::*;
+pub use st3_api_core::api::client_v0::assistant::native::*;
 
 pub async fn propose(State(state): State<AppState>, Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>, Json(request): Json<ActionRequest>) -> Result<Json<Value>, ApiError> {

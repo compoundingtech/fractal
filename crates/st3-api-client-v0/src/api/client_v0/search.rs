@@ -4,7 +4,7 @@ use crate::DeliveryStore;
 use super::*;
 use crate::conversation_search::{SearchEntry, SearchIndex};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-pub use st3_api::api::client_v0::search::*;
+pub use st3_api_core::api::client_v0::search::*;
 
 const REFRESH: Duration = Duration::from_secs(30);
 

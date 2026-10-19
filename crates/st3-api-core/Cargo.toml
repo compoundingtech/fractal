@@ -1,5 +1,5 @@
 [package]
-name = "st3-api"
+name = "st3-api-core"
 version = "0.1.0"
 edition = "2024"
 description = "the HTTP API: the daemon's routes, the client-v0 contract and the request-latency windows"
@@ -53,7 +53,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
-st3_api_self = { package = "st3-api", path = ".", features = ["test-support"] }
+st3_api_core_self = { package = "st3-api-core", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
 jsonschema = { version = "0.33", default-features = false }
