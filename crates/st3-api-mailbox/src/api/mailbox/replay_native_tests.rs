@@ -1,6 +1,8 @@
 use super::*;
 use st_drivers::{harness_events, harness_state};
 use std::sync::atomic::Ordering::SeqCst;
+use st3_api::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
+
 
 fn native_peer_process() -> std::process::Child {
     // Physical capture reads the peer's real /proc identity, not an unrelated
@@ -25,7 +27,7 @@ struct NativeReplay {
 impl NativeReplay {
     fn new(name: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let mut state = crate::api::tests::state(root.path());
+        let mut state = crate::api::tests_shared::state(root.path());
         state.store = Arc::new(Store::open_memory("node").unwrap());
         let subject = format!("agent/{name}");
         let intent = crate::graph::parse_intent(
