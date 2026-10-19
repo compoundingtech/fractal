@@ -1,4 +1,5 @@
 //! Person-owned arrangements use the shared register projection, never glass privacy or history folds.
+use crate::ArrangementsStore;
 use super::*;
 
 pub fn person(

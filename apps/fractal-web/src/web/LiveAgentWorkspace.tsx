@@ -3,6 +3,7 @@ import { sidebarRow } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
+import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
 import { retainPane, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
@@ -17,7 +18,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
 // Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
 import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
@@ -56,6 +57,7 @@ const LiveSidebarAgentRow = React.memo((props: {
   readonly agentRef: string
   readonly active: boolean
   readonly select: (ref: string) => void
+  readonly actions: SidebarActions
 }) => {
   const feed = useAgent(props.agentRef)
   const connection = useConnection()
@@ -64,7 +66,7 @@ const LiveSidebarAgentRow = React.memo((props: {
   const frozenAt = React.useContext(RosterFrozenAt)
   const item = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale }), [agent, stale])
   const onOpen = React.useCallback(() => props.select(props.agentRef), [props.select, props.agentRef])
-  return item === undefined ? null : <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} onOpen={onOpen} {...(stale && frozenAt !== undefined ? { now: frozenAt } : {})} />
+  return item === undefined ? null : <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} actions={props.actions} onOpen={onOpen} {...(stale && frozenAt !== undefined ? { now: frozenAt } : {})} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -77,9 +79,10 @@ const LiveSidebarTreeView = React.memo((props: {
   readonly query: string
   readonly revealKey: string
   readonly select: (ref: string) => void
+  readonly actions: SidebarActions
 }) => {
   const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
-    <LiveSidebarAgentRow agentRef={node.subject} active={props.current === node.subject} select={props.select} />, [props.current, props.select])
+    <LiveSidebarAgentRow agentRef={node.subject} active={props.current === node.subject} select={props.select} actions={props.actions} />, [props.current, props.select, props.actions])
   const renderFolderSignal = React.useCallback((folder: Exclude<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
     <FolderAttentionSignal folder={folder} refs={props.needsYou} />, [props.needsYou])
   return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={props.accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
@@ -262,6 +265,9 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
   const [diffOpen, setDiffOpen] = React.useState(false)
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
+  // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
+  const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
+  const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
   const terminalReasonId = React.useId()
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
@@ -408,7 +414,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         </div>
       </> : null}
       <RosterFrozenAt.Provider value={frozenAt}>
-        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} accessibleNames={accessibleNames} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} />
+        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} accessibleNames={accessibleNames} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} actions={sidebarActions} />
       </RosterFrozenAt.Provider>
     </nav>
     <footer {...stylex.props(styles.footer)}>
@@ -480,6 +486,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                   {toolDetail(openedTool, panelSize)}
                 </>
               ) : null}
+              {/* Always mounted: the theme portal host must exist before the sheet opens; contents render only while open. */}
+              <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
               {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400} actions={
                 <NarrowActionRow label="Agent actions">
                   {agentHeaderActions}

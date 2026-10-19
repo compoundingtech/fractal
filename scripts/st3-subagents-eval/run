@@ -336,9 +336,11 @@ def old_settings_capture(node, seat, checks):
     expect(not seat.claims(), "missing hooks nevertheless published a child")
     expect(not (ledger_path.parent / ".harness-subagents-published").exists(),
            "an empty publisher unexpectedly wrote its open/closed map")
-    parent = node.api("/v1/client/agents/" + seat.subject) or {}
-    expect(parent.get("harness_state") == "idle" and not parent.get("subagents"),
-           f"old-settings parent projection: {parent}")
+    # ready() waits for the stand-in, not for the driver's report: wait for the turn's end.
+    parent = until(lambda: (card if (card := node.api("/v1/client/agents/" + seat.subject))
+                            and card.get("harness_state") == "idle" else None),
+                   30, "the old-settings parent never became idle")
+    expect(not parent.get("subagents"), f"old-settings parent projection: {parent}")
     seat.control("finish", id="legacy-child", responses=[{"output": 1}])
     seat.applied()
     time.sleep(2)
