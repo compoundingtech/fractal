@@ -1,6 +1,8 @@
 # Sourced helper. Aggregate the team review from Small Talk into REVIEW and RL.
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # The review is delivered by message: reviewer(prx.rev)->sup(prx.sup) report + sup->requester verdict.
-ROOT="${CATALOG:-$PWD}"; R="$ROOT/rev"; SM="${ST_ROOT:?st2 eval must export ST_ROOT}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+ROOT="${CATALOG:-$PWD}"; R="$ROOT/rev"; SM="${FRACTAL_ROOT-${ST_ROOT:?st2 eval must export ST_ROOT}}"
 SUP_ID="${SUP_ID:-prx.sup}"; REVIEWER_ID="${REVIEWER_ID:-prx.rev}"; REQUESTER="${REQUESTER:-requester}"
 busdir(){ local id="$1" d; d="$(ls -d "$SM"/*."$id" "$SM/$id" 2>/dev/null | head -1)"; printf '%s\n' "${d:-$SM/$id}"; }
 gather(){ local out="" bd

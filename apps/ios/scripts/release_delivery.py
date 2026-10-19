@@ -120,14 +120,16 @@ def build_identity(args):
 
     The worker derives finer cache keys from these; the reconciler compares
     this digest so a changed toolchain or inherited public environment never
-    trusts an artifact built from other inputs. The worker overrides
-    EXPO_PUBLIC_ST3_BUILD from the revision, so an inherited value is not one.
+    trusts an artifact built from other inputs. The worker overrides both
+    EXPO_PUBLIC_FRACTAL_BUILD and EXPO_PUBLIC_ST3_BUILD from the revision, so
+    neither inherited value is an input.
     """
     identity = {
         "developer_dir": args.developer_dir,
         "tools": {name: shutil.which(name) for name in ("node", "pnpm", "pod")},
         "env": {key: value for key, value in sorted(os.environ.items())
-                if key.startswith("EXPO_PUBLIC_") and key != "EXPO_PUBLIC_ST3_BUILD"},
+                if key.startswith("EXPO_PUBLIC_")
+                and key not in ("EXPO_PUBLIC_FRACTAL_BUILD", "EXPO_PUBLIC_ST3_BUILD")},
         "pinned": DAILY_BUILD_ENV,
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -142,6 +144,7 @@ def build_release(args):
     inputs = json.loads(inputs_file.read_text()) if inputs_file.exists() else {}
     env = os.environ.copy()
     env.update(DAILY_BUILD_ENV, DEVELOPER_DIR=args.developer_dir,
+               EXPO_PUBLIC_FRACTAL_BUILD=args.commit[:12],
                EXPO_PUBLIC_ST3_BUILD=args.commit[:12], CI="1",
                LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8")
     # Metro inlines EXPO_PUBLIC_* values when it transforms each module, and

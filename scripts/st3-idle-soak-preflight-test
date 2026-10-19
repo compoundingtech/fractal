@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-JQ_BIN=${ST3_SOAK_JQ_BIN:-$(command -v jq)}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+JQ_BIN=${FRACTAL_SOAK_JQ_BIN-${ST3_SOAK_JQ_BIN:-$(command -v jq)}}
 preflight="$(dirname "$0")/st3-idle-soak-preflight"
 
 fixture() {
@@ -19,9 +21,10 @@ fixture() {
 
 check() {
   local expected=$1 evidence=$2 result status
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   if result=$(printf '%s\n' "$evidence" | \
-    ST3_IDLE_REPORT_LOG=/dev/stdin ST3_IDLE_REPORT_NOW_UNIX=240 \
-    ST3_IDLE_PREFLIGHT_START_UNIX=0 "$preflight"); then
+    FRACTAL_IDLE_REPORT_LOG=/dev/stdin ST3_IDLE_REPORT_LOG=/dev/stdin FRACTAL_IDLE_REPORT_NOW_UNIX=240 ST3_IDLE_REPORT_NOW_UNIX=240 \
+    FRACTAL_IDLE_PREFLIGHT_START_UNIX=0 ST3_IDLE_PREFLIGHT_START_UNIX=0 "$preflight"); then
     status=0
   else
     status=$?
