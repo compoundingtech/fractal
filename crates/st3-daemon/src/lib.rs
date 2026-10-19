@@ -11,7 +11,7 @@ pub use st3_kernel::{cli_print, cli_println};
 mod ci_test_paths;
 
 pub use st3_kernel::accounts;
-pub use st3_api::api;
+pub mod api;
 pub use st3_kernel::archive;
 pub mod attach_image;
 pub use st3_store::backup;
@@ -26,30 +26,30 @@ pub use st3_missions::{AdhocWorkStore, ArrangementsStore, CoordinationStore, Dec
 pub use st3_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore};
 pub use st3_attention::{AttentionListStore, AttentionSnapshotStore, AttentionStore, ClientSummaryStore, OwnerListsStore, PublishedListStore, PublishedViewsAttentionStore, SummaryListStore};
 pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
-pub use st3_api::claude_channel;
+pub use st3_api_mailbox::claude_channel;
 pub use st3_store::client;
 pub use st3_kernel::config;
 pub use st3_kernel::conversation_search;
-pub use st3_api::creation;
+pub use st3_api_mailbox::creation;
 pub use st3_reconcile::repositories;
 /// Answers the hooks an st3 seat's harness runs: `st driver-hook NAME`.
-pub use st3_api::delivery_hold;
+pub use st3_api_mailbox::delivery_hold;
 pub use st3_reconcile::delivery_presence;
 pub mod driver_hook;
 pub use st3_store::environment;
 pub use st3_kernel::evidence;
-pub use st3_api::subagent_sessions;
+pub use st3_api_mailbox::subagent_sessions;
 pub use st3_kernel::fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub use st3_store::silent;
 /// `st missions check`: run a mission file's exec gates once, now, the way a run would.
-pub use st3_api::gate_check;
+pub use st3_api_mailbox::gate_check;
 pub use st3_kernel::gate_kinds;
 pub use st3_kernel::gate_report;
 pub use st3_store::github_watch;
 pub use st3_missions::graph;
 pub use st3_reconcile::handoff;
-pub use st3_api::graph_watch_ivm;
+pub use st3_api_mailbox::graph_watch_ivm;
 pub use st3_kernel::harness_events;
 pub use st3_kernel::hooks;
 pub use st3_telemetry::incremental;
@@ -68,7 +68,7 @@ pub use st3_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub use st3_reconcile::native_seed;
 pub use st3_store::node_identity;
-pub use st3_api::objectives;
+pub use st3_api_mailbox::objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -113,7 +113,7 @@ pub use st3_reconcile::seat_snapshot;
 pub use st3_telemetry::telemetry;
 pub use smallclaims::task_cpu;
 #[cfg(any(test, feature = "test-support"))]
-pub use st3_api::test_support;
+pub mod test_support;
 #[cfg(test)]
 mod kernel_tests;
 #[cfg(test)]

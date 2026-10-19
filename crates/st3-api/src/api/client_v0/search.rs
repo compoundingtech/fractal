@@ -106,7 +106,7 @@ fn searchable_text(value: &Value, output: &mut String) {
 }
 
 /// A conversation considered in the original per-source budget order.
-struct Source {
+pub struct Source {
     id: String,
     owner: String,
     remote: Option<String>,

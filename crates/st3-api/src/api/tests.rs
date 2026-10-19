@@ -1789,23 +1789,7 @@ fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     );
 }
 
-pub fn state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("node").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "node".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-    }
-}
+pub use crate::api::tests_shared::state;
 
 #[test]
 fn doctor_distinguishes_no_fleet_from_explicitly_leaving_a_fleet() {
