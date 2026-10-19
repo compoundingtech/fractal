@@ -530,7 +530,7 @@ export const fractalWebStoreCache = {
 /**
  * The web lane's devShell closure and `print-dev-env` script (scripts/ci-web-shell), so the job
  * neither fetches and evaluates the flake's inputs nor builds the shell's local tools. The key names
- * every file `.#web` is built from; main upkeep fills it and a pull request that misses fills its own.
+ * every file `.#web` is built from; only protected-main upkeep fills this shared cache.
  */
 export const fractalWebShellEnv = { CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell' } as const
 export const fractalWebShellCache = {
@@ -628,11 +628,6 @@ export const fractalWebJobs = {
           'if-no-files-found': 'ignore',
         },
       },
-      // Only a pull request can read what it saves; merge groups wait for main upkeep's entry.
-      ...[
-        { name: 'Fill the web shell closure', shell: 'bash', run: 'bash scripts/ci-web-shell fill', env: fractalWebShellEnv },
-        { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
-      ].map((step) => ({ ...step, 'continue-on-error': true, if: "${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}" })),
     ],
   },
   'fractal-web': {
