@@ -779,6 +779,7 @@ export type AssistantScope =
   | "read.assistant.terminal"
   | "write.assistant.messages"
   | "write.assistant.custom-reply"
+  | "write.assistant.answers"
 ;
 
 export type AssistantSenderClass = "external-assistant";
@@ -2096,8 +2097,12 @@ export type PersonAnswerRecord = {
   answer?: PersonAnswer;
   answered_at_unix_ms: number;
   ask: Id;
+  assistant_grant_id?: Id;
+  assistant_owner?: PersonId;
+  assistant_session_actor?: string;
   evidence?: Array<Id>;
-  respondent: Id;
+  respondent: SenderRef;
+  sender_class?: string;
   status: "completed" | "cancelled";
   summary: string;
 };

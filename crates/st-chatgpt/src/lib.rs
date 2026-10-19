@@ -45,7 +45,7 @@ fn read_credential(path: &Path) -> io::Result<String> {
 const TOOLS: &[(&str, &str, bool)] = &[
     ("st_alerts_list", "List owner alert identifiers and counts.", true),
     ("st_alert_get", "Read one exact owner alert, including its episode and named answer options.", true),
-    ("st_alert_answer", "Propose one typed person-ask answer. Requires separate owner approval in st; retry identical arguments after approval.", false),
+    ("st_alert_answer", "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
     ("st_missions_list", "List mission metadata.", true),
     ("st_agents_list", "List agent metadata.", true),
     ("st_conversations_list", "Discover source-bounded conversation metadata and read handles without conversation content. Each value.items entry supplies agent_id and session_id for st_conversation_timeline and a read object containing all st_conversation_read arguments (null when the bounded current timeline page has no readable text handle; use timeline to continue). Pass read unchanged to st_conversation_read; use value.page.next_cursor to page this list. Pages fit max_response_bytes; an item that cannot fit alone is named in the error.", true),
@@ -53,7 +53,7 @@ const TOOLS: &[(&str, &str, bool)] = &[
     ("st_conversation_timeline", "Page bounded chat excerpts and revision-pinned read handles. Copy agent_id and session_id from st_conversations_list to select the discovered session; omit session_id only to select the current session. Pass each non-null value.items[].read object unchanged to st_conversation_read, and use value.page.next_cursor only to continue this timeline. Content may be sensitive.", true),
     ("st_conversation_search", "Search bounded plain conversation text snippets. Content may be sensitive.", true),
     ("st_conversation_read", "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from st_conversations_list or st_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
-    ("st_message_send", "Send one exact message to an owner-allowlisted agent, authorized by grant scope and the ChatGPT confirmation card.", false),
+    ("st_message_send", "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
