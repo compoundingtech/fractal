@@ -1,5 +1,6 @@
 import type {
   Agent,
+  Arrangement,
   Attention,
   Capabilities,
   ErrorEnvelope,
@@ -42,6 +43,8 @@ export interface RosterState {
   readonly agents: Agent[]
   readonly runtimes: Runtime[]
   readonly machines: Machine[]
+  /** Synthetic sidebar inventory; omitted inventories are empty. */
+  readonly arrangements?: Arrangement[]
   /** Agent display order. */
   readonly order: Id[]
   /** Captured historical resource versions; transport selects these by index, not response copies. */

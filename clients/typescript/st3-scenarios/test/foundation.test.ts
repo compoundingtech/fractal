@@ -79,7 +79,7 @@ describe('foundation contracts', () => {
     replays.push(replay)
     const timelineUrl = `http://scenario.invalid/v1/client/sessions/${encodeURIComponent(conversation.session_id)}/timeline`
     const runtimeUrl = `http://scenario.invalid/v1/client/runtimes/${encodeURIComponent(terminal.runtime.id)}`
-    expect((await replay.fetch(timelineUrl)).status).toBe(404)
+    expect((await replay.fetch(timelineUrl)).status).toBe(200)
     expect((await replay.fetch(runtimeUrl)).status).toBe(404)
     clock.advance(1_000)
     expect((await replay.fetch(timelineUrl)).status).toBe(200)

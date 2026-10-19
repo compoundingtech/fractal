@@ -844,7 +844,7 @@ pub fn with_authority<T>(
 mod tests {
     use super::*;
 
-    fn fixture_stats() -> pty_core::stats::StatsResult {
+pub fn fixture_stats() -> pty_core::stats::StatsResult {
         serde_json::from_value(json!({
             "name":"physical", "createdAt":"generation-1", "uptimeSeconds":1,
             "daemon":{"pid":100,"resources":null},

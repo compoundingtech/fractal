@@ -1,12 +1,10 @@
-//! Consumed replay input identity and dirty-pass read budgets under a pre-admitted lease.
-//! These exercise the production capture/retention reads, not physical process admission;
-//! native stream tests cover report authentication and replay repair itself.
+#![allow(unused_imports)]
 use super::*;
 use authority::ReplayProofInputs;
 use crate::mailbox::Authority;
 use smallclaims::sqlite::work::SqliteWorkScope;
 
-fn fixture(state: &AppState, name: &str) -> (Fence, NativeDeliveryPeer) {
+pub fn fixture(state: &AppState, name: &str) -> (Fence, NativeDeliveryPeer) {
     let subject = format!("agent/{name}");
     let intent = crate::graph::parse_intent(
         &format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; harness \"omp\" {{}} }}"),
@@ -38,11 +36,12 @@ fn fixture(state: &AppState, name: &str) -> (Fence, NativeDeliveryPeer) {
     (fence, peer)
 }
 
-fn state(root: &Path) -> AppState {
-    let mut state = crate::api::tests::state(root);
+pub fn state(root: &Path) -> AppState {
+    let mut state = crate::api::tests_shared::state(root);
     state.store = Arc::new(Store::open_memory("node").unwrap());
     state
 }
+
 
 #[test]
 fn every_replay_input_change_invalidates_equality_and_retention() {
@@ -195,7 +194,7 @@ fn indexed_episode_read_error_clears_consumed_proof() {
     assert!(proof.is_current(&state, &fence, &peer));
     // Break only the indexed episode lookup in this isolated file store.
     rusqlite::Connection::open(&database).unwrap()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h6a999ac25b12 owner=st3_api::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_subject_kind_accepted_index").unwrap();
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-ha4ded16608ea owner=st3_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_subject_kind_accepted_index").unwrap();
     assert!(state.store.mailbox_failure_episode(&fence, &authority::episode(&fence)).is_err());
     assert!(!proof.is_current(&state, &fence, &peer));
 }
@@ -228,7 +227,7 @@ fn revoked_lease_clears_proof_with_the_same_owner_identity() {
     let proof = authority::replay_proof_inputs(&state, &fence, &peer).unwrap();
     assert!(proof.is_current(&state, &fence, &peer));
     rusqlite::Connection::open(&database).unwrap().execute(
-        /* sqlite-large-value: allow-for-now lv-h966df164c498 owner=st3_api::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1 AND component=?2",
+        /* sqlite-large-value: allow-for-now lv-heb119eae22a2 owner=st3_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1 AND component=?2",
         rusqlite::params![fence.subject, fence.component],
     ).unwrap();
     assert_eq!(state.store.mailbox_lease_authority(&fence).unwrap(), Some(proof.lease_owner.clone()));
