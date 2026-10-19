@@ -145,7 +145,7 @@ export const syncVariants: VariantTable['sync'] = {
         capabilities: {
           ...live.state.capabilities,
           capabilities: live.state.capabilities.capabilities.map((row) =>
-            row.id === 'arrangements' ? { ...row, state: 'ungranted' } : row),
+            row.id === 'arrangements' || row.id === 'read.arrangements' ? { ...row, state: 'ungranted' } : row),
         },
       },
     }

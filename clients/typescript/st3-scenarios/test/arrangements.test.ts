@@ -51,7 +51,10 @@ describe('read-only sidebar arrangements', () => {
     decodeUnknownSync(Arrangement, 'strict')(detail)
     expect(detail).toEqual(sidebar)
     await expect(h.client.arrangementsGet(owner.slice('person/'.length), '00000000-0000-7000-8000-000000000000')).rejects.toMatchObject({ status: 404, response: { code: 'not-found' } })
-    expect((await h.client.arrangementsList(h.world.cast.people[1]!.id)).value.items).toEqual([])
+    const other = h.world.cast.people[1]!.id
+    const forbidden = { status: 403, response: { code: 'forbidden', message: 'cross-person arrangements require delegated authority', retryable: false } }
+    await expect(h.client.arrangementsList(other)).rejects.toMatchObject(forbidden)
+    await expect(h.client.arrangementsGet(other.slice('person/'.length), sidebar.id.split('/').at(-1)!)).rejects.toMatchObject(forbidden)
   })
 
   it('filters owner-wide and exact subscriptions and emits no folder changes', async () => {
@@ -69,7 +72,11 @@ describe('read-only sidebar arrangements', () => {
     stream.subscribeArrangements('missing', owner, 1, `arrangement/${owner}/00000000-0000-7000-8000-000000000000`)
     h.clock.advance(0)
     for (const id of ['owner', 'exact']) expect(frames.find((frame) => frame.kind === 'snapshot' && frame.id === id)).toMatchObject({ items: [sidebar] })
-    for (const id of ['other', 'missing']) expect(frames.find((frame) => frame.kind === 'snapshot' && frame.id === id)).toMatchObject({ items: [] })
+    expect(frames.find((frame) => frame.kind === 'snapshot' && frame.id === 'missing')).toMatchObject({ items: [] })
+    expect(frames.find((frame) => frame.id === 'other')).toMatchObject({
+      kind: 'error', collection: 'arrangements', code: 'forbidden',
+      message: 'cross-person arrangements require delegated authority', retryable: false,
+    })
     h.clock.advance(20_000)
     expect(frames.some((frame) => frame.kind === 'changes' && ['owner', 'exact', 'other', 'missing'].includes(frame.id ?? ''))).toBe(false)
     expect(h.replay.served()).toContain('roster')
@@ -80,7 +87,33 @@ describe('read-only sidebar arrangements', () => {
     const h = setup(loadWorld('failed-sync-arrangements-absent', { now: ANCHOR_MS }))
     const discovery = (await h.client.capabilities()).value
     expect(discovery.capabilities).toContainEqual({ id: 'arrangements', version: 1, state: 'ungranted' })
+    expect(discovery.capabilities).toContainEqual({ id: 'read.arrangements', version: 0, state: 'ungranted' })
     expect(discovery.capabilities.some((row) => row.id === 'arrangements' && row.version === 1 && row.state === 'granted')).toBe(false)
+    // Same guard as fractal-web requireArrangements: feature id, exact version and granted state.
+    const requireArrangements = () => {
+      if (!discovery.capabilities.some((row) => row.id === 'arrangements' && row.version === 1 && row.state === 'granted')) {
+        throw new TypeError('Granted arrangements capability version 1 is required; older pairings may need renewal')
+      }
+    }
+    expect(requireArrangements).toThrow(TypeError)
+    const owner = h.world.cast.people[0]!.id
+    const forbidden = { status: 403, response: { code: 'forbidden',
+      message: 'the authenticated client session is not granted `read.arrangements`', retryable: false } }
+    await expect(h.client.arrangementsList(owner)).rejects.toMatchObject(forbidden)
+    await expect(h.client.arrangementsGet(owner.slice('person/'.length), '00000000-0000-7000-8000-000000000000')).rejects.toMatchObject(forbidden)
+    const frames: CollectionFrame[] = []
+    const stream = await h.client.collectionStream({ socket: h.replay.socket, onFrame: (frame) => {
+      decodeUnknownSync(Frame, 'strict')(frame)
+      frames.push(frame)
+    } })
+    stream.subscribeArrangements('denied', owner, 1)
+    h.clock.advance(0)
+    expect(frames.find((frame) => frame.id === 'denied')).toMatchObject({
+      kind: 'error', collection: 'arrangements', code: 'forbidden',
+      message: forbidden.response.message, retryable: false,
+    })
+    expect(frames.some((frame) => frame.kind === 'snapshot')).toBe(false)
+    stream.close()
   })
 
   it('rejects arrangement edits instead of accepting replay writes', async () => {
@@ -118,5 +151,13 @@ describe('read-only sidebar arrangements', () => {
     expect(Object.keys(sidebar.body.folders)).toHaveLength(57)
     expect(Object.keys(sidebar.body.placements)).toHaveLength(1_000)
     expect(Object.values(sidebar.body.folders).some((folder) => folder.position.value.parent !== null && sidebar.body.folders[folder.position.value.parent]!.position.value.parent !== null)).toBe(true)
+    const counts = new Map<string, number>()
+    const count = (revision: string): void => { counts.set(revision, (counts.get(revision) ?? 0) + 1) }
+    count(sidebar.body.name.revision) // arrangement creation
+    for (const folder of Object.values(sidebar.body.folders)) count(folder.name.revision) // folder.create sets both registers
+    for (const placement of Object.values(sidebar.body.placements)) count(placement.revision)
+    expect(counts.size).toBe(5)
+    expect(Math.max(...counts.values())).toBeLessThanOrEqual(256)
+    expect(sidebar.revision).toBe('arrangement-5')
   })
 })

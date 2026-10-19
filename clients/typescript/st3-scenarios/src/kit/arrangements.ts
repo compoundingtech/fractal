@@ -34,7 +34,9 @@ export const sidebarArrangement = (ctx: FactoryContext, agents: readonly Agent[]
       return roles.map((role, index) => folder(`group/${group}/${role}`, role, parent, index))
     })
     agents.forEach((agent, index) => {
-      placements[agent.id] = { revision, value: { folder: destinations[Math.floor(index / 6) % 8]![index % 6]!, key: key(Math.floor(index / 48)) } }
+      // Creation/folders are one claim; placement claims stay well below 1,024 operations.
+      const placementRevision = `arrangement-${2 + Math.floor(index / 256)}`
+      placements[agent.id] = { revision: placementRevision, value: { folder: destinations[Math.floor(index / 6) % 8]![index % 6]!, key: key(Math.floor(index / 48)) } }
     })
   } else {
     const destinations = [folder('implementation', 'Implementation', project, 0), folder('review', 'Review', project, 1)]
@@ -45,7 +47,7 @@ export const sidebarArrangement = (ctx: FactoryContext, agents: readonly Agent[]
   return {
     id: `arrangement/${ctx.cast.people[0]!.id}/${uuid(ctx, 'sidebar')}`,
     kind: 'arrangement', owner: ctx.cast.people[0]!.id, deleted: false,
-    revision, updated_at: ctx.t.at(-60_000),
+    revision: huge ? `arrangement-${1 + Math.ceil(agents.length / 256)}` : revision, updated_at: ctx.t.at(-60_000),
     body: { version: 1, name: { revision, value: 'Sidebar' }, folders, placements },
   }
 }

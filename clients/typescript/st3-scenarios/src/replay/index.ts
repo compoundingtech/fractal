@@ -129,6 +129,11 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     }
     if (person === undefined) return { code: 'validation-failed', message: 'arrangements require an explicit person/NAME owner', status: 400 }
     if (!/^person\/[^/\s]+$/.test(person)) return { code: 'validation-failed', message: 'arrangement owner must be person/NAME', status: 400 }
+    const sessionActor = state('sync').capabilities?.session_actor
+    const authority = sessionActor?.split('/session/')[0]
+    if (authority?.startsWith('person/') && authority !== person) {
+      return { code: 'forbidden', message: 'cross-person arrangements require delegated authority', status: 403 }
+    }
     if (subject !== undefined) {
       if (!/^arrangement\/person\/[^/\s]+\/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(subject)) {
         return { code: 'validation-failed', message: 'invalid arrangement subject', status: 400 }

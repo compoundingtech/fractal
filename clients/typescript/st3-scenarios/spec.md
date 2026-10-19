@@ -238,6 +238,8 @@ Healthy worlds advertise capability `arrangements` version 1 with `state: 'grant
 `capabilities.session_actor` (no extra capability-row field). They do not grant
 `control.arrangements`. An empty inventory is a supported empty state, not an absent capability.
 The inventory is read-only: no arrangement timeline events or simulated edits are introduced.
+List, detail and subscription requests for another person are forbidden for person-authority
+sessions, matching the daemon's delegated-authority boundary rather than returning empty data.
 
 All arrangements are synthetic, including those in worlds with recorded conversations and
 terminals. Their provenance stays with the synthetic roster, not the recording. Arrangement
@@ -248,6 +250,8 @@ stable labels; UUIDv7 generation uses a forked seeded generator and the fixed an
 Resource `updated_at` is authored at offset -60,000 ms and participates in normal timestamp rebasing.
 Register revision identifiers are provenance, not timestamps to rebase. No wall-clock UUID
 generation or live daemon claim is passed off as synthetic provenance.
+Huge's initial name and folders share one synthetic claim revision; placements use subsequent
+claim revisions in batches of at most 256 operations, below the daemon's 1,024-operation limit.
 
 The catalog's default inventory is:
 
@@ -268,9 +272,10 @@ The catalog's default inventory is:
 | `huge` | One live `Sidebar` arrangement with 57 folders: one project root, eight `Migration` group children, and six role grandchildren per group. All 1,000 existing roster agents are placed; bounded folder structure does not truncate roster membership. |
 | `unicode` | Empty. |
 
-The `sync.arrangements-absent` variant leaves `read.arrangements` granted but advertises the
-`arrangements` feature as ungranted. It leaves roster inventory unchanged, so consumers can prove
-that discovery, rather than missing data, disables the optional arrangement surface.
+The `sync.arrangements-absent` variant advertises both `read.arrangements` and the
+`arrangements` feature as ungranted, matching the daemon's derivation of the feature from
+the scope grant. Inventory is unchanged; discovery disables the optional surface, and
+direct arrangement list, detail and subscription reads are forbidden.
 
 ### Slice selection and variants
 
@@ -882,7 +887,7 @@ client-v0 schema; until then they are excluded from committed fixtures and the g
 | `quiet` (pending PR A) | Live, then `silence {15000}` | `Stale{Quiet{lastFrameAt}}`; at 25 s close and reconnect |
 | `progress` (pending PR B) | `progress` queued → resolving → routing{host} → reading{done,total} | `Progress{stage, elapsedMs, stageSince, reportedAt, host?, done?, total?}` per stage |
 | `progress-absent` | no `sync-status.v1` capability, slow first snapshot | `Requested` → `Live`; no invented stage; quiet detection off |
-| `arrangements-absent` | `arrangements` version 1 is advertised ungranted; `read.arrangements` version 0 stays granted for `session_actor` | Transport remains `Live`; consumers omit the optional arrangement surface. Inventory is unchanged. |
+| `arrangements-absent` | `arrangements` version 1 and `read.arrangements` version 0 are both advertised ungranted | Transport remains `Live`; consumers omit the optional arrangement surface. Direct arrangement reads are forbidden. Inventory is unchanged. |
 
 In every `Failed{Server}` expectation, `code` and `message` equal the triggering envelope's
 `code` and `message`. The SDK never replaces a server code.
@@ -1037,7 +1042,7 @@ Edge states:
 | `loading` | Discovery succeeds; every first reply is held. |
 | `unknown-fields` | Future enum values, extra keys, unknown resource and entry kinds. Decoded tolerant; strict decoding fails exactly at the declared paths. |
 | `failed-sync-<cause>` | One world per failed or stale [sync matrix](#sync-matrix) row that is not pending and needs no local condition: `socket-dropped`, `open-fail`, `resync-coded`, `forbidden`, `non-client-response`, `subscription-error`, `subscription-limit-legacy`, `capability-absent`, `rate-limited`, `cursor-gap`, `page-cursor-expired`. Each uses the authored synthetic refactor cast and slices, not the recording-adopted narrative. Pending rows become worlds when their frames land. |
-| `failed-sync-arrangements-absent` | Healthy transport with the `arrangements` feature advertised ungranted and `read.arrangements` still granted. Uses the authored synthetic refactor cast with an empty arrangement inventory; consumers omit the optional arrangement surface. |
+| `failed-sync-arrangements-absent` | Healthy transport with the `arrangements` feature and `read.arrangements` scope both advertised ungranted. Uses the authored synthetic refactor cast with an empty arrangement inventory; consumers omit the optional surface and direct arrangement reads are forbidden. |
 | `replication-diverged` | Healthy transport; page responses carry a `diverged` sync notice for one peer. |
 | `huge` | Full 1,000-agent roster across many hosts and missions in the normal slice; the first cast agent has 10,000 logical turns (40,000 entries). Commits the newest 400 turns (1,600 entries), including a 50-entry live window; scripted replay pages reach older entries generated deterministically from seed metadata. Native readers see committed pages only. |
 | `unicode` | RTL, CJK, emoji, combining marks, zero-width joiners, 200-character names and long paths in every slice. |
