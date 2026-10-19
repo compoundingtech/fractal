@@ -2142,11 +2142,19 @@ async fn a_frozen_member_is_not_reported_up() {
         &[&a, &b],
     )
     .await;
+    // What a says b has not received: what its last measurement found b lacked, plus what a has
+    // written since. While b is up and in sync that is nothing, so the check below cannot pass
+    // for a member reported up.
+    let unsent = |peer: &Value| {
+        peer["sync"]["local_only_envelopes"].as_u64().unwrap_or(0)
+            + peer["sync"]["added_since_measured_envelopes"].as_u64().unwrap_or(0)
+    };
     wait_until("a measures b in sync", 60, || async {
         let peer = peer_status(&a, "b");
         peer["status"] == "up"
             && peer["sync"]["peer_only_envelopes"] == 0
             && peer["sync"]["local_only_envelopes"] == 0
+            && unsent(&peer) == 0
     })
     .await;
 
@@ -2167,12 +2175,9 @@ async fn a_frozen_member_is_not_reported_up() {
     );
     assert!(peer["last_failure_at_unix_ms"].is_u64(), "{peer}");
     assert_eq!(peer["sync"]["stale"], true, "{peer}");
-    assert!(
-        peer["sync"]["added_since_measured_envelopes"]
-            .as_u64()
-            .is_some_and(|added| added >= 20),
-        "{peer}"
-    );
+    // An exchange that b answered just before it froze can still be measured once its response
+    // arrives, counting the first notes as local-only rather than added since: count both.
+    assert!(unsent(&peer) >= 20, "{peer}");
     let text = a.st_ok(&["replication", "status"]);
     assert!(text.contains("peer\tb\tlast-seen"), "{text}");
     assert!(text.contains("last attempt failed"), "{text}");
