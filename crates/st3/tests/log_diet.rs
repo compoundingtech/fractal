@@ -32,6 +32,7 @@
 //! Inside an st3 harness, unset `ST_AGENT` first: the local API binds a caller to the agent in
 //! its process ancestry, and these drivers write as their own agents.
 
+use st3::MissionsStore;
 use st3::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

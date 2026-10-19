@@ -1,6 +1,7 @@
 //! Attention windows served from the published attention list: each session sees exactly what
 //! the full computation shows it at the publication's cut, reads never fold the list, and a
 //! window before the first publication is a retryable refusal, never an empty list.
+use crate::OwnerListsStore;
 use super::*;
 
 fn custom(state: &AppState, subject: &str, person: &str) {

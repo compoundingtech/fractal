@@ -1,16 +1,17 @@
 //! The part of `store::adhoc_work` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::MissionsStore;
 use super::*;
 use crate::model::{WorkAcknowledgeRequest, WorkHandoffRequest, WorkStartRequest};
-pub use st3_store::store::adhoc_work::*;
-pub use st3_store::store::adhoc_work::{enrich_handoff, is_adhoc, pending_handoff, project_start, transfer_tx, validate_recipient, validate_retry};
+pub use st3_missions::store::adhoc_work::*;
+pub use st3_missions::store::adhoc_work::{enrich_handoff, is_adhoc, pending_handoff, project_start, transfer_tx, validate_recipient, validate_retry};
 
 #[cfg(test)]
 mod tests {
     use super::super::tests::{exchange_from, receive_and_project};
     use super::*;
-    use st3_store::store::adhoc_work_tests_shared_seats::*;
-    use st3_store::store::adhoc_work_tests_shared_seats::{request};
+    use st3_missions::store::adhoc_work_tests_shared_seats::*;
+    use st3_missions::store::adhoc_work_tests_shared_seats::{request};
 
     #[test]
     fn handoff_replicates_and_each_transfer_requires_its_own_acknowledgment() {

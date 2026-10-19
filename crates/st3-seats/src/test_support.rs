@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_store::test_support::*;
+pub use st3_missions::test_support::*;
 pub use st3_secrets::test_support::*;
 use crate::RosterAdmissionStore;
 use std::sync::OnceLock;

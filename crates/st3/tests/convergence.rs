@@ -212,9 +212,28 @@ fn scratch_dir() -> tempfile::TempDir {
         && !REAL_DISK.with(std::cell::Cell::get)
         && let Some(directory) = tmpfs_scratch()
     {
-        return directory;
+        match scratch_headroom(directory.path()) {
+            Ok(()) => return directory,
+            Err(error) => eprintln!("convergence tmpfs refused: {error}; trying ordinary temp"),
+        }
     }
-    tempfile::tempdir().unwrap()
+    let directory = tempfile::tempdir().unwrap();
+    scratch_headroom(directory.path()).unwrap_or_else(|error| {
+        panic!("no convergence scratch device can admit a checkpoint proof: {error}")
+    });
+    directory
+}
+
+fn scratch_headroom(directory: &std::path::Path) -> anyhow::Result<()> {
+    let probe = directory.join("headroom-probe.sqlite3");
+    let connection = rusqlite::Connection::open(&probe)?;
+    connection.execute_batch("CREATE TABLE probe(x);")?;
+    drop(connection);
+    // The gate supplies C, J, F, the live reserve and margin from this real SQLite
+    // source. The extra 2 GiB covers the world's later stores and concurrent seeds.
+    let result = smallclaims::store::checkpoint_test_fixture_headroom(&probe, directory, 2 << 30);
+    std::fs::remove_file(&probe)?;
+    result
 }
 
 /// Where tmpfs scratch directories live, and what names them, so a test killed before it could
@@ -224,15 +243,17 @@ const TMPFS: &str = "/dev/shm";
 #[cfg(target_os = "linux")]
 const TMPFS_PREFIX: &str = "st3-convergence-";
 /// One world's stores peaked at 48 MiB (seed 377) and eight worlds at once at 295 MiB (du of the
-/// scratch directory, polled each second); the room required is far above that.
+/// scratch directory, polled each second). The gate admission probe adds this 2 GiB fixture room
+/// to its own calculated proof minimum before tmpfs may be used.
 #[cfg(target_os = "linux")]
 const TMPFS_ROOM_BYTES: u64 = 2 << 30;
 
 #[cfg(target_os = "linux")]
 fn tmpfs_scratch() -> Option<tempfile::TempDir> {
+    let tmpfs = std::env::var("ST3_CONVERGENCE_TMPFS_ROOT").unwrap_or_else(|_| TMPFS.into());
     static SWEPT: std::sync::Once = std::sync::Once::new();
     SWEPT.call_once(|| {
-        let Ok(entries) = std::fs::read_dir(TMPFS) else {
+        let Ok(entries) = std::fs::read_dir(&tmpfs) else {
             return;
         };
         for entry in entries.flatten() {
@@ -251,7 +272,7 @@ fn tmpfs_scratch() -> Option<tempfile::TempDir> {
             }
         }
     });
-    let path = std::ffi::CString::new(TMPFS).unwrap();
+    let path = std::ffi::CString::new(tmpfs.as_str()).ok()?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: `path` is NUL-terminated and `stats` is a statvfs the call fills in.
     if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
@@ -267,7 +288,7 @@ fn tmpfs_scratch() -> Option<tempfile::TempDir> {
     }
     tempfile::Builder::new()
         .prefix(TMPFS_PREFIX)
-        .tempdir_in(TMPFS)
+        .tempdir_in(tmpfs)
         .ok()
 }
 
@@ -569,6 +590,7 @@ impl World {
                 _ => TrimFault::BeforeFinish,
             };
             self.nodes[index].store.set_trim_chunk_envelopes(2);
+            self.nodes[index].store.set_trim_pause(std::time::Duration::ZERO);
             self.nodes[index].store.set_trim_fault(Some(fault));
             self.note(format!(
                 "{} will crash at {fault:?}",

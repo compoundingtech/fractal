@@ -528,7 +528,7 @@ mod replication_tests {
 
     #[test]
     fn receipt_before_replicated_observation_keeps_opener_and_observed_facts() {
-        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
         let source = Store::open_memory("observer").unwrap();
         let target = Store::open_memory("recorder").unwrap();
         source.bind_fleet(FLEET).unwrap();
@@ -571,7 +571,7 @@ mod replication_tests {
 
     #[test]
     fn resource_latest_converges_when_newer_envelopes_arrive_first() {
-        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
         let source = Store::open_memory("resource-source").unwrap();
         let target = Store::open_memory("resource-target").unwrap();
         source.bind_fleet(FLEET).unwrap();

@@ -13,25 +13,7 @@
 
 
 
-#[cfg(test)]
-mod registry_tests {
-    
 
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::sekrets_daemon::shared_tests_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::sekrets_daemon::shared_tests_seats::{entry};
-
-    
-    
-
-}
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod shared_tests_seats;
