@@ -18242,6 +18242,28 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
             Ok(Err(error)) => eprintln!("st3: local observation trim failed: {error:#}"),
             Err(error) => eprintln!("st3: local observation trim stopped: {error}"),
         }
+        // What these trims, checkpoints and response expiry freed goes back to the filesystem,
+        // one short write at a time so other writes run between them.
+        let mut released = 0;
+        loop {
+            let vacuum_store = store.clone();
+            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(pages)) => released += pages,
+                Ok(Err(error)) => {
+                    eprintln!("st3: giving free pages back failed: {error:#}");
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("st3: giving free pages back stopped: {error}");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if released > 0 {
+            eprintln!("st3: gave {released} free pages back to the filesystem");
+        }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
         match size_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
