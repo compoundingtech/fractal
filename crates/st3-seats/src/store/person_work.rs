@@ -500,6 +500,89 @@ mission "person-work" state="ready" {{
         );
     }
 
+    #[test]
+    fn assistant_answer_keeps_attribution_on_origin_and_ask_after_replay() {
+        let (store, origin, mut input) = fixture();
+        input.request = Some(gateway_decision());
+        let ask = store.ask_person(&input).unwrap();
+        let grant_id = "assistant-grant/projection-test";
+        let authorization = super::super::assistant_write::AssistantWriteAuthorization {
+            grant_subject: "custom/client/assistant-projection-test".into(),
+            actor: format!("assistant/chatgpt/session/{grant_id}"),
+            owner: "person/avery".into(),
+            policy_revision: 1,
+            scope: "write.assistant.answers".into(),
+            recipient: None,
+        };
+        store.append_claim(&ClaimInput {
+            subject: authorization.grant_subject.clone(),
+            kind: "custom.client.assistant.v1.granted".into(),
+            actor: Some("person/avery".into()),
+            fields: serde_json::from_value(json!({
+                "grant_id": grant_id, "principal": "assistant/chatgpt",
+                "session_actor": authorization.actor, "issuer": authorization.owner,
+                "disclosure_consent": true, "policy_revision": 1,
+                "expires_at_unix_ms": (now_ms() + 60_000) as u64,
+                "scopes": ["write.assistant.answers"]
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let item = store.attention_items(Some("person/avery")).unwrap()
+            .into_iter().find(|item| item.subject == ask.subject).unwrap();
+        let response = PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
+            summary: String::new(), evidence: vec![], episode: Some(item.episode),
+            idempotency_key: "assistant-projection-answer".into(),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+        };
+        store.finish_person_step_authorized(&response, false, Some(&authorization)).unwrap();
+        // The answer is stored under the assistant principal, so a retry with the same key must
+        // match that stored actor and return the stored view, not write a second answer.
+        store.finish_person_step_authorized(&response, false, Some(&authorization)).unwrap();
+        assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().person_answers.len(), 1);
+        let check = |store: &Store| {
+            for subject in [&origin.subject, &ask.subject] {
+                let view = store.step_run(subject).unwrap().unwrap();
+                let answer = &view.person_answers[0];
+                assert_eq!(answer.respondent, "assistant/chatgpt");
+                assert_eq!(answer.assistant_owner.as_deref(), Some(authorization.owner.as_str()));
+                assert_eq!(answer.assistant_session_actor.as_deref(), Some(authorization.actor.as_str()));
+                assert_eq!(answer.sender_class.as_deref(), Some("external-assistant"));
+                assert_eq!(answer.assistant_grant_id.as_deref(), Some(grant_id));
+                let json = serde_json::to_value(&view).unwrap();
+                assert_eq!(json["person_answers"][0]["sender_class"], "external-assistant");
+                assert_eq!(json["person_answers"][0]["assistant_grant_id"], grant_id);
+                if subject == &origin.subject {
+                    assert!(view.constraints.iter().any(|constraint|
+                        constraint.starts_with("Person response:")
+                            && constraint.contains("sender_class: external-assistant")
+                            && constraint.contains(&format!("assistant_grant_id: {grant_id}"))));
+                }
+            }
+        };
+        check(&store);
+        store.replay_replication_graph().unwrap();
+        check(&store);
+        input.step = None;
+        input.new_run = Some("standalone-notification".into());
+        input.idempotency_key = "standalone-notification".into();
+        let standalone = store.ask_person(&input).unwrap();
+        let item = store.attention_items(Some("person/avery")).unwrap()
+            .into_iter().find(|item| item.subject == standalone.subject).unwrap();
+        store.finish_person_step_authorized(&PersonStepResponse {
+            delegation: None, subject: standalone.subject, actor: "person/avery".into(),
+            summary: String::new(), evidence: vec![], episode: Some(item.episode),
+            idempotency_key: "standalone-notification-answer".into(),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+        }, false, Some(&authorization)).unwrap();
+        let notification = store.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
+            .find(|message| message.assistant_grant_id.as_deref() == Some(grant_id)).unwrap();
+        let claim = store.latest_claim(&notification.subject, Some("message.sent")).unwrap().unwrap();
+        super::super::assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), &claim.body["fields"]).unwrap();
+        assert!(matches!(classify_replicated_claim_with_registry(&claim, st3_schema::registry()).unwrap(),
+            ReplicatedClaimAdmission::Valid));
+    }
+
     /// A structured ask shows its request to the person, takes only a named answer, and gives
     /// the asker that answer as data when its step resumes.
     #[test]

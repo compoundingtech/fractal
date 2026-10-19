@@ -8,12 +8,12 @@ fn synthetic_source() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h525da7cafce5 owner=st3_store::store::actual_state_sorter_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+            /* sqlite-large-value: allow-for-now lv-hefa42c86e648 owner=st3_store::store::actual_state_sorter_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
          CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT,
              id TEXT UNIQUE, batch_id TEXT, subject TEXT, kind TEXT, body TEXT,
              accepted_at_unix_ms TEXT);
          CREATE INDEX claims_subject_kind_index ON claims(subject, kind, store_index);
-         CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+         CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);
          INSERT INTO batches VALUES ('batch/alder', 'alder', 7), ('batch/birch', 'birch', 1);",
         )
