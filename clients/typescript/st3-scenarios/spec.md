@@ -744,7 +744,7 @@ over the event union (a `never` check), and each row has a test through the real
 | roster, details, attention | `changes` | Updates the state. For every open subscription whose filtered, limited window changes: one `changes` frame with `upserts`, `removes` (including rows leaving the window), the complete new `order`, `has_more` and a new fence. Unaffected subscriptions get nothing. |
 | conversation | `entries` | One `conversation` frame with `replace: false` and those entries, without `has_more`, to subscribers of that agent or session. |
 | conversation | `replace` | One `conversation` frame with `replace: true`, the newest page (`page_size`) and `has_more`. |
-| conversation | `thread-create {thread}` / `thread-remove {agent}` | Introduces / removes full thread membership. Creating an existing agent sends ready subscribers a replacement frame and retains their agent binding across session changes; pending first replies obey hold/loading policies. Removal sends `not-found` to every matching subscriber and later reads. |
+| conversation | `thread-create {thread}` / `thread-remove {agent}` | Introduces / removes full thread membership. A follower that already received an empty pending-thread snapshot receives creation items as a delta (no frame for empty creation), then later entries. Creating an existing agent otherwise sends ready subscribers a replacement frame and retains their agent binding across session changes; pending first replies obey hold/loading policies. Removal sends `not-found` to every matching subscriber and later reads. |
 | terminal | `terminal-create {record}` / `terminal-remove {terminal}` | Introduces / removes full terminal membership. Runtime reads, attaches and subscriptions see new metadata. Existing ready subscriptions get the replacement screen for an unchanged incarnation, `stale-fence` for a changed incarnation, or `terminal-ended` for an exited runtime. Removal sends `not-found` even to held/loading subscriptions, and later reads/attaches. |
 | terminal | `screen` | One `screen` frame with the `TerminalScreen` to subscribers holding the current incarnation. |
 | terminal | `unavailable` | An `error` frame, code `terminal-unavailable`, `retryable: true`. A fresh `terminal.attach` returns the current incarnation and a capability, and a subscribe with it resumes with the current screen. A subscribe that reuses the earlier lease also resumes while the lease is valid (a separate protocol test; the SDK always attaches afresh). |
@@ -766,6 +766,18 @@ over the event union (a `never` check), and each row has a test through the real
 Events marked "same activation" are rejected by the emitter until the client-v0 schema defines
 those frames, so no scenario sends a frame the strict decode gate cannot check.
 
+A thread missing from the current conversation fold is still followable when the current roster
+contains its agent and an associated running agent runtime. Resolve agent selectors and full or
+prefixless session selectors through the roster's `current_session_id`: it is the scenario's
+published managed identity (the server derives this identity from agent plus incarnation, falling
+back to runtime id), not a lookup in future thread events or the cast. An unrelated session id
+remains terminal `not-found`, even when that agent will later create a thread. The first reply is
+`conversation`, `replace: true`, `items: []`, `has_more: false`, with that session id; it has no
+collection window, snapshot or sync fields, just like the server's conversation frame. The
+subscription remains registered. HTTP timeline reads for that known session return an empty
+`timeline-page` in the normal fenced envelope; recorded HTTP reconstruction uses the same
+current-roster identity if its thread and explicit recorded session id are absent.
+
 ### Consumer folds
 
 Each stream is checked with the consumer that really folds it, at every clock step of every
@@ -786,6 +798,9 @@ frames in order, and each frame decodes as a `CollectionFrame` in strict mode, i
 screen frame's `snapshot`. `huge` checks protocol-sized windows and scripted older conversation
 pages, including deterministic generation beyond committed history, not a full 1,000-agent
 socket window. The normal roster slice still commits all 1,000 agents.
+The first-run-onboarding proof subscribes at +3s, folds the empty successful conversation frame,
+then creation/entry deltas from +5s without resubscribing; unknown and not-yet-visible targets
+remain terminal not-found.
 
 ## Sync matrix
 

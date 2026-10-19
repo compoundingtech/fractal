@@ -7,8 +7,10 @@ import {
 import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import { applyConversation, isConversational, type Conversation } from '../../st3-views/sessionView.ts'
 
-import { ANCHOR_MS, foldSlice, loadWorld, type Slice, type SyncEvent, type World } from '../src/index.ts'
+import { ANCHOR_MS, buildWorld, foldSlice, loadWorld, type Slice, type SyncEvent, type World } from '../src/index.ts'
 import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
+import { syntheticFirstRunOnboarding } from '../src/worlds/firstRunOnboarding.ts'
+import { genericVariants } from '../src/kit/variants.ts'
 
 const replays: Replay[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
@@ -134,6 +136,60 @@ describe('collection windows', () => {
 })
 
 describe('conversation dispatch and consumer fold', () => {
+  it.each(['recorded', 'synthetic'] as const)('follows a known running agent before its first thread (%s), by agent or current session', async (source) => {
+    const h = setup(source === 'recorded' ? loadWorld('first-run-onboarding', { now: ANCHOR_MS }) : buildWorld(syntheticFirstRunOnboarding, genericVariants, ANCHOR_MS))
+    const member = h.world.cast.agents[0]!
+    const stream = await h.connect()
+    h.clock.advance(3_000)
+    for (const [id, target] of Object.entries({ agent: member.id, session: member.session, short: member.session.replace(/^session\//, '') })) {
+      stream.subscribeConversation(id, target)
+    }
+    expect(h.frames).toEqual(['agent', 'session', 'short'].map((id) => ({
+      kind: 'conversation', id, collection: 'conversation', session_id: member.session,
+      replace: true, items: [], has_more: false,
+    })))
+    const page = await h.client.timelineList(member.session)
+    expect(page.value).toMatchObject({ kind: 'timeline-page', session_id: member.session, items: [], page: { has_more: false } })
+    h.clock.advance(1_999)
+    if (source === 'synthetic') expect(h.frames).toHaveLength(3)
+    h.clock.advance(1)
+    expect(errors(h.frames)).toEqual([])
+    const frames = h.frames.filter((frame): frame is Extract<CollectionFrame, { kind: 'conversation' }> => frame.kind === 'conversation' && frame.id === 'agent')
+    expect(frames.length).toBeGreaterThan(1)
+    expect(frames[1]).toMatchObject({ replace: false })
+    expect(frames[1]).not.toHaveProperty('has_more')
+    for (const id of ['session', 'short']) {
+      expect(h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === id)).toHaveLength(frames.length)
+    }
+    let conversation: Conversation<TimelineEntry> | undefined
+    for (const frame of frames) conversation = applyConversation(conversation, {
+      replace: frame.replace, items: frame.items, hasMore: frame.has_more ?? false, sessionId: frame.session_id,
+    })
+    const expected = foldSlice(h.world.slices.conversation, 5_000).state.threads[0]!
+    expect(conversation?.entries).toEqual(expected.items.filter(isConversational).sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence))
+    h.clock.advance(11_000)
+    if (source === 'synthetic') expect(h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === 'agent').length).toBeGreaterThan(frames.length)
+  })
+
+  it('does not resolve future or unknown agents and sessions from the cast or timeline', async () => {
+    const h = setup(loadWorld('first-run-onboarding', { now: ANCHOR_MS }))
+    const member = h.world.cast.agents[0]!
+    const stream = await h.connect()
+    stream.subscribeConversation('future', member.id)
+    h.clock.advance(0)
+    h.clock.advance(3_000)
+    stream.subscribeConversation('unknown-agent', 'agent/example-unknown')
+    stream.subscribeConversation('unknown-session', 'session/example-unknown')
+    expect(errors(h.frames)).toMatchObject([
+      { id: 'future', code: 'not-found', retryable: false },
+      { id: 'unknown-agent', code: 'not-found', retryable: false },
+      { id: 'unknown-session', code: 'not-found', retryable: false },
+    ])
+    await expect(h.client.timelineList('session/example-unknown')).rejects.toMatchObject({ response: { code: 'not-found' } })
+    h.clock.advance(13_000)
+    expect(h.frames).toHaveLength(3)
+  })
+
   it('dispatches entries as revision deltas without has_more and folds with sessionView', async () => {
     const h = setup()
     const thread = h.world.slices.conversation.state.threads.find((thread) => h.world.slices.conversation.timeline.some((event) => event._tag === 'entries' && event.agent === thread.agent))!
