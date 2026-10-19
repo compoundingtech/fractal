@@ -15,7 +15,7 @@ pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
 pub const SCOPES: &[&str] = &[
     "read.assistant.summary", "read.assistant.attention", "read.assistant.missions",
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
-    "write.assistant.messages", "write.assistant.custom-reply",
+    "write.assistant.messages", "write.assistant.custom-reply", "write.assistant.answers",
 ];
 // Serializes code consumption and grant policy transitions. Subject fences also protect
 // against concurrent writers in the authoritative store.
@@ -138,7 +138,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         pairing_grant: Some(granted.subject.clone()),
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
         assistant_write: None,
-        conversation_blocks:false, local_peer:false, scopes })
+        conversation_blocks:false, messages_paging:false, local_peer:false, scopes })
 }
 
 pub fn authorize_route(session: &ClientSession, request: &Request<Body>)

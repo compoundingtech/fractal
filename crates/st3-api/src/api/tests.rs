@@ -1101,6 +1101,14 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
     let resources = client_message_resources(&store, None, false, Some(seat)).unwrap();
     assert_eq!(resources.len(), 3);
     assert!(resources.iter().all(|resource| resource["delivery"]["state"] == "waiting"));
+    let now = client_now_ms();
+    let rows = store.client_messages_page(None, Some(seat), false, store.index().unwrap(), None, 20).unwrap();
+    assert_eq!(rows.len(), 3);
+    for (message, metadata, current) in rows {
+        let resource = client_message_resource(&store, message, &metadata, current, now).unwrap();
+        assert_eq!(resource["delivery"]["state"], "waiting");
+        assert_eq!(resource["delivery"]["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
+    }
     // A different message's clear cannot release the head or its queued successors.
     diagnostic(&messages[2].0, "first", "ready", "preparation succeeded; FIFO blocker cleared");
     assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
@@ -8950,6 +8958,10 @@ mission "agent-health" state="ready" {
         .unwrap();
     materialize_run_agents(&state, &run);
     let subject = format!("agent/{}/worker", run.id);
+    // This test isolates harness evidence. Supply the independent local delivery proof:
+    // absent polls become stale after the process-wide startup grace, so relying on that
+    // grace makes the running assertions depend on which tests ran before this one.
+    delivery_presence::record_legacy(&subject, "app-server", std::process::id());
     let queued = run.steps[0].subject.clone();
     store.set_step_state(&queued, "ready", None).unwrap();
     store
@@ -8999,7 +9011,8 @@ mission "agent-health" state="ready" {
         .unwrap();
     let resources =
         client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
-    assert_eq!(resources[0]["state"], "running");
+    assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
+    assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
 
     let healthy_cut = store.index().unwrap();
     let harness = |driver: &str, incarnation: &str, key: &str| {

@@ -669,6 +669,18 @@ fn authority_error_codes_are_typed_and_round_trip() {
 }
 
 #[test]
+fn message_selector_readiness_is_typed_and_preserves_its_plain_message() {
+    let code: ErrorCode = serde_json::from_str("\"message-selectors-not-ready\"").unwrap();
+    assert_eq!(code, ErrorCode::MessageSelectorsNotReady);
+    assert_eq!(
+        serde_json::to_string(&code).unwrap(),
+        "\"message-selectors-not-ready\""
+    );
+    let message = "message selector initialization is still in progress";
+    assert_eq!(plain_message(Some(&code), message), message);
+}
+
+#[test]
 fn runtime_publication_errors_are_typed_and_round_trip() {
     for (raw, expected) in [
         ("runtime-list-not-ready", ErrorCode::RuntimeListNotReady),
