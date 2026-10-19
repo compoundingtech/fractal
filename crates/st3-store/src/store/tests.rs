@@ -101,9 +101,19 @@ mod canonical_audit {
     
 }
 
+mod step_timing_purity_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-hee5f6bf9cec2 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("step_timing_purity_tests.rs");
+}
+
 mod declarative_revision_timestamp_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-h03d3404887a5 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("declarative_revision_timestamp_tests.rs");
+}
+
+mod subagents_purity_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-h8182d4400c47 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("subagents_purity_tests.rs");
 }
 
 mod actual_purity_tests {
@@ -119,6 +129,11 @@ mod activity_purity_tests {
 mod limits_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-hfa68506eaf53 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("limits_purity_tests.rs");
+}
+
+mod seat_queue_purity_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-hdd0e7bf0e60a owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("seat_queue_purity_tests.rs");
 }
 
 mod fault_history_tests {
