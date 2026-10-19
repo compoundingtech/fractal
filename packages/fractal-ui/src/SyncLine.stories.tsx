@@ -92,6 +92,24 @@ export const ServerFailure: Story = { args: { sequence: syncObservations.findInd
 export const ServerFailureSubscriptionLimit: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
 export const SubscriptionLimitsDark: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
 export const SubscriptionLimitsLight: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+/** A host-owned pane header must not reserve standalone hidden retry/detail width. */
+export const InlineHeader: Story = { tags: ['critical'], render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+  {(['Live', 'Failed'] as const).map(id => <div key={id} data-testid={`inline-${id}`} {...stylex.props(styles.band)}>
+    <strong>{id}</strong><SyncLine inline status={syncObservations.find(row => row.id === id)!.status} label="conversation" now={syncNow} onRetry={() => {}} />
+  </div>)}
+  <div data-testid="standalone-live" {...stylex.props(styles.band)}><SyncLine status={{ _tag: 'Live', since: syncNow }} label="conversation" now={syncNow} /></div>
+</main>, play: async ({ canvasElement }) => {
+  const live = canvasElement.querySelector<HTMLElement>('[data-testid="inline-Live"] [data-testid="sync-line"]')!
+  if (live.getBoundingClientRect().width !== 0 || live.getBoundingClientRect().height !== 0) throw new Error('Live inline status must not reserve header space')
+  const standalone = canvasElement.querySelector<HTMLElement>('[data-testid="standalone-live"] [data-testid="sync-line"]')!
+  if (standalone.getBoundingClientRect().height !== 24) throw new Error('Standalone live status must retain its existing slot')
+  const failed = canvasElement.querySelector<HTMLElement>('[data-testid="inline-Failed"] [data-testid="sync-line"]')!
+  for (const name of ['Retry loading conversation', 'Sync details for conversation']) {
+    const button = failed.querySelector<HTMLButtonElement>(`[aria-label="${name}"]`)!
+    if (button.disabled || button.getBoundingClientRect().width === 0) throw new Error(`Inline failure lost ${name}`)
+  }
+} }
+export const InlineHeaderLight: Story = { ...InlineHeader, args: { scheme: 'light' } }
 export const TransitionSequence: Story = { tags: ['critical'],
   render: StoryRender,
   play: async ({ canvasElement }) => {

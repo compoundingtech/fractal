@@ -265,6 +265,9 @@ at 1440 px with Changes fully expanded.
 The desktop pane header is the conversation's sole title owner. The transcript omits
 its own title band and portals its synchronization, retry and run controls into the
 stable pane-header action slot; parked conversations contribute no header controls.
+Portalled sync status uses `SyncLine.inline`: absent status takes no width, and hidden
+retry/details actions do not reserve their standalone slot. The native cluster therefore
+stays right-aligned next to the pane toggles; standalone/narrow sync layout is unchanged.
 History range, earlier-message and search navigation stay in the transcript viewport.
 
 ## Fractal web composer

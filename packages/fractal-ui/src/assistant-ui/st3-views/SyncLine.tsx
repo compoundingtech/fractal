@@ -7,20 +7,21 @@ import { interactionVars as interaction, borderVars as border, geometryVars as g
 import { useClockLabel } from '../../time/clock'
 
 /** The host owns the clock and decodes its own transport into the portable tagged union. */
-export interface SyncLineProps extends Omit<SyncLineInput, 'now'> { readonly now?: number; readonly onRetry?: () => void; readonly compact?: boolean; readonly pill?: boolean }
+export interface SyncLineProps extends Omit<SyncLineInput, 'now'> { readonly now?: number; readonly onRetry?: () => void; readonly compact?: boolean; readonly pill?: boolean; /** Host-owned header: occupy only visible status/actions, not the standalone reserved slot. */ readonly inline?: boolean }
 const pulse = stylex.keyframes({ from: { opacity: 0.5 }, to: { opacity: 1 } })
-/** Always occupies its existing 24px slot; Live and Evicted leave the slot empty, never add a band. */
-export const SyncLine = React.memo(function SyncLine({ status: observation, label, now, observedAt, gateway, socket, onRetry, compact = false, pill = false }: SyncLineProps) {
+/** Standalone lines reserve their existing 24px slot; inline host headers collapse absent status. */
+export const SyncLine = React.memo(function SyncLine({ status: observation, label, now, observedAt, gateway, socket, onRetry, compact = false, pill = false, inline = false }: SyncLineProps) {
   // A primitive snapshot lets unchanged live/hidden status lines skip clock renders.
   const snapshot = useClockLabel(now => JSON.stringify(syncLine({ status: observation, label, now, observedAt, gateway, socket }) ?? null), now)
   const line: SyncLineValue | undefined = JSON.parse(snapshot) ?? undefined
   const failed = observation._tag === 'Failed' && line !== undefined
   const retryable = failed && !(observation.cause._tag === 'Server' && (observation.cause.code === 'unsupported' || observation.cause.code === 'forbidden'))
-  return <div data-testid="sync-line" data-sync-state={observation._tag} data-sync-visible={line !== undefined} aria-busy={observation._tag !== 'Live' && observation._tag !== 'Failed'} {...stylex.props(styles.root, compact && styles.compact, pill && styles.fitContent, pill && line !== undefined && styles.pill)}>
-    <TooltipTrigger delay={150}><Button aria-label={line?.text ?? `${label} sync status not shown`} isDisabled={line === undefined} {...stylex.props(styles.textButton, pill && styles.fitText)}>
-      <span role="status" aria-live="polite" aria-label={line?.announce ?? ''} {...stylex.props(styles.status, pill && styles.fitStatus)}><span aria-hidden="true" {...stylex.props(styles.dot, line?.tone === 'warning' && styles.warningDot, line?.tone === 'error' && styles.errorDot, line?.animate && styles.pulsing, line === undefined && styles.hidden)} /><span aria-hidden="true" {...stylex.props(styles.text, line?.tone === 'warning' && styles.warning, line?.tone === 'error' && styles.error)}>{line?.text ?? ''}</span></span>
+  const fit = pill || inline
+  return <div data-testid="sync-line" data-sync-state={observation._tag} data-sync-visible={line !== undefined} aria-busy={observation._tag !== 'Live' && observation._tag !== 'Failed'} {...stylex.props(styles.root, compact && styles.compact, fit && styles.fitContent, pill && line !== undefined && styles.pill, inline && line === undefined && styles.noActions)}>
+    <TooltipTrigger delay={150}><Button aria-label={line?.text ?? `${label} sync status not shown`} isDisabled={line === undefined} {...stylex.props(styles.textButton, fit && styles.fitText)}>
+      <span role="status" aria-live="polite" aria-label={line?.announce ?? ''} {...stylex.props(styles.status, fit && styles.fitStatus)}><span aria-hidden="true" {...stylex.props(styles.dot, line?.tone === 'warning' && styles.warningDot, line?.tone === 'error' && styles.errorDot, line?.animate && styles.pulsing, line === undefined && styles.hidden)} /><span aria-hidden="true" {...stylex.props(styles.text, line?.tone === 'warning' && styles.warning, line?.tone === 'error' && styles.error)}>{line?.text ?? ''}</span></span>
     </Button>{line !== undefined && <Tooltip {...stylex.props(styles.tooltip)}>{line.text}</Tooltip>}</TooltipTrigger>
-    <div {...stylex.props(styles.actions, !failed && styles.hidden, pill && !failed && styles.noActions)}>
+    <div {...stylex.props(styles.actions, !failed && styles.hidden, fit && !failed && styles.noActions)}>
       <Button data-command-id="sync.retry" aria-label={`Retry loading ${label}`} isDisabled={!retryable || onRetry === undefined} onPress={onRetry} {...stylex.props(styles.button, !retryable && styles.hidden)}>Retry</Button>
       <DialogTrigger><Button aria-label={`Sync details for ${label}`} isDisabled={!failed} {...stylex.props(styles.button)}>Details</Button><Popover {...stylex.props(styles.popover)}><Dialog aria-label={`Sync details for ${label}`} {...stylex.props(styles.dialog)}>{failed && <>{observation.cause._tag === 'Server' ? <><strong>{observation.cause.code}</strong><p {...stylex.props(styles.detail)}>{observation.cause.message}</p></> : observation.cause._tag === 'Local' ? <><strong>{observation.cause.kind}</strong>{observation.cause.detail?.cap !== undefined && <p {...stylex.props(styles.detail)}>Cap: {observation.cause.detail.cap}</p>}{observation.cause.detail?.message !== undefined && <p {...stylex.props(styles.detail)}>{observation.cause.detail.message}</p>}</> : <p {...stylex.props(styles.detail)}>Failure cause unknown.</p>}{gateway !== undefined && <p {...stylex.props(styles.detail)}>Gateway: {gateway}</p>}{socket !== undefined && <p {...stylex.props(styles.detail)}>Socket: {String(socket)}</p>}</>}</Dialog></Popover></DialogTrigger>
     </div>
