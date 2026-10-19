@@ -2,7 +2,7 @@ import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import { DialogTrigger, Dialog, Popover, ToggleButton } from 'react-aria-components'
 import { compositionLightTheme, NarrowLayoutContext } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { geometryVars as g, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { geometryVars as g, typeVars as t, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import {
   Button,
@@ -79,7 +79,7 @@ export const SidebarToolbar = ({
     parsedQuery.facets.length +
     filters.statuses.length
   return (
-    <div ref={shortcut} {...stylex.props(styles.toolbar)}>
+    <div ref={shortcut} {...stylex.props(styles.toolbar, narrow && styles.phoneInset)}>
       <div {...stylex.props(styles.controls)}>
         <SidebarShowMenu
           query={filters.query}
@@ -285,6 +285,7 @@ const styles = stylex.create({
   },
   menus: { display: 'flex', alignItems: 'center', gap: scale.space1 },
   // Narrow (phone) hosts: every toolbar control is a 44px touch target; the search text is 16px so iOS does not zoom on focus.
+  phoneInset: { paddingInline: s.md },
   touchRow: { minHeight: g.touchTarget },
   touchIcon: { width: g.touchTarget, height: g.touchTarget },
   touchSearch: { minHeight: g.touchTarget, fontSize: t.touchInputSize },

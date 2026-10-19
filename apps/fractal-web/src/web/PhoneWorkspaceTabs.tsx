@@ -37,11 +37,12 @@ function PhoneTabButton({ tab, state, id, panelId }: { readonly tab: PhoneTab; r
   const ref = React.useRef<HTMLDivElement>(null)
   const { tabProps, isSelected } = useTab({ key: tab.id }, state, ref)
   const { focusProps, isFocusVisible } = useFocusRing()
-  return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={id} aria-controls={panelId} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab)}>{tab.label}</div>
+  return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={id} aria-controls={panelId} aria-label={tab.label} title={tab.label} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab)}><span {...stylex.props(styles.label)}>{tab.label}</span></div>
 }
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
+  label: { maxWidth: '14ch', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   list: { display: 'flex', flexShrink: 0, overflowX: 'auto', minHeight: 44, paddingInlineStart: `max(${s.sm}, env(safe-area-inset-left))`, paddingInlineEnd: `max(${s.sm}, env(safe-area-inset-right))`, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
   tab: { display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: 44, minHeight: 44, paddingInline: s.lg, flexShrink: 0, boxSizing: 'border-box', fontSize: t.uiSize, color: c.fgMuted, cursor: 'pointer', borderBottomWidth: 2, borderBottomStyle: 'solid', borderBottomColor: 'transparent', ':is([data-selected])': { color: c.fg, borderBottomColor: c.primary }, ':is([data-focus-visible])': { outline: `2px solid ${c.primary}`, outlineOffset: -2 } },
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0, outline: 'none', ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: -2 } },
