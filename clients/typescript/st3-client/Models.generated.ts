@@ -2177,7 +2177,7 @@ export type PushRegistration = {
 };
 
 export type PushRegistrationResponse = {
-  api_version: "st3.client.v0";
+  api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   value: PushRegistrationStatus;
 };

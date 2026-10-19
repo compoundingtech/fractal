@@ -46,7 +46,7 @@ test('every wire version receiver accepts exactly the deployed and fractal names
             }
         }
     }
-    assert.equal(receivers, 13);
+    assert.equal(receivers, 14);
     assert.equal(Rich.API_VERSION, 'st3.client.v0');
     assert.equal(contract['x-st-integers'], 'json-safe');
     assert.equal(contract['x-fractal-integers'], undefined);

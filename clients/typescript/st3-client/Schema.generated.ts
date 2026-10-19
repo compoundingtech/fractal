@@ -4030,7 +4030,7 @@ export type PushRegistration = typeof PushRegistration.Type
 export type PushRegistrationEncoded = typeof PushRegistration.Encoded
 
 export const PushRegistrationResponse = /*#__PURE__*/ (() => Schema.Struct({
-  "api_version": Schema.Literal("st3.client.v0"),
+  "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "request_id": RequestId,
   "value": PushRegistrationStatus
 }).annotate({ identifier: "PushRegistrationResponse" }))()
