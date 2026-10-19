@@ -27,7 +27,6 @@ pub mod timeline_test_support {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, LazyLock, Mutex};
-    use st3_store::external_sessions::shared_timeline_test_support_attention_tests::{scope};
     pub use st3_store::external_sessions::timeline_test_support::*;
 
     /// The instance of a process-wide budget or cache for `path`'s scope, so each test owns

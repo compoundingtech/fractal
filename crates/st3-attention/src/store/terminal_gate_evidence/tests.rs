@@ -5,7 +5,6 @@ use super::*;
 use serde_json::json;
 use smallclaims::ivm::install::{Installer, Limits, Outcome, ScanPage};
 use st3_store::store::terminal_gate_evidence_shared_attention_tests::{MEMBERS};
-use st3_store::store::terminal_gate_evidence::tests_shared_attention_tests::{encoded};
 
 
 #[test]

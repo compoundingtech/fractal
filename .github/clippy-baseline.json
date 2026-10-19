@@ -34,6 +34,9 @@
       "clippy::collapsible_if": 2,
       "clippy::manual_next_back": 1
     },
+    "st3-attention": {
+      "clippy::collapsible_if": 5
+    },
     "st3-client": {
       "clippy::large_enum_variant": 1,
       "clippy::manual_is_multiple_of": 1
@@ -63,7 +66,7 @@
     },
     "st3-store": {
       "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 13,
+      "clippy::collapsible_if": 8,
       "clippy::double_ended_iterator_last": 1,
       "clippy::needless_borrow": 1,
       "clippy::redundant_closure": 1,

@@ -61,7 +61,7 @@ pub enum AttentionDelta {
 
 /// What one delta asks about seats, each answered once: whether the previous rows hold a login
 /// or prompt item for it, whether it needs a login now, and whether it is retiring.
-struct SeatChecks<'a> {
+pub struct SeatChecks<'a> {
     store: &'a Store,
     previous: &'a AttentionPublication,
     seat_items: Option<BTreeSet<String>>,
