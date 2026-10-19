@@ -82,7 +82,13 @@ fn reject_binding(
                 .code,
             "stale-mailbox-session"
         );
-        assert!(st3::test_support::check_fixture_mailbox(store, &successor).is_ok());
+        // Forced raw owner displacement is foreign to the durable native lease.
+        // Linux custody fences this unqualified token. Other platforms retain legacy admission.
+        if cfg!(target_os = "linux") {
+            assert_eq!(st3::test_support::check_fixture_mailbox(store, &successor).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            st3::test_support::check_fixture_mailbox(store, &successor).unwrap();
+        }
         successor
     } else {
         if rejection == "runtime" {
@@ -121,6 +127,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     let runtime = runtime();
     let socket = root.path().join("api.sock");
     let state = st3::api::AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
@@ -151,9 +158,17 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     // Claude channel notification and exits. All files live under this fixture's HOME.
     let provider = root.path().join("fake-claude.py");
     let received = root.path().join("received.json");
+    let native_idle = root.path().join("native-idle");
     std::fs::write(&provider, r#"
 import json, os, subprocess, sys, time
 from pathlib import Path
+# These completion/fence controls exercise a healthy native session. Channel
+# initialization alone is deliberately no longer a native-state publication.
+hook = subprocess.run([os.environ['ST3_BIN'], 'driver-hook', 'claude-observe', 'SessionStart'],
+    input=json.dumps({'session_id': '019a0000-0000-7000-8000-000000000004'}), text=True, capture_output=True)
+Path(os.environ['FIXTURE_NATIVE_IDLE'] + '.hook-result').write_text(json.dumps({
+    'exit': hook.returncode, 'stderr': hook.stderr, 'stdout': hook.stdout}))
+hook.check_returncode()
 channel = subprocess.Popen([os.environ['ST3_BIN'], 'driver', 'claude-mcp', '--subject', os.environ['ST_AGENT']],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 try:
@@ -164,6 +179,8 @@ try:
         event = json.loads(line)
         if event.get('method') == 'notifications/claude/channel':
             Path(os.environ['FIXTURE_RECEIVED']).write_text(json.dumps(event))
+            while not Path(os.environ['FIXTURE_NATIVE_IDLE']).exists():
+                time.sleep(0.005)
             break
     else:
         raise RuntimeError('channel ended without mail')
@@ -175,6 +192,12 @@ if os.environ.get('FIXTURE_EXIT_GATE'):
         time.sleep(0.005)
 sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
 "#).unwrap();
+    // Archives move between runners; choose this consumer's interpreter rather than
+    // resolve a bare name through the producer's captured fixture PATH.
+    let python = std::env::split_paths(&std::env::var_os("PATH").expect("fixture tool PATH"))
+        .map(|directory| directory.join("python3"))
+        .find(|candidate| candidate.is_file())
+        .expect("terminal provider fixture needs python3 on the executing runner");
     let mut command = st3::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
@@ -184,15 +207,17 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .env("FIXTURE_SEAT", SEAT)
         .env("ST3_SUBJECT", TERMINAL)
         .env("ST3_ENDPOINT", root.path().join("api.sock"))
-        .env("ST3_BIN", env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
         .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("FIXTURE_RECEIVED", &received)
+        .env("FIXTURE_NATIVE_IDLE", &native_idle)
         .env("FIXTURE_PROVIDER", provider)
+        .env("FIXTURE_PYTHON", python)
         .current_dir(root.path())
         .args(["--noprofile", "--norc", "-c", r#"
 read -r _
-ST_AGENT="$FIXTURE_SEAT" "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- python3 "$FIXTURE_PROVIDER"
+ST_AGENT="$FIXTURE_SEAT" "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- "$FIXTURE_PYTHON" "$FIXTURE_PROVIDER"
 driver_exit=$?
 printf 'driver-exit=%s shell-still-alive\n' "$driver_exit"
 read -r _
@@ -277,6 +302,28 @@ read -r _
         )
         .await
         .unwrap();
+    // Admit the real SessionStart observation before releasing the provider to
+    // finish or forcing a foreign fence. The initialized channel must be live
+    // before the channel fence permits the native idle view. This does not grant readiness from channel presence.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if store.current_harness(SEAT).unwrap().is_some_and(|h| {
+                h.state == "idle" && h.incarnation_id == agent_incarnation
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "the actual SessionStart must publish native idle: {error}; graph={:?}; hook={:?}",
+            store.current_harness(SEAT).unwrap(),
+            std::fs::read_to_string(native_idle.with_extension("hook-result")),
+        )
+    });
+    std::fs::write(&native_idle, b"go").unwrap();
     let mut rejection_fence = if let Some(rejection) = rejection.filter(|_| order.is_none()) {
         wait_file(&received).await;
         // Reject an established stream, rather than racing its initial HTTP admission.
@@ -382,7 +429,11 @@ read -r _
             "pending"
         );
         if rejection == Some("token") {
-            assert!(st3::test_support::check_fixture_mailbox(&store, owner).is_ok());
+            if cfg!(target_os = "linux") {
+            assert_eq!(st3::test_support::check_fixture_mailbox(&store, owner).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            st3::test_support::check_fixture_mailbox(&store, owner).unwrap();
+        }
         }
         assert!(!barrier.join("provider-return.json").exists());
         std::fs::write(barrier.join("exit-provider"), b"go").unwrap();
@@ -426,7 +477,11 @@ read -r _
     if let Some(owner) = rejection_fence {
         assert!(shell.try_wait().unwrap().is_none());
         if rejection == Some("token") {
-            assert!(st3::test_support::check_fixture_mailbox(&store, &owner).is_ok());
+            if cfg!(target_os = "linux") {
+            assert_eq!(st3::test_support::check_fixture_mailbox(&store, &owner).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            st3::test_support::check_fixture_mailbox(&store, &owner).unwrap();
+        }
         } else {
             assert_eq!(
                 st3::test_support::check_fixture_mailbox(&store, &owner)

@@ -6,9 +6,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
 pub const API_VERSION: &str = "st3.client.v0";
 pub const ERROR_VERSION: &str = "st3.client.error.v0";
 pub const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+
+/// Current advisory text, never an approval, grant, assignment or answer to an ask.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNote {
+    pub person: String,
+    pub author: String,
+    pub time: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DirectiveNotes {
+    pub notes: Vec<DirectiveNote>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope<T> {
@@ -44,9 +62,9 @@ pub struct ErrorEnvelope {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
-    NotFound,
-    Forbidden,
-    UnsupportedCapability,
+    RecipientRetired,
+    LifecycleUnavailable,
+    RetirementUpgradeRequired,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,
@@ -72,19 +90,28 @@ pub enum ErrorCode {
     InvalidMembershipOperations,
     MembershipEditTooLarge,
     InvalidSubjectReference,
+    NotFound,
+    Forbidden,
+    UnsupportedCapability,
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
+    SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
     PageCursorExpired,
+    AgentRosterCutNotReady,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,
+    RuntimeListNotReady,
+    RuntimeListEnded,
     RemoteUnavailable,
     TerminalUnavailable,
     TerminalEnded,
     TimelineHistoryIncomplete,
+    ProjectionDetailTooLarge,
+    ProjectionDetailInvalidSource,
     ConversationContentInvalidated,
     TranscriptUnavailable,
     BlobTooLarge,
@@ -93,6 +120,11 @@ pub enum ErrorCode {
     BlobQuotaExceeded,
     BlobNotFound,
     BlobExpired,
+    MessageTooLarge,
+    MessageStoreFull,
+    LongMessageSignatureUnsupported,
+    ResponseBudgetExceeded,
+    ContentNotText,
     Internal,
     #[serde(other)]
     Unknown,
@@ -122,6 +154,12 @@ pub struct Limits {
     pub max_event_items: usize,
     pub max_response_bytes: usize,
     pub max_wait_ms: u64,
+    /// The longest message body, in UTF-8 bytes, this daemon takes now. Absent on older daemons,
+    /// which take 4096.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_message_bytes: Option<usize>,
+    pub max_assistant_response_bytes: Option<usize>,
+    pub default_assistant_response_bytes: Option<usize>,
     pub max_glass_body_bytes: Option<usize>,
     pub max_glasses: Option<usize>,
     pub max_glass_depth: Option<usize>,
@@ -148,6 +186,20 @@ pub struct Capabilities {
     pub event_cursor: String,
     pub oldest_event_cursor: String,
     pub schemas: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<AssistantPrincipal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<AssistantSenderClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_read_mode: Option<AssistantMinimalReadMode>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -213,7 +265,19 @@ impl SyncNotice {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ExchangeTransport {
+    pub at: String,
+    pub carrier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_route: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SyncPeer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_exchange: Option<ExchangeTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_exchange: Option<ExchangeTransport>,
     pub host_id: String,
     /// Envelopes the peer holds that this host lacks.
     pub peer_only_envelopes: u64,
@@ -319,6 +383,15 @@ pub struct Attention {
     pub attention_kind: String,
     pub source_id: String,
     pub person_id: String,
+    /// Whether this item blocks or waits on its person's answer; absent on older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<bool>,
+    /// The agent whose conversation this item belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    /// Every agent conversation this item shows in, starting with `conversation_id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation_ids: Vec<String>,
     pub requester_id: Option<String>,
     pub launch_id: Option<String>,
     pub variant_id: Option<String>,
@@ -376,6 +449,22 @@ pub struct DocumentContent {
     pub bytes: Vec<u8>,
 }
 
+/// The whole text of a message, of which a long message's `content` is only the start. It is
+/// asked of the machine that sent the message; see `complete`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MessageBody {
+    pub message: String,
+    pub bytes: u64,
+    pub text: String,
+    /// False when the owner could not be reached: `text` is then the preview and a note.
+    #[serde(default = "complete_default")]
+    pub complete: bool,
+}
+
+fn complete_default() -> bool {
+    true
+}
+
 /// The clients connected to one member now and those seen in the last few minutes, newest first.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ClientConnections {
@@ -416,6 +505,42 @@ pub struct MailBacklog {
     pub count: u64,
     pub threshold_ms: u64,
     pub cleanup_command: String,
+}
+/// Every objective and budget at one moment.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloList {
+    pub as_of_unix_ms: u64,
+    pub rows: Vec<SloRow>,
+}
+/// One objective (a target with windows and an error budget) or one budget (an allowance that
+/// resets). `remaining_percent` is null when nothing was measured.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloRow {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub account: Option<String>,
+    pub about: String,
+    pub target: String,
+    pub current: String,
+    pub window: String,
+    pub remaining_percent: Option<f64>,
+    pub status: String,
+    #[serde(default)]
+    pub resets_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub measured_at_unix_ms: Option<u64>,
+    pub explain: String,
+}
+/// What was left of one objective or budget across a period, in equal steps. A step holds its
+/// lowest reading and is null when nothing was read.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloHistory {
+    pub id: String,
+    pub since_ms: u64,
+    pub until_ms: u64,
+    pub samples: u64,
+    pub steps: Vec<Option<f64>>,
 }
 /// Token spend over a period, one row per agent, mission run, step, model, account and host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -591,6 +716,8 @@ pub struct AgentWorkspace {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accountable: Option<String>,
     pub id: String,
     pub revision: String,
     pub tree: Value,
@@ -626,6 +753,12 @@ pub struct Message {
     pub tags: Vec<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// With `body_bytes`: `content` is only the start of a longer message, kept as a blob.
+    /// Read the whole text with `Client::message_body_get`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
 }
 
 /// A file a message carries. The bytes stay on `origin`; read them with `Client::blob`.
@@ -888,6 +1021,13 @@ pub struct Mission {
     pub title: String,
     pub state: String,
     pub mission_revision: String,
+    /// st's own plumbing or a standing observer; false from older daemons.
+    #[serde(default)]
+    pub system: bool,
+    /// st's presentation of this mission (MissionPresentation in the schema), absent from older
+    /// daemons. Rust readers decode it as `st3_ui_model::missions::Presentation`.
+    #[serde(default)]
+    pub presentation: Option<Value>,
     #[serde(default)]
     pub runs: Vec<String>,
     #[serde(default)]
@@ -919,6 +1059,7 @@ pub struct MissionRunSummary {
     pub status: String,
     pub phase: String,
     pub progress: Value,
+    /// Step assignees and claimants are nullable ActorRef strings, not agent-only IDs.
     pub current_steps: Vec<Value>,
     pub must_act: String,
     pub state_since: String,
@@ -950,15 +1091,22 @@ pub struct MissionStep {
     pub title: Option<String>,
     pub state: String,
     pub attempt: u32,
+    /// An ActorRef: agent, daemon, or person.
     #[serde(default)]
     pub assignee: Option<String>,
+    /// An ActorRef: agent, daemon, or person.
     #[serde(default)]
     pub claimant: Option<String>,
     #[serde(default)]
     pub agentless: bool,
+    /// st's own step that holds its run open; false from older daemons.
+    #[serde(default)]
+    pub keep_open: bool,
     pub since: String,
     #[serde(default)]
     pub last_progress: Option<String>,
+    #[serde(default)]
+    pub progress_at: Option<String>,
     #[serde(default)]
     pub blocked_reason: Option<String>,
     #[serde(default)]
@@ -982,9 +1130,13 @@ pub struct MissionStep {
     pub wake: Option<MissionWake>,
     #[serde(default)]
     pub claim_expires_at: Option<String>,
+    /// When st last nudged this held step's holder for idling with nothing set to wake it.
+    #[serde(default)]
+    pub nudged_at: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionWake {
+    /// An ActorRef: agent, daemon, or person.
     pub assignee: String,
     pub assignee_state: String,
     pub incarnation_id: String,
@@ -995,6 +1147,43 @@ pub struct MissionWake {
     pub acknowledged_by: Option<String>,
     #[serde(default)]
     pub failure: Option<String>,
+}
+/// st's presentation of an agent (docs/clients/ui-contract.md, Agent). Words are
+/// fixtures/clients/words.json ids.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AgentPresentation {
+    pub state: String,
+    pub group: String,
+    #[serde(default)]
+    pub because: Option<String>,
+    #[serde(default)]
+    pub now: Option<AgentPresentationNow>,
+    #[serde(default)]
+    pub next: Vec<AgentPresentationWork>,
+    #[serde(default)]
+    pub queued: u64,
+}
+/// A step an agent holds or has queued, named for display.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AgentPresentationWork {
+    pub step: String,
+    pub mission: String,
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `mission › path`.
+    pub label: String,
+}
+/// What an agent holds now.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AgentPresentationNow {
+    #[serde(flatten)]
+    pub work: AgentPresentationWork,
+    #[serde(default)]
+    pub goal: Option<String>,
+    pub since: String,
+    #[serde(default)]
+    pub holder_down_since: Option<String>,
 }
 /// A step named for display: its mission, run, path, title and first goal.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1009,6 +1198,8 @@ pub struct WorkLabel {
     pub goal: Option<String>,
     pub state: String,
     pub since: String,
+    #[serde(default)]
+    pub holder_down_since: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Work {
@@ -1026,18 +1217,26 @@ pub struct Work {
     pub title: Option<String>,
     pub assigned_to: Option<String>,
     pub last_progress: Option<String>,
+    #[serde(default)]
+    pub progress_at: Option<String>,
     pub state: String,
     pub gate_kind: Option<String>,
     pub attempt: u32,
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// Submitting incarnation for this attempt; missing or null means unknown.
+    #[serde(default)]
+    pub submitted_incarnation: Option<String>,
     #[serde(default)]
     pub agentless: bool,
     #[serde(default)]
     pub claim_expires_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_started_at_unix_ms: Option<u64>,
+    /// When st last nudged this held step's holder for idling with nothing set to wake it.
+    #[serde(default)]
+    pub nudged_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_elapsed_ms: u64,
     #[serde(default)]
@@ -1059,6 +1258,16 @@ pub struct Work {
 pub struct AgentRelationship {
     pub agent_id: String,
     pub reason: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentEndReason {
+    pub kind: String,
+    pub ended_at: String,
+    pub actor: Option<String>,
+    pub reason: Option<String>,
+    pub exit_code: Option<i64>,
+    pub exit_signal: Option<String>,
+    pub diagnostic: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Agent {
@@ -1084,14 +1293,21 @@ pub struct Agent {
     #[serde(default)]
     pub observation: Option<String>,
     #[serde(default)]
+    pub end_reason: Option<AgentEndReason>,
+    #[serde(default)]
     pub blocked_on: Option<String>,
     #[serde(default)]
     pub ask: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The seat's status that is neither work nor a wait: `compacting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
     pub host_id: Option<String>,
     pub last_activity_at: Option<String>,
     pub silent_since: Option<String>,
+    #[serde(default)]
+    pub down_since: Option<String>,
     #[serde(default)]
     pub fault: Option<String>,
     #[serde(default)]
@@ -1100,6 +1316,9 @@ pub struct Agent {
     pub current_session_id: Option<String>,
     #[serde(default)]
     pub todo: Option<AgentTodo>,
+    /// st's presentation of this agent; absent from older daemons.
+    #[serde(default)]
+    pub presentation: Option<AgentPresentation>,
     #[serde(default)]
     pub current_work_ids: Vec<String>,
     #[serde(default)]
@@ -1134,6 +1353,9 @@ pub struct Agent {
     pub checkout: Option<AgentCheckout>,
     #[serde(default)]
     pub workspace: Option<String>,
+    /// The selected agent declaration's optional `lifecycle` child; omitted when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<AgentLifecycle>,
     /// Placement handoff phase and the sources still holding its fence.
     #[serde(default)]
     pub handoff: Option<AgentHandoff>,
@@ -1142,6 +1364,16 @@ pub struct Agent {
     /// The resources the seat's current declaration names. An older daemon omits them.
     #[serde(default)]
     pub resources: Vec<DeclaredResource>,
+}
+/// Declared seat lifecycle: standing, owner, or bounded. Absence means undeclared.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentLifecycle {
+    Standing,
+    Owner,
+    Bounded,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentHandoff {
@@ -1527,7 +1759,8 @@ pub struct Device {
     pub header: ResourceHeader,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
-    pub person_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     pub session_actor: String,
@@ -1535,6 +1768,20 @@ pub struct Device {
     #[serde(default)]
     pub scopes: Vec<String>,
     pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<AssistantPrincipal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<AssistantSenderClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_read_mode: Option<AssistantMinimalReadMode>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Operation {
@@ -1624,9 +1871,78 @@ pub struct OwnedSet {
     pub commit_status: Option<Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SummaryMachines {
+    pub connected: u64,
+    pub indirect: u64,
+    pub offline: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ConnectedClient {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    /// The session acting: `person/NAME`, `person/NAME/session/ID` for a paired device, or an agent.
+    pub actor: String,
+    /// The person or agent whose authority the session uses.
+    pub person: String,
+    /// The client's own `x-st3-client` name and build; absent when it sent none.
+    #[serde(default)]
+    pub client: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+    pub member: String,
+    /// `local`, `gateway` (a paired device over Tailscale or Fabric) or `tailscale`.
+    pub via: String,
+    /// An open stream right now.
+    pub connected: bool,
+    pub streams: u64,
+    pub since: String,
+    pub last_seen: String,
+    /// Windows, `conversation:ID` and `terminal:ID` it follows.
+    #[serde(default)]
+    pub follows: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Usage {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub value: UsagePeriod,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Summary {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub person_id: Option<String>,
+    /// The alert count; an older daemon also counted unread updates.
+    pub needs_you: u64,
+    /// Open alerts; absent on daemons that predate alerts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<u64>,
+    pub working_agents: u64,
+    pub active_missions: u64,
+    pub machines: SummaryMachines,
+    /// The published agents roster the agent counts came from, when the daemon prepares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents_as_of: Option<SummaryAgentsAsOf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SummaryAgentsAsOf {
+    pub store_index: u64,
+    pub published_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Resource {
+    ConnectedClient(ConnectedClient),
+    Usage(Usage),
+    Summary(Summary),
     Attention(Attention),
     Message(Message),
     Launch(Launch),
@@ -1657,6 +1973,9 @@ pub enum Resource {
 
 /// The resource kinds this client models; any other kind reads as [`Resource::Unknown`].
 pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
+    "connected-client",
+    "usage",
+    "summary",
     "attention",
     "message",
     "launch",
@@ -1721,6 +2040,9 @@ impl<'de> Deserialize<'de> for UnknownResource {
 impl Resource {
     pub fn header(&self) -> &ResourceHeader {
         match self {
+            Self::ConnectedClient(v) => &v.header,
+            Self::Usage(v) => &v.header,
+            Self::Summary(v) => &v.header,
             Self::Attention(v) => &v.header,
             Self::Message(v) => &v.header,
             Self::Launch(v) => &v.header,
@@ -1774,6 +2096,8 @@ pub struct ConversationChanges {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub next_cursor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1782,6 +2106,8 @@ pub struct TimelinePage {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1953,11 +2279,11 @@ pub struct TimelineMessageBody {
     pub message_id: String,
     #[serde(default)]
     pub reply_to: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -1965,9 +2291,18 @@ pub struct TimelineMessageBody {
     pub attachments: Vec<Attachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
+    /// With a long message: the length of the whole text, of which the content entry is the start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
     /// Who signed a message a person wrote, and whether it checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<MessageProvenance>,
+    /// Trusted sender class stamped only by the authorized external-assistant send path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<String>,
+    /// The assistant grant that authorized the send, with `sender_class`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_grant_id: Option<String>,
 }
 
 /// Who signed a message a person wrote, and whether the signature checks: `verified`, `unsigned`,
@@ -1975,6 +2310,9 @@ pub struct TimelineMessageBody {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MessageProvenance {
     pub verdict: String,
+    /// The complete local authorization model supplying this judgment; absent on older producers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1989,9 +2327,9 @@ pub struct MessageProvenance {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TimelineContentBody {
     pub media_type: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
@@ -2028,7 +2366,7 @@ pub enum TimelineToolStatus {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TimelineStatusBody {
     pub status: TimelineStatus,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
@@ -2061,35 +2399,35 @@ pub struct TimelineErrorBody {
 pub struct TimelineUsageBody {
     pub semantics: TimelineUsageSemantics,
     pub driver: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used_percent: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compaction_ms: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compaction_trigger: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     pub attribution: TimelineAttribution,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2118,7 +2456,7 @@ pub struct TimelineAttribution {
 pub struct TimelineRedactionBody {
     pub reason: String,
     pub withheld_bytes: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withheld_items: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
@@ -2129,7 +2467,7 @@ pub struct TimelineTruncationBody {
     pub reason: String,
     pub omitted_from_sequence: u64,
     pub omitted_to_sequence: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
@@ -2202,6 +2540,8 @@ pub struct Fence {
 pub enum ActionType {
     #[serde(rename = "custom.reply")]
     CustomReply,
+    #[serde(rename = "prompt.respond")]
+    PromptRespond,
     #[serde(rename = "arrangement.edit")]
     ArrangementEdit,
     #[serde(rename = "arrangement.membership.edit")]
@@ -2268,6 +2608,8 @@ pub enum ActionType {
     AgentCreate,
     #[serde(rename = "agent.stop")]
     AgentStop,
+    #[serde(rename = "agent.retire")]
+    AgentRetire,
     #[serde(rename = "agent.start")]
     AgentStart,
     #[serde(rename = "agent.suspend")]
@@ -2381,6 +2723,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::AgentResume,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn agent_retire(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AgentRetireParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AgentRetire,
             idempotency_key,
             fence,
             &parameters,
@@ -2745,6 +3101,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::PairingRevoke,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn prompt_respond(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PromptRespondParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::PromptRespond,
             idempotency_key,
             fence,
             &parameters,
@@ -3155,6 +3525,9 @@ pub struct StructuredRequest {
     pub answers: Vec<RequestAnswerOption>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom: bool,
+    /// Images to look at, read with the blob route and the ask's step as the carrier.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 /// Information an agent brings a person who asked for it. Nothing waits on it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -3226,15 +3599,33 @@ pub struct PersonAnswerRecord {
     pub ask: String,
     pub status: String,
     pub summary: String,
+    /// The answering principal, including `assistant/chatgpt` for assistant responses.
     pub respondent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_for: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_grant_id: Option<String>,
+    /// Server-owned grant owner provenance, not person-delegation authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_owner: Option<String>,
+    /// Grant-bound assistant session audit actor, separate from the respondent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_session_actor: Option<String>,
     pub answered_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<PersonAnswer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRetireParameters {
+    pub agent: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentStopParameters {
@@ -3289,6 +3680,14 @@ pub struct AttentionResolveParameters {
     pub reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    Silent,
+    #[default]
+    Wake,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MessageSendParameters {
     pub to: String,
@@ -3301,6 +3700,9 @@ pub struct MessageSendParameters {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Silent holds unread mail until the next wake; wake is the default.
+    #[serde(default)]
+    pub kind: MessageKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentInput>,
     /// The sending device's signature over the message, as `docs/st3/device-signing.md` lays out.
@@ -3528,7 +3930,14 @@ pub enum ActionStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct PairingBegin {
+#[serde(untagged)]
+pub enum PairingBegin {
+    Person(PersonPairingBegin),
+    Assistant(AssistantPairingBegin),
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PersonPairingBegin {
     pub api_version: String,
     pub device_name: String,
     pub person_id: String,
@@ -3546,6 +3955,18 @@ pub struct PairingChallenge {
     pub expires_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_root_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<AssistantPrincipal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_read_mode: Option<AssistantMinimalReadMode>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PairingComplete {
@@ -3557,7 +3978,14 @@ pub struct PairingComplete {
     pub key_storage: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct PairedSession {
+#[serde(untagged)]
+pub enum PairedSession {
+    Person(Box<PersonPairedSession>),
+    Assistant(Box<AssistantPairedSession>),
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PersonPairedSession {
     pub kind: String,
     pub device_id: String,
     pub person_id: String,
@@ -3574,6 +4002,348 @@ pub struct PairedSession {
     pub device_key_proofs: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_root_key_proof: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum AssistantPrincipal {
+    #[serde(rename = "assistant/chatgpt")]
+    Chatgpt,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum AssistantSenderClass {
+    #[serde(rename = "external-assistant")]
+    ExternalAssistant,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum AssistantMinimalReadMode {
+    #[serde(rename = "approval-once")]
+    ApprovalOnce,
+    #[serde(rename = "caller-bound-allow")]
+    CallerBoundAllow,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum AssistantScope {
+    #[serde(rename = "read.assistant.summary")]
+    Summary,
+    #[serde(rename = "read.assistant.attention")]
+    Attention,
+    #[serde(rename = "read.assistant.missions")]
+    Missions,
+    #[serde(rename = "read.assistant.agents")]
+    Agents,
+    #[serde(rename = "read.assistant.conversation")]
+    Conversation,
+    #[serde(rename = "read.assistant.terminal")]
+    Terminal,
+    #[serde(rename = "write.assistant.messages")]
+    Messages,
+    #[serde(rename = "write.assistant.custom-reply")]
+    CustomReply,
+    #[serde(rename = "write.assistant.answers")]
+    Answers,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantPairingBegin {
+    pub api_version: String,
+    pub device_name: String,
+    pub assistant_id: AssistantPrincipal,
+    pub scopes: Vec<AssistantScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<u64>,
+    pub disclosure_consent: bool,
+    pub consent_evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_read_mode: Option<AssistantMinimalReadMode>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantPairedSession {
+    pub kind: String,
+    pub api_version: String,
+    pub principal: AssistantPrincipal,
+    pub sender_class: AssistantSenderClass,
+    pub device_id: String,
+    pub session_actor: String,
+    pub credential: String,
+    pub scopes: Vec<AssistantScope>,
+    pub expires_at: String,
+    pub grant: AssistantGrant,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantGrant {
+    pub kind: String,
+    pub id: String,
+    pub principal: AssistantPrincipal,
+    pub sender_class: AssistantSenderClass,
+    pub session_actor: String,
+    pub device_id: String,
+    pub key_id: String,
+    /// Concrete daemon-configured owning person, sealed by the authoritative member.
+    pub issuer: String,
+    pub scopes: Vec<AssistantScope>,
+    pub expires_at: String,
+    pub policy_revision: u64,
+    pub minimal_read_mode: AssistantMinimalReadMode,
+    pub recipient_allowlist: Vec<String>,
+    pub disclosure_consent: bool,
+    pub consent_evidence: String,
+    pub revoked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_trust: Option<AssistantReadTrust>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantGrantPolicy {
+    pub api_version: String,
+    pub scopes: Vec<AssistantScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<u64>,
+    pub disclosure_consent: bool,
+    pub consent_evidence: String,
+    pub minimal_read_mode: AssistantMinimalReadMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_allowlist: Option<Vec<String>>,
+}
+
+/// Public pins only: the attestor and shim Ed25519 keys (base64url, 32 bytes) MUST differ.
+/// Budgets are configurable only downward: default 1..=4096, maximum 1..=16384, default <= maximum.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantReadTrust {
+    pub issuer: String,
+    pub key_id: String,
+    pub attestor_public_key: String,
+    pub shim_public_key: String,
+    pub default_response_bytes: usize,
+    pub max_response_bytes: usize,
+}
+/// Omitted budgets pin 4096 and 16384.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantReadTrustRequest {
+    pub api_version: String,
+    pub issuer: String,
+    pub key_id: String,
+    pub attestor_public_key: String,
+    pub shim_public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_response_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+/// Summary query: only the response budget; the person is always the grant issuer.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantSummaryRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantPageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantConversationContentRequest {
+    pub agent_id: String,
+    pub session_id: String,
+    pub reference: String,
+    pub revision: String,
+    pub start: usize,
+    pub end: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantTerminalContentRequest {
+    pub agent_id: String,
+    pub terminal_id: String,
+    pub incarnation_id: String,
+    pub screen_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum AssistantContentRequest {
+    Conversation(AssistantConversationContentRequest),
+    Terminal(AssistantTerminalContentRequest),
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AssistantProjection {
+    Summary,
+    Attention,
+    Missions,
+    Agents,
+    ConversationContent,
+    TerminalContent,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ScgReadIdentity {
+    #[serde(rename = "chatgpt")]
+    Chatgpt,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScgReadAuthorizationPayload {
+    pub issuer: String,
+    pub identity: ScgReadIdentity,
+    pub assistant_id: AssistantPrincipal,
+    pub grant_id: String,
+    pub policy_revision: u64,
+    pub key_id: String,
+    pub approval_id: String,
+    pub execution_id: String,
+    pub projection: AssistantProjection,
+    pub parameters: std::collections::BTreeMap<String, String>,
+    pub max_response_bytes: usize,
+    pub request_digest: String,
+    pub expires_at_unix_ms: u64,
+    pub nonce: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScgReadAuthorization {
+    pub payload: ScgReadAuthorizationPayload,
+    pub signature: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantSummaryCounts {
+    pub attention: u64,
+    pub agent_states: BTreeMap<String, u64>,
+    pub mission_states: BTreeMap<String, u64>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantSummary {
+    pub kind: String,
+    pub as_of: String,
+    pub counts: AssistantSummaryCounts,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantAttentionItem {
+    pub id: String,
+    pub attention_kind: String,
+    pub person_id: String,
+    pub agent_id: Option<String>,
+    pub mission_id: Option<String>,
+    pub mission_run_id: Option<String>,
+    pub revision: String,
+    pub episode: String,
+    pub waiting_since: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantStepCounts {
+    pub total: u64,
+    pub completed: u64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantMissionItem {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub agent_ids: Vec<String>,
+    pub phase: String,
+    pub step_counts: AssistantStepCounts,
+    pub blocked_count: u64,
+    pub revision: Option<String>,
+    pub updated_at: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantAgentItem {
+    pub id: String,
+    pub lifecycle: Option<String>,
+    pub runtime_state: String,
+    pub current_mission_id: Option<String>,
+    pub current_run_id: Option<String>,
+    pub updated_at: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantAttentionPage {
+    pub kind: String,
+    pub collection: String,
+    pub filters: BTreeMap<String, String>,
+    pub items: Vec<AssistantAttentionItem>,
+    pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantMissionPage {
+    pub kind: String,
+    pub collection: String,
+    pub filters: BTreeMap<String, String>,
+    pub items: Vec<AssistantMissionItem>,
+    pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantAgentPage {
+    pub kind: String,
+    pub collection: String,
+    pub filters: BTreeMap<String, String>,
+    pub items: Vec<AssistantAgentItem>,
+    pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantContentRange {
+    pub start: u64,
+    pub end: u64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantConversationContent {
+    pub agent_id: String,
+    pub session_id: String,
+    pub reference: String,
+    pub revision: String,
+    pub start: u64,
+    pub end: u64,
+    pub text: String,
+    pub returned_bytes: u64,
+    pub truncated: bool,
+    pub next_range: Option<AssistantContentRange>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantTerminalContent {
+    pub agent_id: String,
+    pub terminal_id: String,
+    pub incarnation_id: String,
+    pub screen_revision: String,
+    pub text: String,
+    pub returned_bytes: u64,
+    pub truncated: bool,
+}
+/// Disjoint by `kind`; a conversation answer never carries terminal fields or the reverse.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum AssistantContentPage {
+    #[serde(rename = "assistant-conversation-content")]
+    Conversation(AssistantConversationContent),
+    #[serde(rename = "assistant-terminal-content")]
+    Terminal(AssistantTerminalContent),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -3872,6 +4642,15 @@ pub struct AgentRepository {
     pub agent_ids: Vec<String>,
 }
 
+/// A person's answer to a native harness prompt alert.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptRespondParameters {
+    pub target_id: String,
+    pub episode: String,
+    pub answer: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomReplyParameters {
@@ -3891,6 +4670,8 @@ pub struct TimelineBlock {
     pub visibility: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<Value>,
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ConversationContentRef>,
@@ -3915,4 +4696,51 @@ pub struct ConversationContentChunk {
     pub size: u64,
     pub data: String,
     pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationReport {
+    pub report_id: String,
+    pub samples: Vec<ObservationSample>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ObservationSample {
+    #[serde(rename = "latency")]
+    Latency {
+        target: String,
+        carrier: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        interval_start: String,
+        interval_end: String,
+        count: u64,
+        over_target: u64,
+        max_ms: u64,
+        buckets: Vec<(u64, u64)>,
+    },
+    #[serde(rename = "live-share")]
+    LiveShare {
+        target: String,
+        carrier: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        interval_start: String,
+        interval_end: String,
+        foreground_ms: u64,
+        live_ms: u64,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObservationAccepted {
+    pub accepted: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObservationResponse {
+    pub api_version: String,
+    pub request_id: String,
+    pub value: ObservationAccepted,
 }

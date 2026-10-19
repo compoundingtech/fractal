@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, InputAccessoryView, KeyboardAvoidingView, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { quality } from '../qualityNative';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import type { TerminalScreen as Screen } from '../../../clients/typescript/st3-client';
@@ -33,11 +34,13 @@ const lineHeightFor = (fontSize: number) => Math.ceil(fontSize * 1.25);
 // has the keys a phone lacks. Followed on the socket while visible, never polled.
 export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   const { terminalId } = route.params;
-  const { feed, status, canControlTerminal, actions } = useStore();
+  const { feed, status, canControlTerminal, actions, carrierInfo } = useStore();
   const [screen, setScreen] = useState<Screen | null>(null);
   const [issue, setIssue] = useState(''), [notice, setNotice] = useState('');
   const [ctrl, setCtrl] = useState(false), [typing, setTyping] = useState(false);
   const [area, setArea] = useState({ width: 0, height: 0 });
+  const qualityOpen = useRef(0), qualityDirect = useRef(false);
+  const qualityRoute = useRef(carrierInfo); qualityRoute.current = carrierInfo;
   const incarnation = useRef(''), keyboard = useRef<TextInput>(null), scroller = useRef<ScrollView>(null);
   const live = useRef({ screen, status, ctrl });
   live.current = { screen, status, ctrl };
@@ -68,6 +71,10 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   };
 
   useFocusEffect(useCallback(() => {
+    qualityOpen.current = quality.beginTerminal();
+    return () => quality.endTerminal(qualityOpen.current);
+  }, [terminalId]));
+  useFocusEffect(useCallback(() => {
     if (!feed) return;
     incarnation.current = '';
     const follow = feed.followTerminal(terminalId, {
@@ -81,9 +88,25 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
         setScreen(next);
       },
       onIssue: setIssue,
+      onQuality: event => {
+        const route = qualityRoute.current;
+        if (event === 'attempt') {
+          qualityDirect.current = route.route.kind === 'fabric' && (route.route.path === 'direct' || route.path === 'direct');
+          if (qualityDirect.current) quality.counters.add('direct_attach_attempts');
+        }
+        if (event === 'attached') {
+          if (qualityDirect.current) quality.counters.add('direct_attach_success');
+          else quality.counters.add('gateway_attach');
+          quality.terminalAttachment(qualityOpen.current);
+        }
+        if (event === 'error') quality.counters.add('terminal_open_errors');
+        if (event === 'dead') quality.counters.add('dead_terminal_tabs');
+      },
     });
     return () => follow.close();
   }, [feed, terminalId, queue]));
+
+  useLayoutEffect(() => { if (screen && area.width > 0 && area.height > 0) quality.terminalVisible(qualityOpen.current); }, [screen, area.width, area.height]);
 
   // Fit the terminal's columns to the phone's width; a very wide terminal scrolls sideways.
   const columns = screen?.columns ?? 80;
@@ -195,7 +218,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
       onBlur={() => setTyping(false)}
       // The field stays empty: each change is what was just typed.
       onChangeText={text => { if (text) { type(text); keyboard.current?.clear(); } }}
-      onKeyPress={event => { if (event.nativeEvent.key === 'Backspace') press({ label: '⌫', key: 'backspace' }); }}
+      onKeyPress={event => { quality.key(); if (event.nativeEvent.key === 'Backspace') press({ label: '⌫', key: 'backspace' }); }}
       onSubmitEditing={() => press({ label: '⏎', key: 'enter' })}
     /> : null}
     {Platform.OS === 'ios' ? <InputAccessoryView nativeID={BAR} backgroundColor={theme.mantle}>

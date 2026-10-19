@@ -64,7 +64,7 @@ mission "fixture/network-$name" state="ready" {
 }
 KDL
   st3 --endpoint "$socket" publish "$name/network.kdl" --as person/fixture >/dev/null
-  st3 --endpoint "$socket" --json mission start "fixture/network-$name" --workspace "$PWD" --as person/fixture | jq -er .mission_run.id >"$name/run-id"
+  st3 --endpoint "$socket" --json missions start "fixture/network-$name" --workspace "$PWD" --as person/fixture | jq -er .mission_run.id >"$name/run-id"
 done
 sleep 1
 run_a=$(cat a/run-id)

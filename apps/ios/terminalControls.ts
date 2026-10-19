@@ -52,6 +52,8 @@ export type TerminalFollowHandlers = {
   onScreen: (screen: TerminalScreen) => void;
   /** A problem to show; an empty string clears it. */
   onIssue: (issue: string) => void;
+  /** Local, content-free attach/stream transitions. */
+  onQuality?: (event: 'attempt' | 'attached' | 'error' | 'dead') => void;
 };
 
 /** The app's foreground state, such as `ForegroundGate`. */

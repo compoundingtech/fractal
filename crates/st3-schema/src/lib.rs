@@ -2,11 +2,16 @@
 
 pub mod arrangements;
 pub mod custom;
+pub mod accountable;
+pub mod directive_notes;
 pub mod glasses;
 pub mod lifecycle;
 pub mod ordered_membership;
+pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
+pub mod retention;
+pub mod review;
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -16,6 +21,97 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 pub const SCHEMA_NAME: &str = "st3.v1";
+
+/// Local SQLite compatibility is separate from the replicated claim vocabulary.
+pub use st_storage_version::STORAGE_VERSION;
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h583d0a025ac5 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+
+SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
+
+```sql
+CREATE TABLE IF NOT EXISTS checkpoint_capture_epoch (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL,
+    envelope_frontier INTEGER NOT NULL DEFAULT 0,
+    cut_unix_ms INTEGER NOT NULL DEFAULT 0,
+    trigger_version INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO checkpoint_capture_epoch(id, value, envelope_frontier) VALUES (1, 0, 0);
+```
+
+Before the first page, a short read snapshot chooses the sealed envelope rowid and checks the persisted guard bounds. If either bound needs to grow, one atomic autocommit writer statement registers `MAX(envelope_frontier, seal_rowid)` and `MAX(cut_unix_ms, requested_cut)`. Already-covered bounds require no writer loan or durable update. Each attempt reads `SELECT value FROM checkpoint_capture_epoch WHERE id=1`; all retries retain the original seal and cut without registering them again. Every metadata, body, protection, and tombstone page checks that value in its own short snapshot. A mismatch discards the whole attempt; three invalidations fail closed. The registered bounds only grow across concurrent captures and reconnects; registering them does not increment the epoch. A zero cut is inactive.
+
+An envelope is relevant when its rowid is at/below the registered frontier and its accepted time is below the registered cut. A protected or canonical-order target additionally requires the claim's own accepted time below the cut. Mutations audit both OLD and NEW identities and references. These retained highwaters can conservatively invalidate a smaller later capture, but ordinary above-cut history does not invalidate it merely because that history is already within the row frontier.
+
+Claim-to-envelope relevance seeks batch membership through `replica_envelopes_batch` and record membership through `replica_records_claim`, then performs an exact envelope-identity lookup. The two relationships use separate EXISTS branches; record membership is driven from records with CROSS JOIN, not from the envelope frontier. Mutation work therefore depends on the target's relationships rather than unrelated retained history. Guard version 3 replaces version 2's envelope-side OR predicate, which scanned the frontier for each deleted claim during trim, without changing invalidation semantics or adding indexes.
+
+| Captured source | Mutations that increment the epoch |
+|---|---|
+| `claims` | Relevant envelope-associated body, identity, canonical-key and membership changes, body backfills, and deletions. Late claims in a relevant envelope remain exclusion witnesses: changing their accepted time, identity or batch, or deleting them, can change whether that envelope qualifies. |
+| `batches` | Backfills, canonical writer/sequence changes, identity/rowid changes and deletions for claims associated with a relevant envelope. Hash and batch-time bookkeeping alone is not captured. |
+| `replica_records` | Backfills and captured identity, position, admission-state, claim-reference or replacement-reference changes in a relevant envelope. A newer duplicate naming a captured below-cut claim is also fenced on INSERT, UPDATE and DELETE: canonical `MIN(position)` reads every copy, not only the sealed envelope prefix. |
+| `replica_envelopes` | Relevant identity, accepted-time or rowid changes and deletions. Any successful below-cut INSERT conservatively invalidates, including explicit rowid backfill and identical REPLACE relocating an old identity beyond the frontier. Receipt state, relay, validation errors and received-time bookkeeping alone is not captured. |
+| `desired`, `mission_definitions`, `mission_revisions`, `documents` | INSERT/DELETE referencing a captured below-cut claim, and UPDATE moving either OLD or NEW reference to/from such a claim (or moving its scan rowid). Unchanged references and references confined to above-cut claims are ignored. Captured projection rebuilds and direct desired deletion remain fenced. |
+| Repair references | `record.repaired` receipt changes referencing a captured replacement or a record in a relevant envelope; `repair.applied` receipt changes referencing captured predecessor claims; record replacement references into captured below-cut claims. Repairs only concerning newer history are ignored. |
+| `checkpoint_claims`, `checkpoint_envelopes` | Below-cut tombstone INSERT/DELETE and captured metadata, identity, accepted-time or rowid changes; both sides of a cut crossing are checked. The checkpoint-label field alone is not captured. |
+| Identity collisions on INSERT | BEFORE INSERT compares the colliding existing row's capture-relevant content, covering REPLACE with recursive triggers disabled, including removal of captured protection or tombstones. Identical ignored duplicates do not invalidate. Successful relevant inserts still run their AFTER fence. |
+
+Capture does not read envelope signatures/holds, projection-health rows, peer/cursor state, blob bytes, operation caches, or checkpoint status as metadata, so mutations confined to those tables need no capture fence. Blob-backed document bindings and operation identity in claim bodies/tombstones are covered by their captured tables. Any future captured source must extend the trigger audit before pages may read it. Accepted-time parsing remains a prerequisite owned by #2106, not a separate compatibility change here.
+
+Triggers persist and increment the epoch in the mutation's own transaction on every connection, without connection-local hooks or SQL functions. Rollback rolls back the increment too. A trigger-version migration atomically drops/recreates the old predicates, increments `value`, and stores `trigger_version=3`; captures using the old guard must restart. Earlier version-18 PR-head stores receive `cut_unix_ms` and `trigger_version` columns with default zero while preserving their epoch and frontier. Version-2 stores retain their active cut/frontier through the version-3 predicate migration. Ordinary reopens preserve all bounds and do not repeat the migration.
+
+The checkpoint guard requires the normal process restart. Storage version 20 atomically renames and preserves the complete pre-candidate signature projection and its indexes, then inventories candidates online in bounded loans while the whole legacy authorization model serves. One atomic control-row update activates the candidate model; the version marker commits with the rename, so older builds refuse the store before creating empty signature state. The restart duration has not been measured. Builds limited to storage version 19 or earlier reject version 20; in-place rollback below 20 is unsupported. Earlier version-18 PR-head binaries are not rollback targets: guard version 1 cannot safely operate the cut-aware schema, and guard version 2 rejects trigger version 3 on open. Their copied stores can migrate forward only. Binary rollback requires restoring a pre-upgrade database snapshot; otherwise roll forward. No replicated claim, checkpoint rule, or wire protocol changes. Local signature provenance and grant proof responses label the serving authorization model.
+
+## Local runtime start operations
+
+Storage version 19 adds the owner-local `local_runtime_starts` ledger and its admission/pending indexes transactionally. It retains immutable prepared input, original declaration and operation identity, dispatch/result status, revocation and verified cleanup. The ledger does not replicate or enter graph digests, checkpoints or claim backups. Unresolved operations are never trimmed. Existing request receipts precede dispatch and revocation; completion receipts commit only while their original declaration remains selected and the operation remains unrevoked.
+
+In the same installation transaction, `meta` captures `publication-operation-format-shared-cut` from `MAX(claims.store_index)` and `publication-operation-format-local-cut` from `MAX(local_observations.id)`, using zero for an empty table and `INSERT OR IGNORE`. These are two indexed maxima before the first operation-bound request, not history scans. Reopen, graph replay and view forgetting preserve both immutable cuts. A store with existing operation rows but a missing cut is refused rather than capturing a later boundary; preserve that store and its original boundary evidence for forward recovery. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary.
+
+Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial when publishing a differing or absent incarnation; unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
+
+Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
+
+The old version-18 binary refuses version 19. Do not lower `user_version` for rollback: drain starts, revoke pending operations and verify that all producers and operation-owned runtimes have ended, preserve the ledger and runtime generation records as evidence, then restore a consistent pre-upgrade database and runtime state with their matching binary under Operations supervision. New exec generation records contain operation provenance that older runtimes cannot read; restoring only SQLite is insufficient. A claim-only restore does not carry cancellation tombstones and cannot safely authorize starting old unresolved producers. Roll forward if closure cannot be proved. See [seat lifecycle](../seat-lifecycle.md#pending-runtime-starts).
+
+## Immutable claim positions
+
+`claim_positions` holds each claim's position in its batch, the canonical order's fifth
+component. Admission stores it: a replicated claim takes its record's wire position before the
+claim row is inserted, and a local claim takes the number of claims its batch already holds,
+which is where sealing places its record. A later record of the same claim can only lower the
+value, so the stored position is the least position over every record the member has held and
+does not depend on arrival order. For claims stored before this table existed, triggers store
+the legacy value (least record position, else arrival count among surviving siblings) just
+before deleting an earlier sibling, deleting a record or changing a record's claim or position
+could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
+never deleted. No history backfill runs at open; a claim without a row and without any removal
+since keeps the legacy value, which equals what would be stored.
+
+## Retired identity ledger
+
+`retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
+checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
+`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
+background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
+per background writer loan with its cursor in `meta`, resting outside the loan for
+max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
+identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
+stays retired and is also labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
+the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
+would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
+equates with a BLOB.
+"#;
+
+pub fn storage_digest() -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"st3-local-storage-v1\0");
+    digest.update(STORAGE_VERSION.to_be_bytes());
+    digest.update(LOCAL_STORAGE_SCHEMA.as_bytes());
+    hex::encode(digest.finalize())
+}
 
 pub const HARNESS_TODO_MAX_PHASES: usize = 16;
 pub const HARNESS_TODO_MAX_TASKS: usize = 100;
@@ -163,6 +259,8 @@ impl Retention {
 pub struct FieldSpec {
     pub value_type: ValueType,
     pub required: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nullable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<String>,
     #[serde(default)]
@@ -211,6 +309,8 @@ pub struct Registry {
     pub subjects: BTreeMap<String, SubjectSpec>,
     pub resources: BTreeMap<String, ResourceSpec>,
     pub claims: BTreeMap<String, ClaimSpec>,
+    /// Operation tags understood by this build's arrangement decoder and projector.
+    pub arrangement_operations: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -237,9 +337,10 @@ impl Registry {
 
     pub fn markdown(&self) -> String {
         let mut output = format!(
-            "# st3 schema registry\n\nThis file is generated from `st3-schema`.\n\nSchema: `{}`\nDigest: `{}`\n\n",
+            "# st3 schema registry\n\nThis file is generated from `st3-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
             self.name,
-            self.digest()
+            STORAGE_VERSION,
+            storage_digest()
         );
         output.push_str("## Subject families\n\n| Family | Pattern | Client writable | Description |\n|---|---|---:|---|\n");
         for spec in self.subjects.values() {
@@ -287,8 +388,16 @@ impl Registry {
         }
         output.push_str("\n`resource.observed` validates facts against the resource kind. Custom resource facts remain open.\n");
         output.push_str("\nA `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.\n");
+        output.push_str("\n## Accountable fleet roots\n\nA top-level agent root may declare `accountable \"person/NAME\"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.\n\nAll members must upgrade before publishing accountable roots. Older members retain the new closed-schema claim field as unknown, without enforcing it or selecting the declaration. Existing declarations have no field and declare no trace principal. The field does not change the database layout or checkpoint rules.\n");
+        output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
+        output.push_str("\n## Arrangement operation vocabulary\n\nReplication retains unknown operation tags and unknown placement subject families as retryable `unknown-claim-field` records. Local edits still refuse them with `invalid-arrangement-operations` and `invalid-subject-reference`. Supported operation tags, included in this registry's digest:\n\n");
+        for tag in &self.arrangement_operations {
+            output.push_str(&format!("- `{tag}`\n"));
+        }
         output.push_str("\n## Harness todo snapshots\n\n`harness.todo.observed` replaces the entire seat todo list. Session and incarnation identify its source; `observed_at` is source timestamp provenance, not an ordering clock. Keep the last snapshot until replaced, and expose stale provenance rather than presenting an old binding as current. Missing means unobserved; `phases: []`, zero totals and `truncated: false` means known empty.\n\nEach phase has `name` and `tasks`; each task has `content`, `status` (`pending`, `in_progress`, `completed`, `blocked`) and optional string `blocker`. The shared phase/task shape can also represent a future plan with one unnamed phase. Bounds are 16 phases, 100 tasks total, 128 UTF-8 bytes per phase name and 512 per content/blocker. Producers shorten at UTF-8 boundaries and omit trailing tasks/phases in source order to keep serialized claim fields within 64 KiB (including JSON escaping). Bound-driven shortening or omission sets `truncated`. `totals` contains nonnegative integer counts for all four statuses from the full source: counts equal the visible list when not truncated and cannot be less than visible counts when truncated. Unknown nested fields, invalid statuses, null blockers and oversized fields are rejected.\n");
         output.push_str("\nOMP's native `abandoned` tasks are omitted from phase tasks rather than relabeled as completed. Their enclosing phase is preserved when it fits. `totals.abandoned` counts these dropped tasks separately; it is optional on the wire and defaults to zero when absent. Totals for the four task statuses count the full source snapshot and exclude abandoned tasks from active progress. Dropping an abandoned task does not set `truncated`; that flag describes text/list/serialized-size bounds only. The OMP producer always emits the abandoned count and reserves 4 KiB of the serialized-fields budget for authenticated provenance.\n");
+        output.push('\n');
+        output.push_str(LOCAL_STORAGE_SCHEMA);
         output
     }
 
@@ -331,6 +440,15 @@ impl Registry {
                 "invalid-claim-subject",
                 "a subject needs a non-empty path after its registered family",
             ));
+        }
+        if spec.family == "assistant" && subject != "assistant/chatgpt" {
+            let grant = subject.strip_prefix("assistant/chatgpt/session/assistant-grant/");
+            if !grant.is_some_and(|id| id.len() == 24 && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+                return Err(error(
+                    "invalid-claim-subject",
+                    "an assistant subject must be assistant/chatgpt or its exact grant session",
+                ));
+            }
         }
         if spec.family == "custom" {
             let parts = subject.split('/').collect::<Vec<_>>();
@@ -377,6 +495,26 @@ impl Registry {
         subject: &str,
         kind: &str,
         fields: &BTreeMap<String, Value>,
+    ) -> Result<&ClaimSpec, ValidationError> {
+        self.validate_claim_with_mode(subject, kind, fields, false)
+    }
+
+    /// Unknown arrangement vocabulary waits for an upgrade only at replication admission.
+    pub fn validate_replicated_claim(
+        &self,
+        subject: &str,
+        kind: &str,
+        fields: &BTreeMap<String, Value>,
+    ) -> Result<&ClaimSpec, ValidationError> {
+        self.validate_claim_with_mode(subject, kind, fields, true)
+    }
+
+    fn validate_claim_with_mode(
+        &self,
+        subject: &str,
+        kind: &str,
+        fields: &BTreeMap<String, Value>,
+        replicated: bool,
     ) -> Result<&ClaimSpec, ValidationError> {
         let subject_spec = self.validate_subject(subject)?;
         if is_custom_claim_kind(kind) {
@@ -438,9 +576,14 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        review::validate_claim(self, kind, fields)?;
+        if kind == directive_notes::KIND {
+            directive_notes::validate_fields(fields)?;
+        }
         if kind == "mission.provenance" {
             provenance::validate_claim(subject, fields)?;
         }
+        harness_questions::validate(kind, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -463,7 +606,7 @@ impl Registry {
                     "an arrangement requires arrangement.edited or ordered-membership.edited",
                 ));
             }
-            arrangements::operations(subject, fields)?;
+            arrangements::operations_with_registry(subject, fields, self, replicated)?;
         }
         if subject_spec.family == "glass" {
             glasses::owner(subject)?;
@@ -561,8 +704,16 @@ impl Registry {
         fields: &BTreeMap<String, Value>,
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
+        if kind.starts_with("custom.client.assistant.")
+            || subject.starts_with("custom/client/assistant-v1-") {
+            return Err(error(
+                "claim-write-forbidden",
+                "assistant authority claims require a dedicated trusted-local operation",
+            ));
+        }
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
+        directive_notes::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
             || (spec.write_policy == WritePolicy::SameSubjectActor && actor == Some(subject));
         if !allowed {
@@ -602,6 +753,7 @@ fn field_summary(fields: &BTreeMap<String, FieldSpec>) -> String {
         .iter()
         .map(|(name, spec)| {
             let required = if spec.required { "!" } else { "" };
+            let nullable = if spec.nullable { " or null" } else { "" };
             let immutable = if spec.immutable { " immutable" } else { "" };
             let value_type = enum_label(&spec.value_type);
             let value_type = if spec.reference_families.is_empty() {
@@ -609,7 +761,7 @@ fn field_summary(fields: &BTreeMap<String, FieldSpec>) -> String {
             } else {
                 format!("{value_type}({})", spec.reference_families.join("|"))
             };
-            format!("`{name}{required}:{value_type}{immutable}`",)
+            format!("`{name}{required}:{value_type}{nullable}{immutable}`",)
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -647,7 +799,7 @@ fn validate_value(
     value: &Value,
     field: &FieldSpec,
 ) -> Result<(), ValidationError> {
-    if value.is_null() && !field.required {
+    if value.is_null() && (!field.required || field.nullable) {
         return Ok(());
     }
     let valid = match field.value_type {
@@ -755,6 +907,12 @@ fn build_registry() -> Registry {
         ),
         ("host", "host/NAME", "A graph host.", false),
         (
+            "harness-question",
+            "harness-question/ID",
+            "A question a seat's harness asked natively: question ids and option positions, never text.",
+            false,
+        ),
+        (
             "lane",
             "lane/RUN/LOCAL_ID",
             "A mission-run lane: an ordered line of entries its run works through front first.",
@@ -768,6 +926,12 @@ fn build_registry() -> Registry {
             false,
         ),
         ("person", "person/IDENTITY", "A human actor.", false),
+        (
+            "assistant",
+            "assistant/chatgpt[/session/assistant-grant/ID]",
+            "An external assistant principal or its grant-bound audit session, never a person.",
+            false,
+        ),
         (
             "external",
             "external/PROVIDER/KIND/IDENTITY",
@@ -898,6 +1062,7 @@ fn build_registry() -> Registry {
         subjects,
         resources,
         claims,
+        arrangement_operations: arrangements::OPERATION_TAGS.iter().map(|tag| (*tag).into()).collect(),
     }
 }
 
@@ -1073,6 +1238,9 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
             &[
                 ("target", reference()),
                 ("document", string()),
+                // Immutable Git notes IDs explicitly considered by the reviewer.
+                // The protected evidence observer validates each full object ID.
+                ("evidence_tests", array()),
                 ("reviewer", reference()),
                 (
                     "decision",
@@ -1109,6 +1277,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("session_id", string()),
                 ("agent", reference()),
                 ("incarnation_id", string()),
+                ("desired_token", string()),
                 (
                     "status",
                     enumeration(&["active", "inactive", "missing", "unknown"]),
@@ -1139,6 +1308,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::SameSubjectActor,
             Cardinality::StateTransition,
             None,
+            false,
+            &[],
+        ),
+        (
+            directive_notes::KIND,
+            &["person"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::StateTransition,
+            Some("directive-notes"),
             false,
             &[],
         ),
@@ -1294,6 +1472,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("mission-runs"),
             true,
             &["mission-run"],
+        ),
+        (
+            "mission-run.report-to",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::StateTransition,
+            Some("mission-runs"),
+            true,
+            &[],
         ),
         (
             "mission-run.state",
@@ -1491,6 +1678,19 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             true,
             &[],
         ),
+        (
+            "work.nudged",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        ("gate.head-bound", &["gate-operation"], WritePolicy::SystemOnly, Cardinality::Append, Some("gates"), true, &["gate"]),
+        ("gate.review-verdict", &["gate-operation"], WritePolicy::CapabilityHolder, Cardinality::Append, Some("gates"), true, &["gate"]),
+        ("gate.review-withdrawn", &["gate-operation"], WritePolicy::SystemOnly, Cardinality::Append, Some("gates"), true, &["gate"]),
+        ("gate.remediation-attached", &["gate-operation"], WritePolicy::SystemOnly, Cardinality::Append, Some("gates"), true, &["gate"]),
         (
             "gate.requested",
             &["gate-operation"],
@@ -1690,6 +1890,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "agent.retired",
+            &["agent"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("agents"),
+            true,
+            &[],
+        ),
+        (
             "agent.presence",
             &["agent"],
             WritePolicy::SameSubjectActor,
@@ -1833,6 +2042,26 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
             Some("subagents"),
+            false,
+            &[],
+        ),
+        // A question a seat's harness asked natively, and how it ended. Only st writes them: a
+        // client that could write one could forge a question or its answer.
+        (
+            harness_questions::OBSERVED,
+            &["harness-question"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            harness_questions::RESOLVED,
+            &["harness-question"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
             false,
             &[],
         ),
@@ -2471,39 +2700,19 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
     claims
 }
 
-/// Observations that only the node that made them reads. See
-/// `docs/st3/data-authority.md` for the local observation log.
+/// Where a kind's writes go, as `retention.toml` names it. See `docs/st3/data-authority.md` for
+/// the local observation log.
 fn claim_retention(kind: &str) -> Retention {
-    match kind {
-        // The owner reads a transcript from the harness's own session file, or from this log
-        // when there is none. Other nodes relay timeline reads to the owner.
-        "harness.timeline" | "harness.telemetry" => Retention::Local,
-        // Only the node that made them reads these: render receipts and the readiness
-        // deadline, whose attention request replicates.
-        "render.applied" | "runtime.readiness-deadline-reached" => Retention::Local,
-        // A host's sekrets gateway is that host's: its calls, refusals and changes age out with
-        // the local log (seven days by default) and go to OpenTelemetry for anything longer.
-        "sekret.called" | "sekret.exited" | "sekret.refused" | "sekret.changed" => Retention::Local,
-        // The owner's reconciler records its own starts, stops and kills: the stop deadline
-        // fence, restart windows and adoption read them on that node only. Another node
-        // stops a runtime through a replicated `stop` intent. A person's signal names its
-        // requester and replicates.
-        "runtime.action.requested"
-        | "runtime.action.succeeded"
-        | "runtime.action.failed"
-        | "runtime.action.deadline-reached" => Retention::SystemLocal,
-        // Other nodes read the current harness state and usage: step readiness is judged on
-        // the mission's node and fleet views run anywhere. Nothing reads a heartbeat.
-        "harness.observed" | "harness.usage" | "harness.todo.observed" | "workspace.observed" => {
-            Retention::Latest
-        }
-        _ => Retention::Durable,
-    }
+    retention::policy().kind(kind).log.retention()
 }
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
         "person.delegation-set" => &[("actions", required_array())],
+        directive_notes::KIND => &[
+            ("text", FieldSpec { required: true, nullable: true, ..string() }),
+            ("expires_at", string()),
+        ],
         "workspace.observed" => &[
             ("host", required_string()),
             ("workspace", required_string()),
@@ -2540,6 +2749,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
         ],
         "intent.desired" => &[
+            ("accountable", reference_to(&["person"])),
             ("kind", string()),
             ("revision", string()),
             ("desired", object()),
@@ -2599,6 +2809,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("parent_step_run", reference()),
             ("default_selector", object()),
             ("after", reference()),
+            ("report_to", reference()),
+            ("stalled_after_ms", integer()),
+            ("report_stalls", boolean()),
+            ("report_completed", boolean()),
+        ],
+        "mission-run.report-to" => &[
+            ("report_to", reference()),
+            ("stalled_after_ms", integer()),
+            ("report_stalls", boolean()),
+            ("report_completed", boolean()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -2728,11 +2948,21 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claim_expires_at_unix_ms", integer()),
             ("readiness_epoch", integer()),
             ("extend_ms", integer()),
+            ("clock", enumeration(&["paused", "running"])),
+            ("wait_until_unix_ms", integer()),
             ("handoff_key", string()),
             ("handoff_request", object()),
             ("handoff_to", reference()),
             ("handoff_message", reference()),
             ("handoff_acknowledged", reference()),
+        ],
+        "work.nudged" => &[
+            ("attempt", integer()),
+            ("agent", reference()),
+            ("message", reference()),
+            ("idle_since_unix_ms", string()),
+            ("reason", string()),
+            ("waits", array()),
         ],
         "gate.requested" => &[
             ("status", string()),
@@ -2754,6 +2984,82 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("capability_expires_at", string()),
             ("gate", string()),
             ("baseline", boolean()),
+            ("gate_subject", reference_to(&["gate-operation"])),
+            ("generation", reference_to(&["run-generation"])),
+            ("episode", integer()),
+            ("change", object()),
+            ("head", object()),
+            ("scope", object()),
+            ("author", reference_to(&["agent", "person"])),
+            ("binding_claim", string()),
+            ("delta_ref", string()),
+        ],
+        "gate.head-bound" => &[
+            ("owner", required_reference()),
+            ("boundary", required_reference()),
+            ("generation", required_reference_to(&["run-generation"])),
+            ("mission_revision", required_string()),
+            ("step_definition", required_string()),
+            ("attempt", required_integer()),
+            ("change", required_object()),
+            ("head", required_object()),
+            ("observation", required_string()),
+            ("reviewer", required_reference_to(&["agent", "person"])),
+            ("author", required_reference_to(&["agent", "person"])),
+            ("scope", required_object()),
+            ("review_targets", required_array()),
+            ("episode", required_integer()),
+            ("previous_binding", string()),
+            ("request_operation", required_reference_to(&["gate-operation"])),
+            ("reason", required_string()),
+        ],
+        "gate.review-verdict" => &[
+            ("request", required_string()),
+            ("gate_subject", required_reference_to(&["gate-operation"])),
+            ("binding_claim", required_string()),
+            ("generation", required_reference_to(&["run-generation"])),
+            ("attempt", required_integer()),
+            ("episode", required_integer()),
+            ("reviewer", required_reference_to(&["agent", "person"])),
+            ("verdict", required_enum(&["approved", "changes-requested", "abstained"])),
+            ("change", required_object()),
+            ("reviewed_head", required_object()),
+            ("scope", required_object()),
+            ("review_targets", required_array()),
+            ("finding_refs", required_array()),
+            ("evidence", required_array()),
+            ("source", required_object()),
+            ("carry_forward_from", string()),
+        ],
+        "gate.review-withdrawn" => &[
+            ("gate_subject", required_reference_to(&["gate-operation"])),
+            ("binding_claim", required_string()),
+            ("request", required_string()),
+            ("verdict", required_string()),
+            ("generation", required_reference_to(&["run-generation"])),
+            ("attempt", required_integer()),
+            ("episode", required_integer()),
+            ("reviewer", required_reference_to(&["agent", "person"])),
+            ("withdrawing_actor", required_reference_to(&["agent", "person"])),
+            ("authorization_evidence", required_array()),
+            ("reason", required_string()),
+            ("previous_binding", required_string()),
+        ],
+        "gate.remediation-attached" => &[
+            ("gate_subject", required_reference_to(&["gate-operation"])),
+            ("binding_claim", required_string()),
+            ("request", required_string()),
+            ("verdict", required_string()),
+            ("generation", required_reference_to(&["run-generation"])),
+            ("boundary_attempt", required_integer()),
+            ("episode", required_integer()),
+            ("reviewed_head", required_object()),
+            ("author_step", required_reference_to(&["step-run"])),
+            ("author_attempt", required_integer()),
+            ("author_generation", required_reference_to(&["run-generation"])),
+            ("attempt_receipt", required_string()),
+            ("finding_refs", required_array()),
+            ("evidence", required_array()),
         ],
         "gate.result" => &[
             (
@@ -2818,6 +3124,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ),
             ("anchor", reference_to(&["mission-run"])),
             ("reason", string()),
+        ],
+        "agent.retired" => &[
+            ("reason", required_string()),
+            ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
+            ("owner_host", required_string()),
+            ("declaration", required_string()),
+            ("successor", reference_to(&["agent"])),
+            ("transfer", string()),
         ],
         "agent.presence" => &[
             (
@@ -2963,6 +3277,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("targets", array()),
             ("source_revision", string()),
             ("incarnation", string()),
+            ("reproduction", object()),
         ],
         "operational.recovered" => &[
             ("episode", string()),
@@ -3109,6 +3424,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("discovery_revision", string()),
             ("agent", reference_to(&["agent"])),
             ("incarnation_id", string()),
+            ("desired_token", string()),
             (
                 "status",
                 enumeration(&["active", "inactive", "missing", "unknown"]),
@@ -3122,6 +3438,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("reason", string()),
             ("incarnation_id", string()),
+            ("session_id", string()),
+            ("selector_scope", string()),
             ("ownership_sequence", integer()),
             ("provider_auth_sequence", integer()),
             ("auth_attention_key", string()),
@@ -3260,6 +3578,22 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("cached_tokens", integer()),
             ("total_tokens", integer()),
         ],
+        harness_questions::OBSERVED => &[
+            ("agent", required_reference_to(&["agent"])),
+            ("session", required_string()),
+            ("native_id", required_string()),
+            ("runtime_incarnation", required_string()),
+            ("questions", required_array()),
+        ],
+        harness_questions::RESOLVED => &[
+            (
+                "status",
+                required_enum(&["answered", "answered_elsewhere", "expired", "cancelled"]),
+            ),
+            ("revision", required_string()),
+            ("answers", required_object()),
+            ("receipt", object()),
+        ],
         "harness.telemetry" => &[
             ("driver", required_enum(&["claude"])),
             ("unit", required_enum(&["hook"])),
@@ -3350,6 +3684,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("in_reply_to", reference()),
             ("tags", array()),
             ("attachments", array()),
+            ("sender_class", enumeration(&["external-assistant"])),
+            ("assistant_grant_id", string()),
+            ("assistant_owner", reference()),
+            ("assistant_session_actor", string()),
         ],
         "message.staged" => &[
             ("status", required_enum(&["staged"])),
@@ -3583,6 +3921,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         .cloned()
         .map(|(name, spec)| (name.into(), spec))
         .collect();
+    if kind == "work.submitted" {
+        fields.insert("submitted_incarnation".into(), string());
+    }
+    if kind == "work.person-done" {
+        fields.insert("sender_class".into(), enumeration(&["external-assistant"]));
+        fields.insert("assistant_grant_id".into(), string());
+        fields.insert("assistant_owner".into(), reference_to(&["person"]));
+        fields.insert("assistant_session_actor".into(), string());
+    }
     if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());
@@ -3712,6 +4059,7 @@ fn field(value_type: ValueType) -> FieldSpec {
     FieldSpec {
         value_type,
         required: false,
+        nullable: false,
         values: Vec::new(),
         immutable: false,
         reference: false,
@@ -3832,6 +4180,33 @@ fn validate_harness_todo(fields: &BTreeMap<String, Value>) -> Result<(), Validat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_report_stall_policy_is_an_optional_boolean() {
+        for kind in ["mission-run.created", "mission-run.report-to"] {
+            let mut fields =
+                BTreeMap::from([("report_to".into(), serde_json::json!("agent/ops/watcher"))]);
+            assert!(
+                registry()
+                    .validate_claim("mission-run/parent/1", kind, &fields)
+                    .is_ok()
+            );
+            for value in [serde_json::json!(false), serde_json::json!(true)] {
+                fields.insert("report_stalls".into(), value);
+                assert!(
+                    registry()
+                        .validate_claim("mission-run/parent/1", kind, &fields)
+                        .is_ok()
+                );
+            }
+            fields.insert("report_stalls".into(), serde_json::json!("false"));
+            assert!(
+                registry()
+                    .validate_claim("mission-run/parent/1", kind, &fields)
+                    .is_err()
+            );
+        }
+    }
 
     fn todo_fields() -> BTreeMap<String, Value> {
         serde_json::from_value(serde_json::json!({
@@ -3986,6 +4361,7 @@ mod tests {
                 "account",
                 "agent",
                 "arrangement",
+                "assistant",
                 "attention",
                 "checkpoint",
                 "checkpoint-excusal",
@@ -3999,6 +4375,7 @@ mod tests {
                 "gate-operation",
                 "github-post",
                 "glass",
+                "harness-question",
                 "host",
                 "lane",
                 "loop-run",
@@ -4050,6 +4427,7 @@ mod tests {
             [
                 "decision",
                 "document",
+                "evidence_tests",
                 "reason",
                 "reviewer",
                 "submitted_at",
@@ -4067,6 +4445,7 @@ mod tests {
                 "agent.placement.source-offline",
                 "agent.presence",
                 "agent.queue.moved",
+                "agent.retired",
                 "arrangement.edited",
                 "attention.requested",
                 "attention.resolved",
@@ -4086,11 +4465,17 @@ mod tests {
                 "fleet.member-endpoints",
                 "fleet.member-left",
                 "fleet.member-removed",
+                "gate.head-bound",
+                "gate.remediation-attached",
                 "gate.requested",
                 "gate.result",
+                "gate.review-verdict",
+                "gate.review-withdrawn",
                 "github.posted",
                 "glass.deleted",
                 "glass.upserted",
+                "harness-question.observed",
+                "harness-question.resolved",
                 "harness.context-clear.requested",
                 "harness.context-clear.result",
                 "harness.diagnostic",
@@ -4116,6 +4501,7 @@ mod tests {
                 "message.sent",
                 "message.staged",
                 "mission-run.created",
+                "mission-run.report-to",
                 "mission-run.state",
                 "mission.produced",
                 "mission.provenance",
@@ -4128,6 +4514,7 @@ mod tests {
                 "ordered-membership.edited",
                 "owned-set.revised",
                 "person.delegation-set",
+                "person.directive-note-set",
                 "planning-session.approved",
                 "planning-session.cancelled",
                 "planning-session.candidate-submitted",
@@ -4194,6 +4581,7 @@ mod tests {
                 "work.claimed",
                 "work.extended",
                 "work.failed",
+                "work.nudged",
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",
@@ -4281,6 +4669,9 @@ mod tests {
     #[test]
     fn subject_paths_and_file_subjects_are_strict() {
         for invalid in [
+            "assistant/other",
+            "assistant/chatgpt/session/person/operator",
+            "assistant/chatgpt/session/assistant-grant/not-a-grant",
             "agent/",
             "agent/run//worker",
             "file/node/tmp/example",
@@ -4293,6 +4684,8 @@ mod tests {
         registry()
             .validate_subject("file/node:/tmp/example")
             .unwrap();
+        registry().validate_subject("assistant/chatgpt").unwrap();
+        registry().validate_subject("assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567").unwrap();
     }
 
     #[test]
@@ -4477,10 +4870,78 @@ mod tests {
 
 
     #[test]
+    fn submitted_incarnation_is_optional_and_only_registered_on_submissions() {
+        let fields = BTreeMap::from([("attempt".into(), Value::from(1))]);
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
+        let mut fields = fields;
+        fields.insert("submitted_incarnation".into(), Value::from("garden:one"));
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
+        for kind in [
+            "work.claimed",
+            "work.progress",
+            "work.released",
+            "work.failed",
+        ] {
+            assert_eq!(
+                registry()
+                    .validate_claim("step-run/garden/build", kind, &fields)
+                    .unwrap_err()
+                    .code,
+                "unknown-claim-field"
+            );
+        }
+        fields.insert("submitted_incarnation".into(), Value::from(1));
+        assert_eq!(
+            registry()
+                .validate_claim("step-run/garden/build", "work.submitted", &fields)
+                .unwrap_err()
+                .code,
+            "invalid-claim-field"
+        );
+    }
+
+    #[test]
     fn checked_in_schema_document_matches_the_registry() {
         assert_eq!(
             include_str!("../../../docs/st3/schema.md"),
             registry().markdown()
+        );
+    }
+
+    #[test]
+    fn review_test_citations_are_optional_array_facts() {
+        let review = BTreeMap::from([
+            (
+                "target".into(),
+                Value::String("resource/github/acme/garden/pull-request/7".into()),
+            ),
+            (
+                "document".into(),
+                Value::String("doc/review/fixture@digest".into()),
+            ),
+            (
+                "reviewer".into(),
+                Value::String("agent/fixture-reviewer".into()),
+            ),
+            ("decision".into(), Value::String("approve".into())),
+        ]);
+        registry()
+            .validate_resource_facts("human.review", &review)
+            .unwrap();
+        let mut cited = review;
+        cited.insert("evidence_tests".into(), serde_json::json!(["a".repeat(40)]));
+        registry()
+            .validate_resource_facts("human.review", &cited)
+            .unwrap();
+        cited.insert("evidence_tests".into(), Value::String("a".repeat(40)));
+        assert!(
+            registry()
+                .validate_resource_facts("human.review", &cited)
+                .is_err()
         );
     }
 

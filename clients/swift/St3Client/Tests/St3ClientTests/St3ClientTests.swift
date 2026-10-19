@@ -1,4 +1,8 @@
 import XCTest
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import St3Client
 
 final class St3ClientTests: XCTestCase {
@@ -64,6 +68,63 @@ final class St3ClientTests: XCTestCase {
             XCTAssertEqual(String(decoding: try JSONEncoder().encode(code), as: UTF8.self), "\"\(raw)\"")
         }
     }
+    func testUsageAggregationSchemaLiteralsDecode() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/schemas/client-v0.schema.json"))
+        let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let definitions = try XCTUnwrap(schema["$defs"] as? [String: Any])
+        let summary = try XCTUnwrap(definitions["UsageSummary"] as? [String: Any])
+        let properties = try XCTUnwrap(summary["properties"] as? [String: Any])
+        let aggregation = try XCTUnwrap(properties["aggregation"] as? [String: Any])
+        let literals = try XCTUnwrap(aggregation["enum"] as? [String])
+        XCTAssertEqual(literals, [
+            "cumulative-per-incarnation-else-response-deltas",
+            "rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas",
+        ])
+        for literal in literals {
+            let wire: [String: Any] = [
+                "total_tokens": 1200, "input_tokens": 900, "output_tokens": 300,
+                "cached_tokens": 100, "incarnation_count": 2, "aggregation": literal,
+            ]
+            let decoded = try JSONDecoder().decode(UsageSummary.self,
+                from: JSONSerialization.data(withJSONObject: wire))
+            XCTAssertEqual(decoded.aggregation, literal)
+        }
+    }
+
+    func testQueuedMissionDeadlineAcceptsNullAndAdmissionTimestamp() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/person-ask-mission.json"))
+        var mission = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var runs = try XCTUnwrap(mission["run_details"] as? [[String: Any]])
+        runs[0]["after"] = "mission-run/predecessor"
+        runs[0]["deadline"] = NSNull()
+        mission["run_details"] = runs
+        let queued = try JSONDecoder().decode(MissionResource.self, from: JSONSerialization.data(withJSONObject: mission))
+        XCTAssertNil(queued.runDetails?.first?.deadline)
+        runs[0]["deadline"] = "2026-09-20T11:05:00Z"
+        mission["run_details"] = runs
+        let admitted = try JSONDecoder().decode(MissionResource.self, from: JSONSerialization.data(withJSONObject: mission))
+        XCTAssertEqual(admitted.runDetails?.first?.deadline, "2026-09-20T11:05:00Z")
+    }
+
+    func testDirectiveNoteFixturePreservesCurrentAdvisoryMetadata() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/directive-notes.json"))
+        let result = try JSONDecoder().decode(Envelope<DirectiveNotes>.self, from: data)
+        let note = try XCTUnwrap(result.value.notes.first)
+        XCTAssertEqual(note.person, "person/ada")
+        XCTAssertEqual(note.author, note.person)
+        XCTAssertEqual(note.time, "2026-10-10T09:00:00Z")
+        XCTAssertEqual(note.expiresAt, "2026-10-12T09:00:00Z")
+        XCTAssertEqual(note.revision, "claim/example")
+        let empty = try JSONDecoder().decode(DirectiveNotes.self, from: Data(#"{"notes":[]}"#.utf8))
+        XCTAssertTrue(empty.notes.isEmpty)
+    }
+
     func testCreationActionFixtures() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -122,9 +183,59 @@ final class St3ClientTests: XCTestCase {
     }
 
     func testCapabilitiesFixtureDecodes() throws {
-        let json = #"{"api_version":"st3.client.v0","request_id":"request/1","snapshot":{"id":"snapshot/host/1/a","host_id":"host/a","store_index":1,"projection_version":"client-projection.v0","created_at":"2026-09-20T12:00:00Z"},"value":{"kind":"capabilities","session_actor":"person/a/session/b","transport":"fabric-loopback","capabilities":[],"limits":{"max_page_items":200,"max_event_items":500,"max_response_bytes":1048576,"max_wait_ms":30000},"event_cursor":"event-cursor/a/1","oldest_event_cursor":"event-cursor/a/0","schemas":["schema.json"]}}"#
-        let value = try JSONDecoder().decode(Envelope<Capabilities>.self, from: Data(json.utf8))
+        let value = try JSONDecoder().decode(Envelope<Capabilities>.self, from: TraceTestFixtures.capabilities)
         XCTAssertEqual(value.value.limits.maxPageItems, 200)
+    }
+
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): readers accept both names; sunset 60 days after first release shipping the bridge.
+    func testEnvelopeVersionNamesDecodeWithoutChangingStringSemantics() throws {
+        for version in ["st3.client.v0", "fractal.client.v0", "future.client.v99"] {
+            let wire: [String: Any] = [
+                "api_version": version,
+                "request_id": "request/example",
+                "snapshot": [
+                    "id": "snapshot/example", "host_id": "host/example", "store_index": 1,
+                    "projection_version": "projection-v0", "created_at": "2026-10-19T00:00:00Z",
+                ],
+                "value": ["notes": []],
+            ]
+            let decoded = try JSONDecoder().decode(Envelope<DirectiveNotes>.self,
+                from: JSONSerialization.data(withJSONObject: wire))
+            XCTAssertEqual(decoded.apiVersion, version)
+            XCTAssertEqual(decoded.requestID, "request/example")
+            XCTAssertTrue(decoded.value.notes.isEmpty)
+        }
+    }
+
+    func testErrorEnvelopeVersionNamesDecodeIndependently() throws {
+        // These fields have always been strings, not a protocol-selection or version-validation gate.
+        // Mixed namespaces remain valid, as do previously accepted future version strings.
+        for apiVersion in ["st3.client.v0", "fractal.client.v0", "future.client.v99"] {
+            for errorVersion in ["st3.client.error.v0", "fractal.client.error.v0", "future.client.error.v99"] {
+                let wire: [String: Any] = [
+                    "api_version": apiVersion, "error_version": errorVersion,
+                    "request_id": "request/example", "code": "not-found",
+                    "message": "No such resource", "retryable": false, "details": [:],
+                ]
+                let decoded = try JSONDecoder().decode(ErrorEnvelope.self,
+                    from: JSONSerialization.data(withJSONObject: wire))
+                XCTAssertEqual(decoded.apiVersion, apiVersion)
+                XCTAssertEqual(decoded.errorVersion, errorVersion)
+                XCTAssertEqual(decoded.code, .notFound)
+                XCTAssertFalse(decoded.retryable)
+            }
+        }
+    }
+
+    func testWireBridgeKeepsActionSenderVersionBytes() throws {
+        XCTAssertEqual(st3ClientAPIVersion, "st3.client.v0")
+        XCTAssertEqual(st3ClientTerminalSubprotocol, "st3.client.terminal.v0")
+        let request = try ActionRequest.workRetry(id: "work/example",
+            idempotencyKey: "retry/example", fence: Fence(snapshotID: "snapshot/example"),
+            parameters: WorkRetryParameters(targetID: "work/example", reason: "Retry requested"))
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(wire["api_version"] as? String, "st3.client.v0")
     }
 
     func testGeneratedActionCoverage() throws {
@@ -165,10 +276,62 @@ final class St3ClientTests: XCTestCase {
             ("runtime-authority-indeterminate", ErrorCode.runtimeAuthorityIndeterminate),
             ("terminal-unavailable", ErrorCode.terminalUnavailable),
             ("terminal-ended", ErrorCode.terminalEnded),
+            ("agent-roster-cut-not-ready", ErrorCode.agentRosterCutNotReady),
         ] {
             let decoded = try JSONDecoder().decode(ErrorCode.self, from: Data("\"\(raw)\"".utf8))
             XCTAssertEqual(decoded, expected)
             XCTAssertEqual(String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self), "\"\(raw)\"")
+        }
+    }
+
+    func testAgentLifecycleKnownAndFutureKindsRoundTrip() throws {
+        for (raw, expected) in [
+            ("standing", AgentLifecycle.standing),
+            ("owner", AgentLifecycle.owner),
+            ("bounded", AgentLifecycle.bounded),
+            ("future-kind", AgentLifecycle.unknown("future-kind")),
+        ] {
+            let encoded = try JSONEncoder().encode(raw)
+            let decoded = try JSONDecoder().decode(AgentLifecycle.self, from: encoded)
+            XCTAssertEqual(decoded, expected)
+            XCTAssertEqual(try JSONEncoder().encode(decoded), encoded)
+        }
+    }
+
+    func testAgentLifecycleFutureKindPreservesRosterRow() throws {
+        let json = #"{"id":"agent/example","kind":"agent","revision":"r1","updated_at":"2026-10-08T12:00:00Z","name":"Example","state":"idle","reachability":"online","runtime_ids":[],"under":[],"lifecycle":"future-kind"}"#
+        let data = Data(json.utf8)
+        let agent = try JSONDecoder().decode(AgentResource.self, from: data)
+        XCTAssertEqual(agent.id, "agent/example")
+        XCTAssertEqual(agent.name, "Example")
+        XCTAssertEqual(agent.lifecycle, .unknown("future-kind"))
+
+        let roster = try JSONDecoder().decode([Resource].self, from: Data("[\(json)]".utf8))
+        XCTAssertEqual(roster.count, 1)
+        guard case .agent(let row) = roster[0] else { return XCTFail("agent discriminator lost") }
+        XCTAssertEqual(row.id, agent.id)
+        XCTAssertEqual(row.name, agent.name)
+        XCTAssertEqual(row.lifecycle, .unknown("future-kind"))
+
+        let again = try JSONDecoder().decode(Resource.self, from: JSONEncoder().encode(roster[0]))
+        guard case .agent(let roundTrip) = again else { return XCTFail("agent discriminator lost on round trip") }
+        XCTAssertEqual(roundTrip.id, agent.id)
+        XCTAssertEqual(roundTrip.lifecycle, .unknown("future-kind"))
+    }
+
+    func testAgentLifecycleKnownAndAbsentPreserveRosterRows() throws {
+        for (field, expected) in [
+            (#","lifecycle":"standing""#, Optional(AgentLifecycle.standing)),
+            (#","lifecycle":"owner""#, Optional(AgentLifecycle.owner)),
+            (#","lifecycle":"bounded""#, Optional(AgentLifecycle.bounded)),
+            ("", nil),
+            (#","lifecycle":null"#, nil),
+        ] {
+            let json = #"{"id":"agent/example","kind":"agent","revision":"r1","updated_at":"2026-10-08T12:00:00Z","name":"Example","state":"idle","reachability":"online","runtime_ids":[],"under":[]\#(field)}"#
+            let resource = try JSONDecoder().decode(Resource.self, from: Data(json.utf8))
+            guard case .agent(let agent) = resource else { return XCTFail("agent discriminator lost") }
+            XCTAssertEqual(agent.id, "agent/example")
+            XCTAssertEqual(agent.lifecycle, expected)
         }
     }
 
@@ -246,6 +409,83 @@ final class St3ClientTests: XCTestCase {
         guard case .error = timeline.items[9].body else { return XCTFail("error body lost") }
     }
 
+    func testExactAgentCollectionFramesDecodeRowsRemovalsAndRetryability() throws {
+        let json = #"{"kind":"snapshot","id":"details","collection":"agents","items":[{"id":"agent/example/worker","kind":"agent","revision":"r1","updated_at":"2026-10-04T08:00:00Z","name":"Worker","state":"idle","reachability":"up","runtime_ids":[],"under":[]}],"order":["agent/example/worker"],"has_more":false}"#
+        let frame = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(json.utf8))
+        XCTAssertEqual(frame.items?.map(\.id), ["agent/example/worker"])
+        XCTAssertEqual(frame.hasMore, false)
+        let removal = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(
+            #"{"kind":"changes","id":"details","collection":"agents","upserts":[],"removes":["agent/example/worker"],"order":[],"has_more":false}"#.utf8))
+        XCTAssertEqual(removal.removes, ["agent/example/worker"])
+        XCTAssertEqual(removal.order, [])
+        let resync = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(
+            #"{"kind":"resync","id":"details","retryable":true,"code":"internal","message":"Read unavailable"}"#.utf8))
+        XCTAssertEqual(resync.retryable, true)
+        XCTAssertNil(resync.items)
+    }
+
+    @MainActor
+    func testExactAgentStreamRefusesADaemonWithoutTheCapability() async throws {
+        let url = URL(string: "https://exact-\(UUID().uuidString.lowercased()).example/")!
+        let capture = TraceRequestCapture()
+        TraceHTTPRegistry.shared.register(capture, host: url.host!)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraceHTTPProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            TraceHTTPRegistry.shared.remove(host: url.host!)
+        }
+        // The stub daemon's capabilities list is empty, as an older daemon's lacks the selector.
+        let client = St3Client(fabricLoopbackURL: url, session: session)
+        do {
+            for try await _ in await client.agentsStream(subscriptionID: "details", agent: "agent/example/worker") {
+                XCTFail("an older daemon must not be sent the selector")
+            }
+            XCTFail("the exact agent stream must fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains(St3Client.exactAgentSelectorCapability), error.localizedDescription)
+        }
+        XCTAssertTrue(capture.requests.contains { $0.url?.path == "/v1/client/capabilities" })
+    }
+
+    func testRelayOmissionFixtureKeepsKnownBodiesAndOptionalValues() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/timeline-relay-omission.json"))
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let value = try XCTUnwrap(wire["value"] as? [String: Any])
+        let items = try XCTUnwrap(value["items"] as? [[String: Any]])
+        // Swift's current closed type enum has no future-record case. Preserve that existing
+        // contract here; the Rust relay and TypeScript controls cover the unknown raw body.
+        let known = items.filter { ($0["type"] as? String) != "future_record" }
+        for item in known {
+            let entry = try JSONDecoder().decode(TimelineEntry.self, from: JSONSerialization.data(withJSONObject: item))
+            let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any])
+            let originalBody = try XCTUnwrap(item["body"] as? [String: Any])
+            let encodedBody = try XCTUnwrap(encoded["body"] as? [String: Any])
+            // The existing Swift usage model does not expose cache_write_tokens or turn_id.
+            // Their wire preservation is tested by the Rust relay and TypeScript consumers;
+            // this check covers values this installed Swift model actually represents.
+            let unmodeled: Set<String>
+            if case .usage = entry.body { unmodeled = ["cache_write_tokens", "turn_id"] }
+            else { unmodeled = [] }
+            // Codable may omit explicitly nullable nils, without inventing absent fields.
+            for (key, original) in originalBody where !(original is NSNull) && key != "attribution" && !unmodeled.contains(key) {
+                XCTAssertEqual(encodedBody[key] as? NSObject, original as? NSObject, key)
+            }
+            for key in encodedBody.keys {
+                XCTAssertNotNil(originalBody[key], "invented field: \(key)")
+            }
+            XCTAssertEqual(encoded["id"] as? String, item["id"] as? String)
+            XCTAssertEqual(encoded["sequence"] as? Int, item["sequence"] as? Int)
+            XCTAssertEqual(encoded["revision"] as? Int, 2)
+        }
+        let minimal = try JSONDecoder().decode(TimelineEntry.self, from: JSONSerialization.data(withJSONObject: known[0]))
+        guard case .message(let body) = minimal.body else { return XCTFail("message body lost") }
+        XCTAssertNil(body.replyTo); XCTAssertNil(body.from); XCTAssertNil(body.to); XCTAssertNil(body.title)
+    }
+
     func testAKindThisClientDoesNotKnowReadsAsUnknown() throws {
         let json = #"{"kind":"example-arrangement","id":"example-arrangement/person/avery/1","revision":"r1","updated_at":"2026-10-04T08:00:00Z","name":"Pinned"}"#
         let resource = try JSONDecoder().decode(Resource.self, from: Data(json.utf8))
@@ -255,5 +495,251 @@ final class St3ClientTests: XCTestCase {
         XCTAssertEqual(unknown.fields["name"], .string("Pinned"))
         let again = try JSONDecoder().decode(Resource.self, from: JSONEncoder().encode(resource))
         XCTAssertEqual(again.id, resource.id)
+    }
+    @MainActor
+    func testHTTPTraceContextIsReadOncePerRequestAndForwardedVerbatim() async throws {
+        let contexts = [
+            TraceContext(traceparent: TraceTestFixtures.traceparent, tracestate: "vendor=value"),
+            TraceContext(traceparent: TraceTestFixtures.traceparent, tracestate: "vendor=value,st=existing"),
+            TraceContext(traceparent: "01-11111111111111111111111111111111-2222222222222222-00"),
+        ]
+        let probe = TraceContextProbe(contexts)
+        let requests = try await captureHTTPRequests(traceContext: { probe.next() }, count: contexts.count)
+        XCTAssertEqual(probe.count, contexts.count)
+        XCTAssertEqual(requests.count, contexts.count)
+        for (request, context) in zip(requests, contexts) {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "traceparent"), context.traceparent)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "tracestate"), context.tracestate)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-credential")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-st3-client"), "test-app 1")
+        }
+    }
+
+    @MainActor
+    func testHTTPWithoutTraceContextCallbackOmitsBothHeaders() async throws {
+        let requests = try await captureHTTPRequests()
+        assertNoTraceHeaders(try XCTUnwrap(requests.first))
+    }
+
+    @MainActor
+    func testHTTPNilTraceContextOmitsBothHeadersAndCallsOnce() async throws {
+        let probe = TraceContextProbe([nil])
+        let requests = try await captureHTTPRequests(traceContext: { probe.next() })
+        assertNoTraceHeaders(try XCTUnwrap(requests.first))
+        XCTAssertEqual(probe.count, 1)
+    }
+
+    @MainActor
+    func testHTTPInvalidTraceparentOmitsBothHeaders() async throws {
+        for traceparent in TraceTestFixtures.invalidTraceparents {
+            let probe = TraceContextProbe([TraceContext(traceparent: traceparent, tracestate: "vendor=value")])
+            let requests = try await captureHTTPRequests(traceContext: { probe.next() })
+            assertNoTraceHeaders(try XCTUnwrap(requests.first))
+            XCTAssertEqual(probe.count, 1, traceparent)
+        }
+    }
+
+    @MainActor
+    func testEveryWebSocketBuilderReadsContextOnceAndForwardsVerbatim() async throws {
+        let session = WebSocketCaptureSession()
+        defer { session.invalidateAndCancel() }
+        let context = TraceContext(traceparent: TraceTestFixtures.traceparent, tracestate: "vendor=value,st=existing")
+        let probe = TraceContextProbe([context])
+        let client = St3Client(fabricLoopbackURL: URL(string: "https://trace.example/")!,
+            credential: "test-credential", session: session, client: "test-app 1",
+            traceContext: { probe.next() })
+        _ = await client.conversationStream(sessionID: "session/example")
+        _ = await client.glassesStream()
+        _ = await client.arrangementsStream(person: "person/example")
+        _ = await client.terminalStream("terminal/example", streamCapability: "test-capability")
+        let requests = session.capture.requests
+        XCTAssertEqual(probe.count, 4)
+        XCTAssertEqual(requests.count, 4)
+        XCTAssertEqual(requests.map { $0.url?.path }, [
+            "/v1/client/conversations/example/stream", "/v1/client/collections/stream",
+            "/v1/client/collections/stream", "/v1/client/terminals/example/stream",
+        ])
+        for request in requests {
+            XCTAssertEqual(request.url?.scheme, "wss")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "traceparent"), context.traceparent)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "tracestate"), context.tracestate)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-credential")
+            XCTAssertNotNil(request.value(forHTTPHeaderField: "Sec-WebSocket-Protocol"))
+        }
+    }
+
+    @MainActor
+    func testWebSocketWithoutTraceContextCallbackOmitsBothHeaders() async throws {
+        let session = WebSocketCaptureSession()
+        defer { session.invalidateAndCancel() }
+        let client = St3Client(fabricLoopbackURL: URL(string: "https://trace.example/")!, session: session)
+        _ = await client.conversationStream(sessionID: "session/example")
+        assertNoTraceHeaders(try XCTUnwrap(session.capture.requests.first))
+    }
+
+    @MainActor
+    func testWebSocketNilOrInvalidContextOmitsBothHeadersAndCallsOnce() async throws {
+        let contexts: [TraceContext?] = [nil] + TraceTestFixtures.invalidTraceparents.map {
+            TraceContext(traceparent: $0, tracestate: "vendor=value")
+        }
+        for context in contexts {
+            let session = WebSocketCaptureSession()
+            defer { session.invalidateAndCancel() }
+            let probe = TraceContextProbe([context])
+            let client = St3Client(fabricLoopbackURL: URL(string: "https://trace.example/")!,
+                session: session, traceContext: { probe.next() })
+            _ = await client.conversationStream(sessionID: "session/example")
+            assertNoTraceHeaders(try XCTUnwrap(session.capture.requests.first))
+            XCTAssertEqual(probe.count, 1)
+        }
+    }
+
+    @MainActor
+    private func captureHTTPRequests(traceContext: (@Sendable () -> TraceContext?)? = nil,
+        count: Int = 1) async throws -> [URLRequest] {
+        let url = URL(string: "https://trace-\(UUID().uuidString.lowercased()).example/")!
+        let capture = TraceRequestCapture()
+        TraceHTTPRegistry.shared.register(capture, host: url.host!)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraceHTTPProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            TraceHTTPRegistry.shared.remove(host: url.host!)
+        }
+        let client = St3Client(fabricLoopbackURL: url, credential: "test-credential",
+            session: session, client: "test-app 1", traceContext: traceContext)
+        for _ in 0..<count { _ = try await client.capabilities() }
+        return capture.requests
+    }
+
+    private func assertNoTraceHeaders(_ request: URLRequest,
+        file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertNil(request.value(forHTTPHeaderField: "traceparent"), file: file, line: line)
+        XCTAssertNil(request.value(forHTTPHeaderField: "tracestate"), file: file, line: line)
+    }
+}
+
+private enum TraceTestFixtures {
+    static let traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+    static let invalidTraceparents = [
+        "",
+        traceparent.uppercased(),
+        traceparent + "\n",
+        " " + traceparent,
+        traceparent + "-extra",
+        "00-0123456789abcdef0123456789abcde-0123456789abcdef-01",
+        "00-0123456789abcdef0123456789abcdef-0123456789abcde-01",
+        "00-0123456789abcdef0123456789abcdef-0123456789abcdef-0",
+        "00-0123456789abcdef0123456789abcdeg-0123456789abcdef-01",
+        "00_0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+        "ff-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+        "00-00000000000000000000000000000000-0123456789abcdef-01",
+        "00-0123456789abcdef0123456789abcdef-0000000000000000-01",
+    ]
+    static let capabilities = Data(#"{"api_version":"st3.client.v0","request_id":"request/1","snapshot":{"id":"snapshot/host/1/a","host_id":"host/a","store_index":1,"projection_version":"client-projection.v0","created_at":"2026-09-20T12:00:00Z"},"value":{"kind":"capabilities","session_actor":"person/a/session/b","transport":"fabric-loopback","capabilities":[],"limits":{"max_page_items":200,"max_event_items":500,"max_response_bytes":1048576,"max_wait_ms":30000},"event_cursor":"event-cursor/a/1","oldest_event_cursor":"event-cursor/a/0","schemas":["schema.json"]}}"#.utf8)
+}
+
+private final class TraceContextProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let contexts: [TraceContext?]
+    private var calls = 0
+
+    init(_ contexts: [TraceContext?]) { self.contexts = contexts }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+
+    func next() -> TraceContext? {
+        lock.lock()
+        defer { lock.unlock() }
+        let context = contexts[min(calls, contexts.count - 1)]
+        calls += 1
+        return context
+    }
+}
+
+private final class TraceRequestCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var captured: [URLRequest] = []
+
+    var requests: [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return captured
+    }
+
+    func append(_ request: URLRequest) {
+        lock.lock()
+        defer { lock.unlock() }
+        captured.append(request)
+    }
+}
+
+private final class TraceHTTPRegistry: @unchecked Sendable {
+    static let shared = TraceHTTPRegistry()
+    private let lock = NSLock()
+    private var captures: [String: TraceRequestCapture] = [:]
+
+    func register(_ capture: TraceRequestCapture, host: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        captures[host] = capture
+    }
+
+    func remove(host: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        captures.removeValue(forKey: host)
+    }
+
+    func capture(for request: URLRequest) -> TraceRequestCapture? {
+        lock.lock()
+        defer { lock.unlock() }
+        return captures[request.url?.host ?? ""]
+    }
+}
+
+private final class TraceHTTPProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool {
+        TraceHTTPRegistry.shared.capture(for: request) != nil
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let capture = TraceHTTPRegistry.shared.capture(for: request),
+              let url = request.url,
+              let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                  headerFields: ["Content-Type": "application/json"]) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        capture.append(request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: TraceTestFixtures.capabilities)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class WebSocketCaptureSession: URLSession, @unchecked Sendable {
+    let capture = TraceRequestCapture()
+    private let backing = URLSession(configuration: .ephemeral)
+
+    override func webSocketTask(with request: URLRequest) -> URLSessionWebSocketTask {
+        capture.append(request)
+        let task = backing.webSocketTask(with: request)
+        // Capture the public builder's request without opening a network connection.
+        task.cancel(with: .normalClosure, reason: nil)
+        return task
+    }
+
+    override func invalidateAndCancel() {
+        backing.invalidateAndCancel()
     }
 }

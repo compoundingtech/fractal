@@ -63,7 +63,7 @@ impl Fixture {
 
     /// An `st2` invocation with this fixture's isolated state env.
     fn st2(&self) -> Command {
-        self.st2_from(Path::new(env!("CARGO_BIN_EXE_st2")))
+        self.st2_from(Path::new(test_env!("CARGO_BIN_EXE_st2")))
     }
 
     fn st2_from(&self, binary: &Path) -> Command {
@@ -229,7 +229,7 @@ impl Fixture {
         std::fs::create_dir_all(&bin_dir).unwrap();
         let installed = bin_dir.join("st2");
         let staged = installed.with_extension("installing");
-        std::fs::copy(env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
+        std::fs::copy(test_env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
         std::fs::File::open(&staged).unwrap().sync_all().unwrap();
         std::fs::rename(&staged, &installed).unwrap();
         installed
@@ -239,7 +239,7 @@ impl Fixture {
     fn replace_control_plane(&self, installed: &Path) {
         let before = binary_file_identity(installed);
         let staged = installed.with_extension("next");
-        std::fs::copy(env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
+        std::fs::copy(test_env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
         std::fs::File::open(&staged).unwrap().sync_all().unwrap();
         std::fs::rename(&staged, installed).unwrap();
         let after = binary_file_identity(installed);
@@ -252,7 +252,7 @@ impl Fixture {
     /// Spawn the real `st2 up` supervisor loop (long interval — the immediate first pass does the
     /// spawning; the loop just gives us a live runner to kill).
     fn spawn_loop(&self) -> Child {
-        self.spawn_loop_from(Path::new(env!("CARGO_BIN_EXE_st2")))
+        self.spawn_loop_from(Path::new(test_env!("CARGO_BIN_EXE_st2")))
     }
 
     fn spawn_loop_from(&self, binary: &Path) -> Child {
@@ -281,7 +281,7 @@ impl Fixture {
 
     /// One `st2 up --once` pass; returns its stdout (where launched/adopted/torn-down is reported).
     fn up_once(&self) -> String {
-        self.up_once_from(Path::new(env!("CARGO_BIN_EXE_st2")))
+        self.up_once_from(Path::new(test_env!("CARGO_BIN_EXE_st2")))
     }
 
     fn up_once_from(&self, binary: &Path) -> String {
@@ -629,6 +629,25 @@ fn assert_managed_agent_color_contract(suffix: &str) {
         (&ambient_identity, &ambient_snapshot),
         (&explicit_identity, &explicit_snapshot),
     ] {
+        // `pty restart` of a running session sends SIGTERM, waits a fixed 200 ms and starts the
+        // new daemon without waiting for the old one to exit. An old daemon still writing its exit
+        // holds the session's event log, and the new one then refuses to start ("event log is
+        // busy"). End the session and wait for its daemon to exit, so the restart starts from a
+        // stopped session.
+        let session = format!("{HOST}.{identity}");
+        let daemon = read_pid(&fx.pty_root.join(format!("{session}.pid")))
+            .unwrap_or_else(|| panic!("{session} has no daemon pid"));
+        let killed = Command::new("pty")
+            .env("PTY_ROOT", &fx.pty_root)
+            .args(["kill", &session])
+            .output()
+            .unwrap();
+        assert!(killed.status.success(), "`pty kill {session}` failed: {}",
+            String::from_utf8_lossy(&killed.stderr));
+        assert!(
+            poll_until(SPAWN_TIMEOUT, || !process_alive(daemon)),
+            "the daemon of {session} (pid {daemon}) did not exit after `pty kill`"
+        );
         let mut restarted = Command::new("pty")
             .env("NO_COLOR", "1")
             .env("PTY_ROOT", &fx.pty_root)

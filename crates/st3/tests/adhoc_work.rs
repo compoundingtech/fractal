@@ -1,5 +1,6 @@
 //! Start, checkpoint, transfer, acknowledge and close through an isolated durable daemon.
 #![cfg(unix)]
+use st3::SeatsStoreCore;
 use serde_json::{Value, json};
 use st3::{api::AppState, model::ClaimInput, store::Store};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,7 @@ impl Daemon {
     }
     async fn start(&mut self) {
         let state = AppState {
+            owning_person: None,
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
@@ -119,7 +121,7 @@ impl Daemon {
     }
     async fn cli(&self, args: &[&str]) -> std::process::Output {
         let mut command =
-            st3::test_support::async_command(assert_cmd::cargo::cargo_bin!("st3-fixture"));
+            st3::test_support::async_command(test_bin!("st3-fixture"));
         command
             .env("HOME", &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))

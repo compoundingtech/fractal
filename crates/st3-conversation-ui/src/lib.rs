@@ -10,6 +10,7 @@ pub mod adapt;
 #[cfg(feature = "ratatui")]
 pub mod ansi;
 mod clean;
+pub mod header;
 #[cfg(feature = "ratatui")]
 pub mod conversation;
 #[cfg(feature = "ratatui")]
@@ -35,6 +36,9 @@ pub enum DisplayFilter {
     Excerpts,
     /// Records a harness writes for itself (titles, modes, empty reasoning), not conversation.
     Bookkeeping,
+    /// Routine status, usage and withheld-content records, which repeat every turn and say nothing
+    /// to read. Failures, cancellations and other withholding reasons are still shown.
+    Telemetry,
 }
 pub const DEFAULT_FILTERS: &[DisplayFilter] = &[
     DisplayFilter::HarnessMarkup,
@@ -43,6 +47,7 @@ pub const DEFAULT_FILTERS: &[DisplayFilter] = &[
     DisplayFilter::InternalBlocks,
     DisplayFilter::Excerpts,
     DisplayFilter::Bookkeeping,
+    DisplayFilter::Telemetry,
 ];
 /// Empty filters render every entry as reversible JSON, including metadata and raw byte blocks.
 pub const SHOW_EVERYTHING: &[DisplayFilter] = &[];

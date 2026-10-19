@@ -19,6 +19,7 @@
 //! The two stores take about 1.5 GB under `TMPDIR`. Point it at a disk with room and a short
 //! path, since the daemon sockets live there too.
 
+use st3::MissionsStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -63,7 +64,7 @@ async fn an_empty_node_syncs_its_peer_within_two_minutes() {
     if st3::test_support::supervise_test() {
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -326,6 +327,7 @@ fn run_cycle(store: &Store, workspace: &str, index: usize) {
         .unwrap();
     for step in &run.steps {
         let request = |action: &str, n: usize| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/bench/builder".into()),
             incarnation: Some(format!("builder-{index}")),
             // A renewal with a summary publishes its claim, as a lease near expiry does.
@@ -573,7 +575,7 @@ struct Node(Vec<Child>);
 impl Node {
     fn start(dir: &Path, path_dir: &Path) -> Self {
         let spawn = |args: &[&str], log: &str| {
-            st3::test_support::command(env!("CARGO_BIN_EXE_st3-fixture"))
+            st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"))
                 .args(args)
                 .arg("--config")
                 .arg(dir.join("config.toml"))

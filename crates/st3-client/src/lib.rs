@@ -6,6 +6,9 @@ pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
 mod generated;
+pub mod product_dirs;
+/// W3C context injection, enabled by the optional `trace-propagation` feature.
+pub mod propagation;
 pub use contract::*;
 pub use generated::*;
 
@@ -31,8 +34,12 @@ use tokio_tungstenite::{
 };
 
 const HARD_MAX_RESPONSE_BYTES: usize = 8 * 1_048_576;
+/// Assistant read budgets bound the entire JSON envelope, inclusive (`operations.json` limits).
+pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
+pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
 const RAW_TERMINAL_SUBPROTOCOL: &str = "st3.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
@@ -45,8 +52,8 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
         return Ok(path);
     }
 
-    let config_path = xdg_path("XDG_CONFIG_HOME", ".config")?
-        .join("st3")
+    let config_base = xdg_path("XDG_CONFIG_HOME", ".config")?;
+    let config_path = product_dirs::resolve(config_base.join("st3"), config_base.join("fractal"))
         .join("config.toml");
     match std::fs::read_to_string(&config_path) {
         Ok(document) => {
@@ -66,10 +73,12 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         return Ok(PathBuf::from(runtime).join("st3.sock"));
     }
-    Ok(xdg_path("XDG_STATE_HOME", ".local/state")?
-        .join("st3")
-        .join("run")
-        .join("st3.sock"))
+    let state_base = xdg_path("XDG_STATE_HOME", ".local/state")?;
+    Ok(
+        product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
+            .join("run")
+            .join("st3.sock"),
+    )
 }
 
 fn configured_socket(document: &str) -> Result<Option<PathBuf>, ClientError> {
@@ -268,6 +277,16 @@ pub struct RawTerminalAttachmentRequest {
     pub mode: RawTerminalMode,
 }
 
+/// The PTY session a daemon's own host runs for a terminal: what a client connects to itself.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LocalTerminalLocation {
+    pub subject: String,
+    pub runtime_id: String,
+    /// The graph's incarnation, `PTY_DAEMON_PID:CREATED_AT`, which the PTY itself must prove.
+    pub incarnation_id: String,
+    pub pty_root: std::path::PathBuf,
+}
+
 /// A single-use raw PTY stream capability, extracted from the client-v0 response envelope.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RawTerminalAttachment {
@@ -398,6 +417,21 @@ impl Heard {
     }
 }
 
+/// The capability a daemon advertises in `/v1/client/capabilities` when an agents subscription
+/// may select one exact agent. An older daemon ignores the selector and answers with the fleet.
+pub const EXACT_AGENT_SELECTOR_CAPABILITY: &str = "collection.agents.exact-selector";
+
+impl Capabilities {
+    /// Whether this daemon granted capability `id` at `version` or newer.
+    pub fn grants(&self, id: &str, version: u32) -> bool {
+        self.capabilities.iter().any(|capability| {
+            capability.id == id
+                && capability.version >= version
+                && capability.state == CapabilityState::Granted
+        })
+    }
+}
+
 impl CollectionStream {
     pub async fn subscribe_glasses(&mut self, id: &str) -> Result<(), ClientError> {
         self.subscribe(id, "glasses", 100, None, None).await
@@ -435,6 +469,38 @@ impl CollectionStream {
         status: Option<&str>,
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit, "actor":actor, "status":status})).await
+    }
+    /// Follow a usage report for a named period; an omitted end follows current usage.
+    pub async fn subscribe_usage(
+        &mut self,
+        id: &str,
+        limit: usize,
+        since_ms: Option<u64>,
+        until_ms: Option<u64>,
+    ) -> Result<(), ClientError> {
+        let mut command =
+            serde_json::json!({"kind":"subscribe", "id":id, "collection":"usage", "limit":limit});
+        if let Some(since) = since_ms {
+            command["since_ms"] = serde_json::json!(since);
+        }
+        if let Some(until) = until_ms {
+            command["until_ms"] = serde_json::json!(until);
+        }
+        self.send(&command).await
+    }
+    /// Follow active devices for the session person or an explicitly authorized person.
+    pub async fn subscribe_devices(
+        &mut self,
+        id: &str,
+        limit: usize,
+        person: Option<&str>,
+    ) -> Result<(), ClientError> {
+        let mut command =
+            serde_json::json!({"kind":"subscribe", "id":id, "collection":"devices", "limit":limit});
+        if let Some(person) = person {
+            command["person"] = serde_json::json!(person);
+        }
+        self.send(&command).await
     }
     /// Follow a terminal on this socket. `terminal.attach` returns the incarnation and the
     /// single-use capability; screens then arrive as [`CollectionEvent::Screen`], the latest
@@ -629,6 +695,8 @@ pub enum CollectionEvent {
         items: Vec<TimelineEntry>,
         /// Availability before the live window; absent on deltas means unchanged.
         has_more: Option<bool>,
+        /// The conversation header (contract §3) when this frame carries one.
+        header: Option<serde_json::Value>,
     },
     /// Subscribe again: the server could not bring this subscription up to date.
     /// `code` and `message` say why when a temporary failure caused it, such as a conversation
@@ -707,6 +775,7 @@ impl CollectionEvent {
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
                 has_more: field(&frame, "has_more")?,
+                header: frame.get("header").cloned(),
                 id,
             }),
             Some("resync") => Ok(Self::Resync {
@@ -779,10 +848,33 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
+    /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
+    /// with the same key, again). Any other answer, or none, says nothing.
+    pub fn applied(&self) -> Option<&str> {
+        match self {
+            ClientError::Api(_, _, envelope) => envelope
+                .details
+                .get("applied")
+                .and_then(|value| value.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether the request may have been taken without the person hearing so: its answer was lost
+    /// (a transport failure, a deadline) or st said `applied: "unknown"`. A request in this state is
+    /// repeated unchanged, never rebuilt with a new key.
+    pub fn outcome_unknown(&self) -> bool {
+        matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
+    }
+
     /// What went wrong in words a person reads: no codes and no Rust names. st's own message
     /// follows where it says something the sentence does not.
     pub fn plain(&self) -> String {
         match self {
+            ClientError::Api(..) if self.applied() == Some("unknown") => {
+                "st may have taken it and has not confirmed it yet; sending it again is safe".into()
+            }
             ClientError::Api(code, message, _) => plain_message(Some(code), message),
             ClientError::Transport(message) if message.contains("deadline") => {
                 "st took too long to answer; it may or may not have done it".into()
@@ -849,6 +941,10 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::RuntimeAuthorityIndeterminate => {
             "st cannot tell yet which host runs this".into()
         }
+        ErrorCode::RuntimeListNotReady => {
+            "st is still preparing the runtime list; try again shortly".into()
+        }
+        ErrorCode::RuntimeListEnded => "the runtime list stopped updating; restart st".into(),
         ErrorCode::IdempotencyConflict => {
             "this was already sent once in another form, so it was not sent again".into()
         }
@@ -871,13 +967,27 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::BlobQuotaExceeded => {
             "too many images were uploaded recently; try again later".into()
         }
+        // Already worded for the person who sent, naming the limit and what to do.
+        ErrorCode::MessageTooLarge
+        | ErrorCode::MessageStoreFull
+        | ErrorCode::LongMessageSignatureUnsupported => message.to_owned(),
         ErrorCode::BlobNotFound => "this image is not stored on this machine".into(),
         ErrorCode::BlobExpired => {
             "this image was removed after its retention window; the message text remains".into()
         }
+        ErrorCode::ResponseBudgetExceeded => {
+            "the answer is larger than the requested response budget".into()
+        }
+        ErrorCode::ContentNotText => {
+            "this content is not plain text, so it was not returned".into()
+        }
         ErrorCode::ValidationFailed
+        | ErrorCode::AgentRosterCutNotReady
+        | ErrorCode::ProjectionDetailTooLarge
+        | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
+        | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::RuntimeNotLocal
         | ErrorCode::ArrangementExists
         | ErrorCode::ArrangementFolderExists
@@ -903,6 +1013,9 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::InvalidMembershipOperations
         | ErrorCode::MembershipEditTooLarge
         | ErrorCode::InvalidSubjectReference
+        | ErrorCode::RecipientRetired
+        | ErrorCode::LifecycleUnavailable
+        | ErrorCode::RetirementUpgradeRequired
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
@@ -1295,6 +1408,158 @@ impl Client {
         self.list_internal_with_filters("agents", cursor, limit, history, &[("status", status)])
             .await
     }
+    /// Fresh agents: request a refresh and wait briefly for its publication. Return the last
+    /// publication at once only after a failed latest attempt with no newer attempt in flight.
+    pub async fn agents_list_fresh(
+        &self,
+        status: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut filters = vec![("fresh", "true")];
+        if let Some(status) = status {
+            filters.push(("status", status));
+        }
+        self.list_internal_with_filters("agents", cursor, limit, history, &filters)
+            .await
+    }
+    /// Read a roster publication covering a mutation's host-local `store_index`.
+    /// Use the same host that accepted the mutation; ordinary reads do not wait for a cut.
+    /// This starts a page sequence. Continue with `agents_list` or `agents_list_for_status`
+    /// and the returned cursor, without a cut. An older daemon may ignore the query;
+    /// a served index below min_cut returns the same cut-not-ready error as a timeout.
+    pub async fn agents_list_after(
+        &self,
+        status: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+        min_cut: u64,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let requested = min_cut;
+        let min_cut = min_cut.to_string();
+        let filters = [
+            ("min_cut", min_cut.as_str()),
+            ("status", status.unwrap_or_default()),
+        ];
+        let filter_count = if status.is_some() { 2 } else { 1 };
+        let response: Envelope<Page> = self
+            .list_internal_with_filters("agents", None, limit, history, &filters[..filter_count])
+            .await?;
+        // Older daemons ignore min_cut and return their newest publication. Do not
+        // mistake that successful HTTP response for a fulfilled same-host barrier.
+        if response.snapshot.store_index < requested {
+            let code = ErrorCode::AgentRosterCutNotReady;
+            let message =
+                format!("the agents roster has not published cut {requested}; retry shortly");
+            return Err(ClientError::Api(
+                code.clone(),
+                message.clone(),
+                Box::new(ErrorEnvelope {
+                    api_version: response.api_version,
+                    error_version: "st3.client.error.v0".into(),
+                    request_id: response.request_id,
+                    code,
+                    message,
+                    retryable: true,
+                    retry_after_ms: None,
+                    details: std::collections::BTreeMap::from([
+                        (
+                            "reason".into(),
+                            serde_json::json!("agent-roster-cut-not-ready"),
+                        ),
+                        ("min_cut".into(), serde_json::json!(requested)),
+                    ]),
+                }),
+            ));
+        }
+        Ok(response)
+    }
+    /// The current work list's first page as of this request: the daemon waits briefly for a
+    /// publication at least as new as the request. While the list is not ready, or not yet that
+    /// fresh, and while the daemon is unreachable, it asks again within the client's daemon
+    /// wait, measured once from the first attempt across every attempt and pause. A zero wait
+    /// asks once. Only these answers are asked again; any other error returns at once.
+    pub async fn work_list_fresh(
+        &self,
+        actor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = vec!["fresh=true".to_owned()];
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if let Some(actor) = actor {
+            query.push(format!("actor={}", percent_encode(actor)));
+        }
+        let path = format!("/v1/client/work?{}", query.join("&"));
+        let started = tokio::time::Instant::now();
+        let deadline = started + self.outage_wait;
+        let mut pause = Duration::from_millis(100);
+        let mut announced = false;
+        loop {
+            let attempt = self.request_once::<Envelope<Page>>(
+                Method::GET,
+                &path,
+                None,
+                None,
+                "application/json",
+                None,
+            );
+            let outcome = if self.outage_wait.is_zero() {
+                attempt.await
+            } else {
+                // No attempt outlasts what remains of the wait.
+                match tokio::time::timeout_at(deadline, attempt).await {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        return Err(ClientError::Transport(format!(
+                            "the work list did not answer within the daemon wait of {} ms",
+                            self.outage_wait.as_millis()
+                        )));
+                    }
+                }
+            };
+            let again = match &outcome {
+                Err(ClientError::Unreachable(_)) => true,
+                Err(ClientError::Api(_, _, envelope)) => {
+                    envelope.retryable
+                        && matches!(
+                            envelope
+                                .details
+                                .get("reason")
+                                .and_then(serde_json::Value::as_str),
+                            Some("work-list-not-ready" | "work-list-not-fresh")
+                        )
+                }
+                _ => false,
+            };
+            let now = tokio::time::Instant::now();
+            if !again || self.outage_wait.is_zero() || now >= deadline {
+                return match outcome {
+                    Err(ClientError::Unreachable(mut outage)) => {
+                        outage.waited = Some(now - started);
+                        Err(ClientError::Unreachable(outage))
+                    }
+                    outcome => outcome,
+                };
+            }
+            // An unreachable daemon is announced once, as for every other request.
+            if let Err(ClientError::Unreachable(outage)) = &outcome
+                && self.announce_outage_wait
+                && !announced
+            {
+                eprintln!(
+                    "st: {}; retrying for up to {}s",
+                    outage.summary(),
+                    self.outage_wait.as_secs()
+                );
+                announced = true;
+            }
+            tokio::time::sleep(pause.min(deadline - now)).await;
+            pause = (pause * 2).min(Duration::from_secs(1));
+        }
+    }
     /// List only native sessions that are not already managed by st3.
     pub async fn sessions_list_native(
         &self,
@@ -1521,6 +1786,9 @@ impl Client {
         .await
     }
 
+    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
+        self.get("/v1/client/notes").await
+    }
     pub async fn custom_subjects_list(
         &self,
         kind: Option<&str>,
@@ -1595,6 +1863,28 @@ impl Client {
     pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {
         self.get("/v1/client/mail-backlog").await
     }
+    pub async fn slo_list(&self) -> Result<Envelope<SloList>, ClientError> {
+        self.get("/v1/client/slo").await
+    }
+    pub async fn slo_history(
+        &self,
+        id: &str,
+        since_ms: Option<u64>,
+        until_ms: Option<u64>,
+        steps: Option<usize>,
+    ) -> Result<Envelope<SloHistory>, ClientError> {
+        let mut path = format!("/v1/client/slo/history?id={}", percent_encode(id));
+        if let Some(since_ms) = since_ms {
+            path.push_str(&format!("&since_ms={since_ms}"));
+        }
+        if let Some(until_ms) = until_ms {
+            path.push_str(&format!("&until_ms={until_ms}"));
+        }
+        if let Some(steps) = steps {
+            path.push_str(&format!("&steps={steps}"));
+        }
+        self.get(&path).await
+    }
     pub async fn usage_period(
         &self,
         since_ms: Option<u64>,
@@ -1663,6 +1953,10 @@ impl Client {
     }
     pub async fn messages_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("messages", id).await
+    }
+    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {
+        self.get(&format!("/v1/client/message-bodies/{}", percent_encode(id)))
+            .await
     }
     pub async fn launches_list(
         &self,
@@ -2010,6 +2304,49 @@ impl Client {
     pub async fn glasses_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("glasses", id).await
     }
+    pub async fn assistant_summary(
+        &self,
+        params: &AssistantSummaryRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<AssistantSummary>, ClientError> {
+        self.assistant_read("summary", params, proof).await
+    }
+    pub async fn assistant_attention(
+        &self,
+        params: &AssistantPageRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<AssistantAttentionPage>, ClientError> {
+        self.assistant_read("attention", params, proof).await
+    }
+    pub async fn assistant_missions(
+        &self,
+        params: &AssistantPageRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<AssistantMissionPage>, ClientError> {
+        self.assistant_read("missions", params, proof).await
+    }
+    pub async fn assistant_agents(
+        &self,
+        params: &AssistantPageRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<AssistantAgentPage>, ClientError> {
+        self.assistant_read("agents", params, proof).await
+    }
+    pub async fn assistant_conversation_content(
+        &self,
+        params: &AssistantConversationContentRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<AssistantContentPage>, ClientError> {
+        self.assistant_read("conversation-content", params, proof)
+            .await
+    }
+    pub async fn assistant_terminal_content(
+        &self,
+        params: &AssistantTerminalContentRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<AssistantContentPage>, ClientError> {
+        self.assistant_read("terminal-content", params, proof).await
+    }
     pub async fn agent_create(
         &self,
         id: impl Into<String>,
@@ -2040,6 +2377,17 @@ impl Client {
         parameters: AgentResumeParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::agent_resume(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn agent_retire(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AgentRetireParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::agent_retire(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -2342,6 +2690,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn prompt_respond(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PromptRespondParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::prompt_respond(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn review_approve(
         &self,
         id: impl Into<String>,
@@ -2628,9 +2987,24 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    /// Local diagnostic acceptance; retry the identical disjoint intervals and report ID.
+    pub async fn observations_report(
+        &self,
+        report: &ObservationReport,
+    ) -> Result<ObservationResponse, ClientError> {
+        self.post("/v1/client/observations", report).await
+    }
+
     pub async fn pairing_begin(
         &self,
         request: &PairingBegin,
+    ) -> Result<Envelope<PairingChallenge>, ClientError> {
+        self.post("/v1/client/pairings", request).await
+    }
+    /// Begin a person-only pairing without changing its existing wire shape.
+    pub async fn pairing_begin_person(
+        &self,
+        request: &PersonPairingBegin,
     ) -> Result<Envelope<PairingChallenge>, ClientError> {
         self.post("/v1/client/pairings", request).await
     }
@@ -2645,6 +3019,142 @@ impl Client {
                 pairing_id.trim_start_matches("pairing/")
             ),
             request,
+        )
+        .await
+    }
+    /// Person profiles must never accept an external-assistant session.
+    pub async fn pairing_complete_person(
+        &self,
+        pairing_id: &str,
+        request: &PairingComplete,
+    ) -> Result<Envelope<PersonPairedSession>, ClientError> {
+        self.post(
+            &format!(
+                "/v1/client/pairings/{}/complete",
+                percent_encode(pairing_id.trim_start_matches("pairing/"))
+            ),
+            request,
+        )
+        .await
+    }
+    pub async fn assistant_grant(&self, id: &str) -> Result<Envelope<AssistantGrant>, ClientError> {
+        self.get(&format!(
+            "/v1/client/assistant/grants/{}",
+            percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
+        ))
+        .await
+    }
+    pub async fn assistant_grant_revoke(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<AssistantGrant>, ClientError> {
+        self.post(
+            &format!(
+                "/v1/client/assistant/grants/{}/revoke",
+                percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
+            ),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+    pub async fn assistant_grant_policy(
+        &self,
+        id: &str,
+        policy: &AssistantGrantPolicy,
+    ) -> Result<Envelope<AssistantGrant>, ClientError> {
+        self.post(
+            &format!(
+                "/v1/client/assistant/grants/{}/policy",
+                percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
+            ),
+            policy,
+        )
+        .await
+    }
+    pub async fn assistant_grant_read_trust(
+        &self,
+        id: &str,
+        trust: &AssistantReadTrustRequest,
+    ) -> Result<Envelope<AssistantGrant>, ClientError> {
+        self.post(
+            &format!(
+                "/v1/client/assistant/grants/{}/read-trust",
+                percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
+            ),
+            trust,
+        )
+        .await
+    }
+    /// One approval-once read. The proof must already name this projection, these exact decoded
+    /// query parameters, and this response budget; the SDK never signs and never retries.
+    async fn assistant_read<T: DeserializeOwned>(
+        &self,
+        projection: &str,
+        params: &impl Serialize,
+        proof: &ScgReadAuthorization,
+    ) -> Result<T, ClientError> {
+        use base64::Engine as _;
+        let protocol = |message: &str| ClientError::Protocol(message.to_owned());
+        let value = serde_json::to_value(params)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| protocol("assistant parameters must be an object"))?;
+        let mut parameters = std::collections::BTreeMap::new();
+        for (key, value) in object {
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                serde_json::Value::Number(value) if value.is_u64() => value.to_string(),
+                _ => {
+                    return Err(protocol(
+                        "assistant parameters must be scalar strings or unsigned integers",
+                    ));
+                }
+            };
+            parameters.insert(key.clone(), value);
+        }
+        if serde_json::to_value(&proof.payload.projection)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .as_deref()
+            != Some(projection)
+        {
+            return Err(protocol("assistant proof names a different projection"));
+        }
+        if proof.payload.parameters != parameters {
+            return Err(protocol(
+                "assistant proof parameters differ from the request query",
+            ));
+        }
+        // An omitted budget means the grant pin's default, which the signed proof already names.
+        let budget = proof.payload.max_response_bytes;
+        if !(1..=MAX_ASSISTANT_RESPONSE_BYTES).contains(&budget)
+            || parameters
+                .get("max_response_bytes")
+                .is_some_and(|value| *value != budget.to_string())
+        {
+            return Err(protocol(
+                "assistant response budget must match the proof and stay within 1..=16384",
+            ));
+        }
+        let mut path = format!("/v1/client/assistant/{projection}");
+        for (index, (key, value)) in parameters.iter().enumerate() {
+            path.push(if index == 0 { '?' } else { '&' });
+            path.push_str(&percent_encode(key));
+            path.push('=');
+            path.push_str(&percent_encode(value));
+        }
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(proof).map_err(|error| ClientError::Protocol(error.to_string()))?,
+        );
+        // Approval-once: no cursor-expiry retry and no outage retry loop may replay the proof.
+        self.request_once(
+            Method::GET,
+            &path,
+            None,
+            None,
+            "application/json",
+            Some((&encoded, budget)),
         )
         .await
     }
@@ -2718,6 +3228,48 @@ impl Client {
             percent_encode_segment(terminal_id.trim_start_matches("terminal/"))
         ))
         .await
+    }
+
+    /// Whether this client talks to a daemon on this machine over its Unix socket, as opposed to
+    /// a paired device's remote gateway.
+    pub fn is_local_socket(&self) -> bool {
+        matches!(self.endpoint, Endpoint::Unix(_))
+    }
+
+    /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
+    /// A read of the local store; only a Unix socket serves it.
+    pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
+        self.get("/v1/internal/fleet/membership").await
+    }
+
+    /// Where `subject`'s running terminal lives, read from this host's daemon without any graph
+    /// write: `Some` names the PTY session this host owns, which the caller connects to itself,
+    /// and `None` means another host owns it (or this endpoint is not a local socket, or a
+    /// daemon from before direct attachment lacks the route). The daemon only says where; it
+    /// never carries a byte.
+    pub async fn local_terminal(
+        &self,
+        subject: &str,
+    ) -> Result<Option<LocalTerminalLocation>, ClientError> {
+        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+            return Ok(None);
+        }
+        // Sessions routes answer in the daemon's own envelope, with the value under `value`.
+        #[derive(Deserialize)]
+        struct Answer {
+            value: LocalTerminalLocation,
+        }
+        match self
+            .get::<Answer>(&format!(
+                "/v1/sessions/local-terminal/{}",
+                percent_encode_segment(subject)
+            ))
+            .await
+        {
+            Ok(answer) => Ok(Some(answer.value)),
+            Err(ClientError::Api(ErrorCode::RuntimeNotLocal | ErrorCode::NotFound, ..)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Acquire a fresh, single-use capability for a fenced raw PTY connection.
@@ -2813,6 +3365,7 @@ impl Client {
                 self.local_person.as_deref(),
                 None,
             )?;
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
             let protocols = capability.map_or_else(
                 || RAW_TERMINAL_SUBPROTOCOL.to_owned(),
                 |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
@@ -2966,6 +3519,7 @@ impl Client {
                 self.local_person.as_deref(),
                 None,
             )?;
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
                 hyper::header::HeaderValue::from_static("st3.client.collections.v0"),
@@ -3028,6 +3582,30 @@ impl Client {
         })
     }
 
+    /// Follow exactly one current agent's card on `stream`, a window of zero or one rows,
+    /// intersected with `status`. This reads the daemon's capabilities first and refuses, before
+    /// anything is sent, when it does not grant [`EXACT_AGENT_SELECTOR_CAPABILITY`]: an older
+    /// daemon would ignore the selector and answer with the fleet.
+    pub async fn subscribe_agent(
+        &self,
+        stream: &mut CollectionStream,
+        id: &str,
+        agent: &str,
+        status: Option<&str>,
+    ) -> Result<(), ClientError> {
+        if !self
+            .capabilities_internal()
+            .await?
+            .value
+            .grants(EXACT_AGENT_SELECTOR_CAPABILITY, 1)
+        {
+            return Err(ClientError::Protocol(format!(
+                "this daemon does not advertise {EXACT_AGENT_SELECTOR_CAPABILITY}; upgrade it before following one exact agent"
+            )));
+        }
+        stream.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"agents", "limit":1, "actor":null, "status":status, "agent":agent})).await
+    }
+
     pub async fn conversation_stream(
         &self,
         session_id: &str,
@@ -3045,6 +3623,7 @@ impl Client {
                 self.local_person.as_deref(),
                 None,
             )?;
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
                 hyper::header::HeaderValue::from_static("st3.client.conversation.v0"),
@@ -3194,7 +3773,7 @@ impl Client {
         let mut announced = false;
         loop {
             match self
-                .request_once(method.clone(), path, body.clone(), key, content_type)
+                .request_once(method.clone(), path, body.clone(), key, content_type, None)
                 .await
             {
                 Err(ClientError::Unreachable(mut outage)) if !self.outage_wait.is_zero() => {
@@ -3225,8 +3804,9 @@ impl Client {
         body: Option<Vec<u8>>,
         key: Option<&str>,
         content_type: &str,
+        read_authorization: Option<(&str, usize)>,
     ) -> Result<T, ClientError> {
-        let limit = self.response_limit();
+        let limit = read_authorization.map_or_else(|| self.response_limit(), |(_, limit)| limit);
         // Measured only when someone asked: no timer and no copy otherwise.
         let guard = RequestGuard::begin(&method, path);
         let request = async {
@@ -3242,16 +3822,22 @@ impl Client {
                         limit,
                         key,
                         content_type,
+                        read_authorization.map(|(proof, _)| proof),
                     )
                     .await
                 }
                 Endpoint::FabricLoopback(base) => {
+                    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                     let mut request = self.http.request(method, format!("{base}{path}")).header(
                         "x-st3-features",
                         "custom-subjects.v1, conversation-blocks.v1",
                     );
+                    request = propagation::inject_http(request);
                     if let Some(key) = key {
                         request = request.header("idempotency-key", key);
+                    }
+                    if let Some((proof, _)) = read_authorization {
+                        request = request.header("x-st3-scg-read-authorization", proof);
                     }
                     if let Some(name) = client_name() {
                         request = request.header("x-st3-client", name);
@@ -3314,6 +3900,7 @@ impl Client {
                 ));
             }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
+                .or_else(|decode| core_api_error(&bytes).ok_or(decode))
                 .map_err(|decode| ClientError::Protocol(format!("HTTP {status}: {decode}")))?;
             return Err(ClientError::Api(
                 error.code.clone(),
@@ -3323,6 +3910,31 @@ impl Client {
         }
         serde_json::from_slice(&bytes).map_err(|error| ClientError::Protocol(error.to_string()))
     }
+}
+
+/// The error a daemon's own `/v1/` routes (outside `/v1/client/`) answer with: a code and a
+/// message, without the client-v0 error version. A code this client does not know stays unread.
+fn core_api_error(bytes: &[u8]) -> Option<ErrorEnvelope> {
+    #[derive(Deserialize)]
+    struct Core {
+        code: ErrorCode,
+        message: String,
+        #[serde(default)]
+        request_id: String,
+        #[serde(default)]
+        details: std::collections::BTreeMap<String, serde_json::Value>,
+    }
+    let core: Core = serde_json::from_slice(bytes).ok()?;
+    Some(ErrorEnvelope {
+        api_version: "st3.v1".into(),
+        error_version: String::new(),
+        request_id: core.request_id,
+        code: core.code,
+        message: core.message,
+        retryable: false,
+        retry_after_ms: None,
+        details: core.details,
+    })
 }
 
 fn unreachable_error(endpoint: &str, error: &(dyn std::error::Error + 'static)) -> ClientError {
@@ -3366,6 +3978,7 @@ async fn unix_request(
     limit: usize,
     key: Option<&str>,
     content_type: &str,
+    read_authorization: Option<&str>,
 ) -> Result<(u16, Vec<u8>), ClientError> {
     let stream = tokio::net::UnixStream::connect(socket)
         .await
@@ -3376,6 +3989,7 @@ async fn unix_request(
     tokio::spawn(async move {
         let _ = connection.await;
     });
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -3390,6 +4004,9 @@ async fn unix_request(
     if let Some(key) = key {
         builder = builder.header("idempotency-key", key);
     }
+    if let Some(proof) = read_authorization {
+        builder = builder.header("x-st3-scg-read-authorization", proof);
+    }
     if let Some(person) = local_person {
         builder = builder.header("x-st3-person", person);
     }
@@ -3398,6 +4015,9 @@ async fn unix_request(
     }
     if body.is_some() {
         builder = builder.header("content-type", content_type);
+    }
+    if let Some(headers) = builder.headers_mut() {
+        propagation::inject_headers(headers);
     }
     let response = sender
         .send_request(
@@ -3446,6 +4066,7 @@ fn append_bounded(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(),
     Ok(())
 }
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
 fn websocket_request(
     url: &str,
     credential: Option<&str>,
@@ -3455,6 +4076,7 @@ fn websocket_request(
     let mut request = url
         .into_client_request()
         .map_err(|error| ClientError::Protocol(error.to_string()))?;
+    propagation::inject_headers(request.headers_mut());
     request.headers_mut().insert(
         hyper::header::HeaderName::from_static("x-st3-features"),
         hyper::header::HeaderValue::from_static("custom-subjects.v1, conversation-blocks.v1"),
@@ -3492,14 +4114,126 @@ fn websocket_request(
     Ok(request)
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+// Sunset: 60 days after the first release shipping this bridge. Requests still offer
+// only the deployed spelling; tungstenite must continue rejecting unoffered protocols.
+fn selected_subprotocol(
+    response: &tokio_tungstenite::tungstenite::handshake::client::Response,
+) -> Option<&str> {
+    let mut values = response
+        .headers()
+        .get_all(hyper::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter();
+    let selected = values.next()?.to_str().ok()?;
+    values.next().is_none().then_some(selected)
+}
+
+fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
+    selected == expected
+        || expected
+            .strip_prefix("st3.")
+            .is_some_and(|suffix| selected.strip_prefix("fractal.") == Some(suffix))
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
+#[cfg(test)]
+mod wire_receiver_tests {
+    use super::*;
+
+    #[test]
+    fn stream_receivers_accept_both_spellings_but_only_one_selected_protocol() {
+        type Validator = fn(
+            &tokio_tungstenite::tungstenite::handshake::client::Response,
+        ) -> Result<(), ClientError>;
+        let receivers: [(&str, Validator); 4] = [
+            (RAW_TERMINAL_SUBPROTOCOL, validate_raw_terminal_subprotocol),
+            (TERMINAL_SUBPROTOCOL, validate_terminal_subprotocol),
+            (
+                "st3.client.conversation.v0",
+                validate_conversation_subprotocol,
+            ),
+            ("st3.client.collections.v0", validate_collection_subprotocol),
+        ];
+        for (old, validate) in receivers {
+            let new = old.replacen("st3.", "fractal.", 1);
+            let mut response = hyper::Response::new(None);
+            assert!(validate(&response).is_err());
+            for protocol in [old, new.as_str()] {
+                response.headers_mut().insert(
+                    hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                    protocol.parse().unwrap(),
+                );
+                validate(&response).unwrap();
+            }
+            for invalid in [
+                "fractal.client.unknown.v0",
+                "fractal.client.pty.v1",
+                "st3.terminal.v1",
+            ] {
+                response.headers_mut().insert(
+                    hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                    invalid.parse().unwrap(),
+                );
+                assert!(validate(&response).is_err());
+            }
+            response.headers_mut().insert(
+                hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                format!("{old}, {new}").parse().unwrap(),
+            );
+            assert!(validate(&response).is_err());
+            response
+                .headers_mut()
+                .insert(hyper::header::SEC_WEBSOCKET_PROTOCOL, old.parse().unwrap());
+            response
+                .headers_mut()
+                .append(hyper::header::SEC_WEBSOCKET_PROTOCOL, new.parse().unwrap());
+            assert!(validate(&response).is_err());
+        }
+    }
+
+    #[test]
+    fn version_strings_remain_lossless_in_existing_permissive_models() {
+        for (api, error) in [
+            ("st3.client.v0", "st3.client.error.v0"),
+            ("fractal.client.v0", "fractal.client.error.v0"),
+            ("unknown.client.v1", "unknown.client.error.v1"),
+        ] {
+            let wire = serde_json::json!({
+                "api_version": api,
+                "request_id": "request/wire",
+                "snapshot": {"id": "snapshot/wire", "host_id": "host/wire", "store_index": 0,
+                    "projection_version": "client-projection.v0", "created_at": "2026-10-19T00:00:00Z"},
+                "value": {}
+            });
+            let decoded: Envelope<serde_json::Value> =
+                serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.api_version, api);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            let wire = serde_json::json!({
+                "api_version": api, "error_version": error, "request_id": "request/wire",
+                "code": "not-found", "message": "missing", "retryable": false, "details": {}
+            });
+            let decoded: ErrorEnvelope = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.api_version, api);
+            assert_eq!(decoded.error_version, error);
+            assert_eq!(decoded.code, ErrorCode::NotFound);
+        }
+        // Alias readers must never change emitted request bytes.
+        let request = websocket_request("ws://localhost/stream", None, None, None).unwrap();
+        assert_eq!(
+            request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
+            TERMINAL_SUBPROTOCOL
+        );
+        assert_eq!(API_VERSION, "st3.client.v0");
+        assert_eq!(ERROR_VERSION, "st3.client.error.v0");
+    }
+}
+
 fn validate_raw_terminal_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    if selected != Some(RAW_TERMINAL_SUBPROTOCOL) {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, RAW_TERMINAL_SUBPROTOCOL)) {
         return Err(ClientError::Protocol(format!(
             "raw terminal WebSocket selected {selected:?}, expected {RAW_TERMINAL_SUBPROTOCOL}"
         )));
@@ -3628,11 +4362,8 @@ where
 fn validate_terminal_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    if selected != Some(TERMINAL_SUBPROTOCOL) {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, TERMINAL_SUBPROTOCOL)) {
         return Err(ClientError::Protocol(format!(
             "terminal WebSocket selected {selected:?}, expected {TERMINAL_SUBPROTOCOL}"
         )));
@@ -3643,11 +4374,8 @@ fn validate_terminal_subprotocol(
 fn validate_conversation_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    if selected != Some("st3.client.conversation.v0") {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, "st3.client.conversation.v0")) {
         return Err(ClientError::Protocol(format!(
             "conversation WebSocket selected {selected:?}"
         )));
@@ -3658,11 +4386,8 @@ fn validate_conversation_subprotocol(
 fn validate_collection_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    if selected != Some("st3.client.collections.v0") {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, "st3.client.collections.v0")) {
         return Err(ClientError::Protocol(format!(
             "collection WebSocket selected {selected:?}"
         )));
@@ -3821,6 +4546,63 @@ mod tests {
         )
     }
 
+    fn with_applied(applied: &str) -> ClientError {
+        let mut error = api(
+            ErrorCode::Unknown,
+            "the database has not confirmed the send",
+        );
+        if let ClientError::Api(_, _, envelope) = &mut error {
+            envelope
+                .details
+                .insert("applied".into(), serde_json::json!(applied));
+        }
+        error
+    }
+
+    #[test]
+    fn an_answer_that_says_whether_it_applied_decides_what_is_safe() {
+        // A code this client does not know still decodes (to Unknown), and `applied` says the rest.
+        let unknown = with_applied("unknown");
+        assert_eq!(unknown.applied(), Some("unknown"));
+        assert!(unknown.outcome_unknown());
+        assert_eq!(
+            unknown.plain(),
+            "st may have taken it and has not confirmed it yet; sending it again is safe"
+        );
+        let none = with_applied("none");
+        assert_eq!(none.applied(), Some("none"));
+        assert!(!none.outcome_unknown());
+        // A lost answer is unknown too, with or without a word from st; a plain refusal is not.
+        assert!(
+            ClientError::Transport("client-v0 request deadline exceeded".into()).outcome_unknown()
+        );
+        assert!(!api(ErrorCode::Forbidden, "no").outcome_unknown());
+        assert_eq!(api(ErrorCode::Forbidden, "no").applied(), None);
+    }
+
+    #[test]
+    fn a_refused_long_message_reads_as_the_daemon_worded_it_with_its_limit() {
+        let text = "a message cannot be longer than 256 KiB; this one is 300 KiB.";
+        for code in [
+            ErrorCode::MessageTooLarge,
+            ErrorCode::MessageStoreFull,
+            ErrorCode::LongMessageSignatureUnsupported,
+        ] {
+            let error = api(code, text);
+            assert_eq!(error.plain(), text);
+            // A definite refusal: the person's text is kept and trying the same text again
+            // cannot succeed.
+            assert!(!error.is_transient());
+        }
+        // A daemon that predates the code answers `internal`, which the client does not
+        // reword into advice the person cannot follow.
+        assert!(
+            api(ErrorCode::Internal, "an inline message cannot exceed 4 KiB")
+                .plain()
+                .contains("4 KiB")
+        );
+    }
+
     #[test]
     fn membership_frames_decode_as_typed_membership_events_and_resource_frames_stay_resources() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -3948,6 +4730,14 @@ mod tests {
         assert_eq!(gone.plain(), "it is gone: agent `agent/x` does not exist");
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
+        for code in [
+            ErrorCode::ProjectionDetailTooLarge,
+            ErrorCode::ProjectionDetailInvalidSource,
+        ] {
+            let refusal = api(code, "the requested detail was refused");
+            assert_eq!(refusal.plain(), "the requested detail was refused");
+            assert!(!refusal.is_transient());
+        }
         // A terminal out of reach comes back; one whose process exited does not.
         let away = api(
             ErrorCode::TerminalUnavailable,
@@ -4001,8 +4791,47 @@ mod tests {
     }
 
     use super::*;
-    use futures_util::SinkExt as _;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[test]
+    fn an_older_error_decoder_preserves_terminal_refusal_as_a_generic_error() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        #[serde(rename_all = "kebab-case")]
+        enum PreviousCode {
+            NotFound,
+            #[serde(other)]
+            Unknown,
+        }
+        #[derive(serde::Deserialize)]
+        struct PreviousEnvelope {
+            code: PreviousCode,
+            message: String,
+            retryable: bool,
+            details: serde_json::Value,
+        }
+        for (code, variant) in [
+            ("recipient-retired", "Retired"),
+            ("lifecycle-unavailable", "LifecycleUnavailable"),
+        ] {
+            let wire = serde_json::json!({"api_version":API_VERSION,"error_version":ERROR_VERSION,
+                "request_id":"request/example","code":code,"message":format!("{variant}: recipient agent/example/worker refuses this first send"),
+                "retryable":false,"applied":"none","details":{"applied":"none","refusal":{"variant":variant,"recipient":"agent/example/worker"}}});
+            let previous: PreviousEnvelope = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(previous.code, PreviousCode::Unknown);
+            assert!(!previous.retryable);
+            assert!(previous.message.contains(variant));
+            assert_eq!(previous.details["applied"], "none");
+            let current: ErrorEnvelope = serde_json::from_value(wire).unwrap();
+            let error = ClientError::Api(
+                current.code.clone(),
+                current.message.clone(),
+                Box::new(current),
+            );
+            assert_eq!(error.applied(), Some("none"));
+            assert!(!error.outcome_unknown());
+            assert!(!error.is_transient());
+            assert!(error.plain().contains(variant));
+        }
+    }
 
     #[test]
     fn every_schema_error_code_is_typed_and_round_trips() {
@@ -4119,6 +4948,187 @@ mod tests {
         assert_eq!(body, b"12345678");
         assert!(append_bounded(&mut body, b"9", 8).is_err());
         assert_eq!(body, b"12345678");
+    }
+
+    /// A work-list error envelope with `reason` in its details.
+    fn work_list_error(reason: &str, retryable: bool) -> String {
+        format!(
+            r#"{{"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/work","code":"internal","message":"{reason}","retryable":{retryable},"details":{{"reason":"{reason}"}}}}"#
+        )
+    }
+
+    /// Serve each scripted answer to one connection, after its delay, and return the request
+    /// lines in order. Unscripted connections get no answer.
+    fn scripted_server(
+        socket: &std::path::Path,
+        answers: Vec<(u64, u16, String)>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            let mut lines = Vec::new();
+            for (delay, status, body) in answers {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                lines.push(
+                    String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+            lines
+        })
+    }
+
+    #[test]
+    fn agents_reads_keep_legacy_fresh_and_add_an_explicit_host_local_cut() {
+        runtime().block_on(async {
+            let page = EMPTY_PAGE
+                .replace("launch-children", "agents")
+                .replace("resource-page", "page");
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("agents.sock");
+            let server = scripted_server(&socket, vec![(0, 200, page); 6]);
+            let client = Client::unix(&socket);
+            client.agents_list(None, None, false).await.unwrap();
+            client
+                .agents_list_for_status("running", None, Some(5), false)
+                .await
+                .unwrap();
+            client
+                .agents_list_after(None, None, false, 0)
+                .await
+                .unwrap();
+            client
+                .agents_list_after(Some("needs attention"), Some(5), true, 1)
+                .await
+                .unwrap();
+            client
+                .agents_list_fresh(None, None, Some(5), false)
+                .await
+                .unwrap();
+            client
+                .agents_list_for_status("needs attention", Some("page&next"), Some(5), true)
+                .await
+                .unwrap();
+            assert_eq!(
+                server.await.unwrap(),
+                vec![
+                    "GET /v1/client/agents HTTP/1.1",
+                    "GET /v1/client/agents?limit=5&status=running HTTP/1.1",
+                    "GET /v1/client/agents?min_cut=0 HTTP/1.1",
+                    "GET /v1/client/agents?limit=5&history=true&min_cut=1&status=needs%20attention HTTP/1.1",
+                    "GET /v1/client/agents?limit=5&fresh=true HTTP/1.1",
+                    "GET /v1/client/agents?cursor=page%26next&limit=5&history=true&status=needs%20attention HTTP/1.1",
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn a_named_roster_cut_detects_old_daemons_without_a_second_request() {
+        runtime().block_on(async {
+            for served in [6, 7, 8] {
+                let mut page: serde_json::Value = serde_json::from_str(EMPTY_PAGE).unwrap();
+                page["value"]["collection"] = serde_json::json!("agents");
+                page["snapshot"]["store_index"] = serde_json::json!(served);
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("old-daemon.sock");
+                // An old daemon ignores min_cut and returns 200 with its newest publication.
+                let server = scripted_server(&socket, vec![(0, 200, page.to_string())]);
+                let result = Client::unix(&socket)
+                    .agents_list_after(None, None, false, 7)
+                    .await;
+                if served < 7 {
+                    let error = result.unwrap_err();
+                    assert!(matches!(&error, ClientError::Api(
+                        ErrorCode::AgentRosterCutNotReady, _, envelope)
+                        if envelope.retryable && envelope.details["min_cut"] == 7));
+                    assert!(error.plain().contains("has not published cut 7"));
+                } else {
+                    assert_eq!(result.unwrap().snapshot.store_index, served);
+                }
+                assert_eq!(
+                    server.await.unwrap(),
+                    vec!["GET /v1/client/agents?min_cut=7 HTTP/1.1"]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_fresh_work_list_retries_only_not_ready_and_not_fresh_within_one_daemon_wait() {
+        runtime().block_on(async {
+            let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
+            let directory = tempfile::tempdir().unwrap();
+            // Not ready, then not fresh, then rows: three requests, one answer.
+            let socket = directory.path().join("ready.sock");
+            let server = scripted_server(&socket, vec![
+                (0, 503, work_list_error("work-list-not-ready", true)),
+                (0, 503, work_list_error("work-list-not-fresh", true)),
+                (0, 200, page.clone()),
+            ]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(5), false);
+            client.work_list_fresh(Some("agent/garden/ash"), Some(5)).await.unwrap();
+            assert_eq!(server.await.unwrap(), vec!["GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash HTTP/1.1"; 3]);
+            // A zero wait asks once and reports the refusal.
+            let socket = directory.path().join("zero.sock");
+            let server = scripted_server(&socket, vec![(0, 503, work_list_error("work-list-not-ready", true))]);
+            let error = Client::unix(&socket).work_list_fresh(None, None).await.unwrap_err();
+            assert!(matches!(&error, ClientError::Api(_, _, envelope) if envelope.details["reason"] == "work-list-not-ready"));
+            assert_eq!(server.await.unwrap().len(), 1);
+            // An ended list, or any other error, is never asked again.
+            for (status, body) in [(503, work_list_error("work-list-ended", false)), (500, work_list_error("other", true))] {
+                let socket = directory.path().join(format!("once-{status}.sock"));
+                let server = scripted_server(&socket, vec![(0, status, body)]);
+                let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(5), false);
+                assert!(client.work_list_fresh(None, None).await.is_err());
+                assert_eq!(server.await.unwrap().len(), 1, "{status}");
+            }
+            // Never ready: the wait ends at its one deadline, pauses and attempts included.
+            let socket = directory.path().join("never.sock");
+            let server = scripted_server(&socket, vec![(150, 503, work_list_error("work-list-not-ready", true)); 40]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_millis(1_200), false);
+            let started = std::time::Instant::now();
+            let error = client.work_list_fresh(None, None).await.unwrap_err();
+            let waited = started.elapsed();
+            assert!(waited >= Duration::from_millis(1_100) && waited < Duration::from_millis(1_700), "{waited:?}");
+            assert!(matches!(&error, ClientError::Api(..) | ClientError::Transport(_)), "{error:?}");
+            server.abort();
+            // A slow answer is cut at the deadline, not at its own pace.
+            let socket = directory.path().join("slow.sock");
+            let server = scripted_server(&socket, vec![(5_000, 200, page.clone())]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_millis(500), false);
+            let started = std::time::Instant::now();
+            let error = client.work_list_fresh(None, None).await.unwrap_err();
+            assert!(started.elapsed() < Duration::from_millis(1_000), "{:?}", started.elapsed());
+            assert!(matches!(&error, ClientError::Transport(message) if message.contains("daemon wait")), "{error:?}");
+            server.abort();
+            // An unreachable daemon is retried within the same wait, and says how long it waited.
+            let client = Client::unix(directory.path().join("absent.sock")).with_outage_wait(Duration::from_millis(400), false);
+            let started = std::time::Instant::now();
+            let error = client.work_list_fresh(None, None).await.unwrap_err();
+            assert!(started.elapsed() >= Duration::from_millis(350) && started.elapsed() < Duration::from_millis(900));
+            assert!(matches!(&error, ClientError::Unreachable(outage) if outage.waited.is_some()), "{error:?}");
+        });
     }
 
     #[test]
@@ -4432,7 +5442,7 @@ mod device_stream_policy_tests {
             allow_public_http: false,
             person_root_fingerprint: None,
             signing_key: None,
-            session: PairedSession {
+            session: PersonPairedSession {
                 kind: "paired-session".into(),
                 device_id: "device/policy".into(),
                 person_id: "person/avery".into(),

@@ -2,6 +2,10 @@
 //! `refresh` requests a demand observation without rewriting the declaration, and
 //! `add`/`remove`/`rename` mutate one binding through mediated CAS publication.
 
+#[macro_use]
+#[path = "../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -24,7 +28,7 @@ fn declaration(identity: &str, managed_by: &str, bindings: &str) -> String {
 }
 
 fn run(root: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", root.to_str().unwrap()])
         .args(args)
         .env_remove("ST_AGENT")
@@ -507,6 +511,7 @@ fn a_binding_with_a_trailing_line_comment_is_removable_and_updatable() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
     let _guard = OBSERVE_ENV_LOCK
@@ -555,7 +560,7 @@ fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
     let snapshot_ready = temporary.path().join("snapshot-ready");
     let snapshot_release = temporary.path().join("snapshot-release");
     let replacement_attempt = temporary.path().join("replacement-attempt");
-    let refresh = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let refresh = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", root.to_str().unwrap()])
         .args([
             "resource", "refresh", "worker", "work", "--wait", "0", "--host", "h",
@@ -573,7 +578,7 @@ fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
         .unwrap();
     wait_for_file(&snapshot_ready);
 
-    let mut replacement = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let mut replacement = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", root.to_str().unwrap()])
         .args([
             "resource",
@@ -632,6 +637,7 @@ fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
     assert!(spec(&root).contains("https://example.test/replacement"));
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn refresh_cli_reports_exact_receipts_and_wait_expiry_keeps_the_request() {
     let _guard = OBSERVE_ENV_LOCK
@@ -692,7 +698,7 @@ fn refresh_cli_reports_exact_receipts_and_wait_expiry_keeps_the_request() {
     assert_eq!(failed_json["diagnostic"], "provider refused");
     clear_refresh_records(&request_dir, &receipt_dir);
 
-    let timed_out = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let timed_out = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", root.to_str().unwrap()])
         .args([
             "resource", "refresh", "worker", "work", "--wait", "0", "--json", "--host", "h",
@@ -719,7 +725,7 @@ fn refresh_cli_reports_exact_receipts_and_wait_expiry_keeps_the_request() {
 
     let final_read_ready = temporary.path().join("observe-final-read-ready");
     let final_read_release = temporary.path().join("observe-final-read-release");
-    let final_read = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let final_read = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", root.to_str().unwrap()])
         .args([
             "resource", "refresh", "worker", "work", "--wait", "1", "--json", "--host", "h",
@@ -758,7 +764,7 @@ fn refresh_cli_reports_exact_receipts_and_wait_expiry_keeps_the_request() {
         ),
     );
     let no_supervisor_state = temporary.path().join("no-supervisor-state");
-    let no_supervisor = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let no_supervisor = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", no_supervisor_root.to_str().unwrap()])
         .args([
             "resource", "refresh", "worker", "work", "--wait", "0", "--host", "h",
@@ -773,7 +779,7 @@ fn refresh_cli_reports_exact_receipts_and_wait_expiry_keeps_the_request() {
 
 fn spawn_refresh(root: &Path, state: &Path, wait: u64) -> std::process::Child {
     let wait = wait.to_string();
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", root.to_str().unwrap()])
         .args([
             "resource",

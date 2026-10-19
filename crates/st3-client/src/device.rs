@@ -2,7 +2,7 @@
 //! This is client state, never a graph replica or a peer configuration.
 mod grant_proof;
 pub(crate) mod transport;
-use crate::{Client, DeviceSignature, MessageSendParameters, PairedSession, PairingComplete};
+use crate::{AssistantPairedSession, AssistantPrincipal, Client, DeviceSignature, MessageSendParameters, PersonPairedSession, PairingComplete};
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
@@ -20,6 +20,23 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// The longest message, in UTF-8 bytes, whose text stays whole in the claim. A longer one keeps a
+/// preview there, and a device signs the preview with the whole text's hash and length.
+pub const INLINE_MAX_BYTES: usize = 8192;
+const PREVIEW_BYTES: usize = 1024;
+
+/// The start of a long message as the daemon keeps it in the claim: the first 1,024 bytes cut at a
+/// character, trailing whitespace trimmed, then `…`. A device signs exactly this.
+pub fn long_message_preview(text: &str) -> String {
+    let mut end = PREVIEW_BYTES.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut preview = text[..end].trim_end().to_owned();
+    preview.push('…');
+    preview
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -154,7 +171,7 @@ pub struct Device {
     /// Trust supplied separately from the code on the trusted pairing machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_root_fingerprint: Option<String>,
-    pub session: PairedSession,
+    pub session: PersonPairedSession,
     /// Old observer and legacy stui profiles have no signing key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key: Option<SigningKey>,
@@ -182,9 +199,11 @@ impl Device {
         Ok(client)
     }
 
-    /// Sign the seven fields in device-signing-v1, including the canonical message subject.
-    /// These fields contain only strings, nulls and arrays of strings, so serde_json's compact
-    /// encoding is their JCS encoding (no floating point or object ordering to normalize).
+    /// Sign the seven fields in device-signing-v1 (nine for a message past `INLINE_MAX_BYTES`),
+    /// including the canonical message subject.
+    /// These fields contain only strings, nulls, arrays of strings and one whole number, so
+    /// serde_json's compact encoding is their JCS encoding (no floating point or object ordering
+    /// to normalize).
     pub fn sign_message(
         &self,
         idempotency_key: &str,
@@ -225,8 +244,34 @@ impl Device {
             "message/{:016x}",
             u64::from_be_bytes(subject_hash[..8].try_into()?)
         );
-        let fields = [
-            ("content", serde_json::to_value(&parameters.content)?),
+        // Past `INLINE_MAX_BYTES` the daemon keeps only a preview in the claim and names the
+        // whole text by its hash and length, so that is what is signed (docs/st3/long-messages.md).
+        let long = parameters.content.len() > INLINE_MAX_BYTES;
+        let mut fields = Vec::with_capacity(9);
+        if long {
+            fields.push((
+                "body_bytes",
+                serde_json::to_value(parameters.content.len() as u64)?,
+            ));
+            fields.push((
+                "body_sha256",
+                serde_json::to_value(
+                    Sha256::digest(parameters.content.as_bytes())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                )?,
+            ));
+        }
+        fields.extend([
+            (
+                "content",
+                if long {
+                    serde_json::to_value(long_message_preview(&parameters.content))?
+                } else {
+                    serde_json::to_value(&parameters.content)?
+                },
+            ),
             ("from", serde_json::to_value(&self.session.person_id)?),
             (
                 "in_reply_to",
@@ -236,7 +281,7 @@ impl Device {
             ("tags", serde_json::to_value(&parameters.tags)?),
             ("title", serde_json::to_value(&parameters.title)?),
             ("to", serde_json::to_value(&parameters.to)?),
-        ];
+        ]);
         let mut lines = vec![
             "smallclaims-claim-fields-v1".to_owned(),
             subject,
@@ -335,33 +380,120 @@ impl Profile {
 
     fn save_in(&self, path: &Path, parent: &File) -> Result<()> {
         self.person()?;
-        ensure!(
-            parent.metadata()?.permissions().mode() & 0o200 != 0,
-            "Device profile directory is not writable"
-        );
-        let mut temporary = tempfile::NamedTempFile::new_in(
-            path.parent()
-                .context("Device profile needs a parent directory")?,
-        )?;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
-        serde_json::to_writer(&mut temporary, self)?;
-        temporary.flush()?;
-        temporary.as_file().sync_all()?;
-        // Fail before committing if this filesystem cannot sync the containing directory.
-        parent.sync_all()?;
-        temporary.persist(path).map_err(|error| error.error)?;
-        // The atomic commit succeeded. A later sync failure cannot undo it and must not be
-        // reported as a failed completion that supposedly left the previous grant untouched.
-        let _ = parent.sync_all();
-        Ok(())
+        save_private(self, path, parent)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let (parent, _lock) = prepare(path)?;
         self.save_in(path, &parent)
     }
+}
+
+/// External assistant credentials live separately from person device delegation.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantDevice {
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_public_http: bool,
+    pub session: AssistantPairedSession,
+    pub signing_key: SigningKey,
+}
+
+impl std::fmt::Debug for AssistantDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantDevice")
+            .field("endpoint", &self.endpoint)
+            .field("device_id", &self.session.device_id)
+            .field("grant_id", &self.session.grant.id)
+            .field("signing_key", &self.signing_key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AssistantDevice {
+    pub fn client(&self) -> Result<Client> {
+        let endpoint = validate_endpoint_with_http_policy(&self.endpoint, self.allow_public_http)?;
+        let mut client = Client::fabric_loopback(&endpoint, &self.session.credential);
+        client.http = transport::client(&endpoint, self.allow_public_http)?;
+        // Never install the assistant key as a person message-signing device.
+        Ok(client)
+    }
+
+    fn validate(&mut self) -> Result<()> {
+        self.endpoint = validate_endpoint_with_http_policy(&self.endpoint, self.allow_public_http)?;
+        let grant = &self.session.grant;
+        // The selected gateway returns the member-sealed issuer. Check its concrete person
+        // shape, not a deployment identity; assistant keys never require person grant proofs.
+        let issuer = grant.issuer.strip_prefix("person/");
+        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): accept transport aliases; sunset 60 days after first shipping release.
+        ensure!(
+            self.session.kind == "assistant-paired-session"
+                && matches!(self.session.api_version.as_str(), "st3.client.v0" | "fractal.client.v0")
+                && self.session.principal == AssistantPrincipal::Chatgpt
+                && self.session.credential.len() >= 32
+                && self.session.device_id == grant.device_id
+                && self.session.principal == grant.principal
+                && self.session.sender_class == grant.sender_class
+                && self.session.session_actor == grant.session_actor
+                && grant.session_actor == format!("assistant/chatgpt/session/{}", grant.id)
+                && self.session.scopes == grant.scopes
+                && self.session.expires_at == grant.expires_at
+                && issuer.is_some_and(|person| {
+                    !person.is_empty()
+                        && !person.contains('/')
+                        && !person.chars().any(char::is_whitespace)
+                })
+                && grant.kind == "assistant-grant"
+                && grant.policy_revision >= 1
+                && grant.disclosure_consent
+                && !grant.consent_evidence.trim().is_empty()
+                && grant.consent_evidence.len() <= 512
+                && grant.recipient_allowlist.iter().all(|id| id.starts_with("agent/") && !id.chars().any(char::is_whitespace))
+                && !grant.revoked,
+            "Invalid assistant session or grant"
+        );
+        let key_id = format!("{:x}", Sha256::digest(self.signing_key.public_key()?.as_bytes()));
+        ensure!(key_id == grant.key_id, "Assistant grant key does not match the local key");
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantProfile {
+    pub devices: Vec<AssistantDevice>,
+}
+
+impl AssistantProfile {
+    pub fn load(path: &Path) -> Result<Option<Self>> {
+        let Some(file) = open_private(path)? else { return Ok(None); };
+        ensure!(file.metadata()?.len() <= 1024 * 1024, "Assistant profile is too large");
+        let mut profile: Self = serde_json::from_reader(file).context("Read assistant profile")?;
+        for device in &mut profile.devices { device.validate()?; }
+        Ok(Some(profile))
+    }
+
+    pub fn clients(&self) -> Result<Vec<Client>> {
+        self.devices.iter().map(AssistantDevice::client).collect()
+    }
+}
+
+fn save_private(value: &impl Serialize, path: &Path, parent: &File) -> Result<()> {
+    ensure!(
+        parent.metadata()?.permissions().mode() & 0o200 != 0,
+        "Device profile directory is not writable"
+    );
+    let mut temporary = tempfile::NamedTempFile::new_in(path.parent().context("Device profile needs a parent directory")?)?;
+    temporary.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+    serde_json::to_writer(&mut temporary, value)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    parent.sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    // The atomic commit succeeded; a later directory sync cannot undo it.
+    let _ = parent.sync_all();
+    Ok(())
 }
 
 fn open_private(path: &Path) -> Result<Option<File>> {
@@ -438,8 +570,51 @@ pub fn profile_path() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .context("Set XDG_CONFIG_HOME or HOME for the device profile")?;
     ensure!(base.is_absolute(), "The config directory must be absolute");
-    // Preserve the existing stui location: both entrypoints now use this profile.
-    Ok(base.join("st3/stui-devices.json"))
+    Ok(crate::product_dirs::resolve(base.join("st3"), base.join("fractal"))
+        .join("stui-devices.json"))
+}
+
+pub fn assistant_profile_path() -> Result<PathBuf> {
+    Ok(profile_path()?.with_file_name("assistant-devices.json"))
+}
+
+/// Consume an assistant challenge into its own private profile, never a person chain.
+/// Trust the returned member-sealed issuer only from the selected gateway completion;
+/// this path neither delegates person authority nor verifies a person signing chain.
+pub async fn complete_assistant(
+    path: &Path,
+    endpoint: &str,
+    pairing_id: &str,
+    code: &str,
+    key: SigningKey,
+    allow_public_http: bool,
+) -> Result<AssistantDevice> {
+    let endpoint = validate_endpoint_with_http_policy(endpoint, allow_public_http)?;
+    ensure!(!code.trim().is_empty(), "A pairing code is required");
+    key.prove(pairing_id, code.trim())?;
+    let public = key.public_key()?;
+    let (parent, _lock) = prepare(path)?;
+    let mut profile = AssistantProfile::load(path)?.unwrap_or_default();
+    let mut client = Client::fabric_pairing(&endpoint);
+    client.http = transport::client(&endpoint, allow_public_http)?;
+    let session: crate::Envelope<AssistantPairedSession> = client.post(
+        &format!("/v1/client/pairings/{}/complete", crate::percent_encode(pairing_id.trim_start_matches("pairing/"))),
+        &PairingComplete {
+            api_version: crate::API_VERSION.into(),
+            code: code.trim().into(),
+            device_public_key: public,
+            key_storage: Some("software".into()),
+        },
+    ).await.context("Complete assistant pairing")?;
+    let mut device = AssistantDevice { endpoint, allow_public_http, session: session.value, signing_key: key };
+    let committed = (|| -> Result<()> {
+        device.validate()?;
+        profile.devices.retain(|existing| existing.endpoint != device.endpoint);
+        profile.devices.push(device.clone());
+        save_private(&profile, path, &parent)
+    })();
+    committed.context("The server consumed the assistant pairing code, but local completion failed. Inspect and revoke the new assistant grant on the trusted member before pairing again; the previous profile was retained")?;
+    Ok(device)
 }
 
 pub fn validate_endpoint(endpoint: &str) -> Result<String> {
@@ -571,6 +746,20 @@ pub fn validate_fingerprint(fingerprint: &str) -> Result<()> {
     Ok(())
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+// Sunset: 60 days after the first release shipping this bridge. Pairing still sends st3.
+fn supports_device_key_proofs(capabilities: &serde_json::Value) -> bool {
+    matches!(capabilities["api_version"].as_str(), Some("st3.client.v0" | "fractal.client.v0"))
+        && capabilities["capabilities"]
+            .as_array()
+            .is_some_and(|capabilities| capabilities.iter().any(|capability| {
+                capability["id"] == "device-key-proofs"
+                    && capability["version"] == 1
+                    && capability["state"] == "granted"
+            }))
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
 pub async fn complete_with_options(
     path: &Path,
     endpoint: &str,
@@ -606,26 +795,16 @@ pub async fn complete_with_options(
     let capabilities: serde_json::Value = client.get("/v1/client/capabilities").await
         .context("Member cannot advertise pairing proof support; upgrade the member before retrying. The pairing code was not submitted")?;
     ensure!(
-        capabilities["api_version"] == crate::API_VERSION
-            && capabilities["capabilities"]
-                .as_array()
-                .is_some_and(|capabilities| capabilities.iter().any(|capability| {
-                    capability["id"] == "device-key-proofs"
-                        && capability["version"] == 1
-                        && capability["state"] == "granted"
-                })),
+        supports_device_key_proofs(&capabilities),
         "Member does not support verifiable device grants; upgrade it before retrying. The pairing code was not submitted"
     );
-    let session = client
-        .pairing_complete(
-            pairing_id,
-            &PairingComplete {
-                api_version: crate::API_VERSION.into(),
-                code: code.trim().into(),
-                device_public_key: public.clone(),
-                key_storage: Some("software".into()),
-            },
-        )
+    let session = client.pairing_complete_person(pairing_id,
+    &PairingComplete {
+        api_version: crate::API_VERSION.into(),
+        code: code.trim().into(),
+        device_public_key: public.clone(),
+        key_storage: Some("software".into()),
+    },)
         .await
         .context("Complete device pairing")?
         .value;
@@ -796,6 +975,66 @@ pub fn read_pairing_code() -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[test]
+    fn pairing_proof_advertisement_accepts_both_versions_without_weakening_proof_checks() {
+        for version in ["st3.client.v0", "fractal.client.v0", "fractal.client.v1"] {
+            let mut advertisement = serde_json::json!({
+                "api_version": version,
+                "capabilities": [{"id": "device-key-proofs", "version": 1, "state": "granted"}]
+            });
+            assert_eq!(supports_device_key_proofs(&advertisement), version != "fractal.client.v1");
+            advertisement["capabilities"][0]["state"] = "denied".into();
+            assert!(!supports_device_key_proofs(&advertisement));
+            advertisement["capabilities"][0]["state"] = "granted".into();
+            advertisement["capabilities"][0]["version"] = 2.into();
+            assert!(!supports_device_key_proofs(&advertisement));
+        }
+        assert!(!supports_device_key_proofs(&serde_json::json!({})));
+    }
+
+
+    #[test]
+    fn assistant_session_issuer_is_a_concrete_person_not_a_fixed_deployment_owner() {
+        let paired: crate::Envelope<AssistantPairedSession> = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/assistant-pairing.json"
+        ))
+        .unwrap();
+        let signing_key = SigningKey::generate(KeyAlgorithm::Ed25519).unwrap();
+        let mut device = AssistantDevice {
+            endpoint: "https://member.example".into(),
+            allow_public_http: false,
+            session: paired.value,
+            signing_key,
+        };
+        device.session.grant.key_id = format!(
+            "{:x}",
+            Sha256::digest(device.signing_key.public_key().unwrap().as_bytes())
+        );
+        // The renamed wire version must not bypass any of the grant checks below.
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            device.session.api_version = version.into();
+            device.validate().unwrap();
+        }
+        device.session.api_version = "fractal.client.v1".into();
+        assert!(device.validate().is_err());
+        device.session.api_version = "fractal.client.v0".into();
+        for issuer in ["person/operator", "person/other"] {
+            device.session.grant.issuer = issuer.into();
+            device.validate().unwrap();
+        }
+        for issuer in [
+            "",
+            "person/",
+            "person/operator/session/example",
+            "agent/operator",
+            "assistant/chatgpt",
+            "person/operator name",
+            "person/operator\n",
+        ] {
+            device.session.grant.issuer = issuer.into();
+            assert!(device.validate().is_err(), "Accepted invalid issuer {issuer:?}");
+        }
+    }
 
     #[test]
     fn shared_signer_matches_the_protocol_vectors_and_keeps_secrets_out_of_debug() {
@@ -813,28 +1052,36 @@ mod tests {
                 endpoint: "https://member.example".into(),
                 allow_public_http: false,
                 person_root_fingerprint: None,
-                session: PairedSession {
-                    kind: "paired-session".into(),
-                    device_id: "device/vector".into(),
-                    person_id: case["signer"].as_str().unwrap().into(),
-                    session_actor: "person/avery/session/vector".into(),
-                    credential: "test-only-bearer-000000000000000000000".into(),
-                    scopes: vec!["control.messages".into()],
-                    expires_at: "2026-11-01T00:00:00Z".into(),
-                    device_key_chain: serde_json::from_value(case["chain"].clone()).unwrap(),
-                    device_key_proofs: Vec::new(),
-                    person_root_key_proof: None,
-                },
+                session: PersonPairedSession { kind: "paired-session".into(),
+                device_id: "device/vector".into(),
+                person_id: case["signer"].as_str().unwrap().into(),
+                session_actor: "person/avery/session/vector".into(),
+                credential: "test-only-bearer-000000000000000000000".into(),
+                scopes: vec!["control.messages".into()],
+                expires_at: "2026-11-01T00:00:00Z".into(),
+                device_key_chain: serde_json::from_value(case["chain"].clone()).unwrap(),
+                device_key_proofs: Vec::new(),
+                person_root_key_proof: None, },
                 signing_key: Some(key.clone()),
             };
             let fields = &case["fields"];
+            // A long case carries what the person sent as a unit and a count; its `content`
+            // field is only the preview that is signed.
+            let content = match case.get("body") {
+                Some(body) => body["unit"]
+                    .as_str()
+                    .unwrap()
+                    .repeat(body["repeat"].as_u64().unwrap() as usize),
+                None => fields["content"].as_str().unwrap().to_owned(),
+            };
             let parameters = MessageSendParameters {
                 to: fields["to"].as_str().unwrap().into(),
-                content: fields["content"].as_str().unwrap().into(),
+                content,
                 title: serde_json::from_value(fields["title"].clone()).unwrap(),
                 in_reply_to: serde_json::from_value(fields["in_reply_to"].clone()).unwrap(),
                 session_id: serde_json::from_value(fields["session_id"].clone()).unwrap(),
                 tags: serde_json::from_value(fields["tags"].clone()).unwrap(),
+                kind: crate::MessageKind::Wake,
                 attachments: vec![],
                 signature: None,
             };
@@ -848,6 +1095,12 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(signed.key, case["key"]);
+            assert_eq!(
+                signed.signed_fields,
+                serde_json::from_value::<Vec<String>>(case["signed_fields"].clone()).unwrap(),
+                "{}",
+                case["name"]
+            );
             let raw = URL_SAFE_NO_PAD
                 .decode(signed.key.strip_prefix("p256:").unwrap())
                 .unwrap();

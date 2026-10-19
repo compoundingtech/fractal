@@ -9,14 +9,19 @@
 //! systemd's default weight of 100. The daemon's unit carries [`LIVE_WEIGHT`] too.
 //!
 //! macOS has no cgroups. There the harness, and each exec task such as a gate's tests, starts
-//! under a utility QoS clamp that every child inherits, while the daemon and the PTY servers keep
+//! under `taskpolicy -b`, which throttles it and every child it starts, while the daemon and the PTY servers keep
 //! their launchd agent's default QoS.
+//!
+//! Linux scope weights only divide a resource between cgroups, and need the user manager to
+//! delegate the controller. A harness therefore also starts at [`BACKGROUND_NICE`] and IO class
+//! best-effort [`BACKGROUND_IO_LEVEL`], which every child inherits and which a fresh user install
+//! needs nothing for. [`SeatPriority::Normal`] drops both for a seat that should have the cores.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -55,21 +60,104 @@ pub fn server_unit(runtime_id: &str, pid: u32) -> String {
     )
 }
 
+/// The environment variable that carries a seat's [`SeatPriority`] into its launch. The daemon sets
+/// it from the install's `seat_priority`; a seat that declares its own value keeps it.
+pub const PRIORITY_ENV: &str = "ST_SEAT_PRIORITY";
+
+/// The nice value a background seat starts at on Linux.
+pub const BACKGROUND_NICE: u8 = 10;
+
+/// The best-effort IO level (0 highest, 7 lowest) a background seat starts at on Linux.
+pub const BACKGROUND_IO_LEVEL: u8 = 7;
+
+/// How a seat's harness and everything it starts rank against the st daemon for CPU and IO.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeatPriority {
+    /// Below the daemon: nice 10 and best-effort IO level 7 on Linux, `taskpolicy -b` on macOS.
+    #[default]
+    Background,
+    /// The daemon's own priority.
+    Normal,
+}
+
+impl SeatPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Normal => "normal",
+        }
+    }
+
+    /// The value a launch's environment names. An unset or unrecognized value reads as
+    /// [`Self::Background`], so a typo never gives a seat more CPU than the default.
+    pub fn from_environment(environment: &BTreeMap<String, String>) -> Self {
+        environment
+            .get(PRIORITY_ENV)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl std::str::FromStr for SeatPriority {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "background" => Ok(Self::Background),
+            "normal" => Ok(Self::Normal),
+            _ => anyhow::bail!("a seat priority must be `background` or `normal`, not `{value}`"),
+        }
+    }
+}
+
 /// The program and arguments that start a harness below the live path. A PTY launch runs them
-/// before its own argv. Linux needs none: the PTY server moves out of the harness's scope.
-pub fn work_prefix() -> Vec<String> {
+/// before its own argv. `environment` is the launch's: it names the seat's [`SeatPriority`] and the
+/// `PATH` that finds `nice` and `ionice`. On Linux the PTY server moves out of the harness's scope
+/// as well, which this prefix does not replace.
+pub fn work_prefix(environment: &BTreeMap<String, String>) -> Vec<String> {
+    let find = |program: &str| crate::resolve_executable(program, environment).ok();
     work_prefix_for(
+        SeatPriority::from_environment(environment),
         cfg!(target_os = "macos"),
         Path::new(MACOS_TASKPOLICY).is_file(),
+        find("nice"),
+        find("ionice"),
     )
 }
 
-fn work_prefix_for(macos: bool, taskpolicy: bool) -> Vec<String> {
-    if macos && taskpolicy {
-        vec![MACOS_TASKPOLICY.into(), "-c".into(), "utility".into()]
-    } else {
-        Vec::new()
+fn work_prefix_for(
+    priority: SeatPriority,
+    macos: bool,
+    taskpolicy: bool,
+    nice: Option<PathBuf>,
+    ionice: Option<PathBuf>,
+) -> Vec<String> {
+    if priority == SeatPriority::Normal {
+        return Vec::new();
     }
+    if macos {
+        return if taskpolicy {
+            vec![MACOS_TASKPOLICY.into(), "-b".into()]
+        } else {
+            Vec::new()
+        };
+    }
+    let path = |program: PathBuf| program.to_string_lossy().into_owned();
+    let mut prefix = Vec::new();
+    if let Some(nice) = nice {
+        prefix.extend([path(nice), "-n".into(), BACKGROUND_NICE.to_string()]);
+    }
+    if let Some(ionice) = ionice {
+        prefix.extend([
+            path(ionice),
+            "-c".into(),
+            "2".into(),
+            "-n".into(),
+            BACKGROUND_IO_LEVEL.to_string(),
+        ]);
+    }
+    prefix
 }
 
 /// Moves the PTY server `pid` of `runtime_id` out of `work_unit`, the scope st started it in, into
@@ -243,12 +331,65 @@ pub fn protect_servers(observations: &[PtyObservation]) {
     });
 }
 
+static CONFIGURED: AtomicU8 = AtomicU8::new(0);
+
+/// Records the install's `seat_priority` for [`report`]. The daemon calls it once at start, from the
+/// same value it hands each launch through [`PRIORITY_ENV`].
+pub fn set_configured(priority: SeatPriority) {
+    CONFIGURED.store(priority as u8, Ordering::Relaxed);
+}
+
+fn configured() -> SeatPriority {
+    match CONFIGURED.load(Ordering::Relaxed) {
+        x if x == SeatPriority::Normal as u8 => SeatPriority::Normal,
+        _ => SeatPriority::Background,
+    }
+}
+
 /// How this host places the live path, for `st doctor`: a status and one line a person can act on.
 pub fn report(observations: &[PtyObservation]) -> (&'static str, String) {
+    let (status, message) = placement_report(observations);
+    let seats = match configured() {
+        SeatPriority::Background => {
+            // The launch resolves these through the login shell's PATH; the daemon's own PATH is
+            // the closest check this process can make.
+            let missing = if cfg!(target_os = "macos") {
+                (!Path::new(MACOS_TASKPOLICY).is_file()).then_some("taskpolicy")
+            } else {
+                let on_path = |program: &str| {
+                    std::env::var_os("PATH").is_some_and(|path| {
+                        std::env::split_paths(&path)
+                            .any(|directory| directory.join(program).is_file())
+                    })
+                };
+                (!on_path("nice")).then_some("nice")
+            };
+            match missing {
+                None => {
+                    "seats start below the daemon (`seat_priority = \"background\"`)".to_string()
+                }
+                Some(program) => {
+                    return (
+                        "warn",
+                        format!(
+                            "{message}; `seat_priority = \"background\"` but `{program}` is not found, so seats start at the daemon's priority"
+                        ),
+                    );
+                }
+            }
+        }
+        SeatPriority::Normal => {
+            "seats start at the daemon's priority (`seat_priority = \"normal\"`)".to_string()
+        }
+    };
+    (status, format!("{message}; {seats}"))
+}
+
+fn placement_report(observations: &[PtyObservation]) -> (&'static str, String) {
     match crate::isolation_mode() {
         crate::Isolation::Scope => linux_report(observations),
         crate::Isolation::Detached if cfg!(target_os = "macos") => {
-            if work_prefix().is_empty() {
+            if configured() == SeatPriority::Background && !Path::new(MACOS_TASKPOLICY).is_file() {
                 (
                     "warn",
                     format!("{MACOS_TASKPOLICY} is missing, so harnesses run at the daemon's QoS"),
@@ -256,7 +397,7 @@ pub fn report(observations: &[PtyObservation]) -> (&'static str, String) {
             } else {
                 (
                     "pass",
-                    "harnesses start under a utility QoS clamp; the daemon and PTY servers keep the default".into(),
+                    "the daemon and PTY servers keep the default QoS; background throttling applies to harnesses only in the background mode".into(),
                 )
             }
         }
@@ -358,14 +499,81 @@ mod tests {
         );
     }
 
+    fn tool(name: &str) -> Option<PathBuf> {
+        Some(PathBuf::from("/bin").join(name))
+    }
+
     #[test]
-    fn only_macos_with_taskpolicy_prefixes_a_harness() {
+    fn a_background_seat_on_macos_needs_taskpolicy() {
         assert_eq!(
-            work_prefix_for(true, true),
-            ["/usr/sbin/taskpolicy", "-c", "utility"]
+            work_prefix_for(SeatPriority::Background, true, true, None, None),
+            ["/usr/sbin/taskpolicy", "-b"]
         );
-        assert!(work_prefix_for(true, false).is_empty());
-        assert!(work_prefix_for(false, true).is_empty());
+        assert!(
+            work_prefix_for(
+                SeatPriority::Background,
+                true,
+                false,
+                tool("nice"),
+                tool("ionice")
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_background_seat_on_linux_runs_under_nice_and_ionice() {
+        assert_eq!(
+            work_prefix_for(
+                SeatPriority::Background,
+                false,
+                true,
+                tool("nice"),
+                tool("ionice")
+            ),
+            ["/bin/nice", "-n", "10", "/bin/ionice", "-c", "2", "-n", "7"]
+        );
+        assert_eq!(
+            work_prefix_for(SeatPriority::Background, false, false, tool("nice"), None),
+            ["/bin/nice", "-n", "10"]
+        );
+        assert_eq!(
+            work_prefix_for(SeatPriority::Background, false, false, None, tool("ionice")),
+            ["/bin/ionice", "-c", "2", "-n", "7"]
+        );
+        assert!(work_prefix_for(SeatPriority::Background, false, false, None, None).is_empty());
+    }
+
+    #[test]
+    fn a_normal_seat_starts_without_a_prefix() {
+        for macos in [false, true] {
+            assert!(
+                work_prefix_for(
+                    SeatPriority::Normal,
+                    macos,
+                    true,
+                    tool("nice"),
+                    tool("ionice")
+                )
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn the_launch_environment_picks_the_priority() {
+        let with = |value: Option<&str>| {
+            SeatPriority::from_environment(
+                &value
+                    .map(|value| BTreeMap::from([(PRIORITY_ENV.to_string(), value.to_string())]))
+                    .unwrap_or_default(),
+            )
+        };
+        assert_eq!(with(None), SeatPriority::Background);
+        assert_eq!(with(Some("background")), SeatPriority::Background);
+        assert_eq!(with(Some("normal")), SeatPriority::Normal);
+        assert_eq!(with(Some("high")), SeatPriority::Background);
+        assert!("high".parse::<SeatPriority>().is_err());
     }
 
     #[test]

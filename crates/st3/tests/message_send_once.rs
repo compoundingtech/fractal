@@ -3,6 +3,8 @@
 //! --idempotency-key` says whether an unconfirmed send landed.
 #![cfg(unix)]
 
+use st3::RetirementsStore;
+use st3::SeatsStoreCore;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
@@ -17,11 +19,13 @@ use tokio::sync::{Notify, watch};
 
 const WORKER: &str = "agent/example/worker";
 const PERSON: &str = "person/avery";
+const LEAD: &str = "agent/example/lead";
 
 /// An in-process daemon on its own socket, and the store behind it.
 async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        owning_person: None,
         store: Arc::new(Store::open_memory("message-send-once").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -136,7 +140,7 @@ async fn read_request(stream: &mut UnixStream) -> Vec<u8> {
 /// Run the st CLI against `socket` with none of this process's st environment, so a harness
 /// running the suite lends it no seat identity, projection root or incarnation.
 async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
-    let binary = assert_cmd::cargo::cargo_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("st3-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let env = env
         .iter()
@@ -256,7 +260,7 @@ async fn running_the_same_reply_twice_sends_one_reply() {
                 "--json",
                 "conversations",
                 "send",
-                PERSON,
+                LEAD,
                 "--from",
                 WORKER,
                 "--subject",
@@ -274,7 +278,7 @@ async fn running_the_same_reply_twice_sends_one_reply() {
         "reply",
         parent,
         "--from",
-        PERSON,
+        LEAD,
         "--body",
         "Yes, start now.",
     ];
@@ -317,12 +321,32 @@ async fn a_send_whose_answer_was_lost_is_found_and_never_sent_twice() {
     let front = root.path().join("front.sock");
     let losses = Arc::new(Losses::default());
     let proxy = lossy_proxy(front.clone(), back, losses.clone()).await;
+    let intent = st3::parse_intent(
+        "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/tmp\"; }\n",
+        "message-send-once",
+    )
+    .unwrap();
+    store
+        .apply_internal(&intent, "lost-reply-declaration")
+        .unwrap();
     // The daemon applies the send and its in-process retry, and neither answer arrives.
     losses.sends.store(2, Ordering::SeqCst);
 
     let lost = st(&front, &[], SEND).await;
     assert!(!lost.status.success());
     assert_eq!(message_count(&store), 1);
+    let token = store.selected_desired_token(WORKER).unwrap().unwrap();
+    store
+        .retire_agent(
+            WORKER,
+            PERSON,
+            "Work finished",
+            &token,
+            None,
+            "lost-reply-retirement",
+            &[],
+        )
+        .unwrap();
     let rerun = st(&front, &[], SEND).await;
     assert_eq!(
         message_count(&store),
@@ -538,5 +562,29 @@ async fn a_landed_send_succeeds_when_the_projection_cannot_be_refreshed() {
     assert!(warning.contains(&subject), "{warning}");
     assert!(warning.contains("st3-message:v1:"), "{warning}");
     proxy.abort();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_or_reply_to_a_person_is_refused_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let asked = value(&st(&socket, &[], SEND).await);
+    let parent = asked["subject"].as_str().unwrap();
+    assert_eq!(message_count(&store), 1);
+    for args in [
+        vec!["--json", "conversations", "send", PERSON, "--from", WORKER, "--body", "Done."],
+        vec!["--json", "conversations", "reply", parent, "--from", WORKER, "--body", "Done."],
+    ] {
+        let refused = st(&socket, &[], &args).await;
+        assert!(!refused.status.success(), "{args:?}");
+        let text = stderr(&refused);
+        assert!(
+            text.contains("people do not have inboxes: print your answer in the chat"),
+            "{text}"
+        );
+        assert!(text.contains("work ask") && text.contains("work update"), "{text}");
+    }
+    assert_eq!(message_count(&store), 1, "a refused message was written");
     server.abort();
 }

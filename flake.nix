@@ -7,14 +7,12 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/b9d02f3468b718ceff27031e0b9cb38de3bb6b1c";
+    pty.url = "github:compoundingtech/pty/4f703c7d7f9cbff5d713b1234d1db98223881bca";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.
     effect-utils.url =
       "github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b";
-    # The messaging fixture must not invoke Nix or fetch a historical build in the sandbox.
-    messaging-baseline.url = "github:compoundingtech/smalltalk/678103d3e8ae873a158bb2cb951d3ffefdf698c4";
   };
 
   outputs =
@@ -25,13 +23,39 @@
       fenix,
       pty,
       effect-utils,
-      messaging-baseline,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
-        hmModuleEval = nixpkgs.lib.evalModules {
+
+        ciRustcWrapper = pkgs.writeShellApplication {
+          name = "ci-rustc-wrapper";
+          runtimeInputs = [ pkgs.coreutils pkgs.gnugrep ];
+          text = ''
+            export SCCACHE_BIN=${pkgs.sccache}/bin/sccache
+            ${builtins.readFile ./scripts/ci-rustc-wrapper}
+          '';
+        };
+
+        # Reuse the GitHub-archive flake source instead of importCargoLock's git fetcher.
+        # Reject new git sources until they also have an archive-backed input.
+        cargoDeps =
+          (pkgs.rustPlatform.importCargoLock.override {
+            fetchgit =
+              { url, rev, ... }:
+              assert pkgs.lib.assertMsg (url == "https://github.com/compoundingtech/pty")
+                "Cargo git dependency ${url} needs an archive-backed flake input";
+              assert pkgs.lib.assertMsg (rev == pty.rev)
+                "pty flake input (${pty.rev}) and Cargo.lock (${rev}) must pin the same revision";
+              pty.outPath;
+          }) {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "pty-core-0.13.0-rust" = pty.narHash;
+            };
+          };
+        mkHmModuleEval = extraConfig: nixpkgs.lib.evalModules {
           specialArgs = {
             inherit pkgs;
             lib = pkgs.lib // {
@@ -53,16 +77,18 @@
                 systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
+              config.programs.smalltalk.fractalBinary.enable = extraConfig.fractalBinary or false;
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
                 socket = "/tmp/smalltalk-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/st3/seats/claude.kdl ];
-              };
+              } // builtins.removeAttrs extraConfig [ "fractalBinary" ];
             })
           ];
         };
+        hmModuleEval = mkHmModuleEval { };
         providerRustToolchain = fenix.packages.${system}.combine [
           fenix.packages.${system}.stable.cargo
           fenix.packages.${system}.stable.rustc
@@ -75,7 +101,7 @@
 
         # Cargo.toml is the single source of truth for the version, so a release
         # bump needs no matching edit here.
-        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
         # NixStamp for the shared build-versioning contract: the flake rev is a
         # pure input, so baking it lets a hermetic build know its own identity
@@ -92,10 +118,10 @@
             self.rev
           else
             "nix-dirty.${self.dirtyRev or self.dirtyShortRev or "unknown"}";
-        buildStamp = builtins.toJSON {
-          type = "nix";
+        buildStamp = import ./nix/build-stamp.nix {
           inherit version;
           rev = sourceRev;
+          fullRev = self.rev or self.dirtyRev or sourceRev;
           commitTs = sourceCommitUnix;
           dirty = sourceDirty;
         };
@@ -120,14 +146,17 @@
           assert bindings.libghostty-vt-sys.version == "=${pty.lib.libghosttyContract.rustBindingsVersion}";
           pty.packages.${system}.libghostty-vt;
 
-        messagingBaseline =
-          assert messaging-baseline.rev == (builtins.fromJSON (builtins.readFile ./.github/messaging-compat-baseline.json)).commit;
-          messaging-baseline.packages.${system}.st3.overrideAttrs (_: {
-          doCheck = false;
-          nativeCheckInputs = [ ];
-          postInstall = "";
-          cargoBuildFlags = [ "-p" "st3" ];
-        });
+        messagingBaseline = import ./nix/compat-baseline.nix {
+          inherit pkgs;
+          baseline = builtins.fromJSON (builtins.readFile ./.github/messaging-compat-baseline.json);
+        };
+
+        # Give the historical binary a distinct name in the check-only PATH.
+        # Resolving it there keeps its store identity out of the runtime derivation.
+        messagingCompat = pkgs.runCommand "st3-messaging-compat" { } ''
+          mkdir -p $out/bin
+          ln -s ${messagingBaseline}/bin/st3 $out/bin/st3-messaging-compat
+        '';
 
         # buildRustPackage compiles the workspace once per derivation, so a gate that differs from
         # an existing derivation only by test selection is folded into that derivation's check
@@ -200,6 +229,48 @@
           "--exclude"
           "st3"
           "--exclude"
+          "st3-daemon"
+          "--exclude"
+          "st3-e2e"
+          "--exclude"
+          "st3-kernel"
+          "--exclude"
+          "st3-telemetry"
+          "--exclude"
+          "st3-secrets"
+          "--exclude"
+          "st3-seats-base"
+          "--exclude"
+          "st3-delivery-base"
+          "--exclude"
+          "st3-missions-base"
+          "--exclude"
+          "st3-github-base"
+          "--exclude"
+          "st3-store"
+          "--exclude"
+          "st3-delivery"
+          "--exclude"
+          "st3-missions"
+          "--exclude"
+          "st3-seats"
+          "--exclude"
+          "st3-attention"
+          "--exclude"
+          "st3-evidence"
+          "--exclude"
+          "st3-github"
+          "--exclude"
+          "st3-peer"
+          "--exclude"
+          "st3-reconcile"
+          "--exclude"
+          "st3-api"
+          "--exclude"
+          "st3-api-client-v0"
+          "--exclude"
+          "st3-api-mailbox"
+          "--exclude"
           "st3-client"
           "--exclude"
           "st3-client-codegen"
@@ -220,15 +291,10 @@
           inherit version;
           src = self;
 
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "pty-core-0.13.0-rust" = "sha256-iUey+Jj6CT+Oqa0bWDGFXubqYBbpzlLUvpZ9CLFisBo=";
-            };
-          };
+          inherit cargoDeps;
 
           # The workspace default members include the st3 crates. This package ships only st2;
-          # st3, `st`, stui, and st3-migrate come from the st3 package, so each has one build.
+          # st3, `st`, and st3-migrate come from the st3 package, so each has one build.
           cargoBuildFlags = [
             "-p"
             "st2"
@@ -342,6 +408,26 @@
           };
         };
 
+        # Tests that checks.st3 leaves out because the Nix build sandbox cannot give them what they
+        # need. One named list, a reason and an owner per entry; central CI and the wrapper path
+        # still run every one of them. The check fails if an entry no longer names exactly one
+        # test, and any test not listed here must pass.
+        st3Exclusions =
+          let
+            list = (builtins.fromJSON (builtins.readFile ./nix/st3-check-exclusions.json)).exclusions;
+            key = e: "${e.package}/${e.binary}/${e.test}";
+          in
+          assert pkgs.lib.assertMsg (list != [ ]) "nix/st3-check-exclusions.json lists no exclusion";
+          assert pkgs.lib.assertMsg (builtins.all (e: e.reason != "" && e.owner != "") list)
+            "every st3 check exclusion needs a reason and an owner";
+          assert pkgs.lib.assertMsg (
+            builtins.length (pkgs.lib.unique (map key list)) == builtins.length list
+          ) "st3 check exclusions must be unique";
+          list;
+        st3ExcludedFilter = pkgs.lib.concatMapStringsSep " | " (
+          e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
+        ) st3Exclusions;
+
         st3Check = pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
@@ -349,7 +435,7 @@
           # Embedded hooks are published into immutable runtime hook sets. The
           # sandbox has no /usr/bin/env; patch before compilation for package/check.
           postPatch = ''
-            for hook in crates/st3/hooks/claude-observe.sh crates/st3/hooks/claude-statusline.sh; do
+            for hook in crates/st3-daemon/hooks/claude-observe.sh crates/st3-daemon/hooks/claude-statusline.sh; do
               if [ ! -f "$hook" ]; then
                 echo "Missing embedded Claude hook: $hook" >&2
                 exit 1
@@ -363,21 +449,14 @@
               fi
             done
           '';
-          # Stamp st3, its shared driver library, and stui from this declared flake source.
+          # Stamp st3, its shared driver library, and the terminal UI library from this declared flake source.
           CLI_BUILD_STAMP = buildStamp;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "pty-core-0.13.0-rust" = "sha256-iUey+Jj6CT+Oqa0bWDGFXubqYBbpzlLUvpZ9CLFisBo=";
-            };
-          };
+          inherit cargoDeps;
           cargoBuildFlags = [
             "-p"
             "st3"
             "-p"
             "st3-migrate"
-            "-p"
-            "stui"
           ];
           # `--no-fail-fast` reports every failing test target in one run.
           cargoTestFlags = [
@@ -388,6 +467,48 @@
             "st-runtime"
             "-p"
             "st3"
+            "-p"
+            "st3-daemon"
+            "-p"
+            "st3-e2e"
+            "-p"
+            "st3-kernel"
+            "-p"
+            "st3-telemetry"
+            "-p"
+            "st3-secrets"
+            "-p"
+            "st3-seats-base"
+            "-p"
+            "st3-delivery-base"
+            "-p"
+            "st3-missions-base"
+            "-p"
+            "st3-github-base"
+            "-p"
+            "st3-store"
+            "-p"
+            "st3-delivery"
+            "-p"
+            "st3-missions"
+            "-p"
+            "st3-seats"
+            "-p"
+            "st3-attention"
+            "-p"
+            "st3-evidence"
+            "-p"
+            "st3-github"
+            "-p"
+            "st3-peer"
+            "-p"
+            "st3-reconcile"
+            "-p"
+            "st3-api"
+            "-p"
+            "st3-api-client-v0"
+            "-p"
+            "st3-api-mailbox"
             "-p"
             "st3-client"
             "-p"
@@ -402,20 +523,32 @@
             "st3-schema"
             "-p"
             "stui"
+            "-p"
+            "st-chatgpt"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
           checkPhase = ''
             runHook preCheck
+            # Every exclusion must still name exactly one test, or the list has gone stale.
+            cargo nextest list --release --offline --target ${rustHostTarget} \
+              --build-jobs "$NIX_BUILD_CORES" \
+              ${pkgs.lib.escapeShellArgs (pkgs.lib.remove "--no-fail-fast" st3Check.cargoTestFlags)} \
+              --message-format json -E ${pkgs.lib.escapeShellArg st3ExcludedFilter} > excluded-tests.json
+            matched=$(jq '[.["rust-suites"][].testcases | to_entries[] | select(.value["filter-match"].status == "matches")] | length' excluded-tests.json)
+            if [ "$matched" -ne ${toString (builtins.length st3Exclusions)} ]; then
+              echo "nix/st3-check-exclusions.json lists ${toString (builtins.length st3Exclusions)} tests but $matched match; remove or fix the stale entries" >&2
+              exit 1
+            fi
             cargo nextest run --release --offline --target ${rustHostTarget} \
               --build-jobs "$NIX_BUILD_CORES" --test-threads "$NIX_BUILD_CORES" --retries 0 \
+              -E ${pkgs.lib.escapeShellArg "not (${st3ExcludedFilter})"} \
               ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags} \
               -- ${pkgs.lib.escapeShellArgs st3Check.checkFlags}
             cargo test --doc --release --offline --target ${rustHostTarget} \
               -j "$NIX_BUILD_CORES" ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags}
             runHook postCheck
           '';
-          ST3_MESSAGING_COMPAT_BIN = "${messagingBaseline}/bin/st3";
           # These two tests put an openpty(3) terminal into raw mode. In the macOS Nix build one
           # fails and the other hangs, so they run on Linux only until they pass on macOS.
           checkFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
@@ -428,6 +561,14 @@
           # macOS /etc/profile otherwise puts host tools (such as /bin/ps, which
           # cannot execute in the sandbox) ahead of their declared Nix equivalents.
           preCheck = ''
+            # These tools enter PATH only through nativeCheckInputs. Do not put
+            # their store paths in attributes inherited by the unchecked package.
+            # Preserve the historical executable name for its CLI dispatch and
+            # fixtures that copy the binary: pass the original .../bin/st3 path.
+            ST3_MESSAGING_COMPAT_BIN=$(readlink -f "$(command -v st3-messaging-compat)")
+            ST3_OTELITE_BIN=$(command -v otelite)
+            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN
+            export ST3_OTEL_REQUIRE=1
             export HOME=$(mktemp -d)
             export SHELL=${pkgs.bashInteractive}/bin/bash
             printf 'export PATH=%q\n' "$PATH" > "$HOME/.bash_profile"
@@ -452,10 +593,15 @@
             pkgs.which
             pkgs.cargo-nextest
             pkgs.python3
+            # Evidence fixtures make throwaway SSH signing keys and let Git verify the signed
+            # notes; git itself comes from nativeBuildInputs above.
+            pkgs.openssh
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
             ptyPackage
+            effect-utils.packages.${system}.otelite
+            messagingCompat
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.util-linux pkgs.systemd ]
           # Native session discovery lists processes with ps and lsof on macOS (Linux reads /proc).
@@ -464,7 +610,9 @@
             pkgs.lsof
           ];
           postInstall = ''
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
             ln -s st3 $out/bin/st
+            # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
             ln -s ${ptyPackage}/bin/pty $out/bin/pty
             $out/bin/st completions bash > st.bash
             $out/bin/st completions zsh > _st
@@ -483,14 +631,41 @@
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
         st3 = st3Check.overrideAttrs (_: {
           doCheck = false;
-          ST3_MESSAGING_COMPAT_BIN = "";
         });
+
+        # Explicit opt-in: the default st3 package never gains bin/fractal.
+        fractal = pkgs.runCommand "fractal-${version}" {
+          meta = st3.meta // { mainProgram = "fractal"; };
+        } ''
+          mkdir -p $out/bin
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+          ln -s ${st3}/bin/st3 $out/bin/fractal
+          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
+        '';
+
+        stChatgpt = pkgs.rustPlatform.buildRustPackage {
+          pname = "st-chatgpt";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "st-chatgpt" "--bin" "st-chatgpt" ];
+          # .cargo/config.toml links Linux targets with mold.
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          # The shared daemon check runs the adapter's Rust tests.
+          doCheck = false;
+          meta = {
+            description = "Standalone Small Talk ChatGPT MCP adapter";
+            homepage = "https://github.com/compoundingtech/smalltalk";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "st-chatgpt";
+          };
+        };
 
         st3Help = pkgs.runCommand "st3-help-${version}" {
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
         } ''
           test "$(readlink ${st3}/bin/st)" = st3
-          test -x ${st3}/bin/stui
+          test ! -e ${st3}/bin/stui
+          test ! -e ${st3}/bin/fractal
           test -x ${st3}/bin/pty
           expected='${version}+${sourceRev}${pkgs.lib.optionalString (sourceDirty && !(pkgs.lib.hasSuffix "-dirty" sourceRev)) "-dirty"}'
           ${st3}/bin/st3 --version > st3.version
@@ -498,7 +673,7 @@
           test "$(wc -l < st3.version)" -eq 1
           ${st3}/bin/st --version --json > version.json
           test "$(${pkgs.jq}/bin/jq -r .machine_version version.json)" = "$expected"
-          ${st3}/bin/stui --version | grep -F "$expected"
+          ${st3}/bin/st ui --version | grep -F "$expected"
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
@@ -520,14 +695,14 @@
           pkgs.runCommand "st3-install-layout-${version}" { } ''
             export HOME=$(mktemp -d)
             test "$(readlink ${st3}/bin/st)" = st3
-            printf '%s\n' pty st st3 st3-migrate stui > expected-package-bin
+            printf '%s\n' pty st st3 st3-migrate > expected-package-bin
             ls ${st3}/bin | sort > actual-package-bin
             cmp expected-package-bin actual-package-bin
 
             mkdir built
-            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate ${st3}/bin/stui built/
+            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate built/
             bash ${self}/scripts/install --from built --bin-dir "$PWD/bin"
-            printf '%s\n' st st3 st3-migrate stui > expected-source-bin
+            printf '%s\n' st st3 st3-migrate > expected-source-bin
             ls bin | sort > actual-source-bin
             cmp expected-source-bin actual-source-bin
             test "$(readlink bin/st)" = st3
@@ -535,7 +710,7 @@
             bin/st3 --help > st3.help
             cmp st.help st3.help
             bin/st3-migrate --help > /dev/null
-            bin/stui --help > /dev/null
+            bin/st ui --help > /dev/null
 
             bash ${self}/scripts/install-test
             touch $out
@@ -604,12 +779,7 @@
           pname = "st2-provider-components";
           inherit version;
           src = self;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "pty-core-0.13.0-rust" = "sha256-iUey+Jj6CT+Oqa0bWDGFXubqYBbpzlLUvpZ9CLFisBo=";
-            };
-          };
+          inherit cargoDeps;
           buildPhase = ''
             runHook preBuild
             cargo build --offline --release --target wasm32-unknown-unknown \
@@ -771,8 +941,7 @@
           # `checks.hooks-replacement`. Its test suite is `checks.st2`'s, on source that differs
           # only by an appended hook comment, so running it again buys nothing.
           doCheck = false;
-          CLI_BUILD_STAMP = builtins.toJSON {
-            type = "nix";
+          CLI_BUILD_STAMP = import ./nix/build-stamp.nix {
             inherit version;
             rev = "hook-successor";
             commitTs = sourceCommitUnix;
@@ -783,7 +952,12 @@
       {
         packages.st2 = st2;
         packages.st = st3;
+        # Release runners need a host linker for Cargo build scripts and stamp tests.
+        # The release target still links through the pinned Zig/glibc-baseline wrapper.
+        packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
+        packages.fractal = fractal;
+        packages.st-chatgpt = stChatgpt;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;
@@ -806,11 +980,26 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
+        checks.st3-runtime-inputs =
+          assert import ./nix/st3-runtime-input-tests.nix {
+            inherit self system;
+            baseline = messagingCompat;
+            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
+          };
+          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
+        checks.st3-check-input-isolation =
+          assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
+          # Native check inputs must not contribute to the installed package identity.
+          assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
+          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
         checks.debug-assertions = st2DebugAssertions;
+        checks.build-stamp-bounds =
+          assert import ./nix/build-stamp-tests.nix;
+          pkgs.runCommand "build-stamp-bounds" { } ''touch $out'';
         checks.hm-module-eval =
           let
             rendered = hmModuleEval.config;
@@ -831,6 +1020,13 @@
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/smalltalk-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
+          # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
+          # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
+          assert (if pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/st3-client.sock"'' args
+            && !(pkgs.lib.hasInfix "%%t/st3-client.sock" args)
+          else
+            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/st3-client.sock" args);
           assert (if pkgs.stdenv.hostPlatform.isLinux then
             pkgs.lib.hasPrefix ''"${stableExecutable}" '' args
           else
@@ -846,6 +1042,8 @@
             (if pkgs.stdenv.hostPlatform.isLinux then "reloadSystemd" else "setupLaunchAgents")
           ];
           assert builtins.deepSeq activation.data true;
+          assert !rendered.programs.smalltalk.fractalBinary.enable;
+          assert !(pkgs.lib.hasInfix ''/bin/ln -s st3 "$binDir/fractal"'' activation.data);
           assert builtins.length rendered.home.packages == 1;
           assert builtins.deepSeq (if pkgs.stdenv.hostPlatform.isLinux then
             rendered.systemd.user.services.smalltalk-apply.Service.ExecStart
@@ -854,6 +1052,76 @@
           assert (!pkgs.stdenv.hostPlatform.isLinux)
             || rendered.systemd.user.services.smalltalk.Service.MemoryMax == "8G";
           pkgs.runCommand "smalltalk-hm-module-eval" { } "touch $out";
+        checks.fractal-aliases =
+          let
+            rendered = (mkHmModuleEval { fractalBinary = true; }).config;
+            external = (mkHmModuleEval {
+              fractalBinary = true;
+              binary.path = "/opt/smalltalk/bin/st3";
+            }).config;
+            activation = rendered.home.activation.smalltalkBinary.data;
+          in
+          assert rendered.programs.smalltalk.fractalBinary.enable;
+          assert builtins.length rendered.home.packages == 1;
+          assert pkgs.lib.hasInfix ''/bin/ln -s st3 "$binDir/fractal"'' activation;
+          assert pkgs.lib.hasInfix ''[[ ! -e "$binDir/fractal" && ! -L "$binDir/fractal" ]]'' activation;
+          assert !(pkgs.lib.hasInfix ''ln -sfn st3 "$binDir/fractal"'' activation);
+          assert !(external.home.activation ? smalltalkBinary);
+          assert self.packages.${system}.default == st3;
+          pkgs.runCommand "fractal-aliases-${version}" { } ''
+            test "$(readlink ${fractal}/bin/fractal)" = ${st3}/bin/st3
+            test -x ${fractal}/bin/fractal
+            test ! -e ${st3}/bin/fractal
+            touch $out
+          '';
+        checks.hm-module-external-binary-eval =
+          let
+            executable = "/opt/smalltalk/bin/st3";
+            externalConfig = { binary.path = executable; };
+            rendered = (mkHmModuleEval externalConfig).config;
+            successor = (mkHmModuleEval (externalConfig // {
+              package = pkgs.emptyDirectory;
+              ptyPackage = null;
+            })).config;
+            units = config: builtins.toJSON {
+              inherit (config.systemd.user) services;
+              inherit (config.launchd) agents;
+            };
+            unitText = units rendered;
+            forbiddenPaths = map (package: builtins.unsafeDiscardStringContext (toString package)) [
+              rendered.services.smalltalk.package
+              rendered.services.smalltalk.ptyPackage
+              (builtins.head hmModuleEval.config.home.packages)
+            ];
+            applyScript = if pkgs.stdenv.hostPlatform.isLinux then
+              rendered.systemd.user.services.smalltalk-apply.Service.ExecStart
+            else
+              builtins.head rendered.launchd.agents.smalltalk-apply.config.ProgramArguments;
+            args = if pkgs.stdenv.hostPlatform.isLinux then
+              rendered.systemd.user.services.smalltalk.Service.ExecStart
+            else
+              builtins.concatStringsSep " " rendered.launchd.agents.smalltalk.config.ProgramArguments;
+          in
+          assert rendered.home.packages == [ ];
+          assert !(rendered.home.activation ? smalltalkBinary);
+          assert builtins.all (path: !(pkgs.lib.hasInfix path unitText)) forbiddenPaths;
+          assert !(pkgs.lib.hasInfix "X-Restart-Triggers" unitText);
+          assert !(pkgs.lib.hasInfix "SMALLTALK_PACKAGE" unitText);
+          assert pkgs.lib.hasInfix executable args;
+          assert pkgs.lib.hasInfix "${builtins.dirOf executable}/pty" args;
+          # Includes the declaration wrapper's store path: neither it nor a unit
+          # may change when the unused st3 or PTY package changes.
+          assert unitText == units successor;
+          pkgs.runCommand "smalltalk-hm-module-external-binary-eval" { } ''
+            ${pkgs.gnugrep}/bin/grep -F -- ${pkgs.lib.escapeShellArg executable} ${applyScript}
+            for package in ${pkgs.lib.escapeShellArgs forbiddenPaths}; do
+              if ${pkgs.gnugrep}/bin/grep -F -- "$package" ${applyScript}; then
+                echo "Declaration wrapper references a Home Manager-owned package" >&2
+                exit 1
+              fi
+            done
+            touch $out
+          '';
         checks.wasm-resolver-feature = st2WasmResolver;
         checks.wasip2-resource-providers = st2ProviderRuntime;
         checks.provider-components = st2ProviderComponents;
@@ -921,8 +1189,8 @@
           } ''
             cp -R ${self}/crates/st-drivers/hooks hooks
             chmod -R u+w hooks
-            cp ${self}/crates/st3/hooks/pi-channel.ts hooks/st-pi-channel.ts
-            cp ${self}/crates/st3/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            cp ${self}/crates/st3-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
+            cp ${self}/crates/st3-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"
@@ -1036,6 +1304,35 @@
           touch "$out"
         '';
 
+        # The `genie-freshness` required check as a sandboxed derivation: the CI scripts' own tests
+        # and `genie --check` over the exact flake source. It has no network and no `.git`, so
+        # the one test that needs a repository gets a throwaway one (its commit ID is an opaque
+        # value there) and `tar` is declared for the cache test.
+        checks.genie-freshness = pkgs.runCommand "genie-freshness-${version}" {
+          nativeBuildInputs = [
+            effect-utils.packages.${system}.genie
+            pkgs.git
+            pkgs.gnutar
+            pkgs.jq
+            pkgs.nodejs
+            pkgs.openssh
+            pkgs.python3
+            pkgs.zstd
+          ];
+        } ''
+          export HOME=$(mktemp -d)
+          cp -r ${self} source
+          chmod -R u+w source
+          cd source
+          mkdir -p repos
+          ln -sfn ${effect-utils} repos/effect-utils
+          git init --quiet
+          git add -A
+          git -c user.name=nix -c user.email=nix@localhost commit --quiet -m source
+          bash scripts/ci-genie-freshness
+          touch "$out"
+        '';
+
         # Smoke test that the built binary actually runs and its command tree is
         # wired, independent of the in-tree `cargo test`.
         checks.help = pkgs.runCommand "st2-help-${version}" { } ''
@@ -1126,6 +1423,9 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.git
+            # Git evidence fixtures sign observations and serve API responses with Python.
+            pkgs.openssh
+            pkgs.python3
             pkgs.sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
@@ -1135,9 +1435,8 @@
             pkgs.lld
             ptyPackage
             libghosttyVT
-            # Local runs of the OTLP export integration gate
-            # (`cargo test --test integration otel_export::`) need the same collector the
-            # Nix check pins; `ST2_OTELITE_BIN` points at it.
+            # Local st2/st3 OTLP export integration tests use the same collector as Nix checks;
+            # ST2_OTELITE_BIN and ST3_OTELITE_BIN point at it.
             effect-utils.packages.${system}.otelite
             # st3's messaging fault matrix runs the omp channel hook (TypeScript) under the
             # provider stand-in with Node's built-in type stripping, which Node 24 enables.
@@ -1149,7 +1448,19 @@
           # Same collector the Nix gate pins, so a bare
           # `cargo test --test integration otel_export::` in this shell runs against it.
           ST2_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
+          shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
+            if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              source ${./scripts/ci-cargo-tools-env} || exit $?
+              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+            fi
+            # Pushing a branch signs its checks first when they have no evidence yet (scripts/evidence-prepush).
+            if [ -z "''${GITHUB_ACTIONS:-}" ] && [ -z "''${CI:-}" ] && [ -x ./scripts/install-git-hooks ]; then
+              ./scripts/install-git-hooks || echo "scripts/install-git-hooks failed: pushes will not sign evidence" >&2
+            fi
+          '';
         };
         # The in-process load test uses a stand-in PTY and needs no collector or harness tools.
         devShells.perf = pkgs.mkShell {
@@ -1166,17 +1477,72 @@
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
           shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
+            if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+            fi
             export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | sed -n '\|^/nix/store/|p' | paste -sd:):/usr/bin:/bin"
           '';
         };
         # Configuration generation must not realize the Rust/PTY/collector shell.
         devShells.genie = pkgs.mkShell {
-          packages = [ effect-utils.packages.${system}.genie ];
+          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
           shellHook = ''
             mkdir -p repos
             ln -sfn ${effect-utils} repos/effect-utils
           '';
         };
+        # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root
+        # Rust nixpkgs: pnpm 12.7.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
+        # The Buck root mirrors `mkConsumerBuckRoot`; its rules and capabilities cells are linked
+        # into `.buck2/` from the store, and `scripts/ci-fractal-web` fails if the checked-in
+        # `.buckconfig`, `BUCK` or `buck2/toolchains/BUCK` drift from it.
+        devShells.web =
+          let
+            webPkgs = import effect-utils.inputs.nixpkgs { inherit system; };
+            effectUtilsPackages = effect-utils.packages.${system};
+            buckRoot = effect-utils.lib.mkConsumerBuckRoot {
+              pkgs = webPkgs;
+              rules = effectUtilsPackages.buck2-rules;
+              capabilities = effectUtilsPackages.buck2-capabilities;
+              cellName = "smalltalk";
+              # The generator input under `repos/` carries effect-utils' own BUCK files.
+              projectIgnore = [
+                "**/__pycache__"
+                "**/dist"
+                "**/node_modules"
+                "**/target"
+                ".devenv"
+                ".git"
+                "buck-out"
+                "node_modules"
+                "repos"
+                "target"
+                "tmp"
+              ];
+            };
+          in
+          webPkgs.mkShell {
+            packages = [
+              (effect-utils.lib.mkPnpm { pkgs = webPkgs; })
+              # Ahead of Node, whose bundled Corepack is older.
+              webPkgs.corepack
+              webPkgs.nodejs_24
+              webPkgs.bun
+              effectUtilsPackages.buck2
+              effectUtilsPackages.genie
+            ];
+            BUCK2_BIN = "${effectUtilsPackages.buck2}/bin/buck2";
+            FRACTAL_WEB_BUCK_ROOT = "${buckRoot}";
+            PLAYWRIGHT_MODULE = "${webPkgs.playwright-driver}/index.mjs";
+            CHROMIUM_PATH = webPkgs.lib.optionalString webPkgs.stdenv.hostPlatform.isLinux "${webPkgs.chromium}/bin/chromium";
+            shellHook = ''
+              mkdir -p repos .buck2
+              ln -sfn ${effect-utils} repos/effect-utils
+              ln -sfn ${buckRoot}/.buck2/rules .buck2/rules
+              ln -sfn ${buckRoot}/.buck2/capabilities .buck2/capabilities
+            '';
+          };
         # The isolation-vm CI job's NixOS VMs; see each file for how it runs.
         legacyPackages = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           transport-isolation-vm = import ./nix/transport-isolation-vm.nix {

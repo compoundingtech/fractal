@@ -177,6 +177,7 @@ pub fn claude_settings_registration() -> serde_json::Value {
             "PermissionRequest": observe("PermissionRequest"),
             "PreToolUse": observe("PreToolUse"),
             "PostToolUse": observe("PostToolUse"),
+            "PostToolUseFailure": observe("PostToolUseFailure"),
         },
         // The status-line payload is the ONLY Claude channel carrying a context window, so st2
         // occupies the slot to read it — and the slot is single-valued, with the winning
@@ -781,10 +782,7 @@ mod tests {
     /// two drift, a driver-declared and a hand-authored seat stop registering the same hooks.
     #[test]
     fn example_claude_declaration_registers_the_canonical_hook_settings() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../examples/native/agent-claude.kdl"
-        );
+        let path = test_env!("CARGO_MANIFEST_DIR", "/../../examples/native/agent-claude.kdl");
         let raw = std::fs::read_to_string(path).unwrap();
         let document: kdl::KdlDocument = raw.parse().unwrap();
         let agent = document.get("agent").unwrap();

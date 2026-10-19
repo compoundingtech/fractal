@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise a conversation's mouse in an installed stui (spaces) PTY: open an agent from the
+"""Exercise a conversation's mouse in an installed st ui (spaces) PTY: open an agent from the
 sidebar, scroll it with the wheel, and drag to select and copy.
 
 Requires a live st3 daemon and its normal agent tree. Prints no conversation text.
@@ -73,13 +73,13 @@ def text_row(value: str) -> tuple[int, int] | None:
 
 
 def start(binary: str, prefix: str) -> str:
-    """Start stui in a detached PTY session and wait for its first frame."""
+    """Start st ui in a detached PTY session and wait for its first frame."""
     session = f"{prefix}-{uuid.uuid4().hex[:10]}"
     actor = os.environ.get("ST3_PERSON", "person/alex")
     subprocess.run(
         [PTY, "run", "-d", "-e", "--id", session,
          "--env", f"ST3_PERSON={actor}", "--env", "TERM=xterm-256color",
-         "--", os.path.abspath(binary)],
+         "--", os.path.abspath(binary), "ui"],
         check=True, capture_output=True, text=True,
     )
     wait_screen(session, lambda value: FIRST_FRAME in value, "first frame")
@@ -103,8 +103,16 @@ def open_agent(session: str, name: str) -> str:
     send(session, name)
     time.sleep(0.3)
     send(session, "\r")
-    return wait_screen(session, lambda value: PALETTE not in value and name.lower() in value.lower(),
-                       f"{name}'s tab")
+    opened = wait_screen(session, lambda value: PALETTE not in value and name.lower() in value.lower(),
+                         f"{name}'s tab")
+    # Opening an agent attaches its terminal once the tab stays in front (unless this device
+    # chose Conversation first); Ctrl+\ is the conversation this script exercises.
+    attached = lambda value: "← Ctrl+\\" in value or "← Return · Ctrl+\\" in value
+    time.sleep(1.0)
+    if attached(screen(session)):
+        send(session, "\x1c")
+        opened = wait_screen(session, lambda value: not attached(value), f"{name}'s conversation")
+    return opened
 
 
 def main(binary: str, name: str) -> None:
@@ -124,7 +132,18 @@ def main(binary: str, name: str) -> None:
         drag(session, column + 1, row + 1, column + 12)
         wait_screen(session, lambda value: "Copied 1 line" in value, "drag to copy")
         assert FIRST_FRAME in screen(session), "a drag must not leave the conversation"
-        print("Interaction QA passed: open from Ctrl+K, wheel, drag to copy")
+        # The tab strip contains the opened agent and the new-tab control.
+        value = screen(session)
+        tabs = next((row, line) for row, line in enumerate(value.splitlines())
+                    if "+" in line and name.lower() in line.lower())
+        row, line = tabs
+        column = line.lower().index(name.lower()) + 1
+        send(session, f"\x1b[<1;{column};{row + 1}M")
+        assert name.lower() in screen(session).splitlines()[row].lower(), "press must not close"
+        send(session, f"\x1b[<1;{column};{row + 1}m")
+        wait_screen(session, lambda frame: name.lower() not in frame.splitlines()[row].lower(),
+                    "middle-click tab close")
+        print("Interaction QA passed: open from Ctrl+K, wheel, drag to copy, middle-click close")
     finally:
         stop(session)
 

@@ -30,7 +30,7 @@ struct Fixture {
 }
 
 fn st3() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_st3-fixture"))
+    Path::new(test_env!("CARGO_BIN_EXE_st3-fixture"))
 }
 
 fn write_program(path: &Path, source: &str) {
@@ -69,12 +69,66 @@ fn path_of(entries: &[&Path]) -> OsString {
     .unwrap()
 }
 
+#[test]
+fn a_wrapper_that_returns_to_the_recorder_fails_before_spawning_again() {
+    let f = fixture("#!/bin/sh\nexec \"$LOOP_RECORDER\" \"$@\"\n");
+    let output = Command::new(f.recorder.join("git"))
+        .env_clear()
+        .env("HOME", f.root.path())
+        .env("XDG_STATE_HOME", f.root.path().join("private-state"))
+        .env(
+            "PATH",
+            std::env::join_paths([&f.recorder, &f.real]).unwrap(),
+        )
+        .env("LOOP_RECORDER", f.recorder.join("git"))
+        .arg("status")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(126));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing recursive git"));
+    assert_eq!(
+        f.records().len(),
+        1,
+        "only the original invocation is recorded"
+    );
+}
+
+#[test]
+fn an_inherited_recorder_depth_fails_before_starting_the_real_program() {
+    let f = fixture("#!/bin/sh\nexit 99\n");
+    let output = Command::new(f.recorder.join("git"))
+        .env_clear()
+        .env("HOME", f.root.path())
+        .env(
+            "PATH",
+            std::env::join_paths([&f.recorder, &f.real]).unwrap(),
+        )
+        .env("ST3_RECORDER_GIT_DEPTH", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(126));
+    assert!(f.records().is_empty());
+}
+
+#[test]
+fn a_real_programs_nested_git_call_uses_the_real_tool() {
+    let f = fixture("#!/bin/sh\nif [ \"$1\" = outer ]; then git inner; else printf inner; fi\n");
+    let output = Command::new(f.recorder.join("git"))
+        .env_clear()
+        .env("HOME", f.root.path())
+        .env("PATH", std::env::join_paths([&f.recorder, &f.real]).unwrap())
+        .arg("outer")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, b"inner");
+    assert_eq!(f.records().len(), 1);
+}
+
 fn command(program: &str, path: OsString) -> Command {
     let mut command = Command::new(program);
     command
-        .env("PATH", path)
-        .env_remove("ST_AGENT")
-        .env_remove("ST3_SUBJECT")
+        .env("PATH", path).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
         .env_remove("ST_STEP_RUN")
         .env_remove("ST_MISSION_RUN");
     command
@@ -499,8 +553,8 @@ fn a_terminal_interrupt_ends_the_call_and_is_still_recorded() {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null()
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
             ),
             0
         );
@@ -875,7 +929,7 @@ fn terminal_stdout_stays_interactive_and_does_not_publish_a_receipt() {
         assert_eq!(
             libc::openpty(
                 &mut master, &mut slave, std::ptr::null_mut(),
-                std::ptr::null(), std::ptr::null(),
+                std::ptr::null_mut(), std::ptr::null_mut(),
             ),
             0,
         );
@@ -883,8 +937,10 @@ fn terminal_stdout_stays_interactive_and_does_not_publish_a_receipt() {
         libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
         (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave))
     };
+    // macOS discards what a pty holds once its last slave descriptor closes, so this side keeps
+    // the slave open until the output has been read.
     let mut child = fixture.recorded("gh").args(["issue", "create"])
-        .stdout(slave).spawn().unwrap();
+        .stdout(slave.try_clone().unwrap()).spawn().unwrap();
     let status = wait_within(&mut child, Duration::from_secs(10));
     assert!(status.success());
     assert_eq!(read_line(&mut master).trim_end_matches('\r'), "interactive");
@@ -892,6 +948,7 @@ fn terminal_stdout_stays_interactive_and_does_not_publish_a_receipt() {
         read_line(&mut master).trim_end_matches('\r'),
         "https://github.com/owner/repo/issues/123",
     );
+    drop(slave);
     assert!(fixture.receipts().is_empty());
     assert!(fixture.records()[0].get("receipt_url").is_none());
 }

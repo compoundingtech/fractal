@@ -8,6 +8,7 @@
 let
   inherit (lib) mkEnableOption mkIf mkOption types;
   cfg = config.services.smalltalk;
+  externallyManaged = cfg.binary.path != null;
   # Copy st3 itself: a symlinkJoin-only executable resolves current_exe() back to the
   # original package, whose bin/pty would still win when seats prepend that directory.
   effectivePackage =
@@ -20,19 +21,21 @@ let
         postBuild = ''
           rm "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
           cp ${cfg.package}/bin/st3 "$out/bin/st3"
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
           ln -s st3 "$out/bin/st"
+          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           ln -s ${cfg.ptyPackage}/bin/pty "$out/bin/pty"
         '';
       };
   # Keep the real executable with the daemon's per-user state: current_exe()
   # resolves store symlinks, but seats must watch one replaceable path across deploys.
-  binDir = "${cfg.stateDir}/bin";
-  executable = "${binDir}/st3";
+  binDir = if externallyManaged then builtins.dirOf cfg.binary.path else "${cfg.stateDir}/bin";
+  executable = if externallyManaged then cfg.binary.path else "${binDir}/st3";
   environment = cfg.environment // {
     # The Linux daemon asks the user manager to move PTY servers into their own scopes via busctl.
     PATH = binDir + ":" + lib.makeBinPath (
-      lib.optional (cfg.ptyPackage != null) cfg.ptyPackage
-      ++ [ effectivePackage ]
+      lib.optional (!externallyManaged && cfg.ptyPackage != null) cfg.ptyPackage
+      ++ lib.optional (!externallyManaged) effectivePackage
       ++ lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.systemd
     ) + ":/usr/local/bin:/usr/bin:/bin";
     XDG_CONFIG_HOME = config.xdg.configHome;
@@ -44,14 +47,20 @@ let
     ++ lib.optionals (cfg.ptyRoot != null) [ "--pty-root" cfg.ptyRoot ]
     ++ lib.optionals (cfg.socket != null) [ "--socket" cfg.socket ]
     ++ lib.optionals (cfg.clientGatewaySocket != null) [ "--client-gateway-socket" cfg.clientGatewaySocket ]
-    ++ lib.optionals (cfg.ptyPackage != null) [ "--pty-binary" "${cfg.ptyPackage}/bin/pty" ]
+    ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
+      [ "--client-gateway-socket" "${cfg.stateDir}/run/st3-client.sock" ]
+    ++ (if externallyManaged then
+      [ "--pty-binary" "${binDir}/pty" ]
+    else
+      lib.optionals (cfg.ptyPackage != null) [ "--pty-binary" "${cfg.ptyPackage}/bin/pty" ])
     ++ cfg.extraArgs;
   # systemd's command line parser is not a shell; escape its own substitutions too.
   systemdArg = arg:
     "\"${lib.replaceStrings [ "\\" "\"" "$" "%" ] [ "\\\\" "\\\"" "$$" "%%" ] arg}\"";
   applyCommands =
-    map (file: [ "agents" "apply" "${file}" "--as" cfg.person ]) cfg.declarations.seats
-    ++ map (file: [ "missions" "publish" "${file}" "--as" cfg.person ]) cfg.declarations.missions;
+    map (file: [ "apply" "${file}" "--no-gate-check" "--as" cfg.person ]) cfg.declarations.seats
+    ++ map (file: [ "apply" "${file}" "--as" cfg.person ]) cfg.declarations.missions;
+  # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
   applyScript = pkgs.writeShellScript "smalltalk-apply" (
     ''set -eu
 ''
@@ -65,6 +74,11 @@ let
   hasDeclarations = applyCommands != [ ];
 in
 {
+  options.programs.smalltalk.fractalBinary.enable = mkEnableOption ''
+    the opt-in fractal alias in the Home Manager-owned Smalltalk stable bin directory.
+    Requires services.smalltalk.enable; ignored when services.smalltalk.binary.path is set
+  '';
+
   options.services.smalltalk = {
     enable = mkEnableOption "the smalltalk user daemon";
     package = mkOption {
@@ -72,9 +86,31 @@ in
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.st3;
       description = "The st3 package.";
     };
+    binary.path = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/opt/smalltalk/bin/st3";
+      description = ''
+        Stable absolute executable path owned by an external deployer. When set,
+        Home Manager neither installs the st3 package nor copies its executable,
+        uses pty from the same directory instead of ptyPackage, and does not
+        restart the daemon on package changes. Null keeps Home Manager
+        responsible for installing and restarting st3.
+      '';
+    };
     person = mkOption {
       type = types.str;
       description = "The person identity used by st3 commands, for example person/ada.";
+    };
+    accessMode = mkOption {
+      type = types.nullOr (types.enum [ "auto" "bypass" ]);
+      default = null;
+      description = "Managed harness access mode. Null preserves legacy bypass; select auto for new installations.";
+    };
+    seatPriority = mkOption {
+      type = types.nullOr (types.enum [ "background" "normal" ]);
+      default = null;
+      description = "How seats rank against the daemon for CPU and IO. Null means background; normal gives seats the daemon's priority.";
     };
     node = mkOption { type = types.nullOr types.str; default = null; description = "Daemon node name; null uses the daemon default."; };
     stateDir = mkOption {
@@ -84,11 +120,11 @@ in
     };
     ptyRoot = mkOption { type = types.nullOr types.str; default = null; description = "PTY registry root; null uses the daemon default."; };
     socket = mkOption { type = types.nullOr types.str; default = null; description = "API socket; null uses the daemon default."; };
-    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the daemon default."; };
+    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/st3-client.sock on Linux, stateDir/run/st3-client.sock on Darwin)."; };
     ptyPackage = mkOption {
       type = types.nullOr types.package;
       default = null;
-      description = "PTY package used for both the daemon and spawned seats; null uses the bundled PTY.";
+      description = "PTY package used for both the daemon and spawned seats; null uses the bundled PTY. Ignored when binary.path is set, which uses pty beside that executable.";
     };
     environment = mkOption {
       type = types.attrsOf types.str;
@@ -128,8 +164,8 @@ in
   };
 
   config = mkIf cfg.enable {
-    home.packages = [ effectivePackage ];
-    home.activation.smalltalkBinary = lib.hm.dag.entryBetween
+    home.packages = lib.optional (!externallyManaged) effectivePackage;
+    home.activation.smalltalkBinary = mkIf (!externallyManaged) (lib.hm.dag.entryBetween
       [ (if pkgs.stdenv.hostPlatform.isLinux then "reloadSystemd" else "setupLaunchAgents") ]
       [ "writeBoundary" ] ''
         if [[ -n "''${DRY_RUN_CMD:-}" ]]; then
@@ -149,29 +185,52 @@ in
               ${pkgs.coreutils}/bin/chmod 755 "$temporary"
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
             fi
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
             ${pkgs.coreutils}/bin/ln -sfn st3 "$binDir/st"
+            ${if config.programs.smalltalk.fractalBinary.enable then ''
+              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
+                : # Already points at the stable executable.
+              elif [[ ! -e "$binDir/fractal" && ! -L "$binDir/fractal" ]]; then
+                ${pkgs.coreutils}/bin/ln -s st3 "$binDir/fractal" ||
+                  echo "Could not create $binDir/fractal; kept the existing path. Smalltalk remains available as st." >&2
+              else
+                echo "Not replacing $binDir/fractal: it is not a Smalltalk alias. Move it yourself to opt in; use st meanwhile." >&2
+              fi
+            '' else ''
+              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
+                ${pkgs.coreutils}/bin/rm "$binDir/fractal"
+              fi
+            ''}
+            # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           )
         fi
-      '';
+      '');
     xdg.configFile."st3/config.toml".text =
       "person = ${builtins.toJSON cfg.person}\n"
+      + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
+      + lib.optionalString (cfg.seatPriority != null) "seat_priority = ${builtins.toJSON cfg.seatPriority}\n"
       + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
       + "state_dir = ${builtins.toJSON cfg.stateDir}\n"
       + lib.optionalString (cfg.ptyRoot != null) "pty_root = ${builtins.toJSON cfg.ptyRoot}\n"
       + lib.optionalString (cfg.socket != null) "socket = ${builtins.toJSON cfg.socket}\n"
       + lib.optionalString (cfg.clientGatewaySocket != null) "client_gateway_socket = ${builtins.toJSON cfg.clientGatewaySocket}\n";
 
+    # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk.service.
     systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux ({
       smalltalk = {
         Unit = {
           Description = "st claims graph daemon";
           After = [ "network.target" ];
-          # ExecStart is stable; sd-switch still needs to restart on a new build.
+          # Only Home Manager-owned builds should trigger a daemon restart.
+        } // lib.optionalAttrs (!externallyManaged) {
           X-Restart-Triggers = [ effectivePackage ];
         };
         Service = {
           Type = "simple";
-          ExecStart = lib.concatStringsSep " " (map systemdArg ([ executable ] ++ upArgs));
+          ExecStart = lib.concatStringsSep " " (map systemdArg ([ executable ] ++ upArgs))
+            # Preserve systemd's runtime-directory specifier; systemdArg escapes literal percent signs.
+            + lib.optionalString (cfg.clientGatewaySocket == null)
+              '' "--client-gateway-socket" "%t/st3-client.sock"'';
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (environment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
@@ -185,6 +244,7 @@ in
         Install.WantedBy = [ "default.target" ];
       };
     } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
       smalltalk-apply = {
         Unit = {
           Description = "Apply smalltalk KDL declarations";
@@ -207,6 +267,7 @@ in
         $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${cfg.stateDir}/logs"}
       ''
     );
+    # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain Home Manager launchd labels.
     launchd.agents = mkIf pkgs.stdenv.hostPlatform.isDarwin ({
       smalltalk = {
         enable = true;
@@ -218,12 +279,14 @@ in
           SoftResourceLimits.NumberOfFiles = 8192;
           StandardOutPath = "${cfg.stateDir}/logs/st3.stdout.log";
           StandardErrorPath = "${cfg.stateDir}/logs/st3.stderr.log";
-          # Home Manager reloads changed plists; retain a build reference even
-          # though ProgramArguments now points at the stable executable.
-          EnvironmentVariables = environment // { SMALLTALK_PACKAGE = toString effectivePackage; };
+          # Only Home Manager-owned builds should trigger a launchd reload.
+          EnvironmentVariables = environment // lib.optionalAttrs (!externallyManaged) {
+            SMALLTALK_PACKAGE = toString effectivePackage;
+          };
         };
       };
     } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain apply agent label.
       smalltalk-apply = {
         enable = true;
         config = {

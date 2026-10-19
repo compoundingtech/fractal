@@ -44,11 +44,26 @@ st2-maintained encoding and would no longer be opaque launch argv.
 
 ## Decision
 
-Linux scope launches use this exact outer argument order:
+All scopes use the fixed description `st seat`. A generated description embeds
+argument bytes in a D-Bus string, which rejects non-UTF-8 arguments before
+the task executes. Keeping the description separate preserves opaque argv.
+
+Linux scope launches on systemd v254+ use this exact outer argument order:
 
 ```text
-systemd-run --user --scope --collect --quiet --unit=<unit> --expand-environment=no -- <program> <arg>...
+systemd-run --user --scope --collect --quiet --no-ask-password --unit=<unit> "--description=st seat" --expand-environment=no -- <program> <arg>...
 ```
+
+On systemd v236–253, omit only `--expand-environment=no`. These versions
+execute scope arguments directly and do not support that option. The version
+probe must succeed, and the user manager must answer before selecting scope
+isolation. Unknown or unsupported versions keep degraded isolation.
+
+The [systemd v249 scope implementation](https://github.com/systemd/systemd/blob/v249/src/run/run.c)
+passes `arg_cmdline` directly to `execvpe`; neither percent nor dollar bytes
+need escaping. Doubling either byte would corrupt literal arguments. The
+[systemd v254 implementation](https://github.com/systemd/systemd/blob/v254/src/run/run.c)
+introduces the expansion option, so newer launches explicitly disable it.
 
 `--expand-environment=no` is passed as a `systemd-run` option before the `--`
 separator. st2 appends the program and each argument after the separator as the
@@ -61,9 +76,50 @@ pass-throughs.
 - Dollar-bearing literals, including `$HOME`, `${UNSET}`, and `$$`, reach PTY
   and exec tasks byte-for-byte in scope mode.
 - The systemd option sequence is part of the tested wrapper contract; the only
-  addition to the prior shape is the expansion-disable option before the
-  separator.
+  version-dependent option is the expansion-disable option before the
+  separator. All launches disable password prompting.
 - macOS and Linux hosts without usable user scopes keep the existing direct
   program-and-argv path.
 - Scope lifetime and I/O behavior are unchanged. The supporting live evidence
   is recorded in the [systemd scope argv experiment](../.experiments/2026-09-05-systemd-scope-argv-transparency.md).
+
+The [systemd 249 compatibility experiment](../.experiments/2026-10-08-systemd-249-scope-compatibility.md)
+records legacy option rejection, exact raw argv and inherited execution context,
+sibling-scope survival, unreachable-manager fallback, and a native driver seat
+reply before and after daemon service restart. Its supplied-runtime boundary
+is explicit; native stock Ubuntu 22.04 installation is not established.
+
+## Amendment 1 — 2026-10-08
+
+Launch environment values were passed on process command lines, where service
+managers and process listings can record them. The launchers now export the
+resolved environment to the PTY process and pass only `--env NAME`. PTY resolves
+each name from that inherited environment and persists the resolved overlay
+for restart. The shared `PTY_PLACEMENT_ENV` set owns `PTY_ROOT` and the deprecated
+`PTY_SESSION_DIR`: the canonical runtime root wins after the overlay, and the
+legacy variable is removed (also from inherited environments). Declared legacy
+placement receives a value-free, name-only diagnostic. Other resolved
+environment precedence remains unchanged.
+
+Captured launcher output can echo environment values. It is classified privately;
+launch failure reasons expose a closed diagnostic kind plus exit status rather
+than copying stdout/stderr into replicated claims and claim-trace output.
+Kinds are `launcher-incompatible`, `placement-conflict`, `session-in-use`,
+`spawn-failed`, and `unknown`; the implementation specification records their
+matching signatures and priority. The older name-only-rejecting launcher is
+therefore distinguishable from other exit-1 failures without exposing its text.
+No raw-output file or journal sink is added.
+
+The fixed `--description=st seat` already keeps the command line out of the
+unit description, so this amendment adds no scope description of its own and
+leaves the outer argument order above unchanged.
+
+This removes environment values from generated environment arguments, not from
+explicitly authored argv or tag expansions. Seat-declared
+environment values stored in replicated graph claims remain a known exposure
+outside this amendment's fix.
+
+Evidence: launcher environment/argv regression tests, runtime-selected registry
+precedence with declared canonical/legacy placement controls, and sentinel-bearing
+failed launchers with value-free reasons.
+R42's ratified requirements text is unchanged.

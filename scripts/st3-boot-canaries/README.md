@@ -6,12 +6,20 @@ message.
 
     run BINARY EVIDENCE_DIR HARNESS SCENARIO [--bound SECONDS] [--scratch DIR] [--replacement-binary BINARY]
 
-`HARNESS` is `claude`, `codex`, `pi`, `omp` or `opencode`. `SCENARIO` is `fresh`, `restart`,
-`daemon-restart`, `reexec`, `concurrent`, `suspend` or (Codex only) `import`; `run --help` says
-what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
+`HARNESS` is `claude`, `codex`, `pi`, `omp` or `opencode`. `SCENARIO` is one of `fresh`,
+`restart`, `daemon-restart`, `reexec`, `concurrent`, `suspend`, `claim-socket-denied`,
+`access-auto`, `access-bypass`, `idle-hold` (Codex/OpenCode), `utf8` and `import` (Codex),
+or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
+`run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
 back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
 mail exactly once. The Rust wrapper
 `crates/st3/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
+
+The boot, no-st2 and subagent fixtures put their private bin directory first, followed by
+inherited `PATH` entries that neither contain an `st2` executable nor name an `st2` path.
+Provide Bash, Python, `env`, Git, curl and `pty` on the inherited path, plus Node for pi/omp.
+Login shells and stand-in interpreters use discovered absolute executables; conventional
+system bin directories are not required, so these fixtures also run in Nix sandboxes.
 
 The OMP `when-idle` regression uses a separate runner:
 
@@ -24,6 +32,10 @@ the original native UUID and the same transcript inode. With real OMP, an inspec
 also verifies the historical conversation loaded on both starts. The Rust test runs this in
 the Linux gate with the same zero-retry policy as the other boot canaries.
 
+The fixture accepts both OMP session-ID and exact-transcript-path resume selectors. The first
+launch selects by ID; the strict replacement selects its pinned transcript path. Both fixture
+receipts must name that same transcript and report a resumed session.
+
 The Codex-only `utf8` scenario starts and ends the bounded transcript window inside a euro sign,
 withholds live receipts so transcript recovery must release the next message, then forces a
 discovery I/O error. A live status update and receipt must still reach the same seat, and repeated
@@ -31,7 +43,8 @@ warnings must stay rate-limited in its private `driver.log`, outside the PTY.
 
 Claude's `channel-missing` and `channel-uninitialized` scenarios restart with healthy hooks
 but no usable channel. They require `claude-channel-unattached` with a blocked seat within
-45 seconds, a visible hold for early mail, and recovery with exactly one native offer and one
+45 seconds (awaited in the daemon's event log from a cursor taken before the restart, so the
+roughly ten-second blocked window cannot be missed; see `scripts/st3_events.py`), a visible hold for early mail, and recovery with exactly one native offer and one
 staged/delivered/read receipt. Two further restarts must deliver fresh startup mail once without
 replaying recovered mail. The missing-channel seat must restart automatically, continuing its
 native session. The uninitialized channel attaches during the recheck window and must keep its
@@ -76,7 +89,12 @@ so races the real ones hide are hit every time.
 The evidence directory holds `result.json` (the verdict and the seat's last state), `daemon.log`,
 `terminal-*.txt` (the seat's screen), `trace-*.jsonl` (its claims), `receipts-*.jsonl` (what the
 stand-in saw and did), and `observation-outboxes.json` (pending event sequences and driver
-diagnostics). Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
+diagnostics), and private `driver-*.log` files. Runtime roots are registered with the
+process guardian before startup. On interruption, the guardian reaps their writers, captures
+these files and records an interrupted verdict before removing the roots. A collection error
+is recorded in `capture-errors.json`; it cannot skip the other logs. Normal failure snapshots
+are captured before shutdown, with the final outbox state in `observation-outboxes-after-stop.json`.
+Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
 wrote what, in what order. Fix the product on main; do not slow a stand-in to hide a race. The
 canaries found these when they were written: Codex ending its session before the daemon's first
 mailbox replay, Codex publishing its predecessor's `ended` record as the new incarnation's, and a

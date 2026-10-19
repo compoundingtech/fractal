@@ -23,3 +23,8 @@ Kept minimal; each blocks exactly one delivery slice, not the tree.
   `EnvironmentFile=` only if the variable count grows.
 - **Sampling.** Default is always-on given st2's low event volume. If supervisor-loop span volume
   proves noisy in Grafana, revisit parent-based sampling ratios — not before there is data.
+
+## st observability
+
+The current mechanism and remaining integration boundaries are in
+[st observability](../../st3/observability.md#integration-boundaries).

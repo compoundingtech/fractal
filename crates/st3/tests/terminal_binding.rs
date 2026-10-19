@@ -282,6 +282,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     let runtime = runtime();
     let socket = root.path().join("api.sock");
     let state = st3::api::AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
@@ -315,6 +316,10 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     std::fs::write(&provider, r#"
 import json, os, subprocess
 from pathlib import Path
+# A real idle hook supplies the evidence that authorizes new notifications.
+# MCP initialization alone cannot prove the provider is not awaiting a person.
+subprocess.run([os.environ['ST3_BIN'], 'driver-hook', 'claude-observe', 'Stop'],
+    input='{}', text=True, check=True)
 channel = subprocess.Popen([os.environ['ST3_BIN'], 'driver', 'claude-mcp', '--subject', os.environ['ST_AGENT']],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 try:
@@ -332,6 +337,12 @@ finally:
     channel.stdin.close()
     channel.wait(timeout=10)
 "#).unwrap();
+    // Archives move between runners; choose this consumer's interpreter rather than
+    // resolve a bare name through the producer's captured fixture PATH.
+    let python = std::env::split_paths(&std::env::var_os("PATH").expect("fixture tool PATH"))
+        .map(|directory| directory.join("python3"))
+        .find(|candidate| candidate.is_file())
+        .expect("terminal provider fixture needs python3 on the executing runner");
     let mut command = st3::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
@@ -341,15 +352,16 @@ finally:
         .env("FIXTURE_SEAT", SEAT)
         .env("ST3_SUBJECT", TERMINAL)
         .env("ST3_ENDPOINT", root.path().join("api.sock"))
-        .env("ST3_BIN", env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
         .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("FIXTURE_RECEIVED", &received)
         .env("FIXTURE_PROVIDER", provider)
+        .env("FIXTURE_PYTHON", python)
         .current_dir(root.path())
         .args(["--noprofile", "--norc", "-c", r#"
 read -r _
-ST_AGENT="$FIXTURE_SEAT" "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- python3 "$FIXTURE_PROVIDER"
+ST_AGENT="$FIXTURE_SEAT" "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- "$FIXTURE_PYTHON" "$FIXTURE_PROVIDER"
 driver_exit=$?
 printf 'driver-exit=%s shell-still-alive\n' "$driver_exit"
 read -r _

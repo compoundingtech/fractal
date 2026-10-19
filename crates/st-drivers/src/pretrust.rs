@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use sha2::Digest;
 
 use crate::flock::{self, FileLock};
 
@@ -132,6 +133,14 @@ pub fn pretrust_at(config: &Path, dirs: &[PathBuf]) -> Result<usize> {
         // Merge — set only the trust flags and preserve every other field Claude wrote.
         entry.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
         entry.insert("hasCompletedProjectOnboarding".into(), Value::Bool(true));
+        for (name, hash) in approve_project_mcp_servers(dir, entry) {
+            // Claude approves by name, so a later edit to the command is not asked again; this line
+            // is how a changed definition is noticed after the fact.
+            eprintln!(
+                "st: approved project MCP server {name} in {} (definition sha256 {hash})",
+                dir.display()
+            );
+        }
     }
 
     write_atomic(config, &root)?;
@@ -276,6 +285,55 @@ fn canonical_key(dir: &Path) -> String {
         .into_owned()
 }
 
+/// Approve the servers the workspace's own `.mcp.json` declares, as the workspace trust above
+/// already admits the code in the same directory.
+///
+/// Claude asks once per project server ("New MCP server found in .mcp.json") unless it is in the
+/// project's `enabledMcpjsonServers`. The dialog stops startup before any MCP server connects, so
+/// the st channel never attaches and mail is held; `--dangerously-skip-permissions` skips it, and
+/// `--permission-mode auto` does not. A server the project lists in `disabledMcpjsonServers` stays
+/// disabled, and an unreadable `.mcp.json` approves nothing.
+///
+/// Claude approves by NAME: once a name is enabled, a later edit to that server's command in
+/// `.mcp.json` runs without a dialog. Returns each newly approved name with a hash of its
+/// definition so the caller can log it.
+fn approve_project_mcp_servers(
+    dir: &Path,
+    entry: &mut serde_json::Map<String, Value>,
+) -> Vec<(String, String)> {
+    let Some(declared) = std::fs::read(dir.join(".mcp.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|config| config.get("mcpServers").and_then(Value::as_object).cloned())
+    else {
+        return Vec::new();
+    };
+    let names = |key: &str| -> Vec<String> {
+        entry
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default()
+    };
+    let disabled = names("disabledMcpjsonServers");
+    let mut enabled = names("enabledMcpjsonServers");
+    let mut approved = Vec::new();
+    for (name, definition) in &declared {
+        if !disabled.contains(name) && !enabled.contains(name) {
+            enabled.push(name.clone());
+            let digest = sha2::Sha256::digest(definition.to_string().as_bytes());
+            approved.push((name.clone(), digest.iter().map(|byte| format!("{byte:02x}")).collect()));
+        }
+    }
+    if !approved.is_empty() {
+        entry.insert(
+            "enabledMcpjsonServers".into(),
+            Value::Array(enabled.into_iter().map(Value::String).collect()),
+        );
+    }
+    approved
+}
+
 /// Write `value` to `config` atomically, so a crashed write never corrupts the real config.
 fn write_atomic(config: &Path, value: &Value) -> Result<()> {
     let rendered = serde_json::to_string_pretty(value).context("serializing claude config")?;
@@ -306,6 +364,89 @@ fn write_atomic_str(config: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pretrust_approves_the_workspaces_project_mcp_servers_but_not_disabled_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join(".mcp.json"),
+            r#"{"mcpServers":{"one":{"command":"a"},"two":{"command":"b"},"three":{"command":"c"}}}"#,
+        )
+        .unwrap();
+        let config = temp.path().join(".claude.json");
+        let key = canonical_key(&workspace);
+        std::fs::write(
+            &config,
+            serde_json::to_string(&json!({"projects": {key.clone(): {
+                "enabledMcpjsonServers": ["one"], "disabledMcpjsonServers": ["two"], "lastCost": 1
+            }}}))
+            .unwrap(),
+        )
+        .unwrap();
+        pretrust_at(&config, std::slice::from_ref(&workspace)).unwrap();
+        let read = || -> Value { serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap() };
+        let entry = read()["projects"][&key].clone();
+        assert_eq!(entry["enabledMcpjsonServers"], json!(["one", "three"]));
+        assert_eq!(entry["disabledMcpjsonServers"], json!(["two"]));
+        assert_eq!(entry["lastCost"], 1, "other fields are preserved");
+        let first = read();
+        pretrust_at(&config, std::slice::from_ref(&workspace)).unwrap();
+        assert_eq!(read(), first, "approving again changes nothing");
+    }
+
+    #[test]
+    fn an_approved_name_stays_approved_when_its_command_changes_and_nothing_is_written() {
+        // Claude approves by name, so st pins this rather than leaving it implicit: approving again
+        // after the definition changed reports nothing new and does not touch the config.
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = temp.path().join(".claude.json");
+        std::fs::write(workspace.join(".mcp.json"), r#"{"mcpServers":{"one":{"command":"safe"}}}"#).unwrap();
+        pretrust_at(&config, std::slice::from_ref(&workspace)).unwrap();
+        let first = std::fs::read(&config).unwrap();
+        std::fs::write(workspace.join(".mcp.json"), r#"{"mcpServers":{"one":{"command":"changed"}}}"#).unwrap();
+        let mut entry = serde_json::from_slice::<Value>(&first).unwrap()["projects"][canonical_key(&workspace)]
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(approve_project_mcp_servers(&workspace, &mut entry).is_empty());
+        pretrust_at(&config, std::slice::from_ref(&workspace)).unwrap();
+        let after: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        assert_eq!(after["projects"][canonical_key(&workspace)]["enabledMcpjsonServers"], json!(["one"]));
+    }
+
+    #[test]
+    fn a_newly_approved_server_is_reported_with_a_hash_of_its_definition() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".mcp.json"), r#"{"mcpServers":{"one":{"command":"a"}}}"#).unwrap();
+        let mut entry = serde_json::Map::new();
+        let approved = approve_project_mcp_servers(temp.path(), &mut entry);
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].0, "one");
+        assert_eq!(approved[0].1.len(), 64);
+        assert!(approve_project_mcp_servers(temp.path(), &mut entry).is_empty());
+    }
+
+    #[test]
+    fn pretrust_leaves_mcp_approval_alone_without_a_readable_project_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let none = temp.path().join("none");
+        let broken = temp.path().join("broken");
+        std::fs::create_dir_all(&none).unwrap();
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join(".mcp.json"), "{ not json").unwrap();
+        let config = temp.path().join(".claude.json");
+        pretrust_at(&config, &[none.clone(), broken.clone()]).unwrap();
+        let root: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        for dir in [&none, &broken] {
+            let entry = &root["projects"][canonical_key(dir)];
+            assert_eq!(entry["hasTrustDialogAccepted"], true);
+            assert!(entry.get("enabledMcpjsonServers").is_none(), "{entry}");
+        }
+    }
 
     #[test]
     fn pretrust_creates_a_missing_config_and_trusts_the_dir() {

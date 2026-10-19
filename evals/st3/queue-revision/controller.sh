@@ -14,7 +14,7 @@ cleanup() {
 
 trap cleanup EXIT HUP INT TERM
 
-st3 --json mission start eval/queue-revision/work \
+st3 --json missions start eval/queue-revision/work \
   --id "eval/queue-revision/work/${ST_MISSION_RUN}" \
   --workspace "$PWD" \
   --as "$REQUESTER" > initial-run.json
@@ -22,7 +22,7 @@ st3 --json mission start eval/queue-revision/work \
 run_subject=$(jq -er '.mission_run.subject' initial-run.json)
 old_generation=$(jq -er '.mission_run.generation' initial-run.json)
 st3 trace wait "$run_subject" --for standing --timeout 1m >/dev/null
-st3 --json mission show "$run_subject" > initial-standing.json
+st3 --json missions show "$run_subject" > initial-standing.json
 
 jq -e '
   [.steps | sort_by(.queue_position)[] | {step, queue, queue_position, status}]

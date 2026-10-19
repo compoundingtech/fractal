@@ -32,12 +32,21 @@ the lane. A lane never starts, cancels, or reorders mission runs by itself.
 ## Declaration
 
 ```kdl
+version 2
 mission "example/app/merge-train" state="ready" {
   goal "Merge ready pull requests into main one at a time."
 
   lane "app" {
     entries "resource/github/acme/app/ci/pull-request/"
     approver "person/ada"
+  }
+
+  step "retire" {
+    agentless
+    gate "Close the merge lane" type="human" {
+      reviewer "person/ada"
+      question "Has the merge driver finished using this lane?"
+    }
   }
 
   exec "driver" {
@@ -49,6 +58,10 @@ mission "example/app/merge-train" state="ready" {
   }
 }
 ```
+
+The example assumes a merge driver is installed at the shown path. The retirement gate keeps
+the run and lane open while that driver works. Approving the gate finishes the run and closes
+the lane. An exec runtime alone does not keep a mission run active.
 
 `entries` is an optional subject prefix. When it is set, every entry must start with it, and the
 commands accept the rest of the subject alone, so `42` means
@@ -83,8 +96,8 @@ any actor except the lane's approver.
 moves, and approvals, newest first:
 
 ```text
-LANE      lane/example/app/merge-train/1/app
-RUN       mission-run/example/app/merge-train/1
+LANE      lane/example/app/merge-train/RUN_ID/app
+RUN       mission-run/example/app/merge-train/RUN_ID
 ENTRIES   resource/github/acme/app/ci/pull-request/
 APPROVER  person/ada
 QUEUE     3
@@ -97,7 +110,7 @@ RECENT
 
 `st missions show RUN` lists the lanes the run owns with the same entries, and `st missions tree`
 lists every active lane under `LANES`. The client API serves the same view: the `lanes`
-collection, `lane.get`, and the actions `lane.join`, `lane.leave`, `lane.move`, `lane.mark`,
+collection, `lanes.get`, and the actions `lane.join`, `lane.leave`, `lane.move`, `lane.mark`,
 and `lane.approve`.
 
 ## Storage and replication
@@ -121,7 +134,7 @@ observers and schedules.
 
 ## Tests
 
-- `crates/st3/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
+- `crates/st3-kernel/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
   placement, and marks and approvals that belong to one membership.
 - `crates/st3/tests/client_v0_cli.rs` declares a lane, lets the reconciler write it for a run, and
   drives it through the CLI: join by prefix, a harness joining as its own seat, show, move, mark,

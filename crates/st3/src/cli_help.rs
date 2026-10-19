@@ -9,12 +9,15 @@ const GROUPS: &[(&str, &[&str])] = &[
     (
         "Everyday use",
         &[
+            "ui",
             "now",
             "agents",
             "conversations",
+            "note",
             "missions",
-            "attention",
+            "alerts",
             "usage",
+            "slo",
             "terminals",
             "machines",
             "launch",
@@ -26,11 +29,12 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Inside an agent seat",
-        &["work", "gh", "claim", "diagnostic", "trace", "skill"],
+        &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
         "Running st on a machine or fleet",
         &[
+            "setup",
             "up",
             "service",
             "fleet",
@@ -41,7 +45,9 @@ const GROUPS: &[(&str, &[&str])] = &[
             "doctor",
             "admission",
             "rules",
+            "tiles",
             "repair",
+            "store",
             "uninstall",
         ],
     ),
@@ -49,8 +55,10 @@ const GROUPS: &[(&str, &[&str])] = &[
         "Plumbing",
         &[
             "schema",
+            "actor-contract",
             "subject",
             "documents",
+            "evidence",
             "blobs",
             "recorder",
             "activity",
@@ -88,7 +96,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
 pub(super) fn root_help(all: bool) -> String {
     let command = Cli::command();
     let mut output = String::from(
-        "See what needs you:\n  st now\n\nStart an agent and talk to it:\n  st agents new NAME --harness claude --attach\n\nSee what is running:\n  st missions ls\n  st agents ls\n\nFrom an agent seat:\n  st skill\n  st work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or st work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: st [OPTIONS] <COMMAND>\n",
+        "See what needs you:\n  st now\n\nRun st in a terminal to open the interface:\n  st\n  st ui --space NAME\n\nStart an agent and talk to it:\n  st agents new NAME --harness claude --attach\n\nSee what is running:\n  st missions ls\n  st agents ls\n\nFrom an agent seat:\n  st skill\n  st work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or st work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: st [OPTIONS] <COMMAND>\n",
     );
     for (heading, names) in GROUPS {
         if *heading == "Plumbing" && !all {
@@ -130,14 +138,19 @@ pub(super) fn agent_state(
     reachability: &str,
 ) -> String {
     match state {
+        "retired" => "Retired — this agent identity is permanent history.".into(),
         "running" => "Ready — the agent is running.".into(),
         "failed" => format!(
             "Could not start — {}.",
             fault.unwrap_or("the agent process failed")
         ),
         "stopped" => "Stopped — the agent is no longer running.".into(),
+        "down" => "Down — st sees no running session for the agent; `st agents show` says since when.".into(),
         "suspended" => {
             "Suspended — the agent stopped at a quiet moment; `st agents resume` brings back its session.".into()
+        }
+        "waiting" if reachability == "indeterminate" => {
+            "Unknown — st cannot tell which host runs this agent; its processes may be running. `st terminals` says the same until the claims agree.".into()
         }
         "waiting" if reachability != "reachable" => {
             "Still starting — the agent process cannot currently be reached.".into()
@@ -145,6 +158,11 @@ pub(super) fn agent_state(
         "waiting" => match harness {
             Some("unauthenticated" | "needs-login") => {
                 "Waiting for you — attach to sign in to the agent's provider.".into()
+            }
+            // st withdraws an idle report it has not heard renewed in 90 s (idle seats renew every
+            // five minutes): nothing is known to be waiting on a person.
+            Some("indeterminate") => {
+                "Quiet — st has no current report from the agent's harness; an idle agent reports every few minutes. Attach to inspect.".into()
             }
             _ => "Waiting for you — attach to inspect what the agent needs.".into(),
         },
@@ -160,6 +178,7 @@ pub(super) fn agent_state(
 
 pub(super) fn agent_next_steps(subject: &str, actor: &str, state: &str) -> String {
     let subject = shell_argument(subject);
+    if state.starts_with("Retired") { return next_steps(state, &[("Show history", format!("st agents show {subject}"))]); }
     let attach_actor = if actor.starts_with("person/") {
         format!(" --as {}", shell_argument(actor))
     } else {
@@ -340,7 +359,10 @@ mod tests {
             ),
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
+            ("waiting", Some("blocked"), "Waiting for you"),
+            ("waiting", Some("indeterminate"), "Quiet — st has no current report"),
             ("failed", None, "Could not start"),
+            ("down", None, "Down — st sees no running session"),
         ] {
             let state = agent_state(state, harness, None, "reachable");
             assert!(state.contains(expected), "{state}");
@@ -379,6 +401,17 @@ mod tests {
     fn an_unreachable_agent_does_not_imply_a_login_prompt() {
         let state = agent_state("waiting", Some("ready"), None, "unreachable");
         assert!(state.contains("cannot currently be reached"));
+    }
+
+    #[test]
+    fn an_agent_on_an_undecided_host_says_st_cannot_tell() {
+        let state = agent_state("waiting", Some("indeterminate"), None, "indeterminate");
+        assert!(state.contains("cannot tell which host runs this agent"));
+        assert!(!state.contains("Still starting"));
+        assert!(!state.contains("Waiting for you"));
+        for other in ["unreachable", "remote", "unknown"] {
+            assert!(agent_state("waiting", Some("ready"), None, other).starts_with("Still starting"), "{other}");
+        }
     }
 
     #[test]

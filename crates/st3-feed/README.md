@@ -1,8 +1,14 @@
-# Smalltalk feed
+# Fractal feed
 
 `st3-feed` owns the live collection subscriptions, member reconnects, snapshot model and private
 display cache used by stui. It depends on the generated `st3-client` and the conversation model;
 its normal dependencies contain no terminal renderer. It changes no server protocol.
+
+`run_members_with_sidebar` additionally takes an explicit person selector. It follows
+that person's existing `arrangements` collection only when both arrangements and
+sixteen-slot collections are granted, keeping the three conversation slots on older
+daemons. Its authoritative windows arrive as `Window::Arrangements`, including retirement
+removals and remote register edits; it never creates or edits an arrangement.
 
 ## Start a feed
 
@@ -28,7 +34,7 @@ async fn main() {
     ));
     commands.send(Command::Converse { targets: vec!["agent/demo".into()] }).unwrap();
     // Drain `received.try_recv()` from the application's update loop.
-    if let Ok(Update::Window { window, snapshot, items, has_more }) = received.try_recv() {
+    if let Ok(Update::Window { window, snapshot, items, has_more, .. }) = received.try_recv() {
         // Replace this window's items and snapshot; preserve st's order and truncation marker.
         let _ = (window, snapshot, items, has_more);
     }
@@ -81,5 +87,15 @@ versions, nonprivate files, future timestamps and snapshots older than seven day
 have the status `Cached · refreshing…`. They are display data: actions still require live
 snapshots and fresh fences; there is no offline mutation queue.
 
-Run `cargo test --locked -p st3-feed -p stui` to check the extracted feed, cursor-gap recovery,
+Run `cargo test --locked -p st3-feed -p stui -p st3-e2e` to check the extracted feed, cursor-gap recovery,
 cache and consumers. Server-backed tests run outside an st seat's `ST_AGENT` environment.
+
+Optional screen inventories use `Command::Inventories(Inventories { .. })`.
+`InventorySupport` reports admission and the member build once per connection;
+only granted `inventory-collections` and sixteen-slot `collections` capabilities
+activate them. At most six inventory slots (one usage period) coexist with the
+existing ten reserved window, conversation and terminal slots.
+`Window::Inventory(Inventory::Usage(hours))` identifies the requested period, so
+a late old-period frame cannot overwrite the new period. Retained server resyncs
+report staleness; a permanent refusal does not silently switch to HTTP. The UI
+owns its leave grace and decides its compatibility reads on older members.

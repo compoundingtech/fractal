@@ -2,7 +2,7 @@
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
-#   ST_ISOLATION_ARCHIVE    nextest archive of st2's integration test binary and the st2 binary
+#   ST_ISOLATION_ARCHIVE    workspace archive containing st2's integration test binary and the st2 binary
 #   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; the test binary's compiled-in
 #                           st2 path lies below it, so the archive is extracted at the same path.
 #                           nextest also requires the workspace manifest there.
@@ -15,6 +15,9 @@ let
   uid = 1000;
   runTests = pkgs.writeShellScript "run-transport-isolation" ''
     set -euo pipefail
+    export CI_TEST_EXTRACTED="$1" CI_TEST_BUILD_WORKSPACE="$2" CI_TEST_WORKSPACE="$1"
+    export CI_TEST_TARGET_TMPDIR=/tmp/ci-test-scratch
+    mkdir -p "$CI_TEST_TARGET_TMPDIR"
     exec cargo-nextest nextest run \
       --archive-file /tmp/isolation.tar.zst \
       --workspace-remap "$1" \
@@ -31,7 +34,9 @@ pkgs.testers.runNixOSTest {
   nodes.machine = {
     virtualisation.cores = 4;
     virtualisation.memorySize = 2048;
-    virtualisation.diskSize = 4096;
+    # The workspace archive is copied here and expands to the complete prebuilt test inventory.
+    # The former 4 GiB disk held the small legacy archive, but cannot hold both new inputs.
+    virtualisation.diskSize = 16384;
     users.users.${user} = {
       isNormalUser = true;
       inherit uid;
@@ -46,10 +51,12 @@ pkgs.testers.runNixOSTest {
     import json
     import os
     import re
+    import shlex
     import time
 
     archive = os.environ["ST_ISOLATION_ARCHIVE"]
     workspace = os.environ["ST_ISOLATION_WORKSPACE"]
+    build_workspace = os.environ["ST_ISOLATION_BUILD_WORKSPACE"]
 
     started = time.monotonic()
     machine.wait_for_unit("multi-user.target")
@@ -68,7 +75,7 @@ pkgs.testers.runNixOSTest {
         "su ${user} -s /bin/sh -c '"
         "XDG_RUNTIME_DIR=/run/user/${toString uid} systemd-run --user --wait --pipe --collect --quiet "
         "--setenv=PATH=/run/current-system/sw/bin "
-        f"-- ${runTests} {workspace}' 2>&1"
+        f"-- ${runTests} {shlex.quote(workspace)} {shlex.quote(build_workspace)}' 2>&1"
     )
     test_seconds = time.monotonic() - started
     print(output)

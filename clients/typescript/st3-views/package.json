@@ -10,16 +10,19 @@
     "./sessionView": "./sessionView.ts",
     "./homeView": "./homeView.ts",
     "./requestView": "./requestView.ts",
+    "./sidebarView": "./sidebarView.ts",
     "./deviceSigning": "./deviceSigning.ts",
     "./clientName": "./clientName.ts",
-    "./time": "./time.ts"
+    "./time": "./time.ts",
+    "./syncNotice": "./syncNotice.ts",
+    "./slo": "./slo.ts"
   },
   "scripts": {
     "test": "node --experimental-transform-types --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@smalltalk/st3-client": "file:../st3-client"
+    "@smalltalk/st3-client": "workspace:*"
   },
   "devDependencies": {
     "typescript": "6.0.3"

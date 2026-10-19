@@ -1,9 +1,9 @@
-//! Controlled omp launch with a session-owned presence lease.
+//! Controlled omp launch and native session binding.
 //!
-//! omp is pi-family: its integration point is a pi-style extension loaded into the interactive
-//! process, which reaches st2 by spawning `st2 driver omp-channel` (`hooks/omp-channel.ts`,
-//! forked from the pi channel — see `docs/vrs/06-omp-driver/spec.md` for the measured
-//! divergences). The launch body itself is shared with pi in [`crate::pi_family_session`].
+//! omp is pi-family: a pi-style extension inside the interactive process starts
+//! `driver omp-channel` on the configured channel binary (`hooks/omp-channel.ts`).
+//! The current contract is documented in `docs/st3/omp.md`; the launch body itself is
+//! shared with pi in [`crate::pi_family_session`].
 //!
 //! Unlike pi, the wrapper hard-gates the provider version (OMP-R05): the delivery-critical
 //! surface — event names, the sampled idle edge, the approval events — is versioned behavior, not
@@ -470,6 +470,18 @@ fn run_with_required_resume(
         true,
     )
 }
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+/// Admit the same installed producer and shipped extension before the RPC heal touches a session.
+/// Interactive launch still admits its own fork after the asynchronous heal.
+pub fn verify_admission_for_heal(binary: &str) -> Result<()> {
+    use crate::driver_diagnostic::Driver;
+    let set = pi_family_session::channel_extension_set(&OMP_KIND, "interrupted-ask-heal")?;
+    let admission = crate::harness_admission::admit(binary, Driver::Omp, Some(&set.join(EXTENSION)));
+    anyhow::ensure!(admission.passed(), "{}", admission.explanation(Driver::Omp));
+    Ok(())
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 
 /// Measure the installed producer and exact shipped extension before claiming the live seat.
 fn verify_supported_version(binary: &str, agent_dir: &Path, extension: &Path) -> Result<()> {

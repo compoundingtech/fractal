@@ -11,12 +11,14 @@ const KEYWORDS: &[&str] = &[
     "$comment",
     "description",
     "title",
+    "default",
     "examples",
     "type",
     "properties",
     "required",
     "additionalProperties",
     "items",
+    "prefixItems",
     "enum",
     "const",
     "oneOf",
@@ -39,6 +41,7 @@ const KEYWORDS: &[&str] = &[
     "x-st-ref",
     "x-st-brand",
     "x-st-codec",
+    "x-st-conditions",
 ];
 const DATE_TIME: &str =
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$";
@@ -48,6 +51,18 @@ type Defs = Map<String, Value>;
 
 fn js(value: &Value) -> String {
     value.to_string()
+}
+
+/// Lists of this many string cases or more are written one case per line, so two changes that add
+/// different cases merge instead of conflicting on the one line that held them all.
+pub const ONE_PER_LINE_FROM: usize = 8;
+
+fn js_cases(values: &[Value]) -> String {
+    if values.len() < ONE_PER_LINE_FROM {
+        return js(&Value::Array(values.to_vec()));
+    }
+    let lines = values.iter().map(js).collect::<Vec<_>>();
+    format!("[\n  {}\n]", lines.join(",\n  "))
 }
 
 // ------------------------------------------------------------------ normalization
@@ -70,6 +85,7 @@ fn merge_objects(parts: &[Value]) -> Result<Value> {
     let mut required = BTreeSet::new();
     let mut out = Map::new();
     let mut closed: Vec<BTreeSet<String>> = vec![];
+    let mut conditions = Vec::new();
     for part in parts {
         let object = part
             .as_object()
@@ -95,6 +111,11 @@ fn merge_objects(parts: &[Value]) -> Result<Value> {
                         required.insert(name.as_str().context("required name")?.to_owned());
                     }
                 }
+                "x-st-conditions" => {
+                    conditions.extend(
+                        value.as_array().context("object conditions")?.iter().cloned(),
+                    );
+                }
                 _ => {
                     out.insert(key.clone(), value.clone());
                 }
@@ -114,6 +135,9 @@ fn merge_objects(parts: &[Value]) -> Result<Value> {
             "required".into(),
             json!(required.into_iter().collect::<Vec<_>>()),
         );
+    }
+    if !conditions.is_empty() {
+        out.insert("x-st-conditions".into(), Value::Array(conditions));
     }
     Ok(Value::Object(out))
 }
@@ -149,9 +173,10 @@ fn literal_values(test: &Value) -> Option<Vec<Value>> {
         .or_else(|| test.get("enum").and_then(Value::as_array).cloned())
 }
 
-/// Inline `allOf`, distribute an `allOf` base over a sibling `oneOf`, and expand `if`/`then` on one
+/// Inline `allOf`, distribute object siblings over `oneOf`, and expand `if`/`then` on one
 /// enum property into a `oneOf` of complete branches. An open discriminator adds one fallback
 /// branch whose tag is `{ type: string, not: { enum: known } }`.
+/// Predicates on independent properties stay as object relationship assertions instead.
 fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
     let Some(object) = value.as_object() else {
         return Ok(value.clone());
@@ -168,7 +193,7 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
                     .collect::<Result<Map<_, _>>>()?,
             ),
             "items" | "additionalProperties" | "contains" | "then" => normalize(child, defs)?,
-            "oneOf" | "anyOf" | "allOf" => Value::Array(
+            "oneOf" | "anyOf" | "allOf" | "prefixItems" => Value::Array(
                 child
                     .as_array()
                     .context("combinator")?
@@ -180,8 +205,18 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         };
         node.insert(key.clone(), child);
     }
-    let Some(all_of) = node.remove("allOf") else {
-        return Ok(Value::Object(node));
+    let all_of = match node.remove("allOf") {
+        Some(parts) => parts,
+        None
+            if node.contains_key("oneOf")
+                && (node.get("type").and_then(Value::as_str) == Some("object")
+                    || ["properties", "required", "additionalProperties"]
+                        .iter()
+                        .any(|key| node.contains_key(*key))) =>
+        {
+            json!([])
+        }
+        None => return Ok(Value::Object(node)),
     };
     let parts = all_of.as_array().context("allOf")?;
     let (conditionals, plain): (Vec<&Value>, Vec<&Value>) =
@@ -224,7 +259,22 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         );
     }
     if discriminators.len() != 1 {
-        bail!("conditionals must all test one property");
+        // Independent properties constrain one object, not a shared tagged union.
+        if !is_object(&base)
+            || base.get("const").is_some()
+            || base.get("enum").is_some()
+            || base.get("type").is_some_and(|kind| kind != "object")
+        {
+            bail!("independent conditions require an object field schema");
+        }
+        base.as_object_mut()
+            .context("conditional object base")?
+            .entry("x-st-conditions")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .context("object conditions")?
+            .extend(conditionals.into_iter().cloned());
+        return Ok(base);
     }
     let key = discriminators.into_iter().next().unwrap();
     if !base["required"]
@@ -398,28 +448,34 @@ fn subject_ref(object: &Map<String, Value>, families: &Value) -> Result<String> 
 
 fn emit_string(object: &Map<String, Value>) -> Result<String> {
     let mut excluded = vec![];
+    let mut excluded_pattern = None;
     if let Some(not) = object.get("not") {
         let only = not.as_object().filter(|n| n.len() == 1);
         if let Some(known) = only.and_then(|n| n.get("enum")).and_then(Value::as_array) {
             return Ok(format!("unknownCase({})", js(&Value::Array(known.clone()))));
         }
-        // `not: { const }` excludes one value, and `not: { anyOf: [{ const }, ..] }` several,
-        // from an otherwise plain string.
-        excluded = match only.and_then(|n| n.get("anyOf")).and_then(Value::as_array) {
-            Some(branches) => branches
-                .iter()
-                .map(|branch| {
-                    branch
-                        .as_object()
-                        .filter(|b| b.len() == 1)
-                        .and_then(|b| b.get("const"))
-                        .context("`not: { anyOf }` must list only `{ const }` branches")
-                })
-                .collect::<Result<Vec<_>>>()?,
-            None => vec![only.and_then(|n| n.get("const")).context(
-                "only `not: { enum }`, `not: { const }` and `not: { anyOf: [{ const }] }` are translated",
-            )?],
-        };
+        // `not: { pattern }` excludes a family of values (sibling collections) from a plain string.
+        if let Some(pattern) = only.and_then(|n| n.get("pattern")) {
+            excluded_pattern = Some(pattern.as_str().context("`not.pattern` must be a string")?);
+        } else {
+            // `not: { const }` excludes one value, and `not: { anyOf: [{ const }, ..] }` several,
+            // from an otherwise plain string.
+            excluded = match only.and_then(|n| n.get("anyOf")).and_then(Value::as_array) {
+                Some(branches) => branches
+                    .iter()
+                    .map(|branch| {
+                        branch
+                            .as_object()
+                            .filter(|b| b.len() == 1)
+                            .and_then(|b| b.get("const"))
+                            .context("`not: { anyOf }` must list only `{ const }` branches")
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                None => vec![only.and_then(|n| n.get("const")).context(
+                    "only `not: { enum }`, `not: { const }`, `not: { anyOf: [{ const }] }` and `not: { pattern }` are translated",
+                )?],
+            };
+        }
     }
     let mut schema = match object.get("x-st-ref") {
         Some(families) => subject_ref(object, families)?,
@@ -453,6 +509,13 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
         schema = format!(
             "{schema}.check(Schema.makeFilter((value: string) => !{values}.includes(value), {{ expected: {} }}))",
             js(&json!(format!("a string other than {expected}")))
+        );
+    }
+    if let Some(pattern) = excluded_pattern {
+        schema = format!(
+            "{schema}.check(Schema.makeFilter((value: string) => !new RegExp({}, \"u\").test(value), {{ expected: {} }}))",
+            js(&json!(pattern)),
+            js(&json!(format!("a string not matching {pattern}")))
         );
     }
     if let Some(brand) = object.get("x-st-brand") {
@@ -520,6 +583,7 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
     let Some(object) = value.as_object() else {
         return match value {
             Value::Bool(true) => Ok("Schema.Unknown".into()),
+            Value::Bool(false) => Ok("Schema.Never".into()),
             other => bail!("unsupported schema {other}"),
         };
     };
@@ -571,16 +635,13 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
         if known.is_empty() || known.iter().any(|value| !value.is_string()) {
             bail!("open enum must contain known string cases");
         }
-        return Ok(format!("openEnum({})", js(&Value::Array(known))));
+        return Ok(format!("openEnum({})", js_cases(&known)));
     }
     if let Some(constant) = object.get("const") {
         return Ok(format!("Schema.Literal({})", js(constant)));
     }
     if let Some(values) = object.get("enum").and_then(Value::as_array) {
-        return Ok(format!(
-            "Schema.Literals({})",
-            js(&Value::Array(values.clone()))
-        ));
+        return Ok(format!("Schema.Literals({})", js_cases(values)));
     }
     for combinator in ["oneOf", "anyOf"] {
         let Some(branches) = object.get(combinator).and_then(Value::as_array) else {
@@ -625,6 +686,10 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
         Some("number") => with_checks("Schema.Number".into(), number_checks(value)),
         Some("boolean") => "Schema.Boolean".into(),
         Some("null") => "Schema.Null".into(),
+        Some("array") if object.contains_key("prefixItems") => {
+            let fields = object["prefixItems"].as_array().context("tuple items")?.iter().map(|item| emit(item,cx)).collect::<Result<Vec<_>>>()?;
+            format!("Schema.Tuple([{}])", fields.join(", "))
+        }
         Some("array") => {
             let items = object
                 .get("items")
@@ -740,6 +805,226 @@ impl Object {
     }
 }
 
+/// One positive schema allowlist gates both decoded targets and every emitted assertion.
+fn validate_condition_schema(value: &Value, cx: &Cx, depth: usize) -> Result<()> {
+    if depth > 64 {
+        bail!("recursive conditional schemas are not translated");
+    }
+    if value.is_boolean() {
+        return Ok(());
+    }
+    let object = value.as_object().context("conditional allowlisted schema")?;
+    if nullable_inner(value).is_some() {
+        bail!("conditional nullable schemas are not translated");
+    }
+    let scalar = |value: &Value| value.is_boolean() || value.is_string() || value.is_number();
+    for (key, part) in object {
+        match key.as_str() {
+            "$comment" | "description" | "title" | "examples" | "required"
+            | "minItems" | "maxItems" | "uniqueItems" | "minLength" | "maxLength"
+            | "pattern" | "format" | "minimum" | "maximum" | "exclusiveMinimum"
+            | "exclusiveMaximum" | "multipleOf" => {}
+            "type" if matches!(part.as_str(), Some("boolean" | "string" | "number" | "integer" | "array" | "object")) => {}
+            "const" if scalar(part) => {}
+            "enum" if part.as_array().is_some_and(|values| !values.is_empty() && values.iter().all(scalar)) => {}
+            "$ref" => {
+                let name = part.as_str().context("conditional reference")?
+                    .strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
+                validate_condition_schema(cx.normalized.get(name).context("conditional definition")?, cx, depth + 1)?;
+            }
+            "properties" => {
+                for schema in part.as_object().context("conditional properties")?.values() {
+                    validate_condition_schema(schema, cx, depth + 1)?;
+                }
+            }
+            "items" => validate_condition_schema(part, cx, depth + 1)?,
+            "oneOf" | "allOf" => {
+                for schema in part.as_array().context("conditional alternatives")? {
+                    validate_condition_schema(schema, cx, depth + 1)?;
+                }
+            }
+            _ => bail!("conditional schema keyword `{key}` is outside the wire-identity allowlist"),
+        }
+    }
+    Ok(())
+}
+
+/// Decoded-object filters may only inspect fields whose wire representation survives decoding.
+fn validate_condition_fields(
+    assertion: &Value,
+    fields: &Map<String, Value>,
+    cx: &Cx,
+    depth: usize,
+) -> Result<()> {
+    validate_condition_schema(assertion, cx, depth)?;
+    if depth > 64 {
+        bail!("recursive conditional assertions are not translated");
+    }
+    let Some(object) = assertion.as_object() else { return Ok(()) };
+    for (key, value) in object {
+        match key.as_str() {
+            "required" => {
+                for name in value.as_array().context("conditional required")? {
+                    let name = name.as_str().context("conditional required name")?;
+                    let field = fields.get(name)
+                        .with_context(|| format!("conditional field `{name}` is undeclared"))?;
+                    validate_condition_schema(field, cx, depth + 1)?;
+                    if nullable_inner(field).is_some() {
+                        bail!("conditional presence of nullable field `{name}` is not translated");
+                    }
+                }
+            }
+            "properties" => {
+                for (name, assertion) in value.as_object().context("conditional properties")? {
+                    let field = fields.get(name)
+                        .with_context(|| format!("conditional field `{name}` is undeclared"))?;
+                    if nullable_inner(field).is_some() {
+                        bail!("conditional nullable field `{name}` is not translated");
+                    }
+                    validate_condition_value(assertion, field, cx, depth + 1)?;
+                }
+            }
+            "allOf" | "oneOf" => {
+                for part in value.as_array().context("conditional alternatives")? {
+                    validate_condition_fields(part, fields, cx, depth + 1)?;
+                }
+            }
+            "$ref" => {
+                let name = value.as_str().context("conditional reference")?
+                    .strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
+                let assertion = cx.normalized.get(name).context("conditional definition")?;
+                validate_condition_fields(assertion, fields, cx, depth + 1)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_condition_value(assertion: &Value, field: &Value, cx: &Cx, depth: usize) -> Result<()> {
+    if depth > 64 {
+        bail!("recursive conditional fields are not translated");
+    }
+    validate_condition_schema(field, cx, depth)?;
+    if let Some(reference) = field.get("$ref").and_then(Value::as_str) {
+        let name = reference.strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
+        return validate_condition_value(
+            assertion, cx.normalized.get(name).context("conditional field definition")?, cx, depth + 1,
+        );
+    }
+    if nullable_inner(field).is_some() {
+        bail!("conditional nullable field values are not translated");
+    }
+    if let Some(branches) = field.get("oneOf").and_then(Value::as_array) {
+        for branch in branches {
+            validate_condition_value(assertion, branch, cx, depth + 1)?;
+        }
+        return Ok(());
+    }
+    let scalar = |value: &Value| value.is_boolean() || value.is_string() || value.is_number();
+    let literal = field.get("const").is_some_and(scalar)
+        || field.get("enum").and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty() && values.iter().all(scalar));
+    match field.get("type").and_then(Value::as_str) {
+        Some("boolean" | "string" | "number" | "integer") => {}
+        Some("array") => {
+            validate_condition_value(&Value::Bool(true), field.get("items").context("conditional array items")?, cx, depth + 1)?;
+            if assertion.as_object().is_some_and(|object| object.keys().any(|key| !matches!(
+                key.as_str(), "$comment" | "description" | "title" | "examples" | "maxItems" | "minItems"
+            ))) {
+                bail!("conditional arrays only support item-count assertions");
+            }
+        }
+        None if literal => {}
+        _ => bail!("conditional target is outside the wire-identity allowlist"),
+    }
+    validate_condition_fields(assertion, &Map::new(), cx, depth + 1)
+}
+
+/// Relationship assertions operate on decoded fields without replacing their base schemas.
+/// Unsupported assertions fail closed rather than disappearing during normalization.
+fn condition_predicate(value: &Value, target: &str, cx: &mut Cx) -> Result<String> {
+    if let Some(value) = value.as_bool() {
+        return Ok(value.to_string());
+    }
+    let object = value.as_object().context("conditional assertion")?;
+    let mut checks = Vec::new();
+    for (key, value) in object {
+        match key.as_str() {
+            "$comment" | "description" | "title" | "examples" => {}
+            "$ref" => {
+                let schema = emit(&json!({ "$ref": value }), cx)?;
+                checks.push(format!("Schema.is(Schema.toType({schema}))({target})"));
+            }
+            "const" if !value.is_object() && !value.is_array() => {
+                checks.push(format!("{target} === {}", js(value)));
+            }
+            "enum" => {
+                let values = value.as_array().context("conditional enum")?;
+                if values.iter().any(|value| value.is_object() || value.is_array()) {
+                    bail!("object/array conditional literals are not translated");
+                }
+                checks.push(format!(
+                    "({} as ReadonlyArray<unknown>).includes({target})",
+                    js(value)
+                ));
+            }
+            "required" => {
+                for name in value.as_array().context("conditional required")? {
+                    let name = name.as_str().context("conditional required name")?;
+                    checks.push(format!(
+                        "(typeof {target} !== \"object\" || {target} === null || Array.isArray({target}) || Object.prototype.hasOwnProperty.call({target}, {}))",
+                        js(&json!(name))
+                    ));
+                }
+            }
+            "properties" => {
+                for (name, schema) in value.as_object().context("conditional properties")? {
+                    let name = js(&json!(name));
+                    let field = format!("({target} as Record<string, unknown>)[{name}]");
+                    let predicate = condition_predicate(schema, &field, cx)?;
+                    checks.push(format!(
+                        "(typeof {target} !== \"object\" || {target} === null || Array.isArray({target}) || !Object.prototype.hasOwnProperty.call({target}, {name}) || ({predicate}))"
+                    ));
+                }
+            }
+            "maxItems" | "minItems" => {
+                let limit = value.as_u64().context("conditional item limit")?;
+                checks.push(format!(
+                    "(!Array.isArray({target}) || ({target} as ReadonlyArray<unknown>).length {} {limit})",
+                    if key == "maxItems" { "<=" } else { ">=" }
+                ));
+            }
+            "allOf" | "oneOf" => {
+                let parts = value
+                    .as_array()
+                    .context("conditional alternatives")?
+                    .iter()
+                    .map(|part| condition_predicate(part, target, cx))
+                    .collect::<Result<Vec<_>>>()?;
+                if parts.is_empty() {
+                    bail!("conditional alternatives must not be empty");
+                }
+                checks.push(if key == "oneOf" {
+                    format!("[{}].filter(Boolean).length === 1", parts.join(", "))
+                } else {
+                    parts
+                        .iter()
+                        .map(|part| format!("({part})"))
+                        .collect::<Vec<_>>()
+                        .join(" && ")
+                });
+            }
+            _ => bail!("unsupported conditional assertion `{key}`"),
+        }
+    }
+    Ok(if checks.is_empty() {
+        "true".into()
+    } else {
+        checks.iter().map(|check| format!("({check})")).collect::<Vec<_>>().join(" && ")
+    })
+}
+
 /// Open objects (no `additionalProperties`) with declared fields decode as plain structs: excess
 /// keys are ignored, not preserved, so typos stay type errors. Bags without fields stay records.
 fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result<Object> {
@@ -788,6 +1073,21 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
         Some(schema) => Some(emit(schema, cx)?),
     };
     let mut checks = vec![];
+    if let Some(conditions) = object.get("x-st-conditions") {
+        for condition in conditions.as_array().context("object conditions")? {
+            let condition = condition.as_object().context("object condition")?;
+            if condition.keys().any(|key| !matches!(key.as_str(), "if" | "then")) {
+                bail!("unsupported object conditional keyword");
+            }
+            validate_condition_fields(&condition["if"], properties, cx, 0)?;
+            validate_condition_fields(condition.get("then").unwrap_or(&Value::Bool(true)), properties, cx, 0)?;
+            let test = condition_predicate(&condition["if"], "o", cx)?;
+            let assertion = condition_predicate(condition.get("then").unwrap_or(&Value::Bool(true)), "o", cx)?;
+            checks.push(format!(
+                "Schema.makeFilter((o: object) => !({test}) || ({assertion}), {{ expected: \"conditional object relationship\" }})"
+            ));
+        }
+    }
     if let Some(names) = object.get("propertyNames") {
         let mut key = names.as_object().context("propertyNames")?.clone();
         // Property names are always strings; references already name a string schema.
@@ -837,7 +1137,7 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
     })
 }
 
-/// The single-const discriminator shared by every branch, if all values are unique.
+/// The required single-const discriminator shared by every branch, if all values are unique.
 fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     let resolved: Vec<&Value> = branches
         .iter()
@@ -850,6 +1150,12 @@ fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     first
         .keys()
         .find(|key| {
+            if !resolved.iter().all(|branch| {
+                branch.get("required").and_then(Value::as_array)
+                    .is_some_and(|required| required.iter().any(|name| name.as_str() == Some(key.as_str())))
+            }) {
+                return false;
+            }
             let values: Option<Vec<&Value>> = resolved
                 .iter()
                 .map(|branch| branch.get("properties")?.get(key.as_str())?.get("const"))
@@ -899,6 +1205,9 @@ fn is_object(value: &Value) -> bool {
 fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
     if value == &Value::Bool(true) {
         return Ok("unknown".into());
+    }
+    if value == &Value::Bool(false) {
+        return Ok("never".into());
     }
     let object = value.as_object().context("recursive schema")?;
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
@@ -956,7 +1265,14 @@ fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
         Some("string") if !encoded && codec == Some("redacted") => {
             "Redacted.Redacted<string>".into()
         }
-        Some("string") if !encoded && object.contains_key("not") => "UnknownCase".into(),
+        Some("string")
+            if !encoded
+                && object
+                    .get("not")
+                    .is_some_and(|not| not.get("pattern").is_none()) =>
+        {
+            "UnknownCase".into()
+        }
         Some("string") => {
             let mut ty = "string".to_owned();
             if !encoded {
@@ -984,6 +1300,7 @@ fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
         Some("integer" | "number") => "number".into(),
         Some("boolean") => "boolean".into(),
         Some("null") => "null".into(),
+        Some("array") if object.contains_key("prefixItems") => format!("readonly [{}]", object["prefixItems"].as_array().context("tuple items")?.iter().map(|item| recursive_type(item,encoded)).collect::<Result<Vec<_>>>()?.join(", ")),
         Some("array") => format!(
             "ReadonlyArray<{}>",
             object
@@ -1310,8 +1627,9 @@ pub fn models(schema: &Value) -> Result<String> {
             &mut order,
         )?;
     }
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n// Sources: docs/st3/client-v0/schemas/client-v0.schema.json, operations.json\n// Generator: crates/st3-client-codegen/src/rich.rs\n// Regenerate: cargo run -p st3-client-codegen; verify: cargo run -p st3-client-codegen -- --check\nimport {{ DateTime, Duration, Schema, SchemaTransformation }} from \"effect\"\n\nexport const API_VERSION = \"st3.client.v0\" as const\nconst DATE_TIME = new RegExp({}, \"u\")\n{PRELUDE}\n",
+        "// @generated by st3-client-codegen; do not edit.\n// Sources: docs/st3/client-v0/schemas/client-v0.schema.json, operations.json\n// Generator: crates/st3-client-codegen/src/rich.rs\n// Regenerate: cargo run -p st3-client-codegen; verify: cargo run -p st3-client-codegen -- --check\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\nimport {{ DateTime, Duration, Schema, SchemaTransformation }} from \"effect\"\n\nexport const API_VERSION = \"st3.client.v0\" as const\nconst DATE_TIME = new RegExp({}, \"u\")\n{PRELUDE}\n",
         js(&json!(DATE_TIME))
     );
     let mut cx = Cx {
@@ -1331,6 +1649,57 @@ pub fn models(schema: &Value) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn wire_alias_schemas_keep_the_deployed_sender_constant() -> Result<()> {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let output = models(&schema)?;
+        assert!(output.contains("export const API_VERSION = \"st3.client.v0\" as const"));
+        assert!(output.contains("// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both):"));
+        for values in [
+            "[\"st3.client.v0\",\"fractal.client.v0\"]",
+            "[\"st3.client.error.v0\",\"fractal.client.error.v0\"]",
+            "[\"st3.visualization.v0\",\"fractal.visualization.v0\"]",
+        ] {
+            assert!(output.contains(&format!("Schema.Literals({values})")));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn disjoint_object_unions_support_forbidden_fields_and_documented_defaults() {
+        let schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": {
+                "Duration": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
+                "Challenge": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "pairing-challenge" }, "grant_kind": { "enum": ["person", "assistant"] }, "person_id": { "type": "string" } },
+                    "oneOf": [
+                        { "required": ["person_id"], "properties": { "grant_kind": { "const": "person" } } },
+                        { "required": ["grant_kind"], "properties": { "grant_kind": { "const": "assistant" }, "person_id": false } }
+                    ]
+                }
+            }
+        });
+        let normalized = normalize(&schema["$defs"]["Challenge"], &Map::new()).unwrap();
+        for branch in normalized["oneOf"].as_array().unwrap() {
+            assert_eq!(branch["properties"]["kind"], json!({ "const": "pairing-challenge" }));
+            assert!(branch["required"].as_array().unwrap().contains(&json!("kind")));
+            assert_eq!(branch["additionalProperties"], json!(false));
+        }
+        let mut with_all_of = schema["$defs"]["Challenge"].clone();
+        with_all_of["allOf"] = json!([]);
+        assert_eq!(normalize(&with_all_of, &Map::new()).unwrap(), normalized);
+        let rendered = models(&schema).unwrap();
+        assert!(rendered.contains("Schema.Never"));
+        assert!(rendered.contains("Schema.Union"));
+        assert!(!rendered.contains("Schema.toTaggedUnion(\"grant_kind\")"));
+        assert_eq!(recursive_type(&Value::Bool(false), false).unwrap(), "never");
+    }
+
     fn conditional_schema() -> Value {
         json!({
             "type": "object",
@@ -1345,6 +1714,157 @@ mod tests {
                 "then": { "required": ["payload"] }
             }]
         })
+    }
+    fn independent_fixture(field: Value, assertion: Value) -> Value {
+        json!({"x-st-integers": "json-safe", "$defs": {"Entry": {
+            "type": "object", "required": ["enabled", "phase", "tags"],
+            "properties": {"enabled": {"type": "boolean"}, "phase": {"enum": ["ready", "done"]}, "tags": field},
+            "allOf": [
+                {"if": {"properties": {"enabled": {"const": false}}}, "then": assertion},
+                {"if": {"properties": {"phase": {"const": "ready"}}}, "then": true}
+            ]
+        }}})
+    }
+
+    #[test]
+    fn nested_and_merged_independent_assertions_accumulate() {
+        let properties = json!({"a": {"type": "boolean"}, "b": {"type": "boolean"}, "c": {"type": "boolean"}});
+        let inner = json!({"type": "object", "properties": properties, "allOf": [
+            {"if": {"properties": {"a": {"const": true}}}, "then": {"properties": {"c": {"const": true}}}},
+            {"if": {"properties": {"b": {"const": true}}}, "then": {"properties": {"c": {"const": true}}}}
+        ]});
+        let outer = json!({"type": "object", "properties": properties, "allOf": [
+            inner,
+            {"if": {"properties": {"a": {"const": false}}}, "then": true},
+            {"if": {"properties": {"b": {"const": false}}}, "then": true}
+        ]});
+        let normalized = normalize(&outer, &Map::new()).unwrap();
+        assert_eq!(normalized["x-st-conditions"].as_array().unwrap().len(), 4);
+        let generated = models(&json!({"x-st-integers": "json-safe", "$defs": {"Entry": outer}})).unwrap();
+        assert_eq!(generated.matches("conditional object relationship").count(), 4);
+        assert!(generated.contains("[\"c\"] === true"));
+        let inner = normalize(&inner, &Map::new()).unwrap();
+        let merged = normalize(&json!({"allOf": [inner, inner]}), &Map::new()).unwrap();
+        assert_eq!(merged["x-st-conditions"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn nullable_conditional_values_and_presence_fail_closed() {
+        for (field, assertion) in [
+            (json!({"type": ["array", "null"], "items": {"type": "string"}}), json!({"properties": {"tags": {"maxItems": 0}}})),
+            (json!({"type": ["string", "null"]}), json!({"properties": {"tags": {"const": "x"}}})),
+            (json!({"type": ["string", "null"]}), json!({"properties": {"tags": {"enum": ["x"]}}})),
+            (json!({"type": ["string", "null"]}), json!({"required": ["tags"]})),
+        ] {
+            assert!(format!("{:#}", models(&independent_fixture(field, assertion)).unwrap_err()).contains("nullable"));
+        }
+        let mut optional = independent_fixture(json!({"type": ["string", "null"]}), json!({"required": ["tags"]}));
+        optional["$defs"]["Entry"]["required"] = json!(["enabled", "phase"]);
+        assert!(format!("{:#}", models(&optional).unwrap_err()).contains("nullable"));
+        let mut unused = independent_fixture(json!({"type": "array", "items": {"type": "string"}}), Value::Bool(true));
+        unused["$defs"]["Entry"]["properties"]["title"] = json!({"type": ["string", "null"]});
+        assert!(models(&unused).is_ok());
+    }
+
+    #[test]
+    fn excluded_enum_conditional_targets_fail_closed() {
+        let field = json!({"type": "string", "not": {"enum": ["known"]}});
+        let assertion = json!({"properties": {"tags": {"const": "future"}}});
+        let schema = independent_fixture(field.clone(), assertion.clone());
+        assert!(format!("{:#}", models(&schema).unwrap_err()).contains("allowlist"));
+        let mut referenced = independent_fixture(json!({"$ref": "#/$defs/Excluded"}), assertion.clone());
+        referenced["$defs"]["Excluded"] = field.clone();
+        assert!(format!("{:#}", models(&referenced).unwrap_err()).contains("allowlist"));
+        let union = independent_fixture(json!({"oneOf": [field, {"const": "known"}]}), assertion);
+        assert!(format!("{:#}", models(&union).unwrap_err()).contains("allowlist"));
+    }
+
+    #[test]
+    fn transformed_assertion_references_fail_closed_on_every_predicate_path() {
+        for assertion in [
+            json!({"$ref": "#/$defs/Instant"}),
+            json!({"oneOf": [{"$ref": "#/$defs/Instant"}, {"const": "x"}]}),
+            json!({"allOf": [{"allOf": [{"$ref": "#/$defs/Instant"}]}]}),
+        ] {
+            for side in ["if", "then"] {
+                let mut schema = independent_fixture(json!({"type": "string"}), Value::Bool(true));
+                schema["$defs"]["Instant"] = json!({"type": "string", "format": "date-time", "x-st-codec": "timestamp"});
+                schema["$defs"]["Entry"]["allOf"][0][side] = json!({"properties": {"tags": assertion}});
+                assert!(format!("{:#}", models(&schema).unwrap_err()).contains("allowlist"));
+            }
+        }
+    }
+
+    #[test]
+    fn undeclared_conditional_fields_fail_closed() {
+        for assertion in [json!({"required": ["payload"]}), json!({"properties": {"payload": {"const": "x"}}})] {
+            let schema = independent_fixture(json!({"type": "array", "items": {"type": "string"}}), assertion);
+            assert!(format!("{:#}", models(&schema).unwrap_err()).contains("undeclared"));
+        }
+    }
+
+
+    #[test]
+    fn independent_object_conditions_preserve_fields_and_each_assertion() {
+        let input = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["enabled", "phase", "tags"],
+            "properties": {
+                "phase": { "enum": ["ready", "done"] },
+                "enabled": { "type": "boolean" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "payload": { "type": "string" }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "phase": { "const": "ready" } } },
+                    "then": { "required": ["payload"] }
+                },
+                {
+                    "if": { "properties": { "enabled": { "const": false } } },
+                    "then": { "properties": { "tags": { "maxItems": 0 } } }
+                }
+            ]
+        });
+        let normalized = normalize(&input, &Map::new()).unwrap();
+        assert_eq!(normalized["properties"], input["properties"]);
+        assert_eq!(normalized["required"], input["required"]);
+        assert_eq!(normalized["x-st-conditions"], input["allOf"]);
+        assert!(normalized.get("oneOf").is_none());
+        let schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": { "Entry": input }
+        });
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("export const Entry ="));
+        assert_eq!(generated.matches("conditional object relationship").count(), 2);
+        assert!(generated.contains("hasOwnProperty.call(o, \"payload\")"));
+        assert!(generated.contains("[\"phase\"] === \"ready\""));
+        assert!(generated.contains("[\"enabled\"] === false"));
+        assert!(generated.contains(".length <= 0"));
+
+        // Fail closed for assertions the predicate emitter cannot preserve.
+        let mut unsupported = schema;
+        unsupported["$defs"]["Entry"]["allOf"][1]["then"]["properties"]["tags"] =
+            json!({ "uniqueItems": true });
+        assert!(models(&unsupported).is_err());
+    }
+
+    #[test]
+    fn same_property_conditions_still_expand_complete_branches() {
+        let mut input = conditional_schema();
+        input["allOf"].as_array_mut().unwrap().push(json!({
+            "if": { "properties": { "type": { "const": "status" } } },
+            "then": { "properties": { "payload": { "const": "complete" } } }
+        }));
+        let defs = json!({ "Kind": { "enum": ["message", "status"] } });
+        let normalized = normalize(&input, defs.as_object().unwrap()).unwrap();
+        assert!(normalized.get("x-st-conditions").is_none());
+        let branches = normalized["oneOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0]["required"], json!(["id", "payload", "type"]));
+        assert_eq!(branches[1]["properties"]["payload"], json!({ "const": "complete" }));
     }
 
     #[test]

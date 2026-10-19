@@ -8,7 +8,6 @@ The initial st2 corpus came from `compoundingtech/evals` commit `3db48ab56d40ce2
 
 Future imports require an explicit eval review before they enter this corpus.
 
-The [source eval migration review](./MIGRATION-REVIEW.md) classifies all 58 active evals in the old eval repository.
 
 | Eval | st2 | st3 |
 | --- | --- | --- |
@@ -48,6 +47,7 @@ The [source eval migration review](./MIGRATION-REVIEW.md) classifies all 58 acti
 | Native session import | Not supported | `st3/native-session-import` |
 | Graceful messaging | Not supported | `st3/graceful-messaging` |
 | Messaging faults | Not supported | `st3/messaging-faults` |
+| Codex minimal access | Not supported | `st3/codex-minimal-access` |
 
 The License MIT, Restart continuity, and Claude Skill Inheritance pairs use Claude Sonnet in both runtimes.
 

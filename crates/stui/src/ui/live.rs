@@ -6,11 +6,15 @@
 //! preview, the fleet), and carries out the actions the screens queue. A refresh replaces
 //! data in place: it never empties a list or a conversation while the fresh copy is on its way.
 
+#[cfg(test)]
+use st3::MissionsStore;
 use super::adapt::{self, Extras};
+use super::direct;
 use super::glass::GlassWrite;
+use super::resource_sidebar::ArrangementV1 as _;
 use super::view::{Load, MissionPreview};
 use super::{AgentControl, Effect, Guard, Ui};
-use crate::feed::{self, Command, TerminalUpdate, Window};
+use crate::feed::{self, Command, Inventories, Inventory, TerminalUpdate, Window};
 use crate::model::{self, Collection, Model};
 use anyhow::Result;
 use crossterm::{
@@ -44,12 +48,29 @@ struct Pending {
     effect: Effect,
     /// The exact request last sent; a retry repeats it so st can answer with the first result.
     sent: Arc<Mutex<Option<Sent>>>,
+
+    /// The conversation drew it, noted once for the quality counters.
+    echoed: bool,
     /// When it was last sent (or sent again): one st has not answered for a while is said to be
     /// unconfirmed, so it can be sent again or cleared rather than wait forever.
     since: Instant,
 }
 
+/// How often st is asked how long a message it takes, and how soon again after it did not answer.
+const MESSAGE_LIMIT_REREAD: Duration = Duration::from_secs(600);
+const MESSAGE_LIMIT_RETRY: Duration = Duration::from_secs(30);
+/// The followed windows arrive over the live stream, whose frames carry no `sync` notice, so a
+/// small Attention page read supplies it: once when st connects, before the first frames, and
+/// again only when a later Attention or Agents frame shows the graph moving, at most once a
+/// minute. An idle screen sends no request (see client_only's idle oracle). Remove when every
+/// supported daemon streams the notice.
+const SYNC_MIN_GAP: Duration = Duration::from_secs(60);
+
 /// How long a message waits for st's answer before it says st has not confirmed it.
+/// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
+/// input) slower than that, is written to slow.log with what was on screen.
+const SLOW_DRAW: Duration = Duration::from_millis(120);
+const SLOW_TURN: Duration = Duration::from_millis(250);
 const UNANSWERED_AFTER: Duration = Duration::from_secs(30);
 
 /// A message request as sent: st keys its receipt on the whole request.
@@ -58,6 +79,9 @@ struct Sent {
     id: String,
     idempotency_key: String,
     snapshot_id: String,
+    /// What it said, as sent: rebuilt later, it could name the agent's newer session, and st
+    /// refuses a repeat that differs as a conflict.
+    parameters: MessageSendParameters,
 }
 
 /// Read evidence belongs to a presented frame, so navigation cannot cancel retries.
@@ -65,11 +89,39 @@ struct Sent {
 struct ReadReceipts {
     confirmed: HashSet<String>,
     pending: BTreeMap<String, Option<Instant>>,
+    /// How many times in a row each failed: the wait before the next try grows with it.
+    failures: BTreeMap<String, u32>,
+    /// Refused for good (st will not take this person's read of it): never asked again.
+    refused: HashSet<String>,
+}
+
+/// How a read receipt ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiptOutcome {
+    Done,
+    /// Try again later: the connection or the graph moved.
+    Retry,
+    /// st refused it and said it would refuse again.
+    Refused,
+}
+
+/// Whether a failed read receipt is worth trying again: a refusal st marks as not retryable
+/// (this identity may not read it) is final, except a stale fence, which a fresh one answers.
+fn receipt_outcome(error: &anyhow::Error) -> ReceiptOutcome {
+    use st3_client::{ClientError, ErrorCode};
+    match error.downcast_ref::<ClientError>() {
+        Some(ClientError::Api(code, _, envelope))
+            if !envelope.retryable && !matches!(code, ErrorCode::StaleFence) =>
+        {
+            ReceiptOutcome::Refused
+        }
+        _ => ReceiptOutcome::Retry,
+    }
 }
 
 impl ReadReceipts {
     fn displayed(&mut self, id: String, now: Instant) {
-        if !self.confirmed.contains(&id) {
+        if !self.confirmed.contains(&id) && !self.refused.contains(&id) {
             self.pending.entry(id).or_insert(Some(now));
         }
     }
@@ -85,15 +137,32 @@ impl ReadReceipts {
         self.pending.insert(id.clone(), None);
         Some(id)
     }
-    fn completed(&mut self, id: String, succeeded: bool, now: Instant) {
-        if succeeded {
-            self.pending.remove(&id);
-            if self.confirmed.len() >= 2048 {
-                self.confirmed.clear();
+    fn completed(&mut self, id: String, outcome: ReceiptOutcome, now: Instant) {
+        match outcome {
+            ReceiptOutcome::Done => {
+                self.pending.remove(&id);
+                self.failures.remove(&id);
+                if self.confirmed.len() >= 2048 {
+                    self.confirmed.clear();
+                }
+                self.confirmed.insert(id);
             }
-            self.confirmed.insert(id);
-        } else {
-            self.pending.insert(id, Some(now + Duration::from_secs(2)));
+            ReceiptOutcome::Refused => {
+                self.pending.remove(&id);
+                self.failures.remove(&id);
+                if self.refused.len() >= 2048 {
+                    self.refused.clear();
+                }
+                self.refused.insert(id);
+            }
+            ReceiptOutcome::Retry => {
+                let tries = self.failures.entry(id.clone()).or_insert(0);
+                *tries = tries.saturating_add(1);
+                // 2 s, 4 s, 8 s ... up to a minute: a message st keeps failing is not asked every
+                // few seconds.
+                let wait = Duration::from_secs((2_u64 << (*tries - 1).min(5)).min(60));
+                self.pending.insert(id, Some(now + wait));
+            }
         }
     }
 }
@@ -106,9 +175,76 @@ pub struct Context {
     pub person: String,
     pub cache_path: Option<std::path::PathBuf>,
     pub cached: Option<Model>,
-    /// `stui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
+    /// `st ui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
     /// named glass or the last one used on this device.
     pub glass: Option<Option<String>>,
+    pub(crate) open_timing: Option<super::open_timing::Trace>,
+    pub(crate) process_started: Instant,
+    pub initial_subject: Option<String>,
+    /// Where seats on this machine leave requests to show something; none for a paired device.
+    pub requests: Option<std::path::PathBuf>,
+}
+
+// Setup's initial destination waits for a live inventory, rather than cached agent data.
+// Consume it after the first ready inventory so later updates leave the person's focus alone.
+pub(super) fn focus_initial_subject(
+    ui: &mut Ui,
+    subject: &mut Option<String>,
+    agents_live: bool,
+    glasses_ready: bool,
+) {
+    if !agents_live || !glasses_ready || !matches!(ui.world.link, super::view::Link::Live) {
+        return;
+    }
+    let Some(id) = subject.take() else {
+        return;
+    };
+    if !ui.world.agents.items().iter().any(|agent| agent.id == id) {
+        return;
+    }
+    ui.open(&id);
+}
+
+/// Open what seats asked for with `st ui open`, once the inventory is live: an agent a seat has
+/// only just made is waited for, and one that never appears is answered as not found.
+pub(super) fn answer_open_requests(
+    ui: &mut Ui,
+    inbox: &mut super::requests::Inbox,
+    ready: bool,
+) {
+    inbox.read();
+    if !ready || !matches!(ui.world.link, super::view::Link::Live) {
+        return;
+    }
+    let waiting = inbox
+        .waiting()
+        .map(|(request, since)| (request.clone(), since.elapsed()))
+        .collect::<Vec<_>>();
+    for (request, waited) in waiting {
+        let Ok(pane) = super::requests::pane_for(&request.subject) else {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+            continue;
+        };
+        if ui.inventory_has(&pane) {
+            let answer = ui.open_requested(
+                pane,
+                request.place,
+                request.keep_focus,
+                request.from.as_deref(),
+            );
+            inbox.answer(&request.id, &answer);
+        } else if waited >= super::requests::GRACE {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+        }
+    }
+}
+
+fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
+    if matches!(input, Event::Key(_) | Event::Paste(_))
+        || matches!(input, Event::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
+    {
+        *subject = None;
+    }
 }
 
 /// The terminal the feed follows for the open terminal view.
@@ -118,10 +254,98 @@ struct Following {
     incarnation: String,
 }
 
-/// How often usage on screen is read again.
-const USAGE_EVERY: Duration = Duration::from_secs(60);
-/// How often the connected clients are read again while the fleet shows.
-const CLIENTS_EVERY: Duration = Duration::from_secs(10);
+/// How long the missions window stays followed after a mission list or card leaves the screen.
+const MISSIONS_GRACE: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct InventoryGrace(BTreeMap<Inventory, Instant>);
+impl InventoryGrace {
+    fn followed(&mut self, visible: Inventories, now: Instant) -> Inventories {
+        // A changed period replaces the old usage slot immediately; leaving the screen keeps
+        // its last period through the same grace as the other windows.
+        if let Some(hours) = visible.usage_hours {
+            self.0.retain(|inventory, _| !matches!(inventory, Inventory::Usage(old) if *old != hours));
+        }
+        for inventory in visible.windows() { self.0.insert(inventory, now + MISSIONS_GRACE); }
+        self.0.retain(|_, until| *until > now);
+        let mut held = Inventories::default();
+        for inventory in self.0.keys() {
+            match inventory {
+                Inventory::Clients => held.clients = true, Inventory::Usage(hours) => held.usage_hours = Some(*hours),
+                Inventory::Machines => held.machines = true, Inventory::Devices => held.devices = true,
+                Inventory::Sessions => held.sessions = true, Inventory::Terminals => held.terminals = true,
+            }
+        }
+        held
+    }
+}
+
+enum InventoryRead {
+    Rows(Inventory, Result<Collection, String>),
+    Terminals(Result<(Vec<Resource>, bool), String>),
+    Clients(Result<st3_client::ClientConnections, String>),
+    Usage(u64, Result<st3_client::UsagePeriod, String>),
+}
+impl InventoryRead {
+    fn inventory(&self) -> Inventory {
+        match self { Self::Rows(inventory, _) => *inventory, Self::Terminals(_) => Inventory::Terminals,
+            Self::Clients(_) => Inventory::Clients, Self::Usage(hours, _) => Inventory::Usage(*hours) }
+    }
+}
+
+async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRead {
+    match inventory {
+        Inventory::Machines => InventoryRead::Rows(inventory, model::read_machines(client).await.map_err(|error| error.to_string())),
+        Inventory::Devices => InventoryRead::Rows(inventory, model::read_devices(client).await.map_err(|error| error.to_string())),
+        Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
+        Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.plain())),
+        Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
+            ClientError::Api(st3_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
+            error => error.plain(),
+        })),
+        Inventory::Usage(hours) => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            InventoryRead::Usage(hours, client.usage_period(Some(now.saturating_sub(hours.saturating_mul(3_600_000))), None).await.map(|reply| reply.value).map_err(|error| usage_error(&error)))
+        }
+    }
+}
+
+fn terminal_rows(items: Vec<Resource>) -> Vec<super::resource_sidebar::ResourceRow> {
+    items.into_iter().filter_map(|item| match item {
+        Resource::Runtime(runtime) => runtime.terminal_id.map(|terminal| super::resource_sidebar::ResourceRow {
+            id: runtime.header.id, kind: "Terminals".into(), title: runtime.owner_id, open: terminal, missing: false,
+        }),
+        _ => None,
+    }).collect()
+}
+
+/// A polled inventory's read finished at `now` (older daemons serve no inventory windows).
+/// Its error is held until it has kept failing for the time the feed waits before reporting a
+/// window (`feed::REPORT_AFTER`); a read that succeeds clears both the clock and the error.
+fn note_legacy_read(
+    failing: &mut BTreeMap<&'static str, Instant>,
+    errors: &mut BTreeMap<String, String>,
+    name: &'static str,
+    error: Option<&String>,
+    now: Instant,
+) {
+    match error {
+        Some(error) => {
+            let since = *failing.entry(name).or_insert(now);
+            if now.duration_since(since) >= feed::REPORT_AFTER {
+                errors.insert(name.into(), error.clone());
+            }
+        }
+        None => {
+            failing.remove(name);
+            errors.remove(name);
+        }
+    }
+}
+
+fn window_label(window: Window) -> String {
+    match window { Window::Inventory(inventory) => inventory.collection().into(), _ => format!("{window:?}") }
+}
 
 /// Why usage could not be read, saying so plainly when the daemon predates the read.
 fn usage_error(error: &st3_client::ClientError) -> String {
@@ -137,8 +361,28 @@ fn usage_error(error: &st3_client::ClientError) -> String {
     }
 }
 
+/// A disappearing card can race the action's reply (including a refusal). Count
+/// landing only when both the action succeeded and a fresh window showed it gone.
+struct AnswerTiming {
+    sent: Instant,
+    accepted: bool,
+    gone: bool,
+    seen: bool,
+}
+impl AnswerTiming {
+    fn new(sent: Instant) -> Self {
+        Self { sent, accepted: false, gone: false, seen: false }
+    }
+    fn landed(&self) -> Option<Instant> {
+        (self.accepted && self.gone).then_some(self.sent)
+    }
+}
+
 enum Fetched {
-    Read(String, Result<(), String>),
+    Content(super::content::Key, Result<super::content::Fetched, String>),
+    /// An image's terminal encoding, built on a worker for the size a draw asked.
+    Protocol(super::content::Key, u16, u16, super::content::Encoding),
+    Read(String, ReceiptOutcome),
     /// A page before the oldest entry of a conversation's session: its entries, whether st
     /// holds more before them, and the cursor for that next page; or why it could not be read.
     Older {
@@ -152,23 +396,21 @@ enum Fetched {
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
+    AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
-    Sessions(Collection),
+    Session(String, Result<Box<st3_client::Session>, String>),
     /// The Fleet tab's machines and paired devices.
-    Machines(Collection),
-    /// Token spend over a period of this many hours, or why st could not say.
-    Usage(u64, Result<st3_client::UsagePeriod, String>),
-    /// The clients connected to this member, or why they could not be read.
-    Clients(
-        Result<st3_client::ClientConnections, String>,
-        Option<String>,
-    ),
+    Observations { generation: u64, outcome: Result<(Vec<st3_client::ResourceObservation>, bool), String> },
+    Inventory { generation: u64, result: InventoryRead },
     /// st's conversation search for the palette's query, or why st could not say.
     Said(String, Result<st3_client::ConversationSearch, String>),
-    Devices(Collection),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
     /// answer is unknown.
     Sent(String, Result<Option<String>, (String, bool)>),
+    /// The longest message st says it takes, in UTF-8 bytes; None when it does not say.
+    MessageLimit(Result<Option<usize>, ()>),
+    /// The `sync` notice on a one-row Attention page: None when st says nothing is missing.
+    Sync(Result<Option<st3_client::SyncNotice>, ()>),
     /// st started an agent asked for here.
     /// st started a shell asked for here.
     TerminalStarted(String),
@@ -182,6 +424,8 @@ enum Fetched {
         agent: String,
         outcome: Result<Direct, String>,
     },
+    /// A shell's attach was refused for a reason that passes; it is being tried again.
+    AttachWaiting { agent: String, reason: String },
     /// st gave no direct stream; follow its view of the terminal instead.
     NativeFailed {
         agent: String,
@@ -189,6 +433,8 @@ enum Fetched {
         reason: String,
     },
     /// st answered a glass write: the glass, the write's key, and the revision it accepted.
+    /// An error carries whether st refused it because the Sidebar was retired.
+    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), (String, bool)> },
     GlassSaved {
         id: String,
         key: String,
@@ -252,9 +498,18 @@ pub fn run(context: Context) -> Result<()> {
         cache_path,
         cached,
         glass,
+        mut open_timing,
+        process_started,
+        mut initial_subject,
+        requests,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
+    // What seats ask this terminal to show (`st ui open`); a paired device has no seats here.
+    let mut open_requests = super::requests::Inbox::new(requests);
     let mut model = cached.unwrap_or_default();
+    let mut agents_live = false;
+    // The feed announces a granted glasses window before sending any core window.
+    let mut glasses_ready = true;
     // The attention window is already this person's; nothing else names the actor.
     model.actor = person.clone();
     let mut extras = Extras::default();
@@ -265,8 +520,13 @@ pub fn run(context: Context) -> Result<()> {
     let mut filled: BTreeMap<String, usize> = BTreeMap::new();
     // The agent or session whose conversation the feed holds.
     let mut conversing: Vec<String> = Vec::new();
+    let mut opens: BTreeMap<String, Instant> = BTreeMap::new();
+    let mut terminal_opens: BTreeMap<String, Instant> = BTreeMap::new();
+    let mut answers: BTreeMap<String, AnswerTiming> = BTreeMap::new();
+    let mut landed_answers: Vec<Instant> = Vec::new();
     // The session each conversation was last subscribed again for, so it is asked once.
     let mut resubscribed: BTreeMap<String, String> = BTreeMap::new();
+    let mut sessions_requested = HashSet::new();
     let mut preview_requested: HashSet<String> = HashSet::new();
     let mut body_requested: HashSet<String> = HashSet::new();
     let mut read_receipts = ReadReceipts::default();
@@ -274,6 +534,17 @@ pub fn run(context: Context) -> Result<()> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
+    ui.drafts_path = super::drafts_store::path();
+    let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
+    ui.load_drafts();
+    ui.quality = super::slo::Draw::new(process_started);
+    if earlier.is_some() {
+        super::slo::METRICS.add("drafts_restored_unclean", ui.drafts_saved.len() as u64);
+    }
+    if glass.is_some() {
+        ui.resource_sidebar.load(&person);
+    }
+    ui.resource_sidebar.observe(&ui.world);
     ui.build = true;
     ui.live = true;
     ui.glasses = glass.map(|name| {
@@ -283,14 +554,13 @@ pub fn run(context: Context) -> Result<()> {
     ui.show_focused();
     if ui.glasses.is_none() {
         ui.flash(
-            "The classic layout is going away: plain stui opens spaces, with Ctrl+S for this list",
+            "The classic layout is going away: plain st opens spaces, with Ctrl+S for this list",
         );
     } else if std::env::args().any(|arg| arg == "--old") {
         ui.flash("The old screens are gone: this is spaces, and ? shows its keys");
     }
 
     // A stui killed from outside leaves its last picture on the screen; the next one says so.
-    let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     if let Some(note) = earlier {
         // Long enough to read: the usual flash ends after four seconds.
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
@@ -301,51 +571,89 @@ pub fn run(context: Context) -> Result<()> {
     if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
         panic!("terminal restoration probe");
     }
-    // How images are drawn: asked of a terminal known to draw them, once, inside the
-    // alternate screen and before any event is read. A terminal that never answers would
-    // leave the query reading stdin and swallow keys, so others get half blocks unasked.
-    ui.picker = Some(if super::attach::graphics_terminal() {
+    // How images are drawn: asked of the terminal itself, once, inside the alternate screen and
+    // before any event is read, as ratatui-image asks it (kitty graphics, sixel in its device
+    // attributes, iTerm2, through tmux too). Only a terminal that answered a status report is
+    // asked: one that never answers would leave the query reading stdin and swallow keys, so it
+    // gets half blocks unasked. Images load by themselves only where the terminal draws them.
+    let answered = super::attach::terminal_answers(Duration::from_millis(400));
+    let picker = if answered {
         ratatui_image::picker::Picker::from_query_stdio()
             .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks())
     } else {
         ratatui_image::picker::Picker::halfblocks()
-    });
+    };
+    ui.auto_images =
+        picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks;
+    ui.picker = Some(picker);
     // Clickable addresses (OSC 8) where the terminal draws images, as kitty and its kin do.
     let hyperlinks = super::attach::graphics_terminal();
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
     let started = Instant::now();
     let mut changed = true;
+    let mut offline_drawn = false;
+    // When st is next asked how long a message it takes: on connecting, then now and then, since
+    // a daemon that is upgraded changes it.
+    let mut limit_next = Instant::now();
     let stopping = super::stop_flag()?;
     let mut attached: Option<Following> = None;
     // The runtimes of the agent whose terminal view is open, to follow it again after a pause.
     let mut terminal_runtimes: Option<Vec<String>> = None;
     let mut terminal_runtimes_by_agent: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    // Attaching a dropped terminal again: whether a try is out, and how many failed.
-    let mut reattaching = false;
+    // The fleet host that owns each opened terminal, so a dropped stream attaches again directly.
+    let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
     // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
     let mut attach_started: Option<Instant> = None;
-    let mut reattach_tries = 0_u32;
+    // Why the attach in progress is waiting, when st refused it for a reason that passes.
+    let mut attach_note: Option<String> = None;
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
     let mut shown_tab = usize::MAX;
-    // When usage was last asked for and over how many hours, and whether that read is out.
-    let mut usage_read: Option<(Instant, u64)> = None;
-    // When the connected clients were last read, while the fleet shows, and whether a read is out.
-    let mut clients_read: Option<Instant> = None;
-    let mut clients_reading = false;
-    let mut usage_reading = false;
+    let mut resources_shown = false;
+    let mut resource_pane = None;
+    let mut resources_stale = true;
+    let mut resources_reading = false;
+    let mut resources_generation = 0_u64;
+    // Whether the feed was last told to follow the missions window, and until when the last time
+    // one was on screen keeps it followed.
+    let mut missions_sent = false;
+    let mut missions_until: Option<Instant> = None;
+    let mut content_reads = super::content::Reads::default();
+    // Image encodings being built on a worker, by image and size, so each is built once.
+    let mut encoding: std::collections::BTreeSet<(super::content::Key, u16, u16)> =
+        std::collections::BTreeSet::new();
+    let mut inventory_grace = InventoryGrace::default();
+    let mut inventory_sent: Option<Inventories> = None;
+    let mut usage_wanted_hours = None;
+    let mut legacy_requested = BTreeSet::new();
+    // When each polled inventory first failed on this run of failures: a read that fails for a
+    // moment (a daemon catching up) is not said; one that keeps failing is.
+    let mut legacy_failing: BTreeMap<&'static str, Instant> = BTreeMap::new();
+    let mut legacy_pending = BTreeSet::new();
     // The palette's conversation search: what st was last asked, and what is typed since when.
     let mut said_asked: Option<String> = None;
     let mut said_typed: Option<(String, Instant)> = None;
     let mut last_cache_save = Instant::now();
+    // The notice the page read last found, carried onto every window the stream rebuilds.
+    let mut page_sync: Option<st3_client::SyncNotice> = None;
+    let mut sync_read_at: Option<Instant> = None;
+    // When a read is wanted, because a frame after the first showed the graph moving.
+    let mut sync_due: Option<Instant> = None;
+    // The windows whose first frame has arrived on this connection: that frame is not a change.
+    let mut windows_seen: BTreeSet<String> = BTreeSet::new();
     // A closed terminal ends the loop: without this check a detached stui spins and keeps
     // polling the daemon forever.
     while !ui.quit
         && !stopping.load(std::sync::atomic::Ordering::Relaxed)
         && !crate::stdin_hung_up()
     {
+        let turn_started = Instant::now();
+        // A program written over on disk while it runs is told to the person at once, and noted.
+        if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
+            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+        }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
             .flash
@@ -364,18 +672,79 @@ pub fn run(context: Context) -> Result<()> {
                 .as_deref()
                 .is_some_and(|stale| stale.starts_with("connecting"))
         {
-            view.stale = Some(connecting_text(started.elapsed()));
+            view.stale = Some(match &attach_note {
+                Some(reason) => format!("{} · {reason}, trying again", connecting_text(started.elapsed())),
+                None => connecting_text(started.elapsed()),
+            });
+        }
+        if extras.live && Instant::now() >= limit_next {
+            limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
+            let client = client.clone();
+            let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let limit = client
+                    .capabilities()
+                    .await
+                    .map(|found| found.value.limits.max_message_bytes)
+                    .map_err(|_| ());
+                let _ = tx.send(Fetched::MessageLimit(limit));
+            });
+        }
+        if sync_due.is_some_and(|due| Instant::now() >= due) && extras.live && extras.offline.is_none() {
+            sync_due = None;
+            sync_read_at = Some(Instant::now());
+            read_sync(&runtime, &client, &fetched_tx);
         }
         while let Ok(update) = incoming.try_recv() {
             match update {
-                feed::Update::GlassesVersion(version) => super::set_glasses_version(version),
+                feed::Update::GlassesVersion(version) => {
+                    super::set_glasses_version(version);
+                    glasses_ready = ui.glasses.is_none();
+                }
                 feed::Update::Connected(member) => {
+                    limit_next = Instant::now();
+                    // Another member may say something else: drop the old notice and read this
+                    // member's once, ahead of its first frames.
+                    page_sync = None;
+                    fill_notice(&mut model, None);
+                    windows_seen.clear();
+                    sync_due = None;
+                    sync_read_at = Some(Instant::now());
+                    read_sync(&runtime, &member, &fetched_tx);
+                    ui.quality.live(false);
+                    agents_live = false;
+                    glasses_ready = true;
                     client = member;
+                    resources_generation += 1;
+                    resources_stale = true;
+                    extras.inventory_supported = None;
+                    extras.inventory_partial.clear();
+                    inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
+                    sessions_requested.clear();
                     preview_requested.clear();
                     body_requested.clear();
+                    changed = true;
+                }
+                feed::Update::InventorySupport { granted, member_build } => {
+                    extras.inventory_supported = Some(granted);
+                    model.member_build = member_build;
+                    changed = true;
+                }
+                feed::Update::Window { window: Window::Arrangements, items, .. } => {
+                    ui.resource_sidebar.writable = true;
+                    ui.resource_sidebar.arrangements = items.into_iter().filter_map(|item| match item {
+                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted
+                            && matches!(arrangement.body, st3_client::ArrangementBody::V1(_)) => Some(arrangement),
+                        _ => None,
+                    }).collect();
+                    if ui.resource_sidebar.arrangements.iter().any(|a| a.v1().folders.values().any(|folder| folder.tombstone.is_none()))
+                        && let Some(glasses) = ui.glasses.as_mut()
+                        && !glasses.sidebar.configured {
+                        glasses.sidebar.shown = true;
+                    }
                     changed = true;
                 }
                 feed::Update::Window {
@@ -383,6 +752,7 @@ pub fn run(context: Context) -> Result<()> {
                     items,
                     ..
                 } => {
+                    glasses_ready = true;
                     ui.glasses_from_graph(
                         items
                             .into_iter()
@@ -395,31 +765,92 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Window {
+                    received,
                     window,
                     snapshot,
                     items,
                     has_more,
                 } => {
+                    if matches!(window, Window::Attention | Window::Agents) {
+                        ui.quality
+                            .frame(received, if window == Window::Attention { 1 } else { 2 });
+                    }
+                    if window == Window::Attention && !has_more {
+                        // Reuse the pending-answer index: one lookup per card, rather
+                        // than scanning the whole window separately for every answer.
+                        for timing in answers.values_mut() { timing.seen = false; }
+                        for item in &items {
+                            if let Resource::Attention(card) = item
+                                && let Some(timing) = answers.get_mut(&card.header.id) {
+                                timing.seen = card.state != "resolved";
+                            }
+                        }
+                        answers.retain(|_, timing| {
+                            if !timing.seen { timing.gone = true; }
+                            if let Some(at) = timing.landed() {
+                                landed_answers.push(at);
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                    }
+                    extras.window_errors.remove(&window_label(window));
+                    if matches!(window, Window::Attention | Window::Agents) {
+                        let first = windows_seen.insert(window_label(window));
+                        sync_due = sync_due_after_frame(first, sync_read_at, sync_due, Instant::now());
+                    }
+                    if window == Window::Summary {
+                        extras.summary = items.iter().find_map(|item| match item {
+                            Resource::Summary(summary) => Some(summary.clone()),
+                            _ => None,
+                        });
+                        changed = true;
+                        continue;
+                    }
                     // Back in touch: glass changes st has not confirmed go again, same keys.
                     if !extras.live {
                         for write in ui.unsent_glass_writes() {
                             save_glass(&runtime, &client, &fetched_tx, write);
                         }
                     }
-                    let collection = Collection {
-                        items,
-                        snapshot: Some(snapshot),
-                        truncated: has_more,
-                        sync: None,
-                    };
+                    if let Window::Inventory(inventory) = window {
+                        extras.inventory_partial.retain(|name| name != inventory.collection());
+                        if has_more { extras.inventory_partial.push(inventory.collection().into()); }
+                    }
+                    let collection = window_collection(items, snapshot, has_more, page_sync.as_ref());
                     match window {
-                        Window::Attention => model.now = collection,
-                        Window::Missions => model.missions = collection,
-                        Window::Agents => model.agents = collection,
-                        Window::Glasses => {}
+                        Window::Attention => {
+                            model.now = collection;
+                            extras.attention_live = true;
+                        }
+                        Window::Missions => {
+                            model.missions = collection;
+                            extras.missions_followed = true;
+                        }
+                        Window::Agents => {
+                            model.agents = collection;
+                            extras.agents_live = true;
+                            agents_live = true;
+                        }
+                        Window::Inventory(inventory) => match inventory {
+                            Inventory::Machines => model.machines = collection,
+                            Inventory::Devices => model.devices = collection,
+                            Inventory::Sessions => model.sessions = collection,
+                            Inventory::Terminals => {
+                                ui.resource_sidebar.terminals = terminal_rows(collection.items);
+                                ui.resource_sidebar.terminals_has_more = collection.truncated;
+                            }
+                            Inventory::Clients => model.clients = Some(Ok(model::inventory_clients(collection.items, collection.snapshot.as_ref().unwrap().host_id.clone()))),
+                            Inventory::Usage(hours) if hours == ui.usage_hours => model.usage = Some(model::inventory_usage(collection.items)),
+                            Inventory::Usage(_) => {},
+                        },
+                        Window::Glasses | Window::Summary | Window::Arrangements => {}
                     }
                     extras.live = true;
                     extras.offline = None;
+                    extras.offline_since = None;
+                    extras.degraded = None;
                     model.last_connected =
                         Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
                     changed = true;
@@ -430,12 +861,30 @@ pub fn run(context: Context) -> Result<()> {
                     replace,
                     has_more,
                     items,
+                    header,
                 } => {
+                    if let Some(trace) = &mut open_timing {
+                        trace.received(&target, items.len());
+                    }
+                    if opens.contains_key(&target)
+                        && adapt::unreadable_transcript(&items).is_some()
+                        && opens.remove(&target).is_some()
+                    {
+                        super::slo::METRICS.add("open_not_bound", 1);
+                    }
                     failed.remove(&target);
-                    if replace && !timelines.get(&target).is_some_and(|timeline| timeline.older.paged) {
+                    if replace
+                        && !timelines
+                            .get(&target)
+                            .is_some_and(|timeline| timeline.older.paged)
+                    {
                         filled.remove(&target);
                     }
                     ui.conversation_updated(&target);
+                    if let Some(header) = &header {
+                        ui.conversation_headers
+                            .insert(target.clone(), header.clone());
+                    }
                     timelines
                         .entry(target)
                         .or_default()
@@ -444,14 +893,20 @@ pub fn run(context: Context) -> Result<()> {
                             has_more,
                             items,
                             session_id: Some(session_id),
+                            header,
                         });
                     // A message sent from here is done once st shows it in the conversation.
                     pending.retain(|pending| {
-                        pending.message_id.as_ref().is_none_or(|id| {
-                            !timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
-                                matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
-                            })
-                        })
+                        let Some(id) = pending.message_id.as_ref() else {
+                            return true;
+                        };
+                        let shown = timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
+                            matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
+                        });
+                        if shown {
+                            super::slo::METRICS.observe("send_visible_ms", pending.since.elapsed());
+                        }
+                        !shown
                     });
                     changed = true;
                 }
@@ -459,20 +914,72 @@ pub fn run(context: Context) -> Result<()> {
                     target,
                     message,
                     permanent,
+                    code,
                 } => {
+                    if opens.remove(&target).is_some() {
+                        super::slo::METRICS.add(
+                            match code {
+                                Some(st3_client::ErrorCode::RemoteUnavailable) => {
+                                    "open_remote_unavailable"
+                                }
+                                _ => "open_cannot_load",
+                            },
+                            1,
+                        );
+                    }
                     // A permanent refusal is said once, without "retrying".
                     if !permanent {
                         ui.conversation_failed(&target, &message);
+                    } else {
+                        ui.stalled.remove(&target);
                     }
                     failed.insert(target, message);
                     changed = true;
                 }
+                feed::Update::WindowStopped(window) => {
+                    if let Window::Inventory(inventory) = window {
+                        extras.window_errors.remove(&window_label(window));
+                        extras.inventory_partial.retain(|name| name != inventory.collection());
+                        changed = true;
+                    }
+                    // A window left on purpose (no Missions list on screen): what was held for it
+                    // is out of date and not shown as current.
+                    if window == Window::Missions {
+                        model.missions = Collection::default();
+                        extras.missions_followed = false;
+                        changed = true;
+                    }
+                }
                 feed::Update::WindowFailed(window, error) => {
-                    ui.flash(format!("Could not load {window:?}: {error}"));
+                    if let Window::Inventory(Inventory::Clients) = window && model.clients.is_none() { model.clients = Some(Err(error.clone())); }
+                    if let Window::Inventory(Inventory::Usage(hours)) = window && hours == ui.usage_hours && model.usage.is_none() { model.usage = Some(Err(error.clone())); }
+                    // Not flashed: a window that fails is retried quietly and the last good view
+                    // stays. What is left to say (it has not loaded, or has stayed unserved past
+                    // `REPORT_AFTER`, which the feed waits before sending this) goes where the
+                    // window is shown.
+                    extras.window_errors.insert(window_label(window), error);
+                    changed = true;
+                }
+                feed::Update::Degraded(reason) => {
+                    ui.quality.live(false);
+                    // st answered; only its live stream is being replaced. Not offline, and
+                    // nothing on screen is cleared.
+                    extras.live = false;
+                    extras.offline = None;
+                    extras.offline_since = None;
+                    ui.flash(format!(
+                        "Live stream lost ({reason}); st answers, reconnecting"
+                    ));
+                    extras.degraded = Some(reason);
+                    attached = None;
+                    changed = true;
                 }
                 feed::Update::Offline(error) => {
+                    ui.quality.live(false);
                     extras.live = false;
+                    extras.degraded = None;
                     extras.offline = Some(error);
+                    extras.offline_since.get_or_insert_with(Instant::now);
                     attached = None;
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
@@ -508,6 +1015,13 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                     TerminalUpdate::Ended { restarted, reason } => {
+                        if ui
+                            .terminal
+                            .as_ref()
+                            .is_some_and(|view| view.ended.is_none())
+                        {
+                            super::slo::METRICS.add("dead_terminal_tabs", 1);
+                        }
                         attached = None;
                         match ui.terminal.as_mut() {
                             Some(view) => {
@@ -528,34 +1042,99 @@ pub fn run(context: Context) -> Result<()> {
         }
         while let Ok(result) = fetched.try_recv() {
             match result {
-                Fetched::Read(id, result) => {
-                    read_receipts.completed(id, result.is_ok(), Instant::now());
+                Fetched::Content(key, result) => {
+                    content_reads.complete(&key);
+                    ui.content.finish(key, result);
                 }
+                Fetched::Protocol(key, width, height, protocol) => {
+                    encoding.remove(&(key.clone(), width, height));
+                    ui.content.install_protocol(key, width, height, protocol);
+                }
+                Fetched::Read(id, result) => {
+                    read_receipts.completed(id, result, Instant::now());
+                }
+                // A failed read keeps what was last found; the next try is the next minute.
+                Fetched::Sync(Ok(notice)) => {
+                    page_sync = notice;
+                    fill_notice(&mut model, page_sync.as_ref());
+                }
+                Fetched::Sync(Err(())) => {}
+                Fetched::MessageLimit(limit) => match limit {
+                    Ok(limit) => {
+                        ui.message_limit = limit;
+                        limit_next = Instant::now() + MESSAGE_LIMIT_REREAD;
+                    }
+                    // Asked again soon; the last answer stands meanwhile.
+                    Err(()) => limit_next = Instant::now() + MESSAGE_LIMIT_RETRY,
+                },
                 Fetched::Sent(token, outcome) => {
+                    let mut restored = false;
                     if let Some(entry) = pending.iter_mut().find(|entry| entry.token == token) {
                         match outcome {
                             Ok(id) => {
+                                super::slo::METRICS.observe("send_ack_ms", entry.since.elapsed());
                                 entry.message_id = id;
                                 entry.failed = None;
                                 entry.unconfirmed = false;
                             }
                             Err((error, unconfirmed)) => {
+                                // st said no, or never took it: the text goes back to the box
+                                // for the person to change, unless something newer is there. A
+                                // send whose answer was lost stays here as unconfirmed, so it is
+                                // never sent twice.
+                                if !unconfirmed
+                                    && let Effect::Send {
+                                        agent,
+                                        text,
+                                        in_reply_to,
+                                        tags,
+                                        images,
+                                    } = &entry.effect
+                                {
+                                    restored = ui.restore_refused(
+                                        agent,
+                                        text,
+                                        in_reply_to.clone(),
+                                        tags,
+                                        images,
+                                    );
+                                }
+                                if restored {
+                                    ui.flash_for(
+                                        format!("Not sent: {error}. Your message is back in the box"),
+                                        super::FLASH_REFUSAL,
+                                    );
+                                } else {
+                                    ui.flash_for(
+                                        format!("Not sent: {error}"),
+                                        super::FLASH_REFUSAL,
+                                    );
+                                }
                                 entry.failed = Some(error);
                                 entry.unconfirmed = unconfirmed;
                             }
                         }
                     }
+                    if restored {
+                        pending.retain(|entry| entry.token != token);
+                    }
                     // st took it. The copy here gives way once the conversation shows it, which
                     // may already have happened; with no id to look for, at once.
                     pending.retain(|entry| {
-                        entry.token != token
-                            || entry.failed.is_some()
-                            || entry.message_id.as_ref().is_some_and(|id| {
-                                !timelines
-                                    .values()
-                                    .flat_map(|timeline| &timeline.items)
-                                    .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
-                            })
+                        if entry.token != token || entry.failed.is_some() {
+                            return true;
+                        }
+                        // Already in the conversation when st answered: visible as sent now.
+                        let waiting = entry.message_id.as_ref().is_some_and(|id| {
+                            !timelines
+                                .values()
+                                .flat_map(|timeline| &timeline.items)
+                                .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
+                        });
+                        if !waiting {
+                            super::slo::METRICS.observe("send_visible_ms", entry.since.elapsed());
+                        }
+                        waiting
                     });
                 }
                 Fetched::Preview(id, preview) => {
@@ -565,10 +1144,45 @@ pub fn run(context: Context) -> Result<()> {
                     extras.bodies.insert(id, (from, title, content));
                 }
                 Fetched::Notice(notice) => ui.flash(notice),
-                Fetched::Sessions(native) => {
-                    model.sessions = native;
+                Fetched::AlertOutcome(id, accepted) => {
+                    if !accepted {
+                        answers.remove(&id);
+                    } else if let Some(timing) = answers.get_mut(&id) {
+                        timing.accepted = true;
+                        if let Some(at) = timing.landed() {
+                            landed_answers.push(at);
+                            answers.remove(&id);
+                        }
+                    }
                 }
-                Fetched::Machines(machines) => model.machines = machines,
+                Fetched::Session(id, outcome) => match outcome {
+                    Ok(session) => model.add_opened_session(*session),
+                    Err(message) => {
+                        if opens.remove(&id).is_some() {
+                            super::slo::METRICS.add("open_cannot_load", 1);
+                        }
+                        ui.flash(format!("Could not open {id}: {message}"));
+                        failed.insert(id, format!("{message} · open it again to retry"));
+                    }
+                },
+                Fetched::SidebarSaved { write, outcome } => {
+                    ui.resource_sidebar.saved(&write, outcome.is_ok());
+                    match outcome {
+                        Ok(()) => {}
+                        // The reserved Sidebar is retired: never create it again.
+                        Err((_, true)) if write.creating => {
+                            ui.resource_sidebar.reserved_retired = true;
+                            ui.flash(super::resource_sidebar::SIDEBAR_RETIRED);
+                        }
+                        Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
+                    }
+                }
+                Fetched::Observations { generation, outcome } => {
+                    resources_reading = false;
+                    if generation == resources_generation { match outcome {
+                    Ok((rows, has_more)) => { ui.resource_sidebar.observations = rows; ui.resource_sidebar.observations_has_more = has_more; ui.resource_sidebar.observations_issue = None; }
+                    Err(error) => ui.resource_sidebar.observations_issue = Some(error),
+                }}},
                 Fetched::Older {
                     target,
                     session_id,
@@ -595,32 +1209,52 @@ pub fn run(context: Context) -> Result<()> {
                     ui.said = Some((query, outcome));
                     changed = true;
                 }
-                Fetched::Clients(outcome, member_build) => {
-                    clients_reading = false;
-                    model.clients = Some(outcome);
-                    if member_build.is_some() {
-                        model.member_build = member_build;
-                    }
-                }
-                Fetched::Usage(hours, outcome) => {
-                    usage_reading = false;
-                    if hours == ui.usage_hours {
-                        match outcome {
-                            Ok(period) => model.usage = Some(Ok(period)),
-                            // Rows already shown stay; a passing failure is only mentioned.
-                            Err(why) if matches!(model.usage, Some(Ok(_))) => {
-                                ui.flash(format!("Could not read usage again: {why}"))
+                Fetched::Inventory { generation, result } => {
+                    if generation != resources_generation || extras.inventory_supported != Some(false) { continue; }
+                    legacy_pending.remove(&result.inventory());
+                    if matches!(&result, InventoryRead::Usage(hours, _) if *hours != ui.usage_hours) { continue; }
+                    let name = result.inventory().collection();
+                    let error = match &result {
+                        InventoryRead::Rows(_, outcome) => outcome.as_ref().err(),
+                        InventoryRead::Terminals(outcome) => outcome.as_ref().err(),
+                        InventoryRead::Clients(outcome) => outcome.as_ref().err(),
+                        InventoryRead::Usage(_, outcome) => outcome.as_ref().err(),
+                    };
+                    note_legacy_read(&mut legacy_failing, &mut extras.window_errors, name, error, Instant::now());
+                    match result {
+                        // A failed read keeps the last good rows; the stale note says so if it lasts.
+                        InventoryRead::Rows(inventory, outcome) => if let Ok(rows) = outcome {
+                            match inventory {
+                                Inventory::Machines => model.machines = rows,
+                                Inventory::Devices => model.devices = rows,
+                                Inventory::Sessions => model.sessions = rows,
+                                _ => unreachable!(),
                             }
-                            Err(why) => model.usage = Some(Err(why)),
-                        }
+                        },
+                        InventoryRead::Terminals(outcome) => if let Ok((rows, has_more)) = outcome {
+                            ui.resource_sidebar.terminals = terminal_rows(rows);
+                            ui.resource_sidebar.terminals_has_more = has_more;
+                        },
+                        InventoryRead::Clients(outcome) => match outcome {
+                            Ok(clients) => model.clients = Some(Ok(clients)),
+                            // The last good list stays; the stale note says so if it keeps failing.
+                            Err(_) if matches!(model.clients, Some(Ok(_))) => {}
+                            Err(error) => model.clients = Some(Err(error)),
+                        },
+                        InventoryRead::Usage(hours, outcome) if hours == ui.usage_hours => match outcome {
+                            Ok(period) => model.usage = Some(Ok(period)),
+                            Err(_) if matches!(model.usage, Some(Ok(_))) => {}
+                            Err(error) => model.usage = Some(Err(error)),
+                        },
+                        InventoryRead::Usage(_, _) => {},
                     }
                 }
-                Fetched::Devices(devices) => model.devices = devices,
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 Fetched::Native { agent, direct } => {
-                    if let Some(waited) = attach_started.take().map(|at| at.elapsed())
-                        && waited >= Duration::from_secs(3)
+                    attach_note = None;
+                    let waited = attach_started.take().map(|at| at.elapsed());
+                    if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
                     {
                         ui.flash(format!(
                             "Attached after {}s: st was slow to answer",
@@ -628,10 +1262,14 @@ pub fn run(context: Context) -> Result<()> {
                         ));
                     }
                     let (rows, columns) = ui.terminal_size.get();
+                    let route = direct.route.clone();
                     if let Some(view) = ui
                         .terminal_view_mut(&agent)
                         .filter(|view| view.native.is_none())
                     {
+                        // The route stays in the header, so the person can always see it.
+                        view.name = format!("{} · {route}", view.name);
+                        view.title = view.name.clone();
                         view.native = Some(super::pty::NativeTerminal::spawn(
                             direct.stream,
                             &direct.name,
@@ -641,9 +1279,9 @@ pub fn run(context: Context) -> Result<()> {
                         ));
                         view.stale = None;
                     }
+                    ui.flash(format!("Attached · {route}"));
                 }
                 Fetched::Reattached { agent, outcome } => {
-                    reattaching = false;
                     if let Some(native) = ui
                         .terminal_view(&agent)
                         .and_then(|view| view.native.as_ref())
@@ -652,8 +1290,13 @@ pub fn run(context: Context) -> Result<()> {
                             Ok(direct) => native.reconnect(direct.stream, &direct.name),
                             Err(reason) if reason.contains("restarted") => native.give_up(reason),
                             // Still unreachable: the next try waits longer.
-                            Err(_) => reattach_tries += 1,
+                            Err(reason) => native.retry_failed(reason),
                         }
+                    }
+                }
+                Fetched::AttachWaiting { agent, reason } => {
+                    if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+                        attach_note = Some(reason);
                     }
                 }
                 Fetched::NativeFailed {
@@ -661,6 +1304,10 @@ pub fn run(context: Context) -> Result<()> {
                     runtime_ids,
                     reason,
                 } => {
+                    attach_note = None;
+                    if terminal_opens.remove(&agent).is_some() {
+                        super::slo::METRICS.add("terminal_open_errors", 1);
+                    }
                     attach_started = None;
                     if agent.starts_with("terminal/") {
                         // A shell has no other view to fall back to.
@@ -682,6 +1329,19 @@ pub fn run(context: Context) -> Result<()> {
         let (tab, selected) = ui.focus();
         // What a tab needs when it opens: harness sessions st did not start (Agents), and the
         // machines and devices (Fleet). They are read then, never on a timer.
+        let showing_resources = ui.glasses.as_ref().is_some_and(|g| g.sidebar.shown);
+        let focused_resource = match ui.focused_pane() { Some(super::pane::Pane::Resource(id)) => Some(id), _ => None };
+        if tab != shown_tab || showing_resources && !resources_shown || focused_resource.is_some() && focused_resource != resource_pane { resources_stale = true; }
+        resource_pane = focused_resource.clone();
+        if ui.glasses.is_some() && extras.live && resources_stale && !resources_reading {
+            resources_stale = false; resources_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.plain()));
+                let _ = tx.send(Fetched::Observations { generation, outcome });
+            });
+        }
+        resources_shown = showing_resources;
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
             // pauses it, and coming back shows the current screen first.
@@ -700,41 +1360,25 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
             shown_tab = tab;
-            if tab == 1 || model.sessions.snapshot.is_none() {
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    match model::read_native_sessions(&client).await {
-                        Ok(native) => {
-                            let _ = tx.send(Fetched::Sessions(native));
-                        }
-                        Err(error) => {
-                            let _ = tx.send(Fetched::Notice(format!(
-                                "Could not look for other harness sessions: {error}"
-                            )));
-                        }
-                    }
-                });
+        }
+        let visible = ui.inventories_wanted();
+        if let Some(hours) = visible.usage_hours && usage_wanted_hours != Some(hours) {
+            usage_wanted_hours = Some(hours); model.usage = None; changed = true;
+        }
+        if extras.inventory_supported == Some(true) {
+            let held = inventory_grace.followed(visible, Instant::now());
+            if inventory_sent != Some(held) {
+                inventory_sent = Some(held);
+                let _ = commands.send(Command::Inventories(held));
             }
-            // Glasses show the fleet in the status line and the palette, so they need the
-            // machines from the start rather than when a Fleet tab opens.
-            if tab == 3 || (ui.glasses.is_some() && model.machines.snapshot.is_none()) {
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    let (machines, devices) =
-                        tokio::join!(model::read_machines(&client), model::read_devices(&client));
-                    for (result, what) in [(machines, "machines"), (devices, "devices")] {
-                        let _ = tx.send(match result {
-                            Ok(collection) if what == "machines" => Fetched::Machines(collection),
-                            Ok(collection) => Fetched::Devices(collection),
-                            Err(error) => {
-                                Fetched::Notice(format!("Could not load {what}: {error}"))
-                            }
-                        });
-                    }
-                });
+        } else if extras.inventory_supported == Some(false) && extras.live {
+            let wanted = visible.windows().into_iter().collect::<BTreeSet<_>>();
+            for inventory in wanted.difference(&legacy_requested).copied() {
+                if !legacy_pending.insert(inventory) { continue; }
+                let client = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+                runtime.spawn(async move { let result = legacy_inventory(&client, inventory).await; let _ = tx.send(Fetched::Inventory { generation, result }); });
             }
+            legacy_requested = wanted;
         }
         // Ctrl+K asks st's conversation search once what is typed has been still for a moment;
         // an answer to an earlier query is dropped where it lands (Ui::said_choices).
@@ -763,73 +1407,46 @@ pub fn run(context: Context) -> Result<()> {
             }
             _ => {}
         }
-        // Who is connected has no stream either: read while the fleet shows, every few seconds,
-        // since clients come and go.
-        if ui.clients_wanted() && extras.live {
-            let due = clients_read.is_none_or(|at| at.elapsed() >= CLIENTS_EVERY);
-            if due && !clients_reading {
-                clients_read = Some(Instant::now());
-                clients_reading = true;
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    let member_build = client
-                        .capabilities()
-                        .await
-                        .ok()
-                        .and_then(|envelope| envelope.value.machine_version);
-                    let outcome = client
-                        .clients_list()
-                        .await
-                        .map(|envelope| envelope.value)
-                        .map_err(|error| match &error {
-                            ClientError::Api(st3_client::ErrorCode::NotFound, ..) => {
-                                "this st does not list its clients yet: its daemon needs an update"
-                                    .to_owned()
-                            }
-                            _ => error.plain(),
-                        });
-                    let _ = tx.send(Fetched::Clients(outcome, member_build));
-                });
-            }
-        } else {
-            clients_read = None;
-        }
-        // Usage has no stream: it is read while something shows it, again each minute, and at
-        // once over a new period.
-        if let Some(hours) = ui.usage_wanted() {
-            let new_period = usage_read.is_some_and(|(_, read)| read != hours);
-            if new_period {
-                model.usage = None;
-                changed = true;
-            }
-            let due = usage_read.is_none_or(|(at, _)| at.elapsed() >= USAGE_EVERY) || new_period;
-            if due && !usage_reading {
-                usage_read = Some((Instant::now(), hours));
-                usage_reading = true;
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |since| since.as_millis() as u64);
-                    let since = now.saturating_sub(hours * 3_600_000);
-                    let outcome = client
-                        .usage_period(Some(since), None)
-                        .await
-                        .map(|envelope| envelope.value)
-                        .map_err(|error| usage_error(&error));
-                    let _ = tx.send(Fetched::Usage(hours, outcome));
-                });
-            }
-        }
         // Every conversation on screen rides the feed's socket (the focused one first): st
         // pushes each change, so nothing here reads one again on a timer.
         let wanted = ui.live_conversations();
+        for target in &wanted {
+            if !conversing.contains(target) {
+                super::slo::METRICS.add("conversation_opens", 1);
+                opens.insert(target.clone(), Instant::now());
+            }
+        }
+        opens.retain(|target, _| wanted.contains(target));
+        if let Some(trace) = &mut open_timing {
+            trace.intend(&wanted);
+        }
+        retry_failed_opens(&mut sessions_requested, &failed, &wanted);
+        for id in &wanted {
+            if id.starts_with("session/")
+                && !model.opened_sessions.contains_key(id)
+                && sessions_requested.insert(id.clone())
+            {
+                // Opened again after a failure: loading, not the old error, until st answers.
+                failed.remove(id);
+                let client = client.clone();
+                let tx = fetched_tx.clone();
+                let id = id.clone();
+                runtime.spawn(async move {
+                    let outcome = Model::read_session(&client, &id)
+                        .await
+                        .map(Box::new)
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(Fetched::Session(id, outcome));
+                });
+            }
+        }
         if wanted != conversing {
-            let _ = commands.send(Command::Converse {
+            let sent = commands.send(Command::Converse {
                 targets: wanted.clone(),
             });
+            if let Some(trace) = &mut open_timing {
+                trace.enqueue(&wanted, sent.is_ok());
+            }
             conversing = wanted;
             changed = true;
         }
@@ -925,13 +1542,60 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 continue;
             }
-            if !extras.live && !matches!(effect, Effect::CloseTerminal) {
-                ui.flash("Offline · reconnect before acting; nothing was queued");
+            if let Effect::EditArrangement(write) = &effect {
+                let write = write.clone();
+                if !extras.live {
+                    ui.resource_sidebar.saved(&write, false);
+                    ui.flash("Offline · reconnect before editing the sidebar.");
+                } else {
+                    let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone(); let model = model.clone();
+                    runtime.spawn(async move {
+                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| {
+                            let retired = error.chain().any(|cause| matches!(
+                                cause.downcast_ref::<st3_client::ClientError>(),
+                                Some(st3_client::ClientError::Api(st3_client::ErrorCode::ArrangementRetired, ..))
+                            ));
+                            (plain(&error), retired)
+                        });
+                        let _ = tx.send(Fetched::SidebarSaved { write, outcome });
+                    });
+                }
                 continue;
+            }
+            if !extras.live && !matches!(effect, Effect::CloseTerminal) {
+                if let Effect::LoadContent(key) = effect {
+                    ui.content.finish(key, Err("Offline · reconnect, then load again".into()));
+                }
+                ui.flash(if extras.degraded.is_some() {
+                    "Reconnecting to st · try again in a moment; nothing was queued"
+                } else {
+                    "Offline · reconnect before acting; nothing was queued"
+                });
+                continue;
+            }
+            if let Effect::Attention { id, .. } = &effect {
+                if answers.len() < 256 || answers.contains_key(id) {
+                    answers.insert(id.clone(), AnswerTiming::new(Instant::now()));
+                } else {
+                    super::slo::METRICS.add("measurement_overflow", 1);
+                }
             }
             ui.note_acted(&effect);
             match effect {
+                Effect::LoadContent(key) => {
+                    content_reads.enqueue(key);
+                }
+                Effect::RetryConversation { target } => {
+                    retry_conversation_open(
+                        target,
+                        &mut failed,
+                        &mut sessions_requested,
+                        &commands,
+                    );
+                    changed = true;
+                }
                 Effect::OpenTerminal { agent } => {
+                    terminal_opens.insert(agent.clone(), Instant::now());
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
                     // it; st's screen view (the feed follows it on its socket) only when st cannot
                     // give a direct stream.
@@ -959,19 +1623,50 @@ pub fn run(context: Context) -> Result<()> {
                             agent.clone()
                         }
                     });
+                    let owner = terminal_owner(&model, &agent, found, &runtime_ids);
                     attached = None;
                     terminal_runtimes = Some(runtime_ids.clone());
                     terminal_runtimes_by_agent.insert(agent.clone(), runtime_ids.clone());
+                    match &owner {
+                        Some(owner) => terminal_owners.insert(agent.clone(), owner.clone()),
+                        None => terminal_owners.remove(&agent),
+                    };
                     attach_started = Some(Instant::now());
+                    attach_note = None;
                     let _ = commands.send(Command::Unfollow);
                     {
                         let client = client.clone();
                         let tx = fetched_tx.clone();
                         let agent = agent.clone();
+                        let fallback = ui.terminal_fallback;
                         runtime.spawn(async move {
-                            let attached =
-                                attach_known_then_direct(&client, &agent, known, &runtime_ids)
-                                    .await;
+                            // A shell has no other view to fall back to, and one started a moment ago
+                            // can be refused while st settles which host runs it: wait, say why, retry.
+                            let delays: &[Duration] = if agent.starts_with("terminal/") {
+                                &ATTACH_RETRY_DELAYS
+                            } else {
+                                &[]
+                            };
+                            let attached = retry_attach(
+                                delays,
+                                |reason| {
+                                    let _ = tx.send(Fetched::AttachWaiting {
+                                        agent: agent.clone(),
+                                        reason: reason.to_owned(),
+                                    });
+                                },
+                                || {
+                                    attach_known_then_direct(
+                                        &client,
+                                        &agent,
+                                        known.clone(),
+                                        &runtime_ids,
+                                        owner.as_deref(),
+                                        fallback,
+                                    )
+                                },
+                            )
+                            .await;
                             let _ = tx.send(match attached {
                                 Ok(direct) => Fetched::Native { agent, direct },
                                 Err(reason) => Fetched::NativeFailed {
@@ -1148,6 +1843,7 @@ pub fn run(context: Context) -> Result<()> {
                         unconfirmed: false,
                         effect: effect.clone(),
                         sent: sent.clone(),
+                        echoed: false,
                         since: Instant::now(),
                     });
                     changed = true;
@@ -1155,14 +1851,22 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 other => (other, None, None),
             };
+            let alert = match &effect {
+                Effect::Attention { id, .. } => Some(id.clone()),
+                _ => None,
+            };
             let shell = matches!(effect, Effect::CreateTerminal { .. });
             let client = client.clone();
             let tx = fetched_tx.clone();
             let person = person.clone();
             let model = model.clone();
+            let sends_message = token.is_some();
             runtime.spawn(async move {
                 let outcome =
                     perform_steadily(&client, &person, &model, effect, sent.as_deref()).await;
+                if let Some(id) = alert {
+                    let _ = tx.send(Fetched::AlertOutcome(id, outcome.is_ok()));
+                }
                 if let Some(token) = token {
                     let _ = tx.send(Fetched::Sent(
                         token,
@@ -1171,7 +1875,7 @@ pub fn run(context: Context) -> Result<()> {
                             // st saying no, or never reaching it.
                             let unconfirmed = error
                                 .downcast_ref::<ClientError>()
-                                .is_some_and(|error| matches!(error, ClientError::Transport(_)));
+                                .is_some_and(ClientError::outcome_unknown);
                             (plain(error), unconfirmed)
                         }),
                     ));
@@ -1179,14 +1883,31 @@ pub fn run(context: Context) -> Result<()> {
                 if shell && let Ok((_, Some(terminal))) = &outcome {
                     let _ = tx.send(Fetched::TerminalStarted(terminal.clone()));
                 }
-                let _ = tx.send(Fetched::Notice(match outcome {
-                    Ok((notice, _)) => notice,
-                    Err(error) => format!("Not done: {}", plain(&error)),
-                }));
+                match outcome {
+                    Ok((notice, _)) => {
+                        let _ = tx.send(Fetched::Notice(notice));
+                    }
+                    // A message's refusal is said, and its text put back, where its answer is
+                    // handled (`Fetched::Sent`).
+                    Err(_) if sends_message => {}
+                    Err(error) => {
+                        let _ = tx.send(Fetched::Notice(format!("Not done: {}", plain(&error))));
+                    }
+                }
             });
         }
 
+        // The grace for a restart of st ends on its own clock: draw the link as offline then.
+        match extras.offline_since {
+            Some(since) if !offline_drawn && since.elapsed() >= adapt::offline_grace() => {
+                offline_drawn = true;
+                changed = true;
+            }
+            None => offline_drawn = false,
+            Some(_) => {}
+        }
         if changed {
+            ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
             for entry in &pending {
                 if let Some(Load::Ready(entries)) = extras.conversations.get_mut(&entry.agent) {
@@ -1202,24 +1923,96 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
             ui.set_world(adapt::world(&model, &person, &extras));
+            // An ask's images, from the attention just adapted (not the previous world's).
+            if let Load::Ready(items) = &ui.world.attention {
+                ui.content.index_requests(
+                    items
+                        .iter()
+                        .flat_map(|item| match &item.kind {
+                            super::view::AttentionKind::Request { images, .. } => images.clone(),
+                            _ => Vec::new(),
+                        })
+                        .collect(),
+                );
+            }
+            focus_initial_subject(&mut ui, &mut initial_subject, agents_live, glasses_ready);
             changed = false;
             if last_cache_save.elapsed() >= Duration::from_secs(60) {
                 save_cache(cache_path.as_deref(), &person, &model);
                 last_cache_save = Instant::now();
             }
         }
+        // The missions window is large, so it is followed only while a mission list or card is on
+        // screen, and kept for a while after so flipping between tabs does not fetch it each time.
+        let wanted_now = ui.missions_wanted() || open_requests.wants_missions();
+        if wanted_now {
+            missions_until = Some(Instant::now() + MISSIONS_GRACE);
+        }
+        let wanted = wanted_now || missions_until.is_some_and(|until| Instant::now() < until);
+        if wanted != missions_sent {
+            missions_sent = wanted;
+            let _ = commands.send(Command::Missions { follow: wanted });
+        }
+        answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
         ui.step_voice();
         ui.step_terminal_hold();
+        ui.step_default_view();
+        ui.step_terminal_tabs();
+        terminal_opens.retain(|target, _| ui.terminal_view(target).is_some());
+        ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
+        let draw_started = Instant::now();
         terminal.draw(|frame| {
             ui.render(frame);
             if hyperlinks {
                 links = ui.link_cells(frame.buffer_mut());
             }
         })?;
+        // A message just sent is on screen from this draw on: the time from pressing send to it.
+        for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
+            entry.echoed = true;
+            super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
+        }
+        // A slow draw, or a whole turn that took long before it waited for input, is written
+        // down with what was on screen, so that "it was slow" can be explained afterwards.
+        let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
+        if drew >= SLOW_DRAW || turn >= SLOW_TURN {
+            super::lastrun::note_slow(
+                &format!("draw {} ms, turn {} ms", drew.as_millis(), turn.as_millis()),
+                &ui.slow_context(),
+                &crate::version::short(crate::version::now()),
+            );
+        }
         if hyperlinks && !links.is_empty() {
             super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
+        }
+        // Image encodings the draw asked for, built off the draw path; the frame after one
+        // arrives draws it.
+        if let Some(picker) = ui.picker.clone() {
+            for (key, width, height, image) in ui.content.protocol_jobs() {
+                if !encoding.insert((key.clone(), width, height)) {
+                    continue;
+                }
+                let picker = picker.clone();
+                let tx = fetched_tx.clone();
+                runtime.spawn_blocking(move || {
+                    if let Some(protocol) = super::content::encode(&picker, &image, width, height) {
+                        let _ = tx.send(Fetched::Protocol(key, width, height, protocol));
+                    }
+                });
+            }
+        }
+        ui.release_far_images();
+        if extras.live
+            && let Some(key) = ui.next_content_read(&mut content_reads)
+        {
+            let client = client.clone();
+            let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let result = super::content::fetch(&client, &key).await;
+                let _ = tx.send(Fetched::Content(key, result));
+            });
         }
         // The attached terminal's cursor shape (vim's bar while inserting), and the person's
         // own shape back once it is gone.
@@ -1231,7 +2024,39 @@ pub fn run(context: Context) -> Result<()> {
             );
             cursor_style = style;
         }
-        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        super::open_timing::present(
+            &mut open_timing,
+            || execute!(io::stdout(), EndSynchronizedUpdate),
+            |target| ui.conversation_entry_visible(target),
+        )?;
+        ui.quality.live(extras.live);
+        let top = u8::from(extras.live)
+            | (u8::from(extras.offline.is_some()) << 1)
+            | (u8::from(extras.degraded.is_some()) << 2);
+        let placeholders = u8::from(matches!(ui.world.attention, Load::Loading))
+            | (u8::from(matches!(ui.world.agents, Load::Loading)) << 1);
+        let visible_quality = ui.quality_visible();
+        ui.quality
+            .presented(ui.world.settled, top, placeholders, visible_quality);
+        opens.retain(|target, at| {
+            if ui.conversation_entry_visible(target) {
+                super::slo::METRICS.observe("conversation_open_ms", at.elapsed());
+                false
+            } else {
+                true
+            }
+        });
+        terminal_opens.retain(|target, at| {
+            if ui.terminal_ready_visible(target) {
+                super::slo::METRICS.observe("terminal_open_ms", at.elapsed());
+                false
+            } else {
+                true
+            }
+        });
+        for at in landed_answers.drain(..) {
+            super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
+        }
         let visible = ui.visible_messages();
         let incoming: HashSet<_> = timelines
             .values()
@@ -1258,48 +2083,38 @@ pub fn run(context: Context) -> Result<()> {
             let person = person.clone();
             let tx = fetched_tx.clone();
             runtime.spawn(async move {
-                let result = acknowledge_visible_message(&client, &person, &id)
-                    .await
-                    .map_err(|error| error.to_string());
-                let _ = tx.send(Fetched::Read(id, result));
+                let outcome = match acknowledge_visible_message(&client, &person, &id).await {
+                    Ok(()) => ReceiptOutcome::Done,
+                    Err(error) => receipt_outcome(&error),
+                };
+                let _ = tx.send(Fetched::Read(id, outcome));
             });
         }
         // A stream that dropped while the program ran attaches again, to the same incarnation,
-        // after a wait that grows with each try.
-        if !reattaching
-            && extras.live
-            && let Some((view, native)) = ui
-                .terminal
-                .iter()
-                .chain(ui.parked.iter())
-                .filter_map(|view| view.native.as_ref().map(|native| (view, native)))
-                .find(|(_, native)| {
-                    native.dropped().is_some_and(|at| {
-                        at.elapsed() >= Duration::from_secs(2_u64.pow(reattach_tries.min(5)))
-                    })
-                })
+        // after a wait that grows with each try (`pty::retry_delay`).
+        if extras.live
+            && let Some((agent, expected)) = ui.reattach_due()
         {
-            reattaching = true;
             let client = client.clone();
             let tx = fetched_tx.clone();
-            let agent = view.agent.clone();
-            let expected = native.incarnation.clone();
             let runtime_ids = terminal_runtimes_by_agent
                 .get(&agent)
                 .cloned()
                 .unwrap_or_default();
+            let owner = terminal_owners.get(&agent).cloned();
+            let fallback = ui.terminal_fallback;
             runtime.spawn(async move {
-                let outcome = attach_direct(&client, &agent, &runtime_ids, Some(&expected)).await;
+                let outcome = attach_direct(
+                    &client,
+                    &agent,
+                    &runtime_ids,
+                    Some(&expected),
+                    owner.as_deref(),
+                    fallback,
+                )
+                .await;
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
             });
-        }
-        if ui
-            .terminal
-            .iter()
-            .chain(ui.parked.iter())
-            .all(|view| view.native.is_none())
-        {
-            reattach_tries = 0;
         }
         ui.terminal_requests();
         // While an attached terminal's output flows, or voice listens, draw it as it comes.
@@ -1313,19 +2128,25 @@ pub fn run(context: Context) -> Result<()> {
         super::hover::poll_input(
             Duration::from_millis(if flowing { 16 } else { 80 }),
             &stopping,
-            |input| match input {
-                Event::Key(key)
-                    if !extras.live
-                        && key.code == crossterm::event::KeyCode::Char('r')
-                        && !ui.editing =>
-                {
-                    let _ = commands.send(Command::Reconnect);
-                    true
+            |input| {
+                cancel_initial_subject(&mut initial_subject, &input);
+                match input {
+                    Event::Key(key) if reconnect_key(&key, extras.live) => {
+                        let _ = commands.send(Command::Reconnect);
+                        true
+                    }
+                    input => ui.input_event(input),
                 }
-                input => ui.input_event(input),
             },
         )?;
     }
+    super::lastrun::note_exit(if ui.quit {
+        "quit (Ctrl+Q)"
+    } else if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+        "signal (INT, TERM or HUP)"
+    } else {
+        "terminal closed (stdin hung up)"
+    });
     // Leave no attachment behind.
     if let Some(current) = attached.take() {
         let _ = runtime.block_on(feed::detach(
@@ -1336,7 +2157,59 @@ pub fn run(context: Context) -> Result<()> {
         ));
     }
     save_cache(cache_path.as_deref(), &person, &model);
+    ui.flush_drafts();
     Ok(())
+}
+
+/// When a notice read is wanted after an Attention or Agents frame: never for a window's first
+/// frame on a connection (the read made at connect covers it), otherwise once the minimum gap since
+/// the last read has passed, and a read already wanted keeps its time.
+fn sync_due_after_frame(first: bool, read_at: Option<Instant>, due: Option<Instant>, now: Instant) -> Option<Instant> {
+    if first || due.is_some() {
+        return due;
+    }
+    Some(read_at.map_or(now, |at| at + SYNC_MIN_GAP).max(now))
+}
+
+/// Read the notice off a one-row Attention page, and send what it said (or that it failed).
+fn read_sync(runtime: &tokio::runtime::Runtime, client: &Client, tx: &std::sync::mpsc::Sender<Fetched>) {
+    let client = client.clone();
+    let tx = tx.clone();
+    runtime.spawn(async move {
+        let notice = client
+            .attention_list(None, Some(1), false)
+            .await
+            .map(|found| found.value.sync)
+            .map_err(|_| ());
+        let _ = tx.send(Fetched::Sync(notice));
+    });
+}
+
+/// A followed window as the model holds it: its rows, the snapshot they came from, and the
+/// notice the page read last found. The stream's frames carry no notice of their own, so every
+/// window the stream rebuilds takes the page's, or the one with the newest snapshot would drop it.
+fn window_collection(
+    items: Vec<Resource>,
+    snapshot: st3_client::Snapshot,
+    has_more: bool,
+    sync: Option<&st3_client::SyncNotice>,
+) -> Collection {
+    Collection { items, snapshot: Some(snapshot), truncated: has_more, sync: sync.cloned() }
+}
+
+/// Put a fresh page notice on every collection the stream follows, so `Model::sync_notice` finds it
+/// whichever of them holds the newest snapshot.
+fn fill_notice(model: &mut Model, sync: Option<&st3_client::SyncNotice>) {
+    for collection in [
+        &mut model.now,
+        &mut model.missions,
+        &mut model.agents,
+        &mut model.sessions,
+        &mut model.machines,
+        &mut model.devices,
+    ] {
+        collection.sync = sync.cloned();
+    }
 }
 
 fn save_cache(path: Option<&std::path::Path>, person: &str, model: &Model) {
@@ -1424,6 +2297,28 @@ fn conversations(
     out
 }
 
+/// A session that could not be opened is asked for again once the person has left it and opens
+/// it again; while it stays on screen, the error stays, so a refusal is not asked in a loop.
+fn retry_failed_opens(
+    requested: &mut HashSet<String>,
+    failed: &BTreeMap<String, String>,
+    wanted: &[String],
+) {
+    requested.retain(|id| !failed.contains_key(id) || wanted.contains(id));
+}
+
+/// A person's explicit retry clears both the feed failure and the one-shot session read.
+fn retry_conversation_open(
+    target: String,
+    failed: &mut BTreeMap<String, String>,
+    requested: &mut HashSet<String>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    failed.remove(&target);
+    requested.remove(&target);
+    let _ = commands.send(Command::Resubscribe { target });
+}
+
 /// Entries per page read back: st's largest, so a long session takes few requests.
 const OLDER_PAGE: usize = 200;
 
@@ -1434,6 +2329,16 @@ const FILL_ROWS: usize = 200;
 const FILL_PAGES: usize = 7;
 
 /// A page st took this long to give is a sign it is busy: no more pages are read on their own.
+/// Ctrl+R asks to reconnect while there is no live link. A bare `r` is a letter like any other:
+/// it must reach the message box, link or no link (Nathan, 2026-10-14: a lowercase r could not be
+/// typed while the link was stale).
+fn reconnect_key(key: &crossterm::event::KeyEvent, live: bool) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    !live
+        && key.code == KeyCode::Char('r')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 const FILL_SLOW: Duration = Duration::from_millis(1500);
 
 fn slow_page(took: Duration) -> bool {
@@ -1645,6 +2550,8 @@ fn not_applied(error: &anyhow::Error, effect: &Effect) -> bool {
         .chain()
         .filter_map(|cause| cause.downcast_ref::<ClientError>())
         .any(|error| match error {
+            // st said it queued nothing, so a fresh try with a fresh fence is safe.
+            _ if error.applied() == Some("none") => true,
             ClientError::Api(st3_client::ErrorCode::StaleFence, ..) => !attention,
             ClientError::Api(st3_client::ErrorCode::RateLimited, ..)
             | ClientError::Unreachable(_) => true,
@@ -1734,6 +2641,18 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
     Ok(())
 }
 
+/// Submit a register edit with one stable action identity; the stream remains authoritative.
+async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -> Result<()> {
+    let snapshot = client.capabilities().await?.snapshot;
+    let reply = client.arrangement_edit(
+        format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
+        Fence { snapshot_id: snapshot.id, ..Default::default() },
+        st3_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone(), version: None },
+    ).await?;
+    anyhow::ensure!(matches!(reply.value.status, st3_client::ActionStatus::Completed), "Sidebar edit is not completed.");
+    Ok(())
+}
+
 async fn perform(
     client: &Client,
     person: &str,
@@ -1743,8 +2662,13 @@ async fn perform(
 ) -> Result<(String, Option<String>)> {
     match effect {
         // Glass writes and retries never reach here: the loop handles them itself.
-        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::Forget { .. } => {
+        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::RetryConversation { .. }
+        | Effect::Forget { .. } | Effect::LoadContent(_) => {
             Ok((String::new(), None))
+        }
+        Effect::EditArrangement(write) => {
+            save_sidebar(client, &write).await?;
+            Ok(("Sidebar edit saved".into(), None))
         }
         Effect::AgentControl { agent, control } => {
             agent_control(client, &agent, control).await?;
@@ -1870,6 +2794,7 @@ async fn perform(
                 Vec::new(),
                 Vec::new(),
                 None,
+                latest_snapshot(model),
             )
             .await?;
             Ok(("Reply sent".into(), None))
@@ -1892,6 +2817,7 @@ async fn perform(
                 Vec::new(),
                 Vec::new(),
                 sent,
+                latest_snapshot(model),
             )
             .await?;
             Ok((
@@ -1900,17 +2826,20 @@ async fn perform(
             ))
         }
         Effect::OpenImage { image } => {
+            // In the person's own viewer where this machine has one; saved where they keep
+            // downloads (ST3_DOWNLOADS or their download directory) where it has none.
             let bytes = client.blob(&image.sha256, Some(&image.message)).await?;
             let dir = super::attach::dir()
                 .ok_or_else(|| anyhow::anyhow!("No place to keep the image (HOME is not set)"))?;
-            let path = super::attach::received(&dir, &image, &bytes)?;
-            let shown = super::attach::show(&path);
+            let kept = super::attach::received(&dir, &image, &bytes)?;
+            if super::attach::show(&kept) {
+                return Ok((format!("Opened {}", image.name.as_deref().unwrap_or("the image")), None));
+            }
+            let downloads = super::attach::downloads()
+                .ok_or_else(|| anyhow::anyhow!("No place to save the image (HOME is not set)"))?;
+            let path = super::attach::save(&downloads, &image, &bytes)?;
             Ok((
-                if shown {
-                    format!("Opened {}", path.display())
-                } else {
-                    format!("Saved to {}", path.display())
-                },
+                format!("Saved to {} · ST3_DOWNLOADS chooses where", path.display()),
                 None,
             ))
         }
@@ -2062,11 +2991,21 @@ async fn perform(
                 tags,
                 attachments,
                 sent,
+                latest_snapshot(model),
             )
             .await?;
             Ok(("Message sent".into(), id))
         }
     }
+}
+
+/// The newest snapshot id any window frame brought, by store position.
+fn latest_snapshot(model: &Model) -> Option<String> {
+    [&model.now, &model.missions, &model.agents]
+        .into_iter()
+        .filter_map(|collection| collection.snapshot.as_ref())
+        .max_by_key(|snapshot| snapshot.store_index)
+        .map(|snapshot| snapshot.id.clone())
 }
 
 /// Send a message. `sent` keeps the exact request: when it already holds one, that request goes
@@ -2082,6 +3021,7 @@ async fn send_message(
     tags: Vec<String>,
     attachments: Vec<st3_client::AttachmentInput>,
     sent: Option<&Mutex<Option<Sent>>>,
+    snapshot_hint: Option<String>,
 ) -> Result<Option<String>> {
     let parameters = MessageSendParameters {
         to: to.to_owned(),
@@ -2090,6 +3030,7 @@ async fn send_message(
         in_reply_to,
         session_id,
         tags,
+        kind: st3_client::MessageKind::Wake,
         attachments,
         signature: None,
     };
@@ -2112,21 +3053,28 @@ async fn send_message(
                 earlier.id,
                 earlier.idempotency_key,
                 fence,
-                parameters.clone(),
+                earlier.parameters,
             )
             .await
         {
             Ok(result) => return Ok(message_id(result)),
             // st checks a repeat before the fence: a stale fence means it never took it.
-            Err(error) if error.to_string().contains("StaleFence") => {}
+            Err(ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {}
             Err(error) => return Err(error.into()),
         }
     }
     // A send only needs a current snapshot. Take a fresh one each time, and once more if the
     // graph moves between reading it and sending: a stale fence is not the person's problem.
+    // A message carries no subject revisions: st asks only that the snapshot be this host's and not
+    // ahead of its store, so the newest one a window frame already brought is as good as a fresh
+    // read and saves a round trip. Only if st calls it stale is a fresh one read.
+    let mut hint = snapshot_hint;
     let mut last = None;
     for _ in 0..2 {
-        let snapshot = client.capabilities().await?.snapshot.id;
+        let snapshot = match hint.take() {
+            Some(known) => known,
+            None => client.capabilities().await?.snapshot.id,
+        };
         let (id, idem) = crate::action_pair();
         if let Some(sent) = sent
             && let Ok(mut slot) = sent.lock()
@@ -2135,6 +3083,7 @@ async fn send_message(
                 id: id.clone(),
                 idempotency_key: idem.clone(),
                 snapshot_id: snapshot.clone(),
+                parameters: parameters.clone(),
             });
         }
         let fence = Fence {
@@ -2146,7 +3095,9 @@ async fn send_message(
             .await
         {
             Ok(result) => return Ok(message_id(result)),
-            Err(error) if error.to_string().contains("StaleFence") => last = Some(error),
+            Err(error @ ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {
+                last = Some(error)
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -2157,6 +3108,308 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_polled_inventory_that_fails_briefly_says_nothing_and_one_that_keeps_failing_is_said() {
+        let start = Instant::now();
+        let mut failing = BTreeMap::new();
+        let mut errors = BTreeMap::new();
+        let why = "st did not answer".to_owned();
+        let stale = |errors: &BTreeMap<String, String>| {
+            let extras = Extras { window_errors: errors.clone(), ..Extras::default() };
+            adapt::world(&Model::default(), "person/avery", &extras).stale
+        };
+
+        // Young failures leave no error and no stale line, and the rows say loading, not none.
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start);
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER - Duration::from_millis(1));
+        assert!(errors.is_empty());
+        assert!(stale(&errors).is_empty());
+        let extras = Extras { window_errors: errors.clone(), ..Extras::default() };
+        assert!(matches!(adapt::world(&Model::default(), "person/avery", &extras).machines, Load::Loading));
+
+        // One that has lasted is said, in the stale note.
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER);
+        assert_eq!(errors.get("machines"), Some(&why));
+        assert_eq!(stale(&errors), ["machines: st did not answer"]);
+
+        // A read that succeeds clears the error and the clock; the next failure starts over.
+        note_legacy_read(&mut failing, &mut errors, "machines", None, start + feed::REPORT_AFTER * 2);
+        assert!(errors.is_empty() && failing.is_empty());
+        assert!(stale(&errors).is_empty());
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER * 3);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_shells_attach_waits_out_a_refusal_that_passes_and_says_why() {
+        // Nathan, 2026-10-16: a new terminal ended at once with "could not attach: st cannot tell
+        // yet which host runs this", and the shell was lost to him.
+        let run = |refusals: Vec<&'static str>, delays: usize| {
+            let mut refusals = refusals.into_iter();
+            let mut said = Vec::new();
+            let outcome = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+                .block_on(retry_attach(
+                    &vec![Duration::ZERO; delays],
+                    |reason| said.push(reason.to_owned()),
+                    || {
+                        let next = refusals.next();
+                        async move { next.map_or(Ok(7), |reason| Err(reason.to_owned())) }
+                    },
+                ));
+            (outcome, said)
+        };
+        let unsure = "st cannot tell yet which host runs this";
+        // It works on the third try; each wait said why.
+        let (outcome, said) = run(vec![unsure, "host/example cannot be reached right now"], 5);
+        assert_eq!(outcome, Ok(7));
+        assert_eq!(said, [unsure, "host/example cannot be reached right now"]);
+        // It keeps refusing: the last refusal comes back once the waits are used up.
+        let (outcome, said) = run(vec![unsure; 10], 3);
+        assert_eq!(outcome, Err(unsure.to_owned()));
+        assert_eq!(said.len(), 3);
+        // A terminal that is gone, restarted or not allowed is not retried.
+        for reason in ["it is gone: terminal/x", "not allowed: nope", direct::RESTARTED] {
+            let (outcome, said) = run(vec![reason, unsure], 5);
+            assert_eq!(outcome, Err(reason.to_owned()));
+            assert!(said.is_empty(), "{reason} must not be retried");
+        }
+        // The retried reasons are the words st's own messages use.
+        assert!(super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::RuntimeAuthorityIndeterminate),
+            ""
+        )));
+        assert!(!super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::NotFound),
+            "terminal/x"
+        )));
+        // A refusal that passes waits about a minute and a half before the tab gives up.
+        assert!(super::ATTACH_RETRY_DELAYS.iter().sum::<Duration>() >= Duration::from_secs(90));
+    }
+
+    #[test]
+    fn hidden_inventory_windows_leave_after_grace_and_period_changes_replace_one_slot() {
+        let now = Instant::now();
+        let mut grace = InventoryGrace::default();
+        let visible = Inventories { clients: true, usage_hours: Some(24), ..Inventories::default() };
+        assert_eq!(grace.followed(visible, now), visible);
+        assert_eq!(grace.followed(Inventories::default(), now + Duration::from_secs(29)), visible);
+        assert_eq!(grace.followed(Inventories::default(), now + MISSIONS_GRACE), Inventories::default());
+        grace.followed(visible, now);
+        let week = grace.followed(Inventories { usage_hours: Some(168), ..Inventories::default() }, now + Duration::from_secs(1));
+        assert_eq!(week.windows(), vec![Inventory::Clients, Inventory::Usage(168)]);
+        assert_eq!(grace.followed(Inventories::default(), now + MISSIONS_GRACE).windows(), vec![Inventory::Usage(168)]);
+    }
+
+    #[test]
+    fn an_answer_landing_requires_action_confirmation_and_the_fresh_window_in_either_order() {
+        let at = Instant::now();
+        let mut window_first = AnswerTiming::new(at);
+        window_first.gone = true;
+        assert!(
+            window_first.landed().is_none(),
+            "a card closed by another device is not our successful answer"
+        );
+        window_first.accepted = true;
+        assert_eq!(window_first.landed(), Some(at));
+        let mut reply_first = AnswerTiming::new(at);
+        reply_first.accepted = true;
+        assert!(reply_first.landed().is_none());
+        reply_first.gone = true;
+        assert_eq!(reply_first.landed(), Some(at));
+    }
+
+    #[test]
+    fn a_send_st_may_have_taken_is_unconfirmed_and_one_it_never_queued_is_tried_afresh() {
+        let answer = |applied: &str, code: st3_client::ErrorCode| -> anyhow::Error {
+            let envelope = st3_client::ErrorEnvelope {
+                api_version: "st3.client.v0".into(),
+                error_version: "st3.client.error.v0".into(),
+                request_id: "request/test".into(),
+                code: code.clone(),
+                message: "the database has not confirmed the send".into(),
+                retryable: false,
+                retry_after_ms: None,
+                details: std::collections::BTreeMap::from([(
+                    "applied".to_owned(),
+                    serde_json::json!(applied),
+                )]),
+            };
+            ClientError::Api(code, envelope.message.clone(), Box::new(envelope)).into()
+        };
+        let send = Effect::Send {
+            agent: "agent/x".into(),
+            text: "hello".into(),
+            in_reply_to: None,
+            tags: Vec::new(),
+            images: Vec::new(),
+        };
+        // `applied: "unknown"` (a code this build does not know decodes as Unknown): the exact
+        // request may have been taken. It is not retried here, and it is shown as unconfirmed.
+        let unknown = answer("unknown", st3_client::ErrorCode::Unknown);
+        assert!(!not_applied(&unknown, &send));
+        assert!(unknown.downcast_ref::<ClientError>().unwrap().outcome_unknown());
+        assert_eq!(
+            super::plain(&unknown),
+            "st may have taken it and has not confirmed it yet; sending it again is safe"
+        );
+        // `applied: "none"` with a full queue (rate limited): nothing was queued, so try again.
+        assert!(not_applied(&answer("none", st3_client::ErrorCode::RateLimited), &send));
+        assert!(!answer("none", st3_client::ErrorCode::RateLimited)
+            .downcast_ref::<ClientError>()
+            .unwrap()
+            .outcome_unknown());
+    }
+
+    /// st answers a send it could not confirm in time `message-send-unconfirmed`, `applied:
+    /// "unknown"`: it may still complete. Nothing here sends it again by itself, and the person's
+    /// resend repeats the exact request. st keys its receipt on the whole request but the fence,
+    /// so a repeat that differs in anything else (here, the agent moved to a new session in
+    /// between) would be refused as a conflict and the message could never be confirmed.
+    #[tokio::test]
+    async fn an_unconfirmed_send_waits_for_the_person_and_goes_again_unchanged() {
+        use axum::{body::Bytes, extract::State, http::StatusCode, routing};
+        #[derive(Default)]
+        struct Daemon {
+            posted: Vec<serde_json::Value>,
+            receipts: BTreeMap<String, serde_json::Value>,
+        }
+        type Shared = Arc<Mutex<Daemon>>;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/st3/client-v0/fixtures/capabilities.json"
+        ))
+        .unwrap();
+        let snapshot = capabilities["snapshot"].clone();
+        // The first request under a key is taken but not confirmed; the same request again gets
+        // its result; a different request under that key is a conflict, as st answers.
+        let action = move |State(daemon): State<Shared>, body: Bytes| {
+            let snapshot = snapshot.clone();
+            async move {
+                let action: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let mut daemon = daemon.lock().unwrap();
+                daemon.posted.push(action.clone());
+                let key = action["idempotency_key"].as_str().unwrap().to_owned();
+                let mut digest = action.clone();
+                digest.as_object_mut().unwrap().remove("fence");
+                let refusal = |code: &str, retryable: bool, details: serde_json::Value| {
+                    serde_json::json!({
+                        "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                        "request_id": "request/example", "code": code, "message": code,
+                        "retryable": retryable, "details": details,
+                    })
+                };
+                let (status, body) = match daemon.receipts.get(&key) {
+                    Some(seen) if *seen != digest => (
+                        StatusCode::CONFLICT,
+                        refusal("idempotency-conflict", false, serde_json::json!({})),
+                    ),
+                    Some(_) => (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "api_version": "st3.client.v0", "request_id": "request/example",
+                            "snapshot": snapshot,
+                            "value": {
+                                "kind": "action-result", "action_id": action["id"],
+                                "operation_id": "operation/example", "status": "completed",
+                                "affected_ids": ["message/example-tally"],
+                                "snapshot_id": snapshot["id"],
+                            },
+                        }),
+                    ),
+                    None => {
+                        daemon.receipts.insert(key.clone(), digest);
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            refusal(
+                                "message-send-unconfirmed",
+                                false,
+                                serde_json::json!({
+                                    "applied": "unknown", "action_id": action["id"],
+                                    "idempotency_key": key,
+                                }),
+                            ),
+                        )
+                    }
+                };
+                (status, axum::Json(body))
+            }
+        };
+        let daemon = Shared::default();
+        let router = axum::Router::new()
+            .route(
+                "/v1/client/capabilities",
+                routing::get(move || std::future::ready(axum::Json(capabilities.clone()))),
+            )
+            .route("/v1/client/actions", routing::post(action))
+            .with_state(daemon.clone());
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let in_session = |session: &str| {
+            let mut model = Model::default();
+            model.agents.items.push(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "agent", "id": "agent/example/harbor/keeper", "revision": "a",
+                    "updated_at": "2026-10-03T08:28:00Z", "name": "Keeper", "state": "running",
+                    "reachability": "reachable", "current_session_id": session,
+                }))
+                .unwrap(),
+            );
+            model
+        };
+        let send = Effect::Send {
+            agent: "agent/example/harbor/keeper".into(),
+            text: "Count the harbor crates".into(),
+            in_reply_to: None,
+            tags: vec!["tally".into()],
+            images: Vec::new(),
+        };
+        // The live loop's own path: the same effect and the one `sent` slot for its pending copy.
+        let sent = Arc::new(Mutex::new(None));
+        let error = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/first"),
+            send.clone(),
+            Some(&*sent),
+        )
+        .await
+        .unwrap_err();
+        // What `Fetched::Sent` marks the pending copy with: unconfirmed, so it stays and offers
+        // a resend, not a plain failure.
+        assert!(error
+            .downcast_ref::<ClientError>()
+            .is_some_and(ClientError::outcome_unknown));
+        assert!(!not_applied(&error, &send));
+        assert_eq!(
+            super::plain(&error),
+            "st may have taken it and has not confirmed it yet; sending it again is safe"
+        );
+        assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
+        // The agent moved to a new session before the person sent it again.
+        let (_, message) = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/second"),
+            send,
+            Some(&*sent),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.as_deref(), Some("message/example-tally"));
+        let posted = std::mem::take(&mut daemon.lock().unwrap().posted);
+        assert_eq!(posted.len(), 2);
+        for field in ["id", "type", "idempotency_key", "parameters"] {
+            assert_eq!(posted[1][field], posted[0][field], "{field} differs on the resend");
+        }
+        assert_eq!(posted[0]["parameters"]["session_id"], "session/first");
+        server.abort();
+    }
+
     #[test]
     fn a_slow_page_stops_the_first_screen_reading_on() {
         assert!(!super::slow_page(Duration::from_millis(400)));
@@ -2196,6 +3449,433 @@ mod tests {
 
     use super::*;
 
+    fn peer(host: &str, missing: u64, diverged: bool) -> st3_client::SyncPeer {
+        st3_client::SyncPeer {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
+            host_id: host.into(),
+            peer_only_envelopes: missing,
+            local_only_envelopes: 0,
+            last_exchange_at: None,
+            estimated_catch_up_seconds: Some(840),
+            diverged_since: diverged.then(|| "2026-09-29T10:00:00Z".into()),
+        }
+    }
+
+    fn snapshot(store_index: u64) -> st3_client::Snapshot {
+        st3_client::Snapshot {
+            id: format!("snapshot/{store_index}"),
+            host_id: "host/hearth".into(),
+            store_index,
+            projection_version: "1".into(),
+            created_at: "2026-10-16T11:00:00Z".into(),
+        }
+    }
+
+    /// The world a running stui shows after the stream delivered Attention (older) and Agents
+    /// (newest) windows, built by the same function the live loop uses.
+    fn running_world(sync: Option<&st3_client::SyncNotice>) -> super::super::view::World {
+        let mut model = Model::default();
+        let now = window_collection(Vec::new(), snapshot(5), false, sync);
+        let agents = window_collection(Vec::new(), snapshot(9), false, sync);
+        model.now = now;
+        model.agents = agents;
+        let extras = super::super::adapt::Extras { live: true, ..Default::default() };
+        super::super::adapt::world(&model, "person/avery", &extras)
+    }
+
+    #[test]
+    fn a_running_stui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
+        use super::super::view::Link;
+        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        let shown = running_world(Some(&diverged));
+        assert!(matches!(shown.link, Link::Live));
+        assert_eq!(shown.diverged, vec!["harbor".to_owned()]);
+        assert!(shown.behind.is_empty());
+
+        let behind = st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/harbor", 26_820, false)] };
+        let shown = running_world(Some(&behind));
+        assert!(shown.diverged.is_empty());
+        assert_eq!(shown.behind.len(), 1, "{:?}", shown.behind);
+        assert!(shown.behind[0].starts_with("harbor has 26,820 envelopes"), "{:?}", shown.behind);
+
+        // No notice, or one that names nothing missing: nothing is claimed, and the link is live.
+        for sync in [None, Some(st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/dock", 0, false)] })] {
+            let shown = running_world(sync.as_ref());
+            assert!(matches!(shown.link, Link::Live));
+            assert!(shown.diverged.is_empty() && shown.behind.is_empty(), "{:?} {:?}", shown.diverged, shown.behind);
+        }
+    }
+
+    #[test]
+    fn a_notice_read_follows_a_moving_graph_at_most_once_a_minute_and_an_idle_screen_sends_none() {
+        let now = Instant::now();
+        // First frames are not changes: no read is wanted by them.
+        assert_eq!(sync_due_after_frame(true, Some(now), None, now), None);
+        // A later frame soon after a read waits out the minimum gap; a long-ago read is due now.
+        assert_eq!(sync_due_after_frame(false, Some(now), None, now + Duration::from_secs(5)), Some(now + SYNC_MIN_GAP));
+        let late = now + SYNC_MIN_GAP + Duration::from_secs(30);
+        assert_eq!(sync_due_after_frame(false, Some(now), None, late), Some(late));
+        // A read already wanted keeps its time however many frames follow; no read made yet is due now.
+        let wanted = Some(now + Duration::from_secs(40));
+        assert_eq!(sync_due_after_frame(false, Some(now), wanted, now + Duration::from_secs(10)), wanted);
+        assert_eq!(sync_due_after_frame(false, None, None, now), Some(now));
+    }
+
+    #[test]
+    fn the_page_read_fills_the_notice_and_a_rebuilt_window_keeps_it_until_the_next_read() {
+        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        // The stream's windows arrive with nothing known, the newest being Agents.
+        let mut model = Model::default();
+        let now = window_collection(Vec::new(), snapshot(5), false, None);
+        let agents = window_collection(Vec::new(), snapshot(9), false, None);
+        model.now = now;
+        model.agents = agents;
+        assert!(model.sync_notice().is_none());
+        // The page read finds a diverged peer: it shows although Agents holds the newest snapshot.
+        fill_notice(&mut model, Some(&diverged));
+        assert_eq!(model.sync_notice(), Some(&diverged));
+        // A later frame rebuilds Agents with the notice the loop carries, not with none.
+        model.agents = window_collection(Vec::new(), snapshot(12), false, Some(&diverged));
+        assert_eq!(model.sync_notice(), Some(&diverged));
+        // The next read says level: the notice goes from every window.
+        fill_notice(&mut model, None);
+        assert!(model.sync_notice().is_none());
+    }
+
+    #[test]
+    fn open_requests_wait_for_a_live_inventory_and_answer_each_seat_once() {
+        use super::super::requests::{self, Answer, Inbox, Place};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("requests");
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        let mut inbox = Inbox::new(Some(dir.clone()));
+        let early = requests::enqueue(&dir, &known, Place::Right, false, None).unwrap();
+        assert!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077 == 0);
+
+        // Cached inventory is not a reason to open anything.
+        answer_open_requests(&mut ui, &mut inbox, false);
+        assert_eq!(ui.live_conversations().iter().filter(|id| **id == known).count(), 0);
+        assert!(dir.join(format!("{early}.json")).exists());
+
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert_eq!(ui.focus(), (1, Some(known.clone())));
+        assert!(!dir.join(format!("{early}.json")).exists());
+        let answer = std::fs::read(dir.join(format!("{early}.answer"))).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Answer>(&answer).unwrap(),
+            Answer::Opened { focused: true }
+        );
+
+        // An agent that is not in the inventory yet waits, and is not found once the grace ends.
+        let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert_eq!(inbox.waiting().count(), 1);
+        inbox.waiting_since_for_test(&later, requests::GRACE);
+        answer_open_requests(&mut ui, &mut inbox, true);
+        let answer = std::fs::read(dir.join(format!("{later}.answer"))).unwrap();
+        assert_eq!(serde_json::from_slice::<Answer>(&answer).unwrap(), Answer::NotFound);
+        assert_eq!(inbox.waiting().count(), 0);
+    }
+
+    #[test]
+    fn a_request_the_layout_cannot_show_without_moving_focus_is_not_called_opened() {
+        use super::super::pane::Pane;
+        use super::super::requests::{Answer, Place};
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = None;
+        let pane = || Pane::Agent(Some(known.clone()));
+        // The classic layout has no tabs or splits: only the list can show it, which moves focus.
+        let kept = ui.open_requested(pane(), Place::Tab, true, None);
+        assert_eq!(kept, Answer::NotShown);
+        let moved = ui.open_requested(pane(), Place::Tab, false, None);
+        assert_eq!(moved, Answer::Opened { focused: true });
+        // A name another process wrote cannot put control characters in the flash.
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        ui.open_requested(pane(), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        let (shown, _) = ui.flash.clone().unwrap();
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(shown.contains("bad[2Jname"), "{shown:?}");
+    }
+
+    #[test]
+    fn only_ctrl_r_reconnects_and_never_a_letter() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let ctrl_r = key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        let plain_r = key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(reconnect_key(&ctrl_r, false), "Ctrl+R retries a link that is down");
+        assert!(!reconnect_key(&ctrl_r, true), "Ctrl+R is left to the conversation when live");
+        assert!(!reconnect_key(&plain_r, false), "a lowercase r is typed, never taken");
+        assert!(!reconnect_key(&key(KeyCode::Char('R'), KeyModifiers::SHIFT), false));
+    }
+
+    #[test]
+    fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
+        for spaces in [false, true] {
+            let mut world = super::super::demo::world();
+            let mut assistant = world.agents.items()[0].clone();
+            assistant.id = "agent/st/assistant".into();
+            assistant.name = "Fractal Assistant".into();
+            let other = world.agents.items()[0].id.clone();
+            let mut ui = Ui::new(world.clone());
+            if spaces {
+                ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+                ui.show_focused();
+                ui.open_home();
+            }
+            let before = ui.focus();
+            let mut requested = Some(assistant.id.clone());
+            focus_initial_subject(&mut ui, &mut requested, false, true);
+            assert_eq!(
+                ui.focus(), before,
+                "waiting inventory must not open another agent"
+            );
+            assert!(requested.is_some());
+            world.agents = Load::Ready(vec![world.agents.items()[0].clone(), assistant.clone()]);
+            ui.set_world(world.clone());
+            let before = ui.focus();
+            focus_initial_subject(&mut ui, &mut requested, false, true);
+            assert_eq!(
+                ui.focus(), before,
+                "cached inventory must not consume the request"
+            );
+            focus_initial_subject(&mut ui, &mut requested, true, true);
+            assert_eq!(ui.focus(), (1, Some(assistant.id.clone())));
+            assert_eq!(ui.live_conversations()[0], assistant.id);
+            assert!(!ui.home_open());
+            assert!(requested.is_none());
+            ui.open(&other);
+            ui.set_world(world);
+            focus_initial_subject(&mut ui, &mut requested, true, true);
+            assert_eq!(
+                ui.focus(), (1, Some(other)),
+                "later updates preserve navigation"
+            );
+        }
+    }
+
+    #[test]
+    fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
+        let mut ui = Ui::new(super::super::demo::world());
+        let mut missing = Some("agent/st/assistant".to_owned());
+        let before = ui.focus();
+        focus_initial_subject(&mut ui, &mut missing, true, true);
+        assert!(missing.is_none());
+        assert_eq!(ui.focus(), before);
+        let inputs = [
+            Event::Key(crossterm::event::KeyCode::Down.into()),
+            Event::Paste("hello".into()),
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 5, row: 5, modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+        ];
+        for input in inputs {
+            let mut subject = Some(ui.world.agents.items()[0].id.clone());
+            cancel_initial_subject(&mut subject, &Event::Resize(120, 32));
+            assert!(subject.is_some());
+            cancel_initial_subject(&mut subject, &input);
+            focus_initial_subject(&mut ui, &mut subject, true, true);
+            assert_eq!(ui.focus(), before);
+            assert!(subject.is_none());
+        }
+    }
+
+    #[test]
+    fn no_initial_subject_preserves_the_restored_space() {
+        let mut ui = Ui::new(super::super::demo::world());
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        let agent = ui.world.agents.items()[0].id.clone();
+        ui.open(&agent);
+        ui.open_home();
+        let before = ui.focus();
+        focus_initial_subject(&mut ui, &mut None, true, true);
+        assert_eq!(ui.focus(), before);
+        assert!(ui.home_open());
+    }
+
+    fn refusal(code: st3_client::ErrorCode, retryable: bool) -> anyhow::Error {
+        anyhow::Error::new(st3_client::ClientError::Api(
+            code.clone(),
+            "refused".into(),
+            Box::new(st3_client::ErrorEnvelope {
+                api_version: "st3.client.v0".into(),
+                error_version: "st3.client.error.v0".into(),
+                request_id: "request/test".into(),
+                code,
+                message: "refused".into(),
+                retryable,
+                retry_after_ms: None,
+                details: Default::default(),
+            }),
+        ))
+    }
+
+    #[test]
+    fn a_read_receipt_st_refuses_for_good_is_dropped_and_never_asked_again() {
+        // Read-only identity: st says forbidden and not retryable.
+        assert_eq!(
+            receipt_outcome(&refusal(st3_client::ErrorCode::Forbidden, false)),
+            ReceiptOutcome::Refused
+        );
+        // A stale fence is answered by a fresh one, and a retryable refusal or a lost connection is retried.
+        assert_eq!(
+            receipt_outcome(&refusal(st3_client::ErrorCode::StaleFence, false)),
+            ReceiptOutcome::Retry
+        );
+        assert_eq!(
+            receipt_outcome(&refusal(st3_client::ErrorCode::Forbidden, true)),
+            ReceiptOutcome::Retry
+        );
+        assert_eq!(
+            receipt_outcome(&anyhow::anyhow!("the connection broke")),
+            ReceiptOutcome::Retry
+        );
+        let mut receipts = ReadReceipts::default();
+        let now = Instant::now();
+        receipts.displayed("message/a".into(), now);
+        assert_eq!(receipts.next(now).as_deref(), Some("message/a"));
+        receipts.completed("message/a".into(), ReceiptOutcome::Refused, now);
+        // Shown again, asked for nothing more.
+        receipts.displayed("message/a".into(), now);
+        assert!(receipts.next(now + Duration::from_secs(3600)).is_none());
+    }
+
+    #[test]
+    fn a_read_receipt_that_keeps_failing_waits_longer_each_time_up_to_a_minute() {
+        let mut receipts = ReadReceipts::default();
+        let start = Instant::now();
+        receipts.displayed("message/b".into(), start);
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            let at = receipts.pending["message/b"].unwrap();
+            assert_eq!(receipts.next(at).as_deref(), Some("message/b"));
+            receipts.completed("message/b".into(), ReceiptOutcome::Retry, start);
+            waits.push(receipts.pending["message/b"].unwrap().duration_since(start).as_secs());
+        }
+        assert_eq!(waits, [2, 4, 8, 16, 32, 60, 60, 60]);
+        // One success clears it.
+        let at = receipts.pending["message/b"].unwrap();
+        assert!(receipts.next(at).is_some());
+        receipts.completed("message/b".into(), ReceiptOutcome::Done, start);
+        assert!(receipts.next(start + Duration::from_secs(3600)).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_send_uses_the_snapshot_a_window_brought_and_reads_a_fresh_one_only_when_st_calls_it_stale() {
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let store = Arc::new(st3::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
+        let state = st3::api::AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "ui-hint".into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+        };
+        let path = socket.clone();
+        let server = tokio::spawn(async move {
+            st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap();
+        });
+        for _ in 0..200 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let client = Client::unix_as(&socket, "person/avery");
+        // The snapshot an earlier window frame brought: this host's, behind the store now.
+        let earlier = client.capabilities().await.unwrap().snapshot.id;
+        let first = send_message(&client, "agent/example/worker", "one".into(), None, None, None, vec![], vec![], None, Some(earlier.clone()))
+            .await
+            .unwrap();
+        assert!(first.is_some(), "a snapshot from before the store moved is accepted");
+        let count = |store: &st3::store::Store, text: &str| {
+            store.message(first.as_deref().unwrap()).unwrap().map(|m| m.content == text).unwrap_or(false)
+        };
+        assert!(count(&store, "one"));
+        // A snapshot st calls stale (another host's): a fresh one is read and the message goes once.
+        let other = "snapshot/another-host/1/0000000000000000".to_owned();
+        let second = send_message(&client, "agent/example/worker", "two".into(), None, None, None, vec![], vec![], None, Some(other))
+            .await
+            .unwrap()
+            .expect("the message went after a fresh snapshot");
+        assert_ne!(Some(second.as_str()), first.as_deref(), "a new message, once");
+        assert_eq!(store.message(&second).unwrap().unwrap().content, "two");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sidebar_register_edits_merge_and_survive_daemon_restart() {
+        use std::sync::Arc;
+        use st3_client::ArrangementOperation as Op;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("sidebar.sock");
+        async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
+            let store = Arc::new(st3::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
+            let state = st3::api::AppState {
+                owning_person: None,
+                store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
+            };
+            let path = socket.to_owned();
+            let server = tokio::spawn(async move { st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap(); });
+            for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
+            (store, server)
+        }
+        let (store, server) = serve(root.path(), &socket).await;
+        let client = Client::unix_as(&socket, "person/avery");
+        let other_device = Client::unix_as(&socket, "person/avery");
+        let subject = format!("arrangement/person/avery/{}", uuid::Uuid::now_v7());
+        let first = uuid::Uuid::now_v7().to_string(); let second = uuid::Uuid::now_v7().to_string();
+        let write = |operations| super::super::resource_sidebar::Write { subject: subject.clone(), owner: "person/avery".into(), operations, key: uuid::Uuid::now_v7().to_string(), creating: false };
+        let creation = write(vec![Op::Create { name: "Sidebar".into() }, Op::FolderCreate { id: first.clone(), name: "First".into(), parent: None, key: "a0".into() }, Op::FolderCreate { id: second.clone(), name: "Second".into(), parent: None, key: "a1".into() }, Op::SubjectPlace { subject: "agent/example/atlas".into(), folder: Some(first.clone()), key: "a0".into() }]);
+        save_sidebar(&client, &creation).await.unwrap();
+        // Distinct registers edited by two devices combine instead of replacing a layout.
+        save_sidebar(&other_device, &write(vec![Op::FolderRename { id: first.clone(), name: "Renamed".into() }])).await.unwrap();
+        save_sidebar(&client, &write(vec![Op::FolderMove { id: second.clone(), parent: None, key: "Zz".into() }, Op::SubjectPlace { subject: "agent/example/atlas".into(), folder: Some(second.clone()), key: "a1".into() }])).await.unwrap();
+        // Exact retry of the accepted create does not replace later register winners.
+        save_sidebar(&client, &creation).await.unwrap();
+        let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].position.value.key < found.v1().folders[&first].position.value.key);
+        assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], Some(second.clone()));
+        save_sidebar(&client, &write(vec![Op::FolderDelete { id: second.clone() }])).await.unwrap();
+        server.abort(); let _ = server.await; drop(store);
+        let _ = std::fs::remove_file(&socket);
+        let (_store, server) = serve(root.path(), &socket).await;
+        let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].tombstone.is_some());
+        assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
+        // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
+        assert!(found.v1().placements.contains_key("agent/example/atlas"));
+        server.abort();
+    }
+
     #[tokio::test]
     async fn live_sends_retries_discussions_and_creation_survive_daemon_restarts() {
         use std::sync::Arc;
@@ -2208,6 +3888,7 @@ mod tests {
             let store =
                 Arc::new(st3::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
             let state = st3::api::AppState {
+                owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -2287,6 +3968,7 @@ mod tests {
                 })
                 .collect(),
             Some(&sent),
+            None,
         )
         .await
         .unwrap();
@@ -2546,16 +4228,16 @@ mod tests {
             receipts.next(now).is_none(),
             "do not race the in-flight snapshot"
         );
-        receipts.completed("message/one".into(), false, now);
+        receipts.completed("message/one".into(), ReceiptOutcome::Retry, now);
         assert_eq!(receipts.next(now).as_deref(), Some("message/two"));
-        receipts.completed("message/two".into(), true, now);
+        receipts.completed("message/two".into(), ReceiptOutcome::Done, now);
         assert!(receipts.next(now).is_none(), "retry backs off");
         assert_eq!(
             receipts.next(now + Duration::from_secs(2)).as_deref(),
             Some("message/one"),
             "retry without another displayed frame"
         );
-        receipts.completed("message/one".into(), true, now);
+        receipts.completed("message/one".into(), ReceiptOutcome::Done, now);
         receipts.displayed("message/one".into(), now);
         assert!(
             receipts.next(now + Duration::from_secs(3)).is_none(),
@@ -2630,6 +4312,7 @@ mod tests {
                 .unwrap();
         }
         let state = st3::api::AppState {
+            owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -2802,6 +4485,109 @@ mod tests {
     }
 
     #[test]
+    fn failed_conversation_hint_and_key_resubscribe_without_resending_messages() {
+        use super::super::{demo, glass, Hit};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for (spaces, child) in [(false, false), (true, false), (true, true)] {
+            let mut ui = Ui::new(demo::world());
+            ui.live = true;
+            ui.tab = 1;
+            let selected = ui.selected_id().unwrap();
+            if spaces {
+                ui.glasses = Some(glass::Glasses::open(None, None));
+            }
+            let target = if child {
+                ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(
+                    "session/tester-child".into(),
+                )));
+                "session/tester-child".to_owned()
+            } else {
+                let target = selected;
+                if spaces {
+                    ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(target.clone())));
+                }
+                target
+            };
+            let mut failed = BTreeMap::from([(target.clone(), "access refused".into())]);
+            let mut requested = HashSet::from([target.clone()]);
+            ui.world.conversations = conversations(
+                &Model::default(),
+                "person/ada",
+                &BTreeMap::new(),
+                &failed,
+                std::slice::from_ref(&target),
+            );
+            ui.effects.clear();
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let shown: String = terminal.backend().buffer().content.iter()
+                .map(ratatui::buffer::Cell::symbol).collect();
+            assert!(shown.contains("access refused"), "{shown}");
+            assert!(shown.contains("Ctrl+R · retry opening this conversation"), "{shown}");
+            assert!(!shown.contains("retrying") && !shown.contains("Trying again"), "{shown}");
+            assert!(ui.effects.is_empty(), "rendering a refusal never retries it");
+
+            ui.conversation_state.drafts.insert(target.clone(), "saved draft".into());
+            let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+            ui.editing = true;
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "a draft owns Ctrl+R while the box is open");
+            assert!(matches!(ui.world.conversations[&target], Load::Failed(_)));
+            ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            ui.key(key);
+            let effects = std::mem::take(&mut ui.effects);
+            let [Effect::RetryConversation { target: reopened }] = effects.as_slice() else {
+                panic!("opening is distinct from message resend: {effects:?}");
+            };
+            assert_eq!(reopened, &target);
+            assert!(matches!(ui.world.conversations[&target], Load::Loading));
+            assert!(!ui.stalled.contains_key(&target));
+            assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+            let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+            retry_conversation_open(reopened.clone(), &mut failed, &mut requested, &commands);
+            assert!(matches!(incoming.try_recv().unwrap(), Command::Resubscribe { target: sent } if sent == target));
+            assert!(!failed.contains_key(&target));
+            assert!(!requested.contains(&target));
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "loading does not queue another explicit retry");
+            assert!(incoming.try_recv().is_err(), "no automatic retry is sent");
+        }
+    }
+
+    #[test]
+    fn a_session_that_failed_to_open_says_why_and_is_asked_again_when_reopened() {
+        let session = "session/example-child".to_owned();
+        let failed = BTreeMap::from([(
+            session.clone(),
+            "not found · open it again to retry".to_owned(),
+        )]);
+        let shown = conversations(
+            &Model::default(),
+            "person/avery",
+            &BTreeMap::new(),
+            &failed,
+            &[session.clone()],
+        );
+        match &shown[&session] {
+            Load::Failed(reason) => assert!(
+                reason.contains("not found") && reason.contains("retry"),
+                "{reason}"
+            ),
+            other => panic!("a failed open is an error, not loading: {other:?}"),
+        }
+        let mut requested = HashSet::from([session.clone(), "session/example-open".to_owned()]);
+        // On screen, the failure stays and is not asked again in a loop.
+        retry_failed_opens(&mut requested, &failed, std::slice::from_ref(&session));
+        assert!(requested.contains(&session));
+        // Left, it is forgotten, so opening it again asks st once more; a good open is kept.
+        retry_failed_opens(&mut requested, &failed, &[]);
+        assert!(!requested.contains(&session));
+        assert!(requested.contains("session/example-open"));
+    }
+
+    #[test]
     fn a_conversation_says_above_its_oldest_entry_how_far_back_it_goes() {
         let items: Vec<st3_client::TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"c","sequence":2,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"assistant","type":"content","final":true,
@@ -2872,7 +4658,7 @@ mod tests {
         let conversing = [target.clone()];
         assert_eq!(
             moved_sessions(&conversing, &model, &timelines, &mut asked),
-            [target.clone()]
+            std::slice::from_ref(&target)
         );
         // Asked once for that session, not on every pass.
         assert!(moved_sessions(&conversing, &model, &timelines, &mut asked).is_empty());
@@ -2904,6 +4690,7 @@ mod tests {
                 images: Vec::new(),
             },
             sent: Arc::new(Mutex::new(None)),
+            echoed: false,
             since,
         };
         let mut fresh = [pending(Instant::now())];
@@ -2950,6 +4737,8 @@ struct Direct {
     name: String,
     incarnation: String,
     stream: std::os::unix::net::UnixStream,
+    /// How it was reached, for the person: `local PTY`, `Fabric to HOST`, or `via the daemon (…)`.
+    route: String,
 }
 
 /// A direct stream to `subject`'s PTY session: st's raw terminal stream, fenced to the
@@ -2969,19 +4758,88 @@ fn connecting_text(waited: Duration) -> String {
     }
 }
 
+/// How long a shell's attach keeps trying after st refuses it for a reason that passes: about a
+/// minute and a half in all.
+const ATTACH_RETRY_DELAYS: [Duration; 20] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+];
+
+/// Whether an attach refused with `reason` may work a moment later: st cannot tell yet which host
+/// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
+/// is gone, restarted or not allowed is not retried.
+fn worth_retrying(reason: &str) -> bool {
+    [
+        "cannot tell yet which host",
+        "cannot be reached right now",
+        "asked to slow down",
+        "changed while this was on its way",
+    ]
+    .iter()
+    .any(|passing| reason.contains(passing))
+}
+
+/// Try `attempt` again after each delay while it fails for a reason that passes, telling `waiting`
+/// the reason before each wait; the last refusal comes back once the delays are used up.
+async fn retry_attach<T, Fut>(
+    delays: &[Duration],
+    mut waiting: impl FnMut(&str),
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut delays = delays.iter();
+    loop {
+        match attempt().await {
+            Err(reason) if worth_retrying(&reason) => match delays.next() {
+                Some(delay) => {
+                    waiting(&reason);
+                    tokio::time::sleep(*delay).await;
+                }
+                None => return Err(reason),
+            },
+            done => return done,
+        }
+    }
+}
+
 async fn attach_known_then_direct(
     client: &Client,
     agent: &str,
     known: Option<(String, String, String)>,
     runtime_ids: &[String],
+    owner: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
     if let Some((name, terminal, incarnation)) = known
         && !agent.starts_with("terminal/")
-        && let Ok(direct) = attach_terminal(client, name, &terminal, incarnation).await
     {
-        return Ok(direct);
+        // Once selected, keep this incarnation through every route failure. Rediscovery after
+        // an error could silently attach a process that restarted in the meantime.
+        return attach_terminal(
+            client, agent, (name, incarnation), &terminal, owner, None, fallback,
+        ).await;
     }
-    attach_direct(client, agent, runtime_ids, None).await
+    attach_direct(client, agent, runtime_ids, None, owner, fallback).await
 }
 
 async fn attach_direct(
@@ -2989,6 +4847,8 @@ async fn attach_direct(
     subject: &str,
     runtime_ids: &[String],
     expected: Option<&str>,
+    owner: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
     let mut found = Vec::new();
     if subject.starts_with("terminal/") {
@@ -3008,6 +4868,7 @@ async fn attach_direct(
             subject.trim_start_matches("terminal/").replace('/', "."),
             subject.to_owned(),
             screen.value.runtime_incarnation,
+            owner.map(str::to_owned),
         ));
     } else {
         for id in runtime_ids {
@@ -3020,17 +4881,33 @@ async fn attach_direct(
             if let (Some(terminal), Some(incarnation)) =
                 (runtime.terminal_id, runtime.incarnation_id)
             {
-                found.push((runtime.runtime_id, terminal, incarnation));
+                found.push((
+                    runtime.runtime_id,
+                    terminal,
+                    incarnation,
+                    Some(runtime.owner_host_id).filter(|host| !host.is_empty()),
+                ));
             }
         }
     }
     let mut reason = "the agent has no terminal right now".to_owned();
-    for (name, terminal, incarnation) in found {
+    for (name, terminal, incarnation, runtime_owner) in found {
         if expected.is_some_and(|expected| expected != incarnation) {
-            reason = "the terminal restarted; Ctrl+] attaches the new one".into();
+            reason = direct::RESTARTED.into();
             continue;
         }
-        match attach_terminal(client, name, &terminal, incarnation).await {
+        let owner = owner.map(str::to_owned).or(runtime_owner);
+        match attach_terminal(
+            client,
+            subject,
+            (name, incarnation),
+            &terminal,
+            owner.as_deref(),
+            expected,
+            fallback,
+        )
+        .await
+        {
             Ok(direct) => return Ok(direct),
             Err(error) => reason = error,
         }
@@ -3038,27 +4915,86 @@ async fn attach_direct(
     Err(reason)
 }
 
-/// A raw attachment to one terminal's PTY session at one incarnation, and its stream.
+/// One terminal's PTY session at one incarnation, and its stream: the local socket for a terminal
+/// on this host, Fabric for one another fleet host owns. The paired-device gateway carries the
+/// bytes only for a device with no daemon of its own.
 async fn attach_terminal(
     client: &Client,
-    name: String,
+    subject: &str,
+    identity: (String, String),
     terminal: &str,
-    incarnation: String,
+    owner: Option<&str>,
+    expected: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
+    let (name, incarnation) = identity;
+    let opened = direct::open(
+        client,
+        &direct::Terminal {
+            subject,
+            name: &name,
+            incarnation: &incarnation,
+            owner,
+            expected,
+            fallback,
+        },
+    )
+    .await?;
+    let route = match opened {
+        direct::Opened::Stream {
+            stream,
+            name,
+            incarnation,
+            route,
+        } => {
+            return Ok(Direct {
+                name,
+                incarnation,
+                stream,
+                route,
+            });
+        }
+        direct::Opened::UseGateway { route } => route,
+    };
     let attachment = client
         .raw_terminal_attachment(terminal, &incarnation, st3_client::RawTerminalMode::Attach)
         .await
-        .map_err(|error| error.plain())?;
+        .map_err(|error| format!("{route}: {}", error.plain()))?;
     let stream = client
         .raw_terminal_stream(&attachment)
         .await
-        .map_err(|error| error.plain())?;
+        .map_err(|error| format!("{route}: {}", error.plain()))?;
     stream
         .into_std()
         .map(|stream| Direct {
             name,
             incarnation,
             stream,
+            route,
         })
         .map_err(|error| error.to_string())
+}
+
+/// The fleet host that owns `agent`'s terminal, as st already says it: the agent's host, or else
+/// the host of the runtime that holds the terminal.
+fn terminal_owner(
+    model: &Model,
+    agent: &str,
+    found: Option<&st3_client::Agent>,
+    runtime_ids: &[String],
+) -> Option<String> {
+    found
+        .and_then(|agent| agent.host_id.clone())
+        .filter(|host| !host.is_empty())
+        .or_else(|| {
+            model.runtimes.items.iter().find_map(|item| match item {
+                Resource::Runtime(runtime)
+                    if runtime.terminal_id.as_deref() == Some(agent)
+                        || runtime_ids.contains(&runtime.header.id) =>
+                {
+                    Some(runtime.owner_host_id.clone()).filter(|host| !host.is_empty())
+                }
+                _ => None,
+            })
+        })
 }

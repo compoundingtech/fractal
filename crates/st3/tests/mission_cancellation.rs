@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 //! Cancellation owns both declared execs and directly launched gates, including after restart.
+use st3::DeliveryStore;
+use st3::MissionsStore;
 use std::fs::File;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -22,6 +24,8 @@ impl Daemon {
         for (name, source) in [
             ("pty", "#!/bin/sh\nprintf '[]\\n'\n"),
             ("gh", "#!/bin/sh\nexit 1\n"),
+            // Force the group-only teardown path even when the host has a user manager.
+            ("systemctl", "#!/bin/sh\nexit 1\n"),
         ] {
             let path = bin.join(name);
             std::fs::write(&path, source).unwrap();
@@ -38,7 +42,7 @@ impl Daemon {
     fn launch(&mut self) {
         let log = File::create(self.root.join("daemon.log")).unwrap();
         self.child = Some(
-            st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+            st3::test_support::command(test_bin!("st3-fixture"))
                 .env_clear()
                 .env("HOME", &self.root)
                     .env(
@@ -81,7 +85,7 @@ impl Daemon {
     }
 
     fn command(&self, args: &[&str]) -> Value {
-        let output = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+        let output = st3::test_support::command(test_bin!("st3-fixture"))
             .env_clear()
             .env("HOME", &self.root)
             .env("ST3_DAEMON_WAIT", "0")
@@ -414,15 +418,11 @@ mission "orchid/cancellation" state="ready" {
 "#;
     let file = root.path().join("mission.kdl");
     std::fs::write(&file, source).unwrap();
-    daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        // Its gates hold a lock and wait for the test; running them at publish would block.
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    // Its gates hold a lock and wait for the test; running them at publish would block.
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -593,14 +593,10 @@ mission "orchid/processless" state="ready" {
         );
     }
     std::fs::write(&file, source).unwrap();
-    daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -715,14 +711,10 @@ mission "orchid/child" state="ready" {
 "#,
     )
     .unwrap();
-    let published = daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        "--no-gate-check",
-    ]);
+    let published = daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    "--no-gate-check",]);
     let revision = published["published_missions"][0]["revision"]
         .as_str()
         .unwrap();
@@ -740,14 +732,10 @@ mission "orchid/parent" state="ready" {{
         ),
     )
     .unwrap();
-    daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",

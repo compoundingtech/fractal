@@ -1,15 +1,8 @@
-# Conversation normalization design (#1561)
+# Conversation timeline blocks
 
-The project owner decided on 2026-10-06: no outbox/queue and no stored agent history; status
-is a best-effort latest-wins value with a very short timeout. Conversations are
-read from their owner machine at request time, including managed seats. cos owns
-a separate mission to remove the outbox and stored transcript operations. The
-first implementation includes this design; its wire contract still goes
-to the project owner via the curator for exact-head approval before implementation is queued.
-If a harness shows content in its terminal, st shows it in the conversation. Normalize
-for stui, web and phone without token filtering, secret scrubbing, allow-lists or
-fail-closed sanitizers. Access checks remain. Show only reasoning the harness exposes;
-never invent or obtain provider-hidden reasoning.
+st shows in a conversation what the harness shows in its terminal, normalized for
+the terminal UI, web and phone without token filtering, secret scrubbing or allow-lists.
+Access checks still apply. Only reasoning the harness exposes is shown.
 
 ## One display contract
 
@@ -22,11 +15,11 @@ job, subagent, ask, status, error, document, source_record, raw_text, image_link
 an identical second copy; a continuation still fetches the original full body. Preserve native identities, call/result
 correlation, revisions, supplied timing and failure state. Job/subagent payloads
 preserve supplied parent/activity links; an historical ask is never a live picker.
-Errors also have a known `error` block with `{body_ref:true}`, so native stop/exit
-notices from #1478 need no new kind. Optional `block.metadata` is an open JSON
+Errors also have a known `error` block with `{body_ref:true}` for native stop/exit
+notices. Optional `block.metadata` is an open JSON
 object for source-supplied timing (including `wallTimeMs` and `timeoutSeconds`),
-preserving original names, units, values and future fields. #1458 will populate
-that shape after rebasing; this PR does not duplicate its timing extraction.
+preserving original names, units, values and future fields. Native tool-result details
+and assistant text/reasoning metadata use that same shape.
 Unknown uses `payload: {raw: <original JSON>}` and retains the native type and role
 when supplied. Future fields and full structured tool arguments survive; unknown
 blocks have a readable JSON view. A `source_record` block with the `internal`
@@ -35,6 +28,18 @@ the typed projection. A `document` block carries the original Claude document,
 rather than only a placeholder. The optional open-string `visibility` field is a
 UI hint (`visible` by default, `internal`, or `hidden-by-harness`), never a read-scope
 restriction. Unknown role means unknown attribution, not omission.
+
+Fractal Web ignores source records when classifying content visibility. If every
+presentation block is internal/hidden-by-harness, it retains an inspectable event,
+hidden by default, named after the primary block's typed view when available.
+Mixed visible/internal bodies instead keep a quiet, visible-by-default
+“Message with internal records · Show” disclosure; raw body data appears only on
+expansion. Native text blocks may only reference `body.text` via `body_ref`, so
+mixed bodies cannot safely reconstruct visible prose until blocks carry per-block
+text or body ranges. Unspecified visibility retains its existing visible behavior.
+This is defensive schema coverage: at producer revision `25d9c8000`, OMP
+`push_omp_content` emits ordinary text parts as separate entries, and no producer
+of mixed visible/internal presentation blocks has been demonstrated.
 
 Malformed JSON, unfinished tail lines, blank lines and unknown encodings become
 `raw_text` blocks. Their payload has `encoding: "base64"`, `bytes` containing the
@@ -47,14 +52,14 @@ A torn prefix can produce both a raw block and a recovered typed record.
 ### Native record visibility audit
 
 The sole omission table is `omission_reason` in
-`crates/st3/src/external_sessions.rs`: one named match arm per permitted type with
+`crates/st3-store/src/external_sessions.rs`: one named match arm per permitted type with
 an explicit reason. It omits only the four categories below. Nothing else may be
 dropped by a parser branch: an otherwise empty projection falls back to raw JSON.
 The coverage test uses harness-specific native record fixtures, the redacted OMP
 resume/tool captures (also exercising Pi’s shared format), and message/part objects
 from the OpenCode 1.18.34 admission capture. It fails if an empty result has no
 table justification; separate probes cover unknown types, malformed bytes and
-direct owner reads. Fixture provenance is in `crates/st3/fixtures/native-records/SOURCES.md`. When visibility is unproven, retain it.
+direct owner reads. Fixture provenance is in `crates/st3-daemon/fixtures/native-records/SOURCES.md`. When visibility is unproven, retain it.
 
 | Harness records | Decision and reason |
 | --- | --- |
@@ -64,8 +69,9 @@ direct owner reads. Fixture provenance is in `crates/st3/fixtures/native-records
 | Claude `progress`, `file-history-snapshot`, `file-history-delta`, `queue-operation`, `permission-mode`, `mode`, `atis-latch`, `last-prompt`, `ai-title`, `custom-title`, `cost-state`, `agent-name`, `tag`, `pr-link`, `bridge-session`, `fork-context-ref` | Retain raw; no demonstrated generic harness-hidden rule. |
 | Claude attachments other than queued commands and system records without text | Retain raw; queued prompts and textual notices keep their known display shape. |
 | Pi/OMP `session` | Omit the native session setup header. |
-| Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. |
-| Pi/OMP `custom`, `label`, `session_info`, `credential_pin`, `title`, model/thinking changes and summary records without text | Retain raw; summaries with text remain readable native notes. |
+| OMP `reset_boundary`, `credential_pin`, `title` | Retain raw plus typed status views; reset/title are quiet events, credential pins are internal bookkeeping hidden by default. |
+| Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. (The administrative `model_usage`/`title_change`/`session_init`/`ttsr_injection` records are not in this row: they are retained, and `display: false` marks them `hidden-by-harness`.) |
+| Pi/OMP `custom`, `label`, `session_info`, model/thinking changes and summary records without text | Retain raw; summaries with text remain readable native notes. |
 | OpenCode `snapshot` | Retain raw; visibility is not established across releases. |
 | Claude documents | Retain the complete document payload, with a readable document fallback. |
 | Malformed/partial/unknown-encoding input | Retain exact bytes as a `raw_text` block; never silently skip a tail line. |
@@ -78,16 +84,160 @@ OpenCode items whose native rows fit the input bound receive bounded display stu
 and full owner continuations. Rows exceeding that bound produce explicit
 not-fetchable notices, rather than disappearing or acquiring unusable refs.
 
-Start in `crates/st3/src/external_sessions.rs`; use the same normalizer for owner
-side-input updates, reads and follow. Remove deliberate visible-reasoning exclusions, image
-withholding from the data. A 512-character unknown excerpt is a UI preference only. No sanitized-text payload class
-or second durable transcript is needed. Native transcript formats remain authoritative.
+The normalizer in `crates/st3-store/src/external_sessions.rs` retains exposed reasoning and
+image references. A 512-character unknown excerpt is a UI preference only. Native
+transcript formats remain authoritative.
+
+## Typed views and conversation header
+
+Typed views and the header are additive and optional, on top of the block contract, so an
+old client ignores the new fields and keeps the existing text fallback. A block MAY
+carry `view: {type: <string>, ...}`; `type` is an open discriminator, and the client-v0
+schema encodes one closed definition per known `view.type` (`TimelineView*` in
+`docs/st3/client-v0/schemas/client-v0.schema.json`) plus a `TimelineView` fallback
+branch that accepts any other type string. A renderer that does not know a type
+renders the block as it does a block without a view. `view` holds parsed fields only;
+the full native arguments or output stay in `payload`, without changing the block contract. Raw JSON
+stays available for every record, `view` is computed per record and deterministic,
+and the fold caches it with the entry. Generated Rust, Swift and TypeScript clients
+carry `view` and the header below as loose JSON values (`Option<Value>`, `JSONValue?`,
+`unknown`), so no client decoder gains closed cases.
+
+`conversation_blocks::prepare_one` bounds both `view` and `metadata` after enriching
+child-session links, for full reads and native keyset pages alike. Their outer object
+and keys (including `view.type`) survive; long strings carry the visible size-limit
+marker, and oversized nested objects/arrays may become marked JSON-preview strings.
+Generated clients retain these as loose JSON, and both conversation renderers check
+string/array/object shapes rather than assuming a closed view. A single clipped open
+subtree uses a continuation to `/body/blocks/{index}/view` or `/metadata`; if another
+remainder already needs that block's continuation, it instead points to the whole
+original `/body` so owner fetch recovers every exact subtree. Clients inspect the
+returned JSON accordingly. The final entry-size guard still runs after all display
+bounding and can replace an over-budget entry with a fetchable error notice. `omp_event`
+view fields are bounded before the view is built so it stays parseable: kind and attribution
+have 256-byte windows, content and details 8 KiB windows, each plus a visible marker. The
+complete raw record remains available through the block's owner continuation. Page windows target 768 KiB
+but retain one complete larger entry up to the hard response ceiling (1 MiB minus 128,000
+reserved bytes); paging refuses an entry beyond that hard ceiling rather than skipping it.
+
+On `tool_call` blocks, parsed from the native arguments (OMP field `i` becomes
+`intent`; every tool_call view also has `tool`, the native tool name):
+
+| view.type | fields | OMP source |
+| --- | --- | --- |
+| `bash` | command, cwd?, timeout_s?, env_keys?: string[], background: bool | tool `bash` {command,cwd,timeout,env,async} |
+| `edit` | path?, ops: number, input_bytes | tool `edit` {input} (hashline patch; path = first `[PATH#TAG]` header) |
+| `write` | path, bytes, content?, line_count? | tool `write` {path,content}; line count counts native written lines |
+| `read` | path, range?: string | tool `read` {path} (suffix after `:` = range) |
+| `search` | engine: "grep"\|"glob"\|"web", pattern?, path?, query?, case?, hidden?, gitignore?, limit?, skip? | tools `grep`, `glob`, `web_search`; flags preserve explicit false/zero values |
+| `todo` | op, items?: [{content, status}], phase?, task? | tool `todo` |
+| `ask` | questions: [{id, question, options: [{label, description?}], multi: bool, recommended?: number}] | tool `ask`; every alternative survives the selected answer |
+| `task` | context?, tasks: [{name?, agent?, task}] | tool `task`; context carries the parent context/contract |
+| `hub` | op, name?, target?, timeout_s?, message? | tool `hub`; send body remains beside its receipt |
+| `eval` | language, title?, code_bytes, code?, timeout_s?, reset? | tool `eval`; preserve explicit reset=false and timeout=0 |
+| `generic` | name | any other tool |
+
+On `tool_output` blocks, parsed from the OMP toolResult `details`; all of these also
+have `tool`, `call_id` and `is_error`:
+
+| view.type | fields |
+| --- | --- |
+| `bash` | exit_code?, wall_ms?, timeout_s?, timed_out?: bool |
+| `search` | engine, match_count?, file_count?, truncated?, file_limit_reached?, per_file_limit_reached?, warning?; counts come from native matchCount/fileCount, never inferred from bounded rows |
+| `edit` | path?, first_changed_line?, diff?: string (unified diff as given) |
+| `todo` | phases: [{name, items: [{content, status}]}] |
+| `ask` | answers: [{question, selected: string[], custom?: string, note?: string}] |
+| `task` | async: bool, total_ms?, agents: [SubagentSummary] |
+| `hub` | op, timed_out?: bool, jobs?: [JobSummary], state? |
+| `generic` | is_error: bool, wall_ms? |
+
+`SubagentSummary` = `{id, name?, agent?, status, task?, duration_ms?, tokens?, cost_usd?,
+requests?, tool_count?, conversation?: {session_id}}`. `name` preserves the OMP name
+(native `name`, otherwise `id`); `agent` is its type. `task` preserves the full native
+`assignment`, otherwise `task`. Both clients retain invocation rows when the result
+arrives and draw all assignment lines only on the invocation's expansion. Subagent
+result cards show status, usage and the child-open link, without repeating the
+assignment. The child-open row names the agent while routing to its actual session
+id. The owner fills
+`conversation.session_id` only when the child transcript exists at
+`<parent transcript without .jsonl>/<id>.jsonl` and is readable; that session id opens
+through the normal conversation routes (same fold, paging and refs), which is how a
+subagent card links to the child transcript as its own conversation.
+`JobSummary` = `{id, name?, type?, state, exit_code?, started_at?, ended_at?,
+duration_ms?, output_bytes?}`.
+
+Extension and bookkeeping records become blocks as follows; anything not listed keeps
+its block shape:
+
+| OMP record | block kind | view |
+| --- | --- | --- |
+| custom_message `irc:incoming` | `irc` | `{type:"irc", from, message, reply_to?, message_id}` |
+| custom_message `launch-completion` | `job` | `{type:"job", jobs: [JobSummary]}` (from details.daemons) |
+| custom_message `async-result` | `job` | `{type:"job", jobs: [JobSummary]}` (from details.jobs) |
+| custom_message `skill-prompt` | `status` | `{type:"skill", name, path?, args?}` |
+| `compaction` / `branch_summary` | `status` | `{type:"compaction", method?, tokens_before?, tokens_after?, short_summary?, summary?}`; first lines collapsed, full summary on expansion |
+| `model_change` | `status` | `{type:"model_change", model, role?, fallback?: bool}` |
+| `thinking_level_change` | `status` | `{type:"thinking_level", level, configured?}` |
+| other visible custom_message | unchanged (`text`) | `{type:"omp_event", kind, attribution?, content?, details?}`: `kind` is the native customType, the rest are the native values present on the record (attribution is never inferred); content and details are bounded separately to 8 KiB (marked text when over) and the full record stays in the raw payload |
+| `model_usage` / `session_init` / `ttsr_injection` | `status` | `{type:"omp_event", kind: <record type>, attribution?, details: <record>}`; explicit `display: false` is retained with visibility `hidden-by-harness` |
+| `title_change` / `title` | `status` | `{type:"title", title, previous?, source?}` (`previous` only on title changes) |
+| `reset_boundary` | `status` | `{type:"reset_boundary"}`; quiet event `session reset` |
+| `credential_pin` | `status`, visibility `internal` | `{type:"credential_pin", provider}`; hidden by default; hash remains only in raw payload/source record |
+| custom `session_exit` | `status` | `{type:"session_exit", kind, reason}` |
+| custom `tool_execution_start` | `status`, visibility `internal` | `{type:"tool_start", call_id, tool, started_at}`; renderers attach it to the call row and do not draw it alone |
+| assistant message metadata | on its `text`/`reasoning` blocks | `metadata.model`, `metadata.provider`, `metadata.usage` {input, output, cache_read, cache_write, total, cost_usd}, `metadata.context_tokens`, `metadata.stop_reason`, `metadata.ttft_ms`, `metadata.duration_ms`; no view |
+| assistant error message | `error` | `{type:"assistant_error", status, presentation, is_error, label, message, stop_reason?, error_id?, api?, provider?, model?, retry?}` |
+
+Assistant errors come from the assistant session message, not a synthesized daemon
+failure. Persisted `retry` markers carry `{kind,status,attempt,recovery,note,
+recovered_at?,superseded_by?}`. Status is `failed`, `recovered`, or `superseded`;
+presentation is `full`, `compact-recovered`, or `none`, matching OMP's persisted
+outcome. Original error text remains available on expansion after recovery.
+Superseded errors are retained in source data but not drawn. No in-progress retry
+state is invented when the session record does not contain it.
+
+Written content, assignment/context, eval code and compaction summaries use the
+existing 8 KiB display bound and authenticated continuation. Typed view-only refs
+are reattached to their original blocks and passed through the same adapter on
+expansion; metadata and unknown subtrees keep a raw JSON fallback. The written
+line count describes the complete source, not the bounded preview.
+Simplified rendering and history auto-fill share the same bundling predicate:
+write, compaction and assistant-error preview cards remain separate rather than
+being counted as one ordinary-tool run.
+
+
+Timeline pages and delta responses (when `conversation-blocks.v1` is negotiated) MAY
+carry a `header` object. Each field is `{value, source: register|transcript, as_of}`:
+`model` (model id), `context` ({tokens, window}), `cost` ({usd}, with `window: true`
+when the fold window is truncated), `todos`, `jobs` ([JobSummary]), `subagents`
+([SubagentSummary]), `ask` (the last ask call without a matching result, or null) and
+`working` (bool). `source` can be `register` or `transcript`; a register field takes
+precedence when supplied. The current `conversation_header::register_value` adapter
+returns `None`, so headers contain transcript-derived fields and omit `working`. A
+field is absent when its source supplies no value. Transcript derivation uses the
+normalized block metadata: model = last `metadata.model`; context = last
+`metadata.context_tokens`; cost = sum of `metadata.usage.cost_usd` in the window;
+todos = last todo tool_output view, else the last todo call; jobs = latest state per
+job id from job blocks and hub outputs, keeping non-terminal ones; subagents = task
+outputs whose status is not terminal; ask = the last ask call without a matching
+result. `docs/st3/client-v0/fixtures/timeline-views.json` fixes the wire shape with a
+synthetic page that carries views, an `irc` block and a full header.
+
+The Rust and TypeScript renderers show every populated header field in the same fixed
+order. The most common source appears once at the end (`· transcript · 2d ago`);
+ties use the first source in field order. Only fields from another source get their own
+marker (`cost $0.02 [register · 30m ago]`). The shared age uses the oldest field from
+that source, so compaction cannot hide stale data. Phone headers wrap without a line
+limit. A subagent's open-child link is an independent accessible control, outside the
+card's expand/collapse control; opening it pushes a conversation so Back restores
+the parent. Todo statuses remain distinct: `[x]` completed, `[ ]` pending, `[~]`
+in progress, `[!]` blocked and `[/]` abandoned. Only `completed` counts as done.
 
 ## UI filters and show-everything mode
 
 Rust `conversation_with_filters` and TypeScript `conversationEntries` accept an
 explicit named filter set. `DEFAULT_FILTERS` selects harness-markup, context-block,
-control-character, internal-block and excerpt filters. This keeps stui and the
+control-character, internal-block and excerpt filters. This keeps terminal UI and the
 phone's familiar delivery/task/command display shapes, folded tools/mail and
 heartbeat/usage suppression, while new reasoning, image/link, document,
 job/subagent/ask/status and unknown blocks have readable fallbacks. Default filters
@@ -104,12 +254,9 @@ terminal view can expose them without interpreting them. Decoding that JSON yiel
 the unchanged normalized entry. Transport size caps and owner continuations still
 apply; raw mode cannot conjure an unrequested chunk.
 
-This PR supplies the shared renderer APIs and verifies both defaults and raw mode.
-Interactive raw-mode controls, and **stui/phone image loading and clipped-value
-expansion wired to the chunk route, are the next implementation PR**. Current
-clients show load/truncation markers and references; they do not fetch native image
-pixels or expand clipped blocks yet. Existing graph-message image handling is
-separate. Generated Rust/Swift/TypeScript clients expose the chunk API now.
+The terminal UI and the phone fetch image bytes and clipped remainders through the
+chunk route. Existing graph-message image handling is separate. Generated Rust,
+Swift and TypeScript clients expose the chunk API.
 
 ## Owner reads, images and limits
 
@@ -143,7 +290,7 @@ actors, and projection-only paired display/phone keys. There is no separate secr
 filter or raw-content scope. Pairing scope changes and revocation apply to every
 chunk request, including owner-forwarded requests.
 
-The present 8 KiB/value and 1 MB/page bounds protect memory and transport only.
+The 8 KiB/value and 768 KiB timeline-page bounds protect memory and transport only.
 The initial chunk contract returns up to 256 KiB decoded bytes; image reads have
 a visible 32 MiB decoded limit. Four expensive owner timeline/chunk reads can run
 concurrently; excess reads, including managed timeline reads, return HTTP 429
@@ -151,7 +298,7 @@ concurrently; excess reads, including managed timeline reads, return HTTP 429
 Input bounds are distinct from response clipping. A JSONL read captures at most
 32 MiB of source bytes and retains at most 4,096 complete lines from that window.
 The partial first line and older prefix are marked **not fetchable through this
-owner read**; there is no prefix continuation in this slice. A line exceeding the
+owner read**; there is no prefix continuation. A line exceeding the
 window can therefore have no complete record in this response, with the same
 explicit marker. Within the window, clipped values have fetchable continuations.
 
@@ -177,7 +324,7 @@ source-record attachment, normalization and response preparation: budget roughly
 addition to the daemon's other work. This is an estimate, not a strict RSS limit:
 dense JSON, many projected parts, allocator overhead and encoded/base64 expansion
 can exceed it. The source-byte limit and four-read admission limit are enforced;
-a hard heap/AST budget and streaming normalization are follow-up work.
+these do not impose a hard heap/AST budget or guarantee streaming JSON normalization.
 
 OpenCode streams selected messages and their parts instead of copying up to
 4,097 message rows and every part into Rust vectors. Before any Rust byte copy,
@@ -225,234 +372,40 @@ value with its reason, original size when known and continuation. Fetching the
 remainder recovers full arguments/output/unknown JSON; do not cut JSON into an
 apparently complete object. Oversized entries must make progress through chunks.
 File/line scan bounds and missing native history also need explicit partial notices.
-Paging cursors fence source revisions; invalidation requests resync, never silently
-skips content. Build on #1487's versioned per-subject incremental read models, with
-native transcripts as explicit owner-local side inputs. Maintain append/revision
-folds as the source changes, and read the normalized model at request time rather
-than re-normalizing the whole file for every page. Target wakes to affected sessions;
-merged #1512 provides mailbox dependency wakes, not a completed conversation IVM.
-
-The conversation model, prepared pages and search content remain bounded volatile
-memory: #1487's proposed SQLite-backed shape cannot persist conversation bytes under
-the project owner's decision. Rebuild after restart/eviction from the native source, without a
-durable ingestion queue or second transcript. Validate owner availability and file
-identity/revision on requests; bring the fold to the captured native high-water mark
-or report explicit partial progress. Replacement/truncation invalidates its old basis.
-A model is a derived accelerator, never authority or an offline fallback. Coordinate
-this boundary with #1487's owner, avoiding a second cache implementation; prove bounded
-cold rebuild, incremental append/replace work and unchanged-read costs separately.
-
-## Managed seats currently store content
-
-“Read from the owner, as today” describes native sessions, not all managed seats.
-`client_v0.rs` first tries a bound native transcript, then reconstructs a claim-backed
-fallback, showing only the newest 4,096 `harness.timeline` operations. Append/replace/
-finalize chains, truncation coverage and `timeline-query-limited` support that fallback.
-
-Today's dependencies that must move before removal:
-
-- `st-drivers` commits timeline state and events to `st-harness-events.sqlite`;
-  `main.rs` publishes the FIFO with prepared retry bodies and successful-prefix
-  acknowledgment. Adopted older providers also use the polled timeline record file.
-- Timeline pages/deltas, WebSocket replay cursors and conversation-search stamps
-  consume stored operations. Replace these with owner source revisions and visible
-  availability; preserve chronology and graph-message deduplication.
-- Response usage deduplication, totals/spend, `harness.usage` rollups and OTLP consume
-  usage-shaped timeline operations. Move numeric accounting to a separate metadata
-  path with the same attribution and retry identity before retiring that carrier.
-  Do not export conversation bodies through the observation exporter.
-- Local observations default to seven days/20,000 per subject/kind, retaining the
-  newest. Older builds can still replicate the kind. Checkpoint rules currently keep
-  the newest legacy timeline claim and age other candidates at five days before the
-  cut, subject to witnesses and whole-envelope/evidence guards. UI limits do not
-  delete rows. Status-transition readers also depend on historical observations.
-
-The decided target is **no stored agent history and no outbox/queue**, including
-local observation databases, replicated transcript claims and durable event spools.
-The harness's own native transcript on its owner remains the conversation source.
-Categorical status is one small replace-in-place value per seat, fenced to the active
-runtime and ordered by original source time. Publication is best effort with a very
-short timeout, no retry backlog: a failed send is superseded by the next current
-observation. Stale evidence becomes unknown; the removal mission specifies the timeout
-and freshness bound. The no-agent-history builder confirmed 100 ms one-shot local/fleet attempts and
-source-age freshness on 2026-10-06. Numeric usage/limits and st messages remain
-durable independently. No prose, arguments, output or ask prompt belongs in that value.
-A latest-shaped append claim alone does not meet the replace-in-place requirement.
-Coordinate #1546 with its author and cos; do not build a competing lane or assume its
-earlier FIFO/history guarantee survives this decision.
-
-## Interface with the removal mission
-
-`st missions ls` was checked before editing this design; cos's new removal mission
-was still being drafted then. It is now published as
-`mission-run/fleet/smalltalk/no-agent-history/2026-10-06`; its builder confirmed
-that it will sequence reader cutover against this normalizer/chunk contract.
-Check the mission list and its published ownership before
-any implementation touching managed storage, admission, status or the outbox.
-
-Normalization needs these outcomes from cos's mission:
-
-1. An exact owner/session/incarnation/native-source binding for managed reads, with
-   authorized forwarding and a versioned native side input usable by #1487's
-   incremental model, paging, follow and chunk fetches. No dependence on stored
-   timeline operations or an outbox sequence.
-2. Explicit owner-unavailable and transcript-unavailable results; stale prepared pages
-   cannot masquerade as current owner reads. Source replacement invalidates refs and
-   cursors visibly. Search uses the same owner availability and volatile-only content.
-3. A current-status read containing categorical value, source time, incarnation and
-   freshness/unknown state. Conversations read it without historical status replay.
-   Historical harness-shown status comes from the native source when present.
-4. A cutover signal for flushing old pages/search stamps/replay cursors. Numeric usage
-   accounting/OTLP consumers must be handled independently, without retaining agent
-   conversation history or exporting its bodies to preserve the old carrier.
-
-cos owns the removal order: establish owner-read/current-status replacements and
-dependent-reader compatibility, stop all old/new producer and admission paths,
-then retire operation reducers/indexes and clean existing data. Its mission must
-account for pending prepared events and numeric usage, legacy polled providers,
-status-history API retirement, mixed builds, rollback and old writers that would
-reintroduce storage. Do not silently report discarded pending events as delivered.
-It also owns inventory/cleanup of local rows, spools, legacy files, replicated
-envelopes and backups. Checkpoint guards, whole signed envelopes, pinned/evidence
-references and shared operations can block deletion; report residual data. A rules
-change needs coordinated version/digest agreement (baseline 11; #1473 reserves 12).
-The normalization mission performs none of this removal or live-store cleanup.
+Paging cursors fence source revisions; invalidation requests resync and preserves
+explicit notices for unavailable content.
 
 ## Client compatibility
 
-Existing stui/iOS clients must stay usable. The frozen old-Swift decode fixture is
-hand-authored from six contract cases, not generated by the normalizer. Separate
-real owner HTTP tests exercise normalizer-produced legacy/negotiated responses,
-full chunk reads, paired credentials and authenticated fleet forwarding. Swift currently decodes a closed
+Existing terminal UI/iOS clients retain their negotiated capabilities. Swift decodes a closed
 `TimelineType` enum, so sending new top-level kinds to old clients is breaking.
 Advertise/negotiate blocks and chunk fetch; retain existing entry types and complete
 text/JSON fallbacks with explicit transport truncation notices for legacy clients.
 New clients render reasoning, full expandable arguments/results, unknown JSON,
 images, jobs/subagents, asks and availability consistently. Old clients keep their
 known text/tool/status behavior; they do not gain image fetch or new interactive
-rendering. Only a genuinely incompatible wire change requires rejecting an old
-client. Old daemons still have stored fallback behavior until upgraded; the no-storage
-guarantee begins after writer cutover, not on a mixed fleet's first deploy.
+rendering. An incompatible wire change requires rejecting an old client.
 
-## Existing work and proof
+## Collection timeline frames
 
-Open conversation work was inventoried on 2026-10-06. Sequence after or integrate
-the owners' work: #1487 (incremental per-subject read models; coordinate its
-conversation-content persistence boundary), merged #1512 (targeted mailbox wakes),
-#1323/#1351 (native semantics and chronological windows/cursors),
-#1349/#1348 (exact binding/revisits), #1446 (cold runtime/message lookup, currently
-parked), #1471 (volatile prepared owner pages, stacked on #1446), #1458/#1478
-(timing/outcomes), #1496/#1442/#1342 (live ask identity/actions), #1444/#1441
-(tasks/queue), #1343 (generated transport), #1205 (search coverage), #1521
-(owner terminal history), #1489 (terminal images/input), and #1173 (mail images).
-These are dependencies/coordination points, not approval or reasons to duplicate them.
+The terminal UI (`st3-feed`) and phone (`apps/ios/feed.ts`) subscribe to a conversation on
+one existing collections socket. The first `replace:true` frame contains the newest 200
+entries, subject to the existing 1 MiB frame limit, with `has_more` when older content exists.
+Older content remains available through the existing 200-entry timeline pages and owner
+content chunks. Subsequent `replace:false` frames carry new or revised entries by ID.
 
-#1453's omission labels remain useful, but dropping unknown-role text and hiding raw
-unknown bodies contradict #1561. Merged #1482 deliberately withholds image bytes/URLs;
-replace that policy with authorized owner fetch. Closed #1507/#1560's unknown-block
-allow-list and argument withholding, and #1449's sanitizer/capture slice 1, are
-superseded and must not enter this stack. Coordinate #1546 separately: the project owner's
-no-outbox/latest-status decision supersedes the earlier history lane plan; cos and
-the collaborating assistant own reconciliation and removal, not this normalization builder.
+Native assistant stop outcomes use the shared `assistant_error` block and harness
+presentation rules: superseded attempts, silent aborts and user interrupts render
+nothing; recovered attempts show a compact note and terminal failures render in full.
+The view retains the exact native `stopReason`, `errorMessage`, `retryRecovery`,
+`errorStatus` and `errorId` under `native`, alongside the presentation projection.
+Native source records remain available through owner reads.
 
-Normalization PRs: contract/normalizer and withholding removal; owner chunk/image
-fetch; shared/generated clients and renderers. Managed reader/writer cutover and
-existing-data cleanup belong to cos's separate mission. Each contract, claim or
-checkpoint change returns for exact-head approval through its owning mission.
-Use isolated daemons and invented fixtures to compare harness-shown content through
-HTTP, follow/reconnect and all renderers, including full arguments, exposed reasoning,
-unknown nested JSON, images, oversized chunks, paging, owner failure and mixed builds.
-Prove no new content writes, preserved accounting/retries, and checkpoint convergence
-before cleanup. Required checks run on each implementation head; no self-enqueue
-before contract approval, no manual merge or deployment from this document.
-
-## First implementation boundary
-
-The first PR establishes negotiation, raw native blocks, legacy fallbacks and
-on-demand owner chunk reads with revision invalidation. It removes the #1453/#1482
-withholding policy without changing producers, admission, current-status storage
-or the managed stored fallback. It exposes the normalizer/preparation interface
-for #1487's native side-input fold. This checkout contains targeted reconcile
-wakes but no conversation IVM engine; the first slice still uses the existing
-bounded native read path. It claims no cold-read or incremental-append performance
-proof. Integrate with #1487's owner before the subsequent read-model slice; do not
-add an independent cache or persist conversation bytes to meet that dependency.
-
-#1478 (native stop/retry/abort/process exit) and #1458 (native tool-result timing)
-will rebase onto this implementation's final head. The former currently proposes
-withholding free-form stop/provider prose; that policy must be removed or kept
-strictly as a UI presentation choice on rebase. Native source records here retain
-all those fields. The latter's optional timing extraction can use open block
-metadata; arbitrary native result details remain available in `source_record`,
-without copying its numeric whitelist into this normalizer.
-
-## Graph reads for conversation changes
-
-Conversation routing uses a volatile map of runtime identities at eight recent
-claim frontiers. A changed read folds only agents whose actual-state claims changed;
-harness-only and unrelated commits do not repeat agent status/history reductions.
-Catch-up copies at most 4,097 small subject/kind rows before releasing the statement;
-a gap beyond 4,096 rebuilds the identity map. The map contains routing metadata,
-not conversation bytes. A newly seen agent enters the map even when its first
-claim is only a declaration or harness report, so warm and cold reads agree that
-it exists without a current session. Projection repair/trim advances a generation
-under the cache lock; a build started before that reset cannot republish its result.
-Mixed origins and other actual kinds retain the existing canonical identity
-reduction for that agent. This is not a history-independent
-cold-read proof or a replacement for the shared incremental read-model mechanism.
-
-Message reads preserve the newest 10,000 fleet-send window, but existing endpoint
-indexes select the owner's sends before any payload decoding. Two partial indexes
-retain legacy sends whose endpoint fields are at the body root. Replay additionally
-selects only sends after its cursor and before the captured claim frontier. Runtime
-membership reads indexed acceptance times instead of decoding every observation
-into Rust. Message payloads are copied in batches of at most 64 rows, stopping at
-1 MiB plus one complete row; each SQL statement and connection is released before
-JSON decoding. No encompassing SQLite transaction spans native I/O, preparation,
-payload decoding or long-poll waiting. A concurrent-checkpoint test pauses decoding
-a 2 MiB message and proves a subsequent write can be fully checkpointed.
-
-The isolated before/after changes-handler measurement uses a consistent 10.55 GB
-store copy with 784,162 retained claims (frontier 960,761), a representative agent
-with 19,339 claims, and a fixed 128-record native fixture. Four warmed debug-build
-samples append one native reply and one harness observation, request negotiated
-blocks, and use zero long-poll wait. Both variants return two items and 1,006 bytes.
-Handler time changes from 781–787 ms to 246–277 ms; CPU from 781–787 ms to 244–269 ms;
-SQLite VM work from about 343,000 steps to 118,500. The longest SQL statement/reader
-lifetime drops from 229–231 ms to 4–5 ms. Statement count rises from 103–105 to
-117–119 because payload copies use short bounded batches. These measurements
-isolate graph work and do not reproduce the full production 11-second read or
-identify its WAL holder. Owned-message processing and native window preparation
-remain separate costs; the incremental native-window/page slice is #1665.
-
-The two legacy indexes add no payload class, claim kind, retention rule, client
-contract or projection digest. Their first builds on the isolated store took
-17.08 seconds and 0.34 seconds (the second reused warmed pages); subsequent opens
-reuse them. This startup cost belongs in rollout planning. Older builds ignore
-the additional indexes. The routing cache is cleared with projection repairs and
-rebuilds after restart.
-
-## Stored session timeline graph reads
-
-Until the owner-native reader cutover removes the stored-history fallback, its
-attribution reads only the desired row for the session owner by primary key.
-The owner record query first selects the existing newest 10,000 physical owner
-rows, then selects the kinds that the fallback already renders: runtime and
-harness status, diagnostics, usage and messages. It does not filter kinds before
-the physical window, which would bring older entries back into the view. Timeline
-operations keep their separate incarnation window and missing-history checks.
-
-Selected owner payloads use the same 64-row, 1 MiB-plus-one-complete-row copy
-batches as messages. Statements and connections are released before JSON decoding;
-a paused 2 MiB diagnostic decode allows a concurrent write to be fully checkpointed.
-Existing subject and claim identity indexes suffice. This cuts unnecessary payload
-copies and the long decode-held reader, without changing stored data, retention,
-visible entries, attribution or cursors. The operation fold, native normalization,
-response preparation and serialization remain separate costs; this slice alone
-does not establish the client p99 or attached-client CPU targets.
-
-Existing request profiles distinguish `timeline/native-read`,
-`timeline/stored-fallback` and `timeline/cached-page` stages so deployment evidence
-can identify the path beneath the shared session-detail route label. The native
-incremental fold and bounded prepared pages remain #1665's scope. Session detail
-and session-list collection construction remain separate from timeline reads.
+Session exits preserve the complete checkpoint, including `pendingToolCalls`,
+arguments/intent and unknown fields. Only transport size and paging limits apply,
+with visible truncation markers and owner continuations for exact full values.
+Outcomes are read from the owner machine, not stored in the database.
+Recognized exits use the existing `cancelled` status value — the process stopped
+before the turn finished; the recorded kind, reason and exit code stay in `detail` —
+so a planned stop is neither a completed turn nor an error, with no new
+client-visible vocabulary. Fatal and unknown exits remain diagnostic errors.

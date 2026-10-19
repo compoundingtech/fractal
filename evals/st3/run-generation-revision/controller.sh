@@ -46,7 +46,7 @@ wait_for_event() {
 }
 
 st3 publish "$EVAL_ROOT/initial.kdl" --as "$REQUESTER" >/dev/null
-st3 --json mission start generation-proof \
+st3 --json missions start generation-proof \
   --id "generation-proof/${ST_MISSION_RUN}" \
   --workspace "$EVAL_ROOT" \
   --as "$REQUESTER" > "$EVAL_ROOT/initial-run.json"
@@ -111,7 +111,7 @@ jq -e --arg hash "$preview_hash" '
   and .source_generation != null
 ' "$EVAL_ROOT/approved.json" >/dev/null
 
-st3 --json mission show "$run_subject" > "$EVAL_ROOT/applied.json"
+st3 --json missions show "$run_subject" > "$EVAL_ROOT/applied.json"
 new_generation=$(jq -er '.generation' "$EVAL_ROOT/applied.json")
 environment_subject=$(jq -er '.steps[] | select(.step == "generation-environment") | .subject' "$EVAL_ROOT/applied.json")
 st3 trace wait "$environment_subject" --for completed --timeout 2m >/dev/null

@@ -3,9 +3,10 @@ import { FlatList, SectionList, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
+import { quality } from '../qualityNative';
 import { saidRows, type SaidRow } from '../conversationSearch';
-import { AGENT_LEGEND, agentGlyph, agentRows, agentSections, agentTreeLines, filterAgentRows, harnessColor, UNMANAGED_GROUP, type AgentRowView, type TreeLine } from '../agentsView';
-import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
+import { AGENT_LEGEND, agentGlyph, agentRows, OLDER_ST_NOTE, agentSections, agentTreeLines, filterAgentRows, harnessColor, UNMANAGED_GROUP, type AgentRowView, type TreeLine } from '../agentsView';
+import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu, type MenuAction } from '../menu';
 import type { RootParams } from '../navigation';
 import { sessionDetail } from '@smalltalk/st3-views';
@@ -25,6 +26,7 @@ export function AgentsScreen() {
   const { data, gatewayHost, truncated, hasSynced, loadErrors, treeView, setTreeView, status, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   useListsOnFocus(['sessions']);
+  useMissionsOnFocus();
   const refresh = useRefresh(['sessions']);
   const list = useRef<SectionList<AgentRowView>>(null), tree = useRef<FlatList<TreeLine>>(null);
   useDebugScroll(list as never);
@@ -36,7 +38,7 @@ export function AgentsScreen() {
         placeholder: 'Filter agents',
         hideWhenScrolling: true,
         autoCapitalize: 'none',
-        onChangeText: event => setFilter(event.nativeEvent.text),
+        onChangeText: event => { quality.key(); setFilter(event.nativeEvent.text); },
         onCancelButtonPress: () => setFilter(''),
       },
     });
@@ -87,6 +89,7 @@ export function AgentsScreen() {
       />)}
     </View> : null}
     {truncated.agents ? <Note tone="warning">More agents exist beyond these 200.</Note> : null}
+    {rows.some(row => row.reported) ? <Note>{OLDER_ST_NOTE}</Note> : null}
     <Legend entries={legend} />
     <View style={{ paddingHorizontal: 12 }}><Button label="past sessions" onPress={() => navigation.navigate('History')} /></View>
   </View>;

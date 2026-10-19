@@ -34,7 +34,7 @@ impl Daemon {
             executable(&bin.join(name), source);
         }
         let log = File::create(root.join("daemon.log")).unwrap();
-        let child = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+        let child = st3::test_support::command(test_bin!("st3-fixture"))
             .env_clear()
             .env("HOME", root)
             .env(
@@ -82,12 +82,28 @@ impl Daemon {
         serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
     }
 
+    /// Plain CLI roster reads no longer wait. Tests needing publication name the cut
+    /// explicitly on the same daemon, without adding a sleep or a retry to the CLI.
+    fn require_roster_cut(&self, cut: u64) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let response = runtime.block_on(async {
+            st3_client::Client::unix(self.root.join("daemon.sock"))
+                .agents_list_after(None, Some(200), true, cut)
+                .await
+                .expect("the fixture must publish the requested host-local roster cut")
+        });
+        assert!(response.snapshot.store_index >= cut);
+    }
+
     fn run_cli(&self, args: &[&str]) -> std::process::Output {
         self.run_cli_format(args, true)
     }
 
     fn run_cli_format(&self, args: &[&str], json: bool) -> std::process::Output {
-        let mut command = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"));
+        let mut command = st3::test_support::command(test_bin!("st3-fixture"));
         command
             .env_clear()
             .env("HOME", &self.root)
@@ -210,6 +226,9 @@ fn mission_publish_dry_run_prints_the_preview_without_gates_or_publication() {
     }
     let root = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(root.path());
+    // There is no mutation receipt before the first read: cut zero asks only for
+    // this daemon's initial history publication, not a later global head.
+    daemon.require_roster_cut(0);
     let file = root.path().join("preview.kdl");
     let source = r#"version 2
 agent "example/helper" {
@@ -235,19 +254,23 @@ mission "example/preview" state="ready" {
     for (prefix, flag) in [
         (vec!["apply"], "--dry-run"),
         (vec!["apply"], "--preview"),
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         (vec!["agents", "apply"], "--dry-run"),
         (vec!["missions", "publish"], "--dry-run"),
         (vec!["missions", "publish"], "--preview"),
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
     ] {
         let mut args = prefix.clone();
         args.extend([file, "--as", PUBLISHER, flag]);
         let output = daemon.run_cli(&args);
         assert!(output.status.success(), "{output:?}");
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             stderr.contains("is legacy; use st apply FILE"),
             prefix.len() == 2
         );
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
         let preview = daemon.command(&args);
         let resolved = preview["resolved_intent"]["kdl"].as_str().unwrap();
         let intent = st3::graph::parse_intent(resolved, "orchid").unwrap();
@@ -315,8 +338,10 @@ fn mission_publish_dry_run_prints_blockers_before_refusing_publication() {
     .unwrap();
     for prefix in [
         vec!["apply"],
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         vec!["agents", "apply"],
         vec!["missions", "publish"],
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
     ] {
         let mut args = prefix;
         args.extend([file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run"]);
@@ -350,6 +375,9 @@ fn apply_bundles_seats_missions_and_schedules_and_refuses_partial_publication() 
     }
     let root = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(root.path());
+    // There is no mutation receipt before the first read: cut zero asks only for
+    // this daemon's initial history publication, not a later global head.
+    daemon.require_roster_cut(0);
     let seat = root.path().join("seat.kdl");
     let mission = root.path().join("mission.kdl");
     let schedule = root.path().join("schedule.kdl");
@@ -412,6 +440,7 @@ fn apply_bundles_seats_missions_and_schedules_and_refuses_partial_publication() 
             .contains("example/helper")
     );
     let applied = daemon.command(&["apply", seat, mission, schedule, "--as", PUBLISHER]);
+    daemon.require_roster_cut(applied["store_index"].as_u64().expect("apply acceptance cut"));
     assert!(
         applied.to_string().contains("schedule/example/daily"),
         "{applied}"
@@ -592,14 +621,10 @@ mission "orchid/replay" state="ready" {
 "#,
     )
     .unwrap();
-    daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -659,14 +684,10 @@ mission "orchid/replay" state="ready" {
 "#,
     )
     .unwrap();
-    daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -717,7 +738,7 @@ mission "orchid/replay" state="ready" {
         health["message"].as_str().unwrap().contains(stuck),
         "{health}"
     );
-    let output = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
         .env_clear()
         .env("HOME", root.path())
         .env("ST3_DAEMON_WAIT", "0")
@@ -866,14 +887,10 @@ fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
     // Publish the broken gates as their runs had them; publish would otherwise refuse them.
     let file = root.path().join("replay.kdl");
     std::fs::write(&file, mission(root.path(), false)).unwrap();
-    daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -1023,15 +1040,11 @@ fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
     }
 
     // Publish runs the same check and refuses the broken gates, naming each one.
-    let refused = daemon.run_cli(&[
-        "missions",
-        "publish",
-        file,
-        "--as",
-        PUBLISHER,
-        "--workspace",
-        workspace,
-    ]);
+    let refused = daemon.run_cli(&["apply", file,
+    "--as",
+    PUBLISHER,
+    "--workspace",
+    workspace,]);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -1065,15 +1078,11 @@ fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
         };
         assert_eq!(gate["answer"], expected, "{gate:#}");
     }
-    daemon.command(&[
-        "missions",
-        "publish",
-        fixed,
-        "--as",
-        PUBLISHER,
-        "--workspace",
-        workspace,
-    ]);
+    daemon.command(&["apply", fixed,
+    "--as",
+    PUBLISHER,
+    "--workspace",
+    workspace,]);
     let listed = daemon.command(&["missions", "ls"]);
     assert!(listed.to_string().contains("orchid/replay"), "{listed}");
 
@@ -1179,4 +1188,191 @@ mission "orchid/inputs" state="ready" {
     );
     let (_, view) = check(&["--input", "release=1.5.0"]);
     assert_eq!(view["gates"][0]["answer"], "not-yet", "{view:#}");
+}
+
+
+#[test]
+fn until_scripts_wait_for_round_outputs_in_preflight_and_still_run_each_round() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("until.kdl");
+    std::fs::write(&file, r#"version 2
+mission "orchid/round-output" state="ready" {
+  goal "Check a result only after a round produces it."
+  completion { when "all-steps-exhausted" }
+  gate "mission script" { exec "printf checked > mission-checked"; host "orchid"; workspace "."; }
+  loop "improve" {
+    max-rounds 2
+    until {
+      gate "round result" {
+        exec "printf '%s\\n' \"$ST_LOOP_ROUND\" >> until-evaluated; test -s result.json || exit 2; test \"$ST_LOOP_ROUND\" -ge 2"
+        host "orchid"
+        workspace "."
+      }
+    }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "produce" {
+        assigned-to "person/avery"
+        goal "Write result.json for this round."
+        gate "round step script" { exec "printf checked > round-checked"; host "orchid"; workspace "."; }
+      }
+    }
+  }
+}
+"#).unwrap();
+    let file = file.to_str().unwrap();
+    let workspace = root.path().to_str().unwrap();
+
+    // This used to run until-evaluated before any round and reject the absent result with exit 2.
+    let dry = daemon.run_cli(&[
+        "apply",
+        file,
+        "--as",
+        PUBLISHER,
+        "--workspace",
+        workspace,
+        "--dry-run",
+        "--check",
+    ]);
+    assert!(dry.status.success(), "{dry:?}");
+    assert!(
+        String::from_utf8_lossy(&dry.stderr).contains("not checked, they run after each round")
+    );
+    assert!(!root.path().join("until-evaluated").exists());
+    assert!(!root.path().join("result.json").exists());
+    assert!(root.path().join("mission-checked").exists());
+    assert!(root.path().join("round-checked").exists());
+    assert!(
+        !daemon
+            .command(&["missions", "ls", "--all"])
+            .to_string()
+            .contains("orchid/round-output")
+    );
+
+    let checked = daemon.command(&["missions", "check", file, "--workspace", workspace]);
+    let gates = checked["gates"].as_array().unwrap();
+    // Normalization also lists the generated round mission; assert the relevant gates by name.
+    for name in ["mission script", "round step script", "round result"] {
+        assert!(gates.iter().any(|gate| gate["gate"] == name), "{checked:#}");
+    }
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| gate["gate"] == "round result")
+            .count(),
+        1,
+        "{checked:#}"
+    );
+    for gate in gates {
+        if gate["gate"] == "round result" {
+            assert_eq!(gate["answer"], "unchecked", "{gate:#}");
+            assert_eq!(gate["reason"], "not checked, they run after each round");
+            assert!(gate["exit_code"].is_null(), "{gate:#}");
+        } else {
+            assert_eq!(gate["answer"], "pass", "{gate:#}");
+        }
+    }
+    let human = daemon.run_cli_format(
+        &["missions", "check", file, "--workspace", workspace],
+        false,
+    );
+    assert!(human.status.success(), "{human:?}");
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("not checked, they run after each round")
+    );
+
+    // Real publication uses the same scope and displays the deferred reason, too.
+    let published = daemon.run_cli(&["apply", file, "--as", PUBLISHER, "--workspace", workspace]);
+    assert!(published.status.success(), "{published:?}");
+    assert!(
+        String::from_utf8_lossy(&published.stderr)
+            .contains("not checked, they run after each round")
+    );
+    assert!(!root.path().join("until-evaluated").exists());
+    assert!(!root.path().join("result.json").exists());
+
+    for args in [
+        vec!["apply", "--help"],
+        vec!["missions", "publish", "--help"],
+        vec!["missions", "check", "--help"],
+    ] {
+        let help = daemon.run_cli_format(&args, false);
+        assert!(help.status.success(), "{help:?}");
+        let text = String::from_utf8_lossy(&help.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("after each round"), "{text}");
+    }
+
+    let run_id = "mission-run/orchid/round-output-test";
+    daemon.command(&[
+        "missions",
+        "start",
+        "mission/orchid/round-output",
+        "--id",
+        run_id,
+        "--workspace",
+        workspace,
+        "--as",
+        PUBLISHER,
+    ]);
+    for round in 1..=2 {
+        let mut step = String::new();
+        wait_for("the round's producer step", || {
+            let work = daemon.command(&["work", "ls", "--as", "person/avery"]);
+            let found = work["value"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["state"] == "ready");
+            if let Some(item) = found {
+                step = item["id"].as_str().unwrap().to_owned();
+            }
+            !step.is_empty()
+        });
+        if round == 1 {
+            assert!(!root.path().join("until-evaluated").exists());
+        } else {
+            let evaluated = std::fs::read_to_string(root.path().join("until-evaluated")).unwrap();
+            assert!(!evaluated.is_empty());
+            assert!(evaluated.lines().all(|value| value == "1"), "{evaluated}");
+        }
+        std::fs::write(
+            root.path().join("result.json"),
+            format!("{{\"round\":{round}}}"),
+        )
+        .unwrap();
+        daemon.command(&[
+            "work",
+            "done",
+            &step,
+            "--as",
+            "person/avery",
+            "--summary",
+            "Produced result.json",
+        ]);
+    }
+    wait_for("the loop to finish after its second boundary", || {
+        daemon.command(&["missions", "show", run_id])["status"] == "completed"
+    });
+    // Verify both boundaries in order without imposing exactly-once execution on runtime.
+    let evaluated = std::fs::read_to_string(root.path().join("until-evaluated")).unwrap();
+    let rounds = evaluated.lines().collect::<Vec<_>>();
+    assert_eq!(rounds.first(), Some(&"1"), "{evaluated}");
+    let second = rounds.iter().position(|value| *value == "2").unwrap();
+    assert!(
+        rounds[..second].iter().all(|value| *value == "1"),
+        "{evaluated}"
+    );
+    assert!(
+        rounds[second..].iter().all(|value| *value == "2"),
+        "{evaluated}"
+    );
+    let run = daemon.command(&["missions", "show", run_id]);
+    assert_eq!(run["loops"][0]["round"], 2, "{run:#}");
 }

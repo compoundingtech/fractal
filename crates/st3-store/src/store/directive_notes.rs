@@ -1,0 +1,304 @@
+//! Current person context, never authorization evidence. Claims remain authoritative.
+use super::*;
+use smallclaims::store::canonical;
+
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, Serialize)]
+pub struct DirectiveNote {
+    pub person: String,
+    pub author: String,
+    pub time: String,
+    pub text: String,
+    pub expires_at: Option<String>,
+    pub revision: String,
+}
+
+pub const CURRENT_QUERY: &str = "SELECT c.id,c.store_index,c.batch_id,c.subject,c.kind,c.origin,c.actor,c.body,c.predecessors,c.accepted_at_unix_ms
+    FROM person_directive_notes n JOIN claims c ON c.id=n.claim_id WHERE n.person=?1";
+
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2aaa16339e75 owner=st3_store::store::directive_notes TODO=chunk-or-reference-variable-columns */ r#"
+CREATE TABLE IF NOT EXISTS person_directive_notes (
+    person TEXT PRIMARY KEY,
+    claim_id TEXT NOT NULL,
+    head_key BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS local_directive_note_pending (claim_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS local_directive_note_dirty (subject TEXT PRIMARY KEY);
+CREATE TRIGGER IF NOT EXISTS directive_note_claim_insert AFTER INSERT ON claims
+WHEN NEW.kind='person.directive-note-set' BEGIN
+    INSERT OR IGNORE INTO local_directive_note_pending VALUES(NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS directive_note_legacy_insert AFTER INSERT ON claims BEGIN
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT subject FROM claims WHERE batch_id=NEW.batch_id AND store_index>NEW.store_index
+        AND kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id)
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
+END;
+CREATE TRIGGER IF NOT EXISTS directive_note_claim_delete AFTER DELETE ON claims BEGIN
+    DELETE FROM local_directive_note_pending WHERE claim_id=OLD.id;
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT OLD.subject WHERE OLD.kind='person.directive-note-set';
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT subject FROM claims WHERE batch_id=OLD.batch_id AND store_index>OLD.store_index
+        AND kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id)
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
+END;
+CREATE TRIGGER IF NOT EXISTS directive_note_claim_update
+AFTER UPDATE OF id,batch_id,subject,kind,accepted_at_unix_ms,store_index ON claims
+WHEN OLD.id IS NOT NEW.id OR OLD.batch_id IS NOT NEW.batch_id
+    OR OLD.subject IS NOT NEW.subject OR OLD.kind IS NOT NEW.kind
+    OR OLD.accepted_at_unix_ms IS NOT NEW.accepted_at_unix_ms
+    OR OLD.store_index IS NOT NEW.store_index BEGIN
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT OLD.subject WHERE OLD.kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=OLD.id);
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT NEW.subject WHERE NEW.kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=OLD.id);
+    INSERT OR IGNORE INTO local_directive_note_pending
+    SELECT NEW.id WHERE NEW.kind='person.directive-note-set'
+        AND (OLD.kind<>'person.directive-note-set'
+            OR EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=OLD.id));
+    DELETE FROM local_directive_note_pending
+    WHERE claim_id=OLD.id AND (OLD.id IS NOT NEW.id OR NEW.kind<>'person.directive-note-set');
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT subject FROM claims
+    WHERE (OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index)
+        AND ((batch_id=OLD.batch_id AND store_index>OLD.store_index)
+            OR (batch_id=NEW.batch_id AND store_index>NEW.store_index))
+        AND kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id)
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
+END;
+CREATE TRIGGER IF NOT EXISTS directive_note_record_insert AFTER INSERT ON replica_records
+WHEN NEW.claim_id IS NOT NULL BEGIN
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT subject FROM claims WHERE id=NEW.claim_id AND kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=NEW.claim_id)
+        AND (NEW.state='repaired'
+            OR (SELECT MIN(position) FROM replica_records WHERE claim_id=NEW.claim_id)
+            IS NOT COALESCE(
+                (SELECT MIN(position) FROM replica_records
+                    WHERE claim_id=NEW.claim_id AND record_ref<>NEW.record_ref),
+                (SELECT COUNT(*) FROM claims legacy_position
+                    WHERE legacy_position.batch_id=claims.batch_id
+                        AND legacy_position.store_index<claims.store_index)));
+END;
+CREATE TRIGGER IF NOT EXISTS directive_note_record_update
+AFTER UPDATE OF position,claim_id,state,replacement_claim_id ON replica_records
+WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id
+    OR OLD.state IS NOT NEW.state
+    OR OLD.replacement_claim_id IS NOT NEW.replacement_claim_id BEGIN
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT subject FROM claims WHERE id IN (OLD.claim_id,NEW.claim_id)
+        AND kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
+END;
+CREATE TRIGGER IF NOT EXISTS directive_note_record_delete AFTER DELETE ON replica_records
+WHEN OLD.claim_id IS NOT NULL BEGIN
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT subject FROM claims WHERE id=OLD.claim_id AND kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=OLD.claim_id)
+        AND (OLD.state='repaired'
+            OR (SELECT MIN(position) FROM replica_records WHERE claim_id=OLD.claim_id)>OLD.position
+            OR (NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=OLD.claim_id)
+                AND OLD.position IS NOT (SELECT COUNT(*) FROM claims legacy_position
+                    WHERE legacy_position.batch_id=claims.batch_id
+                        AND legacy_position.store_index<claims.store_index)));
+END;
+CREATE TRIGGER IF NOT EXISTS directive_note_batch_update
+AFTER UPDATE OF origin,replica_sequence ON batches
+WHEN OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_sequence BEGIN
+    INSERT OR IGNORE INTO local_directive_note_dirty
+    SELECT subject FROM claims WHERE batch_id=NEW.id AND kind='person.directive-note-set'
+        AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
+END;
+"#;
+
+pub fn create_schema(connection: &Connection) -> Result<()> {
+    // Earlier builds cannot admit this kind. Install an empty projection before any new
+    // admission, without scanning or rewriting the existing log during schema migration.
+    // Preserve the schema cookie on unchanged opens, while upgrading an older trigger
+    // definition exactly once. The fixed definitions contain no whitespace-bearing literals.
+    for suffix in ["insert", "update", "delete"] {
+        let name = format!("directive_note_record_{suffix}");
+        let marker = format!(/* sqlite-large-value: allow-for-now lv-h7358615098b0 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {name}");
+        let start = SCHEMA
+            .find(&marker)
+            .context("missing directive-note trigger definition")?;
+        let end = SCHEMA[start..]
+            .find("\nEND;")
+            .context("unterminated directive-note trigger definition")?;
+        let expected = SCHEMA[start..start + end + 5].replace("IF NOT EXISTS ", "");
+        let installed: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [&name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let tokens = |sql: &str| {
+            sql.trim()
+                .trim_end_matches(';')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if installed
+            .as_deref()
+            .is_some_and(|sql| tokens(sql) != tokens(&expected))
+        {
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h476206fc7944 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER {name}"))?;
+        }
+    }
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2cced01813a3 owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ SCHEMA)?;
+    Ok(())
+}
+
+pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h4911e953fa4d owner=st3_store::store::directive_notes TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM person_directive_notes;
+        DELETE FROM local_directive_note_pending;
+        DELETE FROM local_directive_note_dirty;
+        INSERT INTO local_directive_note_pending SELECT id FROM claims WHERE kind='person.directive-note-set'
+            AND NOT EXISTS (SELECT 1 FROM replica_records repaired
+                WHERE repaired.claim_id=claims.id AND repaired.state='repaired');")?;
+    flush(tx)
+}
+
+pub fn flush(tx: &Transaction<'_>) -> Result<()> {
+    let dirty = tx.prepare("SELECT subject FROM local_directive_note_dirty ORDER BY subject")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for person in dirty {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h44baba168680 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM person_directive_notes WHERE person=?1", [&person])?;
+        let latest = tx.query_row(/* sqlite-large-value: allow-for-now lv-ha09a9fdb6d38 owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='person.directive-note-set'
+            AND NOT EXISTS (SELECT 1 FROM replica_records repaired
+                WHERE repaired.claim_id=claims.id AND repaired.state='repaired')
+            ORDER BY CANONICAL_DESC(claims) LIMIT 1"), [&person], |row| row.get::<_, String>(0)).optional()?;
+        if let Some(id) = latest { project(tx, &person, &id)?; }
+    }
+    let pending = tx.prepare("SELECT c.subject,c.id FROM local_directive_note_pending p JOIN claims c ON c.id=p.claim_id
+        WHERE NOT EXISTS (SELECT 1 FROM replica_records repaired
+            WHERE repaired.claim_id=c.id AND repaired.state='repaired')
+        ORDER BY p.claim_id")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (person, id) in pending { project(tx, &person, &id)?; }
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hbdc0ad73cc41 owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_directive_note_dirty; DELETE FROM local_directive_note_pending;")?;
+    Ok(())
+}
+
+pub fn project(tx: &Transaction<'_>, person: &str, id: &str) -> Result<()> {
+    let key = canonical::sortable_key(&canonical::claim_key(tx, id)?);
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h88d1aeed0c6e owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_directive_notes(person,claim_id,head_key) VALUES(?1,?2,?3)
+        ON CONFLICT(person) DO UPDATE SET claim_id=excluded.claim_id,head_key=excluded.head_key
+        WHERE excluded.head_key>person_directive_notes.head_key", params![person, id, key])?;
+    Ok(())
+}
+
+/// A pinned membership is necessary, not proof of undiscovered legacy peers. Operators must
+/// fence legacy replication before enabling notes; reject every observed unfenced writer too.
+pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St3Error> {
+    fn refused(message: impl Into<String>) -> St3Error {
+        St3Error::new("directive-note-feature-barrier", message)
+    }
+    // A newly staged local admission/removal is not in the signed membership fold yet.
+    // Do not publish against yesterday's members while the replication writer seals it.
+    let pending: bool = tx.query_row(/* sqlite-large-value: allow-for-now lv-h0f0a95d925de owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
+        "SELECT EXISTS(SELECT 1 FROM claims c JOIN batches b ON b.id=c.batch_id
+         LEFT JOIN replica_envelopes e ON e.batch_id=b.id
+         WHERE c.origin=?1 AND c.kind IN ({})
+           AND NOT EXISTS(SELECT 1 FROM replica_envelope_signatures s
+             WHERE s.writer=b.origin AND s.sequence=b.replica_sequence
+               AND s.envelope_hash=e.envelope_hash))",
+        smallclaims::store::FLEET_CLAIM_KINDS,
+    ), [origin], |row| row.get(0)).map_err(internal)?;
+    if pending {
+        return Err(refused("pending local fleet membership must be signed before publishing directive notes"));
+    }
+    let membership = fleet_membership_tx(tx).map_err(internal)?;
+    if membership.anchor().is_none()
+        || !matches!(membership.state(origin), crate::fleet::MemberState::Current(_))
+    {
+        return Err(refused("directive notes require anchored membership and an active local member; fence legacy peers from replication before enabling notes"));
+    }
+    for member in membership.incarnations().filter(|member| member.end.is_none()) {
+        if !matches!(membership.state(&member.name), crate::fleet::MemberState::Current(_)) {
+            return Err(refused("conflicted fleet membership cannot enable directive notes"));
+        }
+        let supported: Option<bool> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h81352151898a owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT json_extract(claims.body,'$.fields.features.person_directive_note')=1
+             FROM claims JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
+                 AND batches.replica_sequence>=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+            params![format!("daemon/{}", member.name), member.name, member.start], |row| row.get(0))
+            .optional().map_err(internal)?.flatten();
+        if supported != Some(true) {
+            return Err(refused(format!("host/{} has not advertised features.person_directive_note=1; upgrade or fence it before enabling notes", member.name)));
+        }
+    }
+    let fenced = membership.legacy_removed_names().collect::<BTreeSet<_>>();
+    // Seek past each writer prefix instead of scanning all retained batches/envelopes.
+    // Checkpoint tombstones still witness legacy writers after their payloads are trimmed.
+    for (table, column) in [
+        ("replica_envelopes", "writer"),
+        ("batches", "origin"),
+        ("checkpoint_envelopes", "writer"),
+    ] {
+        let mut statement = tx.prepare(/* sqlite-large-value: allow-for-now lv-h05ec825e07b5 owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1"
+        )).map_err(internal)?;
+        let mut previous = String::new();
+        while let Some(writer) = statement.query_row(/* sqlite-large-value: allow-for-now lv-h56014f7f4dad owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0))
+            .optional().map_err(internal)?
+        {
+            if !membership.is_keyed_writer(&writer) && !fenced.contains(&writer) {
+                return Err(refused(format!("legacy writer `{writer}` remains unfenced; feature advertisements do not establish complete legacy discovery")));
+            }
+            previous = writer;
+        }
+    }
+    Ok(())
+}
+
+pub fn current(connection: &Connection, person: &str, now: u128) -> Result<Option<DirectiveNote>> {
+    smallclaims::touched::note_read(|| person.to_owned());
+    let claim = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd742fa0a89fd owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ CURRENT_QUERY, [person], claim_from_row).optional()?;
+    let Some(mut claim) = claim else { return Ok(None); };
+    let fields = claim.body.get_mut("fields").and_then(Value::as_object_mut)
+        .context("admitted directive note has no fields")?;
+    let Some(Value::String(text)) = fields.remove("text") else { return Ok(None); };
+    let expires_at = match fields.remove("expires_at") {
+        Some(Value::String(at)) => Some(at),
+        None => None,
+        Some(_) => anyhow::bail!("admitted directive note has an invalid expiry"),
+    };
+    if let Some(at) = expires_at.as_deref() {
+        let expires = st3_schema::directive_notes::expiry(at).map_err(anyhow::Error::new)?;
+        let expires_nanos = i128::from(expires.timestamp()) * 1_000_000_000
+            + i128::from(expires.timestamp_subsec_nanos());
+        let now_nanos = i128::try_from(now).unwrap_or(i128::MAX).saturating_mul(1_000_000);
+        if expires_nanos <= now_nanos { return Ok(None); }
+    }
+    Ok(Some(DirectiveNote {
+        person: claim.subject,
+        author: claim.actor.context("admitted directive note has no person author")?,
+        time: chrono::DateTime::from_timestamp_millis(i64::try_from(claim.accepted_at_unix_ms).unwrap_or(i64::MAX))
+            .context("directive note creation time is outside UTC timestamp range")?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        text,
+        expires_at,
+        revision: claim.id,
+    }))
+}
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_delivery;

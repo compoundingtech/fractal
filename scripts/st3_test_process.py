@@ -74,9 +74,11 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
         signal.signal(sig, interrupt)
     task = None
     roots = []
+    evidence_manifest = tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
     code = 1
     try:
-        env = {**os.environ, "SMALLTALK_TEST_SUPERVISOR": str(os.getpid())}
+        env = {**os.environ, "SMALLTALK_TEST_SUPERVISOR": str(os.getpid()),
+               "SMALLTALK_TEST_EVIDENCE_MANIFEST": evidence_manifest.name}
         # Allocate under the guardian, not the killable controller. Remove only
         # these freshly created roots, and only after their processes are reaped.
         for name, prefix, parent in temporary_roots:
@@ -99,6 +101,14 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
             kill_group(task.pid)
             code = task.wait()
         reap_descendants()
+        from st3_test_evidence import finish
+        try:
+            finish(Path(evidence_manifest.name), code)
+        except Exception as error:
+            print(f"isolated test evidence capture: {error}", file=sys.stderr)
+            code = code or 1
+        finally:
+            evidence_manifest.close()
         if not keep:
             for root in roots:
                 shutil.rmtree(root)

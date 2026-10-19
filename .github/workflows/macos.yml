@@ -5,7 +5,13 @@ name: macOS CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+      - labeled
   push:
     branches: [main]
 
@@ -20,7 +26,7 @@ concurrency:
 jobs:
   macos-ci:
     name: macos-ci
-    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 120
     defaults:
@@ -139,7 +145,7 @@ jobs:
           key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
       - id: build-snapshot-save
         name: Keep valid same-source build outputs
-        if: "!cancelled()"
+        if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
         env:
           CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'

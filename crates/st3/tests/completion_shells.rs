@@ -1,7 +1,7 @@
 #![cfg(unix)]
 //! `st completions <shell>` installs a stub that asks st for candidates on every TAB. These tests
 //! serve an in-process daemon with known terminals and drive the stub in real bash, fish, and zsh
-//! (docs/st3/cli-completion/spec.md, R01-R08). The shells are test inputs: the Nix check and the
+//! (docs/st3/cli-completion/spec.md). The shells are test inputs: the Nix check and the
 //! dev shell provide them, and a missing shell fails the test rather than skipping it.
 
 use std::collections::BTreeMap;
@@ -57,13 +57,12 @@ async fn daemon(root: &Path) -> (PathBuf, tokio::task::JoinHandle<()>) {
 }
 
 fn st3() -> PathBuf {
-    assert_cmd::cargo::cargo_bin!("st3").to_path_buf()
+    test_bin!("st3").to_path_buf()
 }
 
 /// An operator environment: no seat identity, config and state under `root`, daemon at `socket`.
 fn environment(command: &mut Command, root: &Path, socket: &Path) {
-    command
-        .env_remove("ST_AGENT")
+    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("COMPLETE")

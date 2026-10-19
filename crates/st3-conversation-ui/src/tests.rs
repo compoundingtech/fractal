@@ -90,6 +90,7 @@ fn delta_preserves_older_history_until_an_older_page_reaches_the_start() {
         has_more: Some(true),
         items: vec![item("c", 3, 1, "c")],
         session_id: Some("session/a".into()),
+        header: None,
     });
     timeline.apply(Frame {
         items: vec![item("d", 4, 1, "d")],
@@ -152,6 +153,7 @@ fn earlier_pages_go_above_the_window_and_survive_a_new_window_that_meets_them() 
         has_more: Some(has_more),
         items,
         session_id: Some("session/a".into()),
+        header: None,
     };
     let mut timeline = Timeline::default();
     timeline.apply(window(
@@ -205,6 +207,7 @@ fn projection_notices_do_not_connect_disconnected_history_windows() {
         has_more: Some(true),
         items,
         session_id: Some("session/a".into()),
+        header: None,
     };
     let mut timeline = Timeline::default();
     timeline.apply(window(vec![
@@ -257,6 +260,7 @@ fn projection_notice_is_removed_from_preserved_older_prefix() {
     })).unwrap();
     let window = |items| Frame {
         replace: true, has_more: Some(true), items, session_id: Some("session/a".into()),
+        header: None,
     };
     let mut timeline = Timeline::default();
     timeline.apply(window(vec![
@@ -286,6 +290,7 @@ fn an_earlier_page_from_another_session_is_dropped_and_a_new_session_starts_over
         has_more: Some(true),
         items: vec![item("c", 3, 1, "c")],
         session_id: Some("session/a".into()),
+        header: None,
     });
     timeline.older_page("session/b", vec![item("b", 2, 1, "b")], true, None);
     assert_eq!(ids(&timeline), ["c"]);
@@ -298,6 +303,7 @@ fn an_earlier_page_from_another_session_is_dropped_and_a_new_session_starts_over
         has_more: Some(false),
         items: vec![item("n", 1, 1, "n")],
         session_id: Some("session/b".into()),
+        header: None,
     });
     assert_eq!(ids(&timeline), ["n"]);
     assert!(!timeline.older.paged && timeline.older.failed.is_none());
@@ -552,8 +558,22 @@ fn shared_transcripts_match_without_a_renderer() {
             include_str!("../../../fixtures/clients/transcripts/native-omp-run.json"),
             include_str!("../../../fixtures/clients/transcripts/native-omp-run.expected.json"),
         ),
+        (
+            include_str!("../../../fixtures/clients/transcripts/omp-parity.json"),
+            include_str!("../../../fixtures/clients/transcripts/omp-parity.expected.json"),
+        ),
     ] {
-        let items = serde_json::from_str::<Vec<st3_client::TimelineEntry>>(input).unwrap();
+        // A page also carries its conversation header; the rows are its items.
+        let input = serde_json::from_str::<serde_json::Value>(input).unwrap();
+        let items = match input {
+            serde_json::Value::Object(page) => {
+                serde_json::from_value::<Vec<st3_client::TimelineEntry>>(
+                    page.get("items").cloned().unwrap_or(serde_json::Value::Null),
+                )
+            }
+            entries => serde_json::from_value::<Vec<st3_client::TimelineEntry>>(entries),
+        }
+        .unwrap();
         let mut entries =
             serde_json::to_value(adapt::conversation(&items, &Default::default())).unwrap();
         // The local display time depends on the host's time zone, not the conversation model.
@@ -591,6 +611,139 @@ fn omp_bookkeeping_custom_entries_hide_and_other_custom_entries_stay() {
         }
     }
     assert!(text(&adapt::conversation(&other, &Default::default())).contains("unrecognized omp entry"));
+}
+
+#[test]
+fn omp_parity_header_renders_one_line_with_source_and_age() {
+    let page: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/clients/transcripts/omp-parity.json"
+    ))
+    .unwrap();
+    let line = header::line(&page["header"], "2026-10-06T12:00:00Z");
+    assert_eq!(
+        line,
+        "model synthetic/model · context 50 tokens · cost $0.02 · todo 1/5 · jobs 1 · agents 1 \
+         · ask Continue? · working [register · 0s ago] · transcript · 0s ago"
+    );
+}
+
+#[test]
+#[cfg(feature = "ratatui")]
+fn a_subagent_card_opens_its_child_conversation() {
+    let entries = parity_entries();
+    let card = entries
+        .iter()
+        .find(|entry| entry.id == "parity-18#child")
+        .expect("one card per subagent");
+    let Body::Tool { title, state, output } = &card.body else {
+        panic!("{card:?}");
+    };
+    assert_eq!((title.as_str(), *state), ("Review · completed · reviewer", ToolState::Ok));
+    assert_eq!(
+        output.as_slice(),
+        [
+            "duration 1200ms",
+            "tokens 80",
+            "cost $0.02",
+            "open session/child"
+        ]
+    );
+    assert_eq!(header::open_session(output), Some("session/child"));
+    let doc = Cache::default().render(
+        std::slice::from_ref(card),
+        40,
+        &HashSet::new(),
+        "*",
+        &theme(),
+    );
+    assert!(
+        doc.targets
+            .iter()
+            .any(|target| matches!(&target.hit, PaneIntent::Open(id) if id == "session/child")),
+        "{:?}",
+        doc.targets
+    );
+    assert!(
+        doc.lines
+            .iter()
+            .any(|line| text::plain(line).contains("open Review"))
+    );
+}
+
+#[test]
+#[cfg(feature = "ratatui")]
+fn typed_calls_bundle_in_the_simplified_conversation() {
+    let entries = parity_entries();
+    let doc = Cache::default().render_as(
+        &entries,
+        60,
+        &HashSet::new(),
+        "*",
+        &theme(),
+        Density::Simple,
+    );
+    let shown = doc
+        .lines
+        .iter()
+        .map(|line| text::plain(line))
+        .collect::<Vec<_>>();
+    assert!(
+        // Written content remains a preview card, splitting the surrounding tool runs.
+        shown.iter().any(|line| line.contains("2 tool calls"))
+            && shown.iter().any(|line| line.contains("11 tool calls"))
+            && shown.iter().any(|line| line.contains("write demo.txt")),
+        "{shown:?}"
+    );
+}
+
+#[test]
+fn task_assignments_render_once_on_invocation_for_pending_and_completed_results() {
+    for status in ["pending", "completed"] {
+        let mut page: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/transcripts/omp-parity.json"
+        ))
+        .unwrap();
+        let result = page["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["id"] == "parity-18")
+            .unwrap();
+        let block = result["body"]["blocks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|block| block["view"]["type"] == "task")
+            .unwrap();
+        block["view"]["agents"][0]["status"] = status.into();
+        let items = serde_json::from_value::<Vec<st3_client::TimelineEntry>>(page["items"].clone())
+            .unwrap();
+        let entries = adapt::conversation(&items, &Default::default());
+        for assignment in ["Review synthetic code", "Report all findings"] {
+            let owners = entries
+                .iter()
+                .filter(|entry| matches!(&entry.body, Body::Tool { output, .. }
+                    if output.iter().any(|line| line == assignment)))
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(owners, ["parity-10"], "{status}: {assignment}");
+        }
+        let result = entries.iter().find(|entry| entry.id == "parity-18#child").unwrap();
+        assert!(matches!(&result.body, Body::Tool { title, output, .. }
+            if title.contains(status) && output.iter().any(|line| line == "open session/child")));
+    }
+}
+
+/// The omp-parity page's entries, as the shared transcript test reads them.
+#[cfg(feature = "ratatui")]
+fn parity_entries() -> Vec<Entry> {
+    let page: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/clients/transcripts/omp-parity.json"
+    ))
+    .unwrap();
+    let items = serde_json::from_value::<Vec<st3_client::TimelineEntry>>(page["items"].clone())
+        .unwrap();
+    adapt::conversation(&items, &Default::default())
 }
 
 #[test]
@@ -709,7 +862,7 @@ fn exposed_timeline_variants_media_and_unknown_payloads_are_visible() {
     let bodies = [
         (
             "status",
-            serde_json::json!({"status":"waiting","detail":"approval"}),
+            serde_json::json!({"status":"failed","detail":"approval"}),
         ),
         (
             "usage",
@@ -752,7 +905,7 @@ fn exposed_timeline_variants_media_and_unknown_payloads_are_visible() {
     let rendered = adapt::conversation(&timeline, &Default::default());
     let display = serde_json::to_string(&rendered).unwrap();
     for visible in [
-        "waiting",
+        "failed",
         "approval",
         "credential",
         "42",
@@ -761,7 +914,7 @@ fn exposed_timeline_variants_media_and_unknown_payloads_are_visible() {
         "future-secret",
         "attachment/safe",
         "image/png",
-        "transcript unavailable",
+        "transcript unavailable until the harness writes its first line",
         "Earlier history is not shown: st reads only the newest part",
     ] {
         assert!(display.contains(visible), "missing {visible}: {display}");
@@ -769,7 +922,9 @@ fn exposed_timeline_variants_media_and_unknown_payloads_are_visible() {
     assert!(display.contains("must-not-render"));
     assert!(!display.contains("bounded read window"), "{display}");
     assert!(!display.contains("nothing in the harness"));
-    assert_eq!(rendered.len(), timeline.len());
+    // Every record is shown but the routine usage line, which is hidden by default.
+    assert!(!display.contains("usage:"), "{display}");
+    assert_eq!(rendered.len(), timeline.len() - 1);
 }
 
 #[test]
@@ -916,6 +1071,31 @@ fn attachment_only_mail_and_non_image_refs_remain_visible() {
 }
 
 #[test]
+fn a_long_message_shows_its_start_and_says_where_the_rest_is_read() {
+    let long: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+        "id":"mail","sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",
+        "role":"user","final":true,"type":"message",
+        "body":{"message_id":"message/harbor","role":"user","from":"person/ada","to":"agent/a",
+            "body_bytes":12800}
+    }))
+    .unwrap();
+    let start = item("content", 2, 1, "Harbor notes: the tide table…");
+    let rendered = adapt::conversation(&[long, start.clone()], &Default::default());
+    let Body::Mail { body, .. } = &rendered[0].body else { panic!("{rendered:?}") };
+    assert!(body.starts_with("Harbor notes: the tide table…"), "{body}");
+    assert!(body.contains("12.5 KiB") && body.contains("st conversations read message/harbor"), "{body}");
+    // A message with no body size reads exactly as before.
+    let short: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+        "id":"mail","sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",
+        "role":"user","final":true,"type":"message",
+        "body":{"message_id":"message/short","role":"user","from":"person/ada","to":"agent/a"}
+    }))
+    .unwrap();
+    let rendered = adapt::conversation(&[short, start], &Default::default());
+    assert!(matches!(&rendered[0].body, Body::Mail { body, .. } if body == "Harbor notes: the tide table…"));
+}
+
+#[test]
 fn pending_binding_preserves_authorized_activity_without_claiming_an_empty_harness() {
     let activity = item("activity", 1, 1, "Captured activity");
     let mail = serde_json::from_value(serde_json::json!({
@@ -944,6 +1124,25 @@ fn pending_binding_preserves_authorized_activity_without_claiming_an_empty_harne
     assert!(!availability.contains("nothing"));
 }
 
+#[test]
+fn a_seat_still_starting_reads_as_one_calm_line_not_an_error() {
+    // Nathan, 2026-10-10: a new agent's conversation read "transcript unavailable: transcript not
+    // bound: ..." for a while. It is startup: one quiet line, no technical reason, no claim that
+    // the harness is idle.
+    let notice = serde_json::from_value(serde_json::json!({
+        "id":"notice","sequence":4,"revision":1,"timestamp":"2026-10-05T10:00:01Z",
+        "role":"system","final":true,"type":"error",
+        "body":{"code":"transcript-not-bound","message":"transcript not bound: the SessionStart hook did not bind this incarnation",
+            "retryable":true,"details":{"not_yet":true}}
+    }))
+    .unwrap();
+    let rendered = adapt::conversation(&[notice], &Default::default());
+    let [entry] = &rendered[..] else { panic!("{rendered:?}") };
+    let Body::Event(line) = &entry.body else { panic!("{entry:?}") };
+    assert_eq!(line, "starting · transcript unavailable until the harness writes its first line");
+    assert!(!line.contains("not bound") && !line.contains("SessionStart") && !line.contains("nothing"));
+}
+
 fn review_entry(kind: &str, role: &str, body: serde_json::Value) -> st3_client::TimelineEntry {
     serde_json::from_value(serde_json::json!({
         "id":kind,"sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",
@@ -966,7 +1165,15 @@ fn review_usage_is_compact_and_preserves_supplied_tokens_cost_and_semantics() {
     ] {
         let mut body = body;
         body["attribution"] = serde_json::json!({"agent_id":"ATTRIBUTION_SENTINEL","mission_run_id":"MISSION_SENTINEL","generation_id":null,"step_id":null});
-        let rendered = adapt::conversation(&[review_entry("usage", "assistant", body)], &Default::default());
+        let entries = [review_entry("usage", "assistant", body)];
+        // Routine usage lines are hidden by default; the record itself is unchanged.
+        assert!(adapt::conversation(&entries, &Default::default()).is_empty());
+        let without_telemetry = crate::DEFAULT_FILTERS
+            .iter()
+            .copied()
+            .filter(|filter| *filter != crate::DisplayFilter::Telemetry)
+            .collect::<Vec<_>>();
+        let rendered = adapt::conversation_with_filters(&entries, &Default::default(), &without_telemetry);
         assert!(matches!(&rendered[..], [Entry { body: Body::Event(line), .. }] if line == expected), "{rendered:?}");
     }
 }
@@ -1032,7 +1239,6 @@ fn review_unknown_type_and_diagnostics_are_bounded_on_unicode_boundaries() {
     assert!(matches!(&rendered[0].body, Body::Event(line)
         if line.contains('…') && line.matches('界').count() == 64));
     for (code, details) in [
-        ("transcript-not-bound", serde_json::json!({"not_yet":true})),
         ("transcript-not-bound", serde_json::json!({})),
         ("other", serde_json::json!({"severity":"warning"})),
         ("other", serde_json::json!({})),
@@ -1252,4 +1458,218 @@ fn native_run_shows_one_mail_and_collates_calls_without_bookkeeping() {
         adapt::conversation_with_filters(&items, &Default::default(), crate::SHOW_EVERYTHING).len(),
         items.len()
     );
+}
+
+#[test]
+fn invocation_details_survive_tool_results_and_summaries_fold() {
+    let call = |id: &str, view: serde_json::Value| {
+        serde_json::from_value::<st3_client::TimelineEntry>(serde_json::json!({
+            "id":id, "sequence":1, "revision":1, "timestamp":"2026-10-08T12:00:00Z",
+            "role":"assistant", "final":true, "type":"tool_call",
+            "body":{"call_id":id,"name":view["type"],"arguments":{},
+                "blocks":[{"id":id,"kind":"tool_call","source_type":"synthetic","payload":{},"view":view}]}
+        })).unwrap()
+    };
+    for (kind, view, expected) in [
+        ("bash", serde_json::json!({"type":"bash","command":"echo synthetic","cwd":"/synthetic","timeout_s":30}), vec!["cwd: /synthetic", "timeout: 30s"]),
+        ("write", serde_json::json!({"type":"write","path":"demo","bytes":11,"line_count":2,"content":"first\nlast"}), vec!["first", "last"]),
+        ("eval", serde_json::json!({"type":"eval","language":"py","code":"1 + 2\n3 + 4","timeout_s":5,"reset":false}), vec!["language: py", "timeout: 5s", "reset: false", "1 + 2", "3 + 4"]),
+        ("hub", serde_json::json!({"type":"hub","op":"send","target":"Child","message":"sent\nbody"}), vec!["sent", "body"]),
+        ("search", serde_json::json!({"type":"search","engine":"grep","pattern":"needle","case":false,"gitignore":true,"skip":2}), vec!["case: false", "gitignore: true", "skip: 2"]),
+    ] {
+        let result: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+            "id":format!("{kind}-result"),"sequence":2,"revision":1,"timestamp":"2026-10-08T12:00:01Z",
+            "role":"tool","final":true,"type":"tool_result",
+            "body":{"call_id":kind,"status":"success","media_type":"text/plain","content":"receipt"}
+        })).unwrap();
+        let entries = adapt::conversation(&[call(kind, view), result], &Default::default());
+        let Body::Tool { output, .. } = &entries[0].body else { panic!("tool card") };
+        for row in expected { assert!(output.iter().any(|actual| actual == row), "{kind}: {output:?}"); }
+        assert_eq!(output.last().unwrap(), "receipt");
+    }
+}
+
+/// A conversation as it reads in a real session: status, usage and withheld-content records every
+/// turn, a repeated channel error, and the harness's echo of two deliveries (a channel message and
+/// a background task) after message entries that name no sender. Shapes only; no real content.
+fn noise() -> Vec<st3_client::TimelineEntry> {
+    serde_json::from_str(include_str!("../../../fixtures/clients/transcripts/noise.json")).unwrap()
+}
+
+#[test]
+fn routine_records_and_delivery_echoes_do_not_reach_the_conversation() {
+    let items = noise();
+    let shown = adapt::conversation(&items, &Default::default());
+    let text = serde_json::to_string(&shown).unwrap();
+    // Nothing that reads as markup or as a heartbeat.
+    for gone in [
+        "<channel",
+        "<smalltalk-message",
+        "<task-notification",
+        "<task-id>",
+        "status: running",
+        "status: waiting",
+        "status: completed",
+        "usage:",
+        "sensitive-content",
+    ] {
+        assert!(!text.contains(gone), "{gone} reached the conversation: {text}");
+    }
+    // What a person needs is still there: the words, the failure, the other withholding reason,
+    // the transcript notice, and what each delivery was.
+    for kept in [
+        "Please run the build and tell me what fails.",
+        "I will run the build now.",
+        "status: failed",
+        "the harness reported an error",
+        "content withheld: credential",
+        "transcript unavailable until the harness writes its first line",
+        "Run the clone command, then create a branch and work there.",
+        "background task completed",
+    ] {
+        assert!(text.contains(kept), "missing {kept}: {text}");
+    }
+    // A hold of mail while Claude's channel is confirmed, released a moment later, is not an
+    // error: each pair is one quiet line, and the pairs, once the records between them are gone,
+    // fold into one counted line. A hold that has not been released stays a visible line.
+    assert!(!text.contains("claude-channel-unattached"), "{text}");
+    assert!(!text.contains("error: claude-channel"), "{text}");
+    let events = shown
+        .iter()
+        .filter_map(|entry| match &entry.body {
+            Body::Event(line) if line.starts_with("delivery") => Some(line.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events,
+        [
+            "delivery paused, then resumed ×3",
+            "delivery paused · channel not verified yet",
+        ]
+    );
+}
+
+#[test]
+fn the_filter_hides_a_view_only_and_every_record_stays_available() {
+    let items = noise();
+    // Showing everything keeps all of it, as reversible JSON.
+    assert_eq!(
+        adapt::conversation_with_filters(&items, &Default::default(), crate::SHOW_EVERYTHING).len(),
+        items.len()
+    );
+    // Without the telemetry filter the routine lines come back, in words.
+    let without = crate::DEFAULT_FILTERS
+        .iter()
+        .copied()
+        .filter(|filter| *filter != crate::DisplayFilter::Telemetry)
+        .collect::<Vec<_>>();
+    let text = serde_json::to_string(&adapt::conversation_with_filters(&items, &Default::default(), &without)).unwrap();
+    for back in ["status: waiting", "usage: context occupancy", "content withheld: sensitive-content"] {
+        assert!(text.contains(back), "{back} should return: {text}");
+    }
+}
+
+#[test]
+fn assistant_error_and_compaction_are_explicit_expandable_cards() {
+    for (view, kind, expected, state) in [
+        (serde_json::json!({"type":"assistant_error","status":"recovered","presentation":"compact-recovered","is_error":false,"message":"synthetic failure","retry":{"note":"retried successfully"}}), "error", vec!["synthetic failure", "retried successfully"], ToolState::Ok),
+        (serde_json::json!({"type":"compaction","summary":"first summary line\nlast summary line","tokens_before":100,"tokens_after":20}), "status", vec!["first summary line", "last summary line"], ToolState::Ok),
+    ] {
+        let entry: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({
+            "id":"summary", "sequence":1,"revision":1,"timestamp":"2026-10-08T12:00:00Z",
+            "role":"assistant","final":true,"type":"content",
+            "body":{"media_type":"text/plain","blocks":[{"id":"summary","kind":kind,"source_type":"synthetic","payload":{},"view":view}]}
+        })).unwrap();
+        let entries = adapt::conversation(&[entry], &Default::default());
+        assert!(matches!(&entries[0].body, Body::Tool { output, state:actual, .. } if output == &expected && actual == &state));
+    }
+}
+
+#[test]
+fn simplified_history_fill_counts_standalone_preview_and_error_cards() {
+    let entries: Vec<_> = [
+        "$ echo a", "$ echo b", "write demo · 2 lines",
+        "$ echo c", "$ echo d", "compaction · 100 → 20 tokens",
+        "$ echo e", "$ echo f", "assistant error · recovered · retried",
+        "$ echo g", "$ echo h",
+    ].into_iter().enumerate().map(|(index, title)| Entry {
+        id: format!("card-{index}"),
+        at: String::new(),
+        body: Body::Tool { title: title.into(), state: ToolState::Ok, output: Vec::new() },
+    }).collect();
+    assert_eq!(display_rows(&entries), 7);
+    #[cfg(feature = "ratatui")]
+    {
+        let doc = Cache::default().render_as(
+            &entries, 80, &HashSet::new(), "*", &theme(), Density::Simple,
+        );
+        let lines: Vec<_> = doc.lines.iter().map(text::plain).collect();
+        assert_eq!(lines.iter().filter(|line| line.contains("2 tool calls")).count(), 4);
+        for title in ["write demo", "compaction", "assistant error"] {
+            assert!(lines.iter().any(|line| line.contains(title)), "{lines:?}");
+        }
+    }
+}
+
+#[test]
+fn a_waiting_or_running_status_with_a_real_reason_is_never_hidden() {
+    let status = |kind: &str, detail: Option<&str>| {
+        let mut body = serde_json::json!({"status": kind});
+        if let Some(detail) = detail {
+            body["detail"] = serde_json::json!(detail);
+        }
+        review_entry("status", "system", body)
+    };
+    let shown = |entry: st3_client::TimelineEntry| adapt::conversation(&[entry], &Default::default()).len();
+    // The plain heartbeats are hidden.
+    for routine in [
+        status("waiting", None),
+        status("waiting", Some("idle")),
+        status("running", None),
+        status("running", Some("working")),
+        status("queued", None),
+        status("completed", None),
+    ] {
+        assert_eq!(shown(routine.clone()), 0, "{routine:?}");
+    }
+    // A harness state st has no word for arrives as `waiting` plus a detail: it is a reason.
+    for reason in ["rate limited", "waiting on approval", "blocked", "needs login"] {
+        assert_eq!(shown(status("waiting", Some(reason))), 1, "{reason}");
+    }
+    assert_eq!(shown(status("running", Some("compacting"))), 1);
+    // A plain-looking status that carries blocks carries content.
+    let mut with_blocks = serde_json::json!({"status":"waiting","detail":"idle"});
+    with_blocks["blocks"] = serde_json::json!([{
+        "id":"block/1","kind":"text","source_type":"status","visibility":"visible","payload":{"text":"approve?"}
+    }]);
+    assert_eq!(shown(review_entry("status", "system", with_blocks)), 1);
+    assert_eq!(shown(status("failed", None)), 1);
+    assert_eq!(shown(status("cancelled", None)), 1);
+}
+
+#[test]
+fn a_delivered_image_is_the_messages_image_and_never_its_seat_path() {
+    let sha = "ab".repeat(32);
+    let delivery = format!(
+        "<smalltalk-message id=\"d1\" from=\"person/ada\" to=\"agent/example/gardener\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/d1\">\nthe pond again\n<attachment path=\"/home/example/.local/state/st3/drivers/gardener/attachments/{sha}.png\" media_type=\"image/png\" bytes=\"1269\" name=\"pond.png\"/>\n<attachment media_type=\"image/png\" bytes=\"70\" name=\"seed.png\" unavailable=\"expired\"/>\n</smalltalk-message>"
+    );
+    let mut prompt = item("delivered", 1, 1, &delivery);
+    prompt.role = st3_client::TimelineRole::User;
+    let entries = adapt::conversation(&[prompt], &Default::default());
+    let Some(Body::Mail { body, images, .. }) = entries.iter().map(|entry| &entry.body).find(|body| matches!(body, Body::Mail { .. })) else {
+        panic!("{entries:#?}");
+    };
+    assert_eq!(body, "the pond again\n\n[seed.png · expired]");
+    assert_eq!(
+        images,
+        &[MailImage {
+            sha256: sha,
+            message: "message/d1".into(),
+            media_type: "image/png".into(),
+            name: Some("pond.png".into()),
+            size: 1269,
+        }]
+    );
+    assert!(!serde_json::to_string(&entries).unwrap().contains("/home/example"));
 }

@@ -192,6 +192,32 @@ pub(crate) fn render_mission_run(
     output
 }
 
+/// A seek page can start after a parent run, so render each returned run directly instead of
+/// building a partial parent-to-child map that would hide disconnected continuation rows.
+pub(crate) fn render_mission_run_page(
+    selected: &MissionRunView,
+    runs: &[MissionRunView],
+    style: OutputStyle,
+    now_unix_ms: u128,
+) -> String {
+    let mut output = String::from(
+        "TREE SCOPE  Each PROGRESS line counts its named run only; this page omits other descendants.\n\n",
+    );
+    output.push_str(&render_mission_run(selected, &[], style, now_unix_ms));
+    let _ = writeln!(output, "\nTREE PAGE  {} · {} runs", selected.root_mission_run, runs.len());
+    for run in runs {
+        if run.subject == selected.subject {
+            continue;
+        }
+        output.push('\n');
+        if let Some(parent) = &run.parent_step_run {
+            let _ = writeln!(output, "PARENT    {parent}");
+        }
+        output.push_str(&render_mission_run(run, &[], style, now_unix_ms));
+    }
+    output
+}
+
 #[cfg(test)]
 pub(crate) fn render_work_list(
     actor: Option<&str>,
@@ -510,12 +536,12 @@ pub(crate) fn render_attention_list(
 ) -> String {
     let mut output = String::new();
     let title = person.map_or_else(
-        || "HUMAN ATTENTION".to_owned(),
-        |person| format!("HUMAN ATTENTION FOR {person}"),
+        || "ALERTS".to_owned(),
+        |person| format!("ALERTS FOR {person}"),
     );
     let _ = writeln!(output, "{}", style.heading(title));
     if items.is_empty() {
-        let _ = writeln!(output, "{}", style.muted("No human attention is waiting."));
+        let _ = writeln!(output, "{}", style.muted("No alert is waiting."));
         return output;
     }
     let _ = writeln!(output, "{} waiting · oldest first", items.len());
@@ -552,7 +578,7 @@ pub(crate) fn render_attention_list(
         let _ = writeln!(output, "    subject: {}", item.subject);
         let _ = writeln!(
             output,
-            "    inspect: st attention show {} --as {}",
+            "    inspect: st alerts show {} --as {}",
             item.subject, item.person
         );
         for action in &item.actions {
@@ -574,12 +600,21 @@ pub(crate) fn render_attention_show(
     now_unix_ms: u128,
 ) -> String {
     let mut output = String::new();
-    let _ = writeln!(output, "{}  {}", style.heading("ATTENTION"), item.title);
+    let heading = if item.is_update() { "UPDATE" } else { "ALERT" };
+    let _ = writeln!(output, "{}  {}", style.heading(heading), item.title);
     let _ = writeln!(output, "SUBJECT   {}", item.subject);
     let _ = writeln!(output, "KIND      {}", item.kind);
     let _ = writeln!(output, "PERSON    {}", item.person);
     if let Some(requester) = &item.requester_id {
         let _ = writeln!(output, "FROM      {requester}");
+    }
+    // The agent whose conversation it belongs to, when that is not who asked.
+    if let Some(conversation) = item
+        .conversation
+        .as_ref()
+        .filter(|conversation| item.requester_id.as_ref() != Some(*conversation))
+    {
+        let _ = writeln!(output, "AGENT     {conversation}");
     }
     let _ = writeln!(
         output,
@@ -793,6 +828,9 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
     if let Some(incarnation) = &step.claim_incarnation {
         let _ = writeln!(output, "  Incarnation  {incarnation}");
     }
+    if let Some(incarnation) = &step.submitted_incarnation {
+        let _ = writeln!(output, "  Submitted incarnation  {incarnation}");
+    }
     if let Some(expires) = step.claim_expires_at_unix_ms {
         let _ = writeln!(
             output,
@@ -804,11 +842,26 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
         let active = step
             .execution_started_at_unix_ms
             .map(|started| format!(" · active {}", relative_time(started, now_unix_ms)))
+            .or_else(|| {
+                step.execution_paused_until_unix_ms.map(|until| {
+                    format!(" · clock stopped for a wait until {}", relative_time(until, now_unix_ms))
+                })
+            })
             .unwrap_or_default();
         let _ = writeln!(
             output,
             "  Execution    {}ms / {timeout_ms}ms{active}",
             step.execution_elapsed_ms
+        );
+    }
+    if step.execution_waited_ms > 0 || step.execution_paused_until_unix_ms.is_some() {
+        let budget = u128::from(st3::store::MAX_STEP_WAIT_MS);
+        let _ = writeln!(
+            output,
+            "  Wait budget  {} used of {} · {} left",
+            st3::store::format_wait_span(step.execution_waited_ms),
+            st3::store::format_wait_span(budget),
+            st3::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
         );
     }
     if let Some(wake) = &step.wake {
@@ -868,6 +921,18 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
                 "  • {outcome}{id}: {}  ({}, {})",
                 response.summary, response.respondent, response.ask
             );
+            if let Some(sender_class) = &response.sender_class {
+                let _ = writeln!(output, "    Sender class: {sender_class}");
+            }
+            if let Some(grant) = &response.assistant_grant_id {
+                let _ = writeln!(output, "    Assistant grant: {grant}");
+            }
+            if let Some(owner) = &response.assistant_owner {
+                let _ = writeln!(output, "    Assistant owner: {owner}");
+            }
+            if let Some(session_actor) = &response.assistant_session_actor {
+                let _ = writeln!(output, "    Assistant session actor: {session_actor}");
+            }
         }
     }
     output
@@ -1295,6 +1360,10 @@ fn render_work_list_item(output: &mut String, step: &StepRunView, style: OutputS
             step.execution_elapsed_ms,
             step.execution_started_at_unix_ms
                 .map(|started| format!(" · active since {started}"))
+                .or_else(|| {
+                    step.execution_paused_until_unix_ms
+                        .map(|until| format!(" · clock stopped for a wait until {until}"))
+                })
                 .unwrap_or_default()
         );
     }
@@ -1427,9 +1496,12 @@ mod tests {
             worker_reported: false,
             claimant: None,
             claim_incarnation: None,
+            submitted_incarnation: None,
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -1442,10 +1514,36 @@ mod tests {
             blocked_reason: None,
             blockers: Vec::new(),
             not_before_unix_ms: None,
+            nudged_at_unix_ms: None,
             created_at_unix_ms: 1_000,
             updated_at_unix_ms: 2_000,
             person_answers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn work_detail_displays_assistant_answer_attribution() {
+        let mut work = step("step-run/demo/build", "build", "ready");
+        work.person_answers.push(st3::model::PersonAnswerView {
+            acted_for: None,
+            sender_class: Some("external-assistant".into()),
+            assistant_grant_id: Some("assistant-grant/test".into()),
+            assistant_owner: Some("person/avery".into()),
+            assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
+            ask: "step-run/demo/ask".into(),
+            status: "completed".into(),
+            summary: "Proceed".into(),
+            respondent: "assistant/chatgpt".into(),
+            answered_at_unix_ms: 2_000,
+            answer: None,
+            evidence: vec![],
+        });
+        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000);
+        assert!(rendered.contains("Sender class: external-assistant"));
+        assert!(rendered.contains("Assistant grant: assistant-grant/test"));
+        assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
+        assert!(rendered.contains("Assistant owner: person/avery"));
+        assert!(rendered.contains("Assistant session actor: assistant/chatgpt/session/test"));
     }
 
     fn run(subject: &str, parent: Option<&str>, steps: Vec<StepRunView>) -> MissionRunView {
@@ -1510,6 +1608,7 @@ mod tests {
             harness: None,
             conflicts: Vec::new(),
             claims: vec!["claim/actual".into()],
+            claims_summary: Default::default(),
             owner_run: Some("mission-run/test/run".into()),
             gap: None,
             reachability: "reachable".into(),
@@ -1599,7 +1698,8 @@ mod tests {
             requester_id: None,
             launch_id: None,
             variant_id: None,
-            message_id: None,
+            message_id: None, answers: Vec::new(), conversation: None,
+            prompt_call: None,
             title: "Fabric needs review".into(),
             detail: "The queue did not recover.".into(),
             mission: Some("mission/fabric".into()),
@@ -1626,7 +1726,7 @@ mod tests {
             OutputStyle::plain(),
             180_000,
         );
-        assert!(rendered.contains("HUMAN ATTENTION FOR person/alex"));
+        assert!(rendered.contains("ALERTS FOR person/alex"));
         assert!(rendered.contains("1 waiting · oldest first"));
         assert!(rendered.contains("[fault] Fabric needs review"));
         assert!(rendered.contains("requested 2m ago"));
@@ -1634,11 +1734,11 @@ mod tests {
         assert!(rendered.contains("--reason 'It is fixed'"));
         assert!(!rendered.contains("The queue did not recover."));
         assert!(
-            rendered.contains("inspect: st attention show attention/fabric --as person/alex")
+            rendered.contains("inspect: st alerts show attention/fabric --as person/alex")
         );
 
         let shown = render_attention_show(&item, OutputStyle::plain(), 180_000);
-        assert!(shown.contains("ATTENTION  Fabric needs review"));
+        assert!(shown.contains("ALERT  Fabric needs review"));
         assert!(shown.contains("The queue did not recover."));
         assert!(shown.contains("TARGETS\n  doc/fabric/report@abc"));
     }
@@ -1648,7 +1748,7 @@ mod tests {
         let rendered = render_attention_list(None, &[], OutputStyle::plain(), 180_000);
         assert_eq!(
             rendered,
-            "HUMAN ATTENTION\nNo human attention is waiting.\n"
+            "ALERTS\nNo alert is waiting.\n"
         );
     }
 
@@ -1688,6 +1788,30 @@ mod tests {
         assert!(rendered.contains("queue issues #1"));
         assert!(rendered.contains("↳ demo · completed · 1/1 completed"));
         assert!(!rendered.contains("publish — publish"));
+    }
+
+    #[test]
+    fn mission_tree_continuation_shows_a_child_without_its_parent_on_the_page() {
+        let root = run("mission-run/demo/run", None, vec![]);
+        let child = run(
+            "mission-run/demo/child",
+            Some("step-run/demo-generation/release"),
+            vec![step("step-run/child-generation/publish", "publish", "ready")],
+        );
+        let rendered = render_mission_run_page(
+            &root,
+            std::slice::from_ref(&child),
+            OutputStyle::plain(),
+            3_000,
+        );
+        assert!(rendered.contains("RUN       mission-run/demo/run"));
+        assert!(rendered.contains("PARENT    step-run/demo-generation/release"));
+        assert!(rendered.contains("RUN       mission-run/demo/child"));
+        assert!(rendered.contains("publish — publish"));
+        let selected_child = render_mission_run_page(&child, &[root], OutputStyle::plain(), 3_000);
+        assert!(selected_child.contains("RUN       mission-run/demo/child"));
+        assert!(selected_child.contains("publish — publish"));
+        assert!(selected_child.contains("RUN       mission-run/demo/run"));
     }
 
     #[test]

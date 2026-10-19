@@ -21,7 +21,7 @@ fn executable(path: &Path, source: &str) {
 fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::path::PathBuf) {
     let socket = root.join("daemon.sock");
     let log = std::fs::File::create(root.join("daemon.log")).unwrap();
-    let binary = assert_cmd::cargo::cargo_bin!("st3-fixture");
+    let binary = test_bin!("st3-fixture");
     let mut service = Service(
         st3::test_support::command(binary)
             .env_clear()
@@ -55,7 +55,7 @@ fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::
 }
 
 fn doctor_report(home: &Path, socket: &Path) -> serde_json::Value {
-    let output = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
         .env_clear()
         .env("HOME", home)
         .arg("--endpoint")
@@ -71,7 +71,7 @@ fn a_fixture_listener_ignores_the_callers_host_seat_ancestry() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join(".bash_profile"), format!("export PATH='{}'\n", std::env::var("PATH").unwrap())).unwrap();
@@ -95,9 +95,9 @@ mission "hermetic" state="ready" {
         .env("ST_AGENT", "agent/fixture/host")
         .args(["--noprofile", "--norc", "-c", "\"$@\"; status=$?; exit \"$status\"", "fixture-parent"])
         .arg(env).args(["-u", "ST_AGENT"])
-        .arg(env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg("--endpoint").arg(&socket)
-        .args(["missions", "publish"]).arg(source)
+        .args(["apply"]).arg(source)
         .args(["--as", "person/pat", "--no-gate-check"])
         .output().unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -108,7 +108,7 @@ fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     // The service has no PATH; its login shell must provide one before socket discovery.
@@ -118,11 +118,18 @@ fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
     }
     let state_home = root.path().join("state").join("long".repeat(26));
     let (_service, socket) = start_service(root.path(), &home, &state_home);
+    // Socket readiness is not a roster publication; this fixture explicitly needs one.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(st3_client::Client::unix(&socket).agents_list_after(None, None, false, 0))
+        .expect("the fixture must publish its initial roster");
     let state_socket = state_home.join("st3/run/st3.sock");
     assert!(state_socket.as_os_str().len() > 108);
     assert_eq!(std::fs::read_link(&state_socket).unwrap(), socket);
 
-    let output = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
         .env_clear()
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -144,7 +151,7 @@ fn bare_service_environment_loads_shell_path_and_rechecks_credentials() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -220,7 +227,7 @@ fn doctor_reports_missing_build_tools_and_whether_a_small_crate_links() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -289,7 +296,7 @@ fn a_login_shell_too_slow_for_the_first_capture_still_lets_the_daemon_start() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -347,7 +354,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
     if st3::test_support::supervise_test() { return; }
     use st3::sekrets::protocol::{self, CallerView, Reply, Request};
     use base64::Engine as _;
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -356,7 +363,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
     let config = st3::config::Config {
         node: "fixture-node".into(), person: Some("person/fixture".into()),
         state_dir: root.path().join("node-state"),
-        github: st3::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None },
+        github: st3::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None, observer_requests_per_hour: None },
         ..Default::default()
     };
     let key = smallclaims::fleet::MemberKey::load_or_create(
@@ -402,7 +409,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
         }
     });
     for expected_code in [0, 3] {
-        let output = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+        let output = st3::test_support::command(test_bin!("st3-fixture"))
             .env_clear().env("HOME", &home).env("PATH", &bin)
             .env("GH_TOKEN", "fixture-local-credential").env("GITHUB_TOKEN", "fixture-secondary")
             .env("ST_SEKRETS_SOCKET", &socket).env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -412,4 +419,132 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
         assert!(!calls.exists(), "configured profile spawned gh");
     }
     gateway.join().unwrap();
+}
+
+#[test]
+fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = st3::test_support::evidence_tempdir();
+    for identity in [
+        None,
+        Some("ST_AGENT"),
+        Some("ST_MISSION_RUN"),
+        Some("ST3_INCARNATION"),
+    ] {
+        let agent = identity.is_some();
+        for json in [false, true] {
+            let mut command =
+                st3::test_support::command(test_bin!("st3-fixture"));
+            command
+                .env_clear()
+                .env("HOME", root.path())
+                .env("XDG_CONFIG_HOME", root.path().join("config"))
+                .env("ST3_DAEMON_WAIT", "0")
+                .arg("--endpoint")
+                .arg(root.path().join("missing.sock"))
+                .arg("doctor");
+            if let Some(identity) = identity {
+                command.env(identity, "fixture-identity");
+            }
+            if json {
+                command.arg("--json");
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(5), "{output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if agent {
+                assert!(
+                    !stderr.contains("Run `st`") && !stderr.contains("st setup"),
+                    "{stderr}"
+                );
+                assert!(stderr.contains("may be restarting"), "{stderr}");
+            } else {
+                assert!(
+                    stderr.contains("Run `st`") && stderr.contains("st setup"),
+                    "{stderr}"
+                );
+                assert!(!stderr.contains("may be restarting"), "{stderr}");
+            }
+            if json {
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report["status"], "fail");
+                assert_eq!(report["checks"][0]["name"], "daemon");
+                let message = report["checks"][0]["message"].as_str().unwrap();
+                assert_eq!(message.contains("st setup"), !agent, "{report}");
+            }
+        }
+    }
+}
+
+#[test]
+fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = st3::test_support::evidence_tempdir();
+    let home = root.path().join("home");
+    let bin = home.join("studio-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(
+        st_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap(),
+        bin.join("env"),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".bash_profile"),
+        format!("export PATH='{}'\n", bin.display()),
+    )
+    .unwrap();
+    let run = || {
+        st3::test_support::command(test_bin!("st3-fixture"))
+            .env_clear()
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .arg("--endpoint")
+            .arg(root.path().join("missing.sock"))
+            .args(["doctor", "--developer", "--strict", "--json"])
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "warn");
+    assert_eq!(report["scope"], "local developer tools");
+    let message = report["checks"][0]["message"].as_str().unwrap();
+    for tool in ["cargo", "rustc", "sccache", "git", "nix"] {
+        assert!(message.contains(tool), "{report}");
+    }
+    assert!(!message.contains("gh"), "{report}");
+    let calls = root.path().join("tool-calls");
+    for tool in ["cargo", "rustc", "mold", "sccache", "git", "nix", "gh"] {
+        executable(
+            &bin.join(tool),
+            &format!("#!/bin/sh\nprintf x >> '{}'\nexit 9\n", calls.display()),
+        );
+    }
+    let output = run();
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "pass");
+    assert!(
+        !calls.exists(),
+        "developer checks must not invoke source tools"
+    );
+    assert!(!root.path().join("missing.sock").exists());
+}
+
+#[test]
+fn developer_doctor_cannot_be_combined_with_performance() {
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
+        .args(["doctor", "--developer", "--performance"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be used"),
+        "{output:?}"
+    );
 }

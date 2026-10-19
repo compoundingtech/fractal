@@ -65,7 +65,7 @@ impl Default for Limits {
     }
 }
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h76acec99c00b owner=smallclaims::ivm::asynchronous TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS ivm_async_state (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), format TEXT NOT NULL,
  queue_rows INTEGER NOT NULL, queue_bytes INTEGER NOT NULL, page_rows INTEGER NOT NULL,
@@ -172,8 +172,8 @@ pub(super) fn check_owner(connection: &Connection, limits: Option<Limits>) -> Re
     Ok(())
 }
 pub(super) fn create_schema(connection: &Connection, limits: Limits) -> Result<()> {
-    connection.execute_batch(SCHEMA)?;
-    connection.execute("INSERT OR IGNORE INTO ivm_async_state(singleton,format,queue_rows,queue_bytes,page_rows,page_bytes,legacy_rank_rows) VALUES(1,?1,?2,?3,?4,?5,?6)",
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h0528c66b8c77 owner=smallclaims::ivm::asynchronous TODO=trace-statement-and-value-representation */ SCHEMA)?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h5989fcd9a9dd owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO ivm_async_state(singleton,format,queue_rows,queue_bytes,page_rows,page_bytes,legacy_rank_rows) VALUES(1,?1,?2,?3,?4,?5,?6)",
         params![FORMAT,limits.queue_rows,limits.queue_bytes,limits.page_rows,limits.page_bytes,limits.legacy_rank_rows])?;
     let stored = state(connection)?;
     ensure!(
@@ -214,7 +214,7 @@ pub(super) fn initialize(
                 "missing async view requires explicit installation"
             );
             tx.execute(
-                "INSERT INTO ivm_async_views(view,fingerprint,epoch,through) VALUES(?1,?2,?3,0)",
+                /* sqlite-large-value: allow-for-now lv-he996de9029f4 owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO ivm_async_views(view,fingerprint,epoch,through) VALUES(?1,?2,?3,0)",
                 params![name, views.fingerprints[index], cut.epoch],
             )?;
         }
@@ -409,7 +409,7 @@ fn page_tx(tx: &Transaction<'_>, runtime: &ViewRuntime) -> Result<PageReport> {
         page.push(candidate);
     }
     if page.is_empty() && !candidates.is_empty() {
-        tx.execute("UPDATE ivm_async_state SET available=0,error='async input exceeds page byte bound; explicit recovery required'",[])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h97861be93699 owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_async_state SET available=0,error='async input exceeds page byte bound; explicit recovery required'",[])?;
         let state = state_after(tx)?;
         return Ok(report(
             PageStatus::Stopped(state.error.clone().unwrap_or_default()),
@@ -490,23 +490,23 @@ fn page_tx(tx: &Transaction<'_>, runtime: &ViewRuntime) -> Result<PageReport> {
             continue;
         }
         tx.execute(
-            "UPDATE ivm_async_views SET through=?2 WHERE view=?1",
+            /* sqlite-large-value: allow-for-now lv-h7470b1085b3a owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_async_views SET through=?2 WHERE view=?1",
             params![name, through],
         )?;
     }
     if !page.is_empty() {
         tx.execute(
-            "UPDATE ivm_async_state SET draining=1 WHERE singleton=1",
+            /* sqlite-large-value: allow-for-now lv-hdae0d65c679a owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_async_state SET draining=1 WHERE singleton=1",
             [],
         )?;
         tx.execute(
-            "DELETE FROM ivm_async_queue WHERE store_index<=?1",
+            /* sqlite-large-value: allow-for-now lv-h5d4ffdc48455 owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM ivm_async_queue WHERE store_index<=?1",
             [through],
         )?;
-        tx.execute("UPDATE ivm_async_state SET retained_rows=retained_rows-?1,retained_bytes=retained_bytes-?2 WHERE singleton=1",params![page.len(),bytes])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h3e466eab8622 owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_async_state SET retained_rows=retained_rows-?1,retained_bytes=retained_bytes-?2 WHERE singleton=1",params![page.len(),bytes])?;
     }
     tx.execute(
-        "UPDATE ivm_async_state SET draining=0 WHERE singleton=1",
+        /* sqlite-large-value: allow-for-now lv-h746c6c43b72c owner=smallclaims::ivm::asynchronous TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_async_state SET draining=0 WHERE singleton=1",
         [],
     )?;
     let cut = SourceCut {
@@ -578,12 +578,23 @@ impl Worker {
     pub fn start(
         store: Arc<Store>,
         runtime: Arc<ViewRuntime>,
-        mut notices: broadcast::Receiver<events::Notice>,
+        notices: broadcast::Receiver<events::Notice>,
     ) -> Result<Self> {
         ensure!(
             runtime.asynchronous.is_some(),
             "async worker requires asynchronous runtime"
         );
+        Self::start_pages(Arc::new(move || step(&store, &runtime)), notices)
+    }
+    /// Reuse bounded scheduling for a native source owner. The callback must close its
+    /// short read snapshot, prepare owned output off writer, then briefly publish one
+    /// bounded page. This supplies no source/admission/cut certificate or registry.
+    /// Subscribe before starting; the callback must return CaughtUp from an authoritative
+    /// recheck. Commit notices received during a page remain pending for the idle wait.
+    pub fn start_pages(
+        run_page: Arc<dyn Fn() -> Result<PageReport> + Send + Sync>,
+        mut notices: broadcast::Receiver<events::Notice>,
+    ) -> Result<Self> {
         let (stop, mut cancelled) = watch::channel(false);
         let (progress, receiver) = watch::channel(None);
         let executor = tokio::runtime::Handle::try_current()
@@ -593,9 +604,8 @@ impl Worker {
                 if *cancelled.borrow() || cancelled.has_changed().is_err() {
                     return Ok(());
                 }
-                let page_store = store.clone();
-                let page_runtime = runtime.clone();
-                let page = tokio::task::spawn_blocking(move || step(&page_store, &page_runtime))
+                let execute = run_page.clone();
+                let page = tokio::task::spawn_blocking(move || execute())
                     .await
                     .context("async page task failed")??;
                 let status = page.status.clone();

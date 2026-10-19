@@ -13,11 +13,19 @@ this protocol step. All example names and IDs below are invented.
 ## Version and evidence
 
 Read fabric at commit
-[`8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6`](https://github.com/compoundingtech/fabric/tree/8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6),
-tag/release `v0.2.30`. The installed binary inspected for this step reports
-`0.2.30+8bd9017`. Its [Cargo manifest and lock](https://github.com/compoundingtech/fabric/blob/8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6/Cargo.lock)
-select **iroh 1.0.2**. Pin `=1.0.2`, the fabric source revision, and the adapter’s
-own lockfile for the executable proof. A version banner alone is not an artifact
+[`84c3208b3d1c82e4a036640aed330473a74cf105`](https://github.com/compoundingtech/fabric/tree/84c3208b3d1c82e4a036640aed330473a74cf105),
+tag/release `v0.2.41`, built as `0.2.41+84c3208` for the bridge’s checks. Its
+[Cargo manifest and lock](https://github.com/compoundingtech/fabric/blob/84c3208b3d1c82e4a036640aed330473a74cf105/Cargo.lock)
+select **iroh 1.0.2**, as v0.2.30 did. Pin `=1.0.2`, the fabric source revision, and the adapter’s
+own lockfile for the executable proof. The adapter’s lock resolves newer
+semver-compatible iroh dependencies than fabric’s (for example `noq` 1.3.0
+against 1.0.1); the pinned-daemon and real-member checks run with them. Since
+v0.2.41 fabric documents this wire itself, in
+[`docs/tunnel-wire.md`](https://github.com/compoundingtech/fabric/blob/v0.2.41/docs/tunnel-wire.md),
+as a compatibility surface frozen by its test
+`daemon::tests::the_direct_exposure_wire_is_frozen`, and its error codes in
+[`docs/errors.md`](https://github.com/compoundingtech/fabric/blob/v0.2.41/docs/errors.md).
+The frame bytes are those of v0.2.30. A version banner alone is not an artifact
 checksum; record the built adapter and tested member binary hashes when testing.
 
 Smalltalk references were inspected at commit
@@ -26,11 +34,11 @@ recheck them when implementing against a newer main.
 
 | Contract | Source at the fabric pin |
 | --- | --- |
-| Identity, peer representation, exact grants | [`src/config.rs`](https://github.com/compoundingtech/fabric/blob/8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6/src/config.rs): `load_or_create_identity`, `Peer`, `PeerBook::may` |
-| Endpoint setup, transport trust, service admission | [`src/daemon.rs`](https://github.com/compoundingtech/fabric/blob/8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6/src/daemon.rs): `build_daemon_endpoint`, `AllowListHook`, `handle_mux_connection`, `handle_mux_stream` |
-| Connection ALPN, generation preface, stream routing | [`src/mux.rs`](https://github.com/compoundingtech/fabric/blob/8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6/src/mux.rs): `MUX_ALPN`, `PeerConnections`, `MuxStreamHeader`, `read_admission` |
-| Generic exposure framing and resumable byte delivery | [`src/tunnel.rs`](https://github.com/compoundingtech/fabric/blob/8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6/src/tunnel.rs): `Frame`, `write_frame`, `decode_frame`, `attach_stream_inner`, `serve_connection`, `TunnelSession::run_attach`, `write_attach_loop`, `read_attach_loop`, `ServerSessionStore::get_or_create` |
-| Service-side interface, distinct from a dialer | [`fabric-service-api`](https://github.com/compoundingtech/fabric/blob/8bd9017a79f4aaa2b25a33321bd7daed6a0acaa6/crates/fabric-service-api/src/lib.rs): `Service`, `PeerStream`, `Access` |
+| Identity, peer representation, exact grants | [`src/config.rs`](https://github.com/compoundingtech/fabric/blob/84c3208b3d1c82e4a036640aed330473a74cf105/src/config.rs): `load_or_create_identity`, `Peer`, `PeerBook::may` |
+| Endpoint setup, transport trust, service admission | [`src/daemon.rs`](https://github.com/compoundingtech/fabric/blob/84c3208b3d1c82e4a036640aed330473a74cf105/src/daemon.rs): `build_daemon_endpoint`, `AllowListHook`, `handle_mux_connection`, `handle_mux_stream` |
+| Connection ALPN, generation preface, stream routing | [`src/mux.rs`](https://github.com/compoundingtech/fabric/blob/84c3208b3d1c82e4a036640aed330473a74cf105/src/mux.rs): `MUX_ALPN`, `PeerConnections`, `MuxStreamHeader`, `read_admission` |
+| Generic exposure framing and resumable byte delivery | [`src/tunnel.rs`](https://github.com/compoundingtech/fabric/blob/84c3208b3d1c82e4a036640aed330473a74cf105/src/tunnel.rs): `Frame`, `write_frame`, `decode_frame`, `attach_stream_inner`, `serve_connection`, `TunnelSession::run_attach`, `write_attach_loop`, `read_attach_loop`, `ServerSessionStore::get_or_create` |
+| Service-side interface, distinct from a dialer | [`fabric-service-api`](https://github.com/compoundingtech/fabric/blob/84c3208b3d1c82e4a036640aed330473a74cf105/crates/fabric-service-api/src/lib.rs): `Service`, `PeerStream`, `Access` |
 
 ## Identity, addresses, and discovery
 
@@ -68,7 +76,7 @@ source inspection alone does not establish iOS viability.
 ## Member exposure and authorization
 
 Expose exactly the **paired-only** gateway socket, whose router is
-[`fabric_router`](../../crates/st3/src/api.rs) and whose configured path is
+[`fabric_router`](../../crates/st3-api/src/api.rs) and whose configured path is
 `client_gateway_socket` (normally `st3-client.sock`). Do not expose `st3.sock`:
 that is the privileged local API. A generic socket exposure is sufficient; no
 new server-side Rust service is needed.
@@ -84,9 +92,22 @@ phone grant after the proof:
 fabric expose demo-client/0 --socket /path/to/private/st3-client.sock --ephemeral
 fabric peers
 # Choose an unused peer name before adding the phone.
-fabric add PHONE_NODE_ID demo-phone --allow demo-client/0
+fabric add PHONE_NODE_ID demo-phone --inbound-only --allow demo-client/0
 fabric reload-peers
 ```
+
+Grant the phone **inbound-only**, which needs fabric 0.2.41 or later (read at tag
+[`v0.2.41`](https://github.com/compoundingtech/fabric/tree/v0.2.41), commit
+`84c3208b3d1c82e4a036640aed330473a74cf105`: `fabric add --inbound-only`,
+`PeerBook::add_inbound_only` and `PeerBook::dialable_peers` in `src/config.rs`, and
+`DaemonState::dialable_peers` and `check_peer_reachability` in `src/daemon.rs`).
+An inbound-only peer is served under its `allow` list when it connects, exactly
+like any other peer, and the member never dials, probes or announces to it: the
+liveness loop, the start-up announcement and the network-change checks skip it.
+`fabric status` and `fabric doctor` show it as `inbound-only`, connected or not
+connected, never offline. `fabric ping`, `exec`, `shell`, `dial` and sync for it are
+refused. The flag cannot be combined with `--dial-only`. `fabric add` runs
+`reload-peers` itself; run it again and check its result.
 
 For a new phone entry, the equivalent authoritative `peers.toml` content is:
 
@@ -97,23 +118,28 @@ format = 2
 id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 name = "demo-phone"
 allow = ["demo-client/0"]
+inbound_only = true
 ```
 
 The example ID is a placeholder. Inspect the resulting entry, particularly if
 updating an existing peer: `PeerBook::add_with_allow` preserves existing grants
 when the allow argument is omitted. It also replaces any other peer with the same
-name: choose an unused alias after inspecting `fabric peers`. A new entry has
-`roaming = false`; `fabric add` has no roaming flag. If the isolated experiment
-needs `roaming = true`, edit that field explicitly and reload. Do not silently
-widen a phone’s grant. The member-side scope is one exposure and this phone’s exact grant only; broader
+name: choose an unused alias after inspecting `fabric peers`, which lists the
+phone as `inbound-only,demo-client/0`. Re-adding an existing phone with
+`--inbound-only` marks it inbound-only and keeps it so on later re-adds; only
+removing the peer undoes it. A new entry has `roaming = false`, which does not
+matter for a peer that is never probed. Do not silently widen a phone’s grant.
+The member-side scope is one exposure and this phone’s exact grant only; broader
 changes go through operations. `--ephemeral` avoids persisting the exposure;
 peer grants still persist and require deliberate cleanup after the proof.
+A member below 0.2.41 refuses `--inbound-only`; an ordinary grant there still
+admits the phone, at the probe cost described under the direct connection.
 
 There are two fabric checks before the target socket is opened:
 
 1. `AllowListHook::after_handshake` checks inbound `remote_id()` against the
    loaded peer IDs. An unknown phone is rejected with application code `403`
-   and `node is not in fabric allow-list`.
+   and `fabric:peer_not_in_allow_list node is not in fabric allow-list`.
 2. On a direct exposure connection, `process_incoming_iroh` calls
    `PeerBook::may(remote_id, service_name)` before accepting the tunnel stream.
    Mux streams perform the same check in `handle_mux_stream`. Generic exposures
@@ -129,18 +155,37 @@ applies to this generic gateway exposure. Format 2’s generated `allow_shell` a
 At this pin, a `PeerBook::load` failure clears the in-memory peer book and
 transport allow-list. A later `SyncBook` validation failure occurs before the
 new book is installed. Do not infer successful admission from an edited file.
-At the pinned v0.2.30, `reload-peers` does not close already attached connections or sessions. Removing
-the grant prevents new connections and resumes, but does not cut an already
-admitted stream. Close the app’s active carrier sessions as part of proof cleanup;
-verify detached sessions drain, expire, or are evicted on the isolated daemon.
 
-Since [v0.2.31](https://github.com/compoundingtech/fabric/blob/v0.2.31/docs/tunnel-wire.md#trust-after-admission),
-a successful peer reload ends attached and detached sessions that the new policy
-no longer permits. Direct connections close with code 403 and the same admission
-reason: `not permitted for service` for a removed grant, or
-`node is not in fabric allow-list` for a removed peer. Treat these as refusals,
-not transport losses; a failed reload ends no sessions. The wire bytes are
-unchanged. This behavior note does not advance the isolated proof's v0.2.30 pin.
+A successful peer reload ends attached and detached sessions that the new policy
+no longer permits ([trust after admission](https://github.com/compoundingtech/fabric/blob/v0.2.41/docs/tunnel-wire.md#trust-after-admission),
+since v0.2.31). Direct connections close with code 403 and the same admission
+reason followed by `(access revoked)`:
+`fabric:peer_not_permitted_for_service peer not permitted for service "demo-client/0" (access revoked)`
+for a removed grant, or the `peer_not_in_allow_list` reason for a removed peer.
+Treat these as refusals, not transport losses; a failed reload ends no sessions.
+
+### Error codes
+
+Since v0.2.41 every refusal reason and Error frame text starts with a stable
+`fabric:<code> ` token, then a diagnostic for people. A reader acts on the code,
+and on its class for a code it does not know; the diagnostic may change, and in
+an Error frame it can name a path on the member. A member before 0.2.41 sends the
+same reasons without the token. The codes the direct wire uses:
+
+| Where | Code | Class |
+| --- | --- | --- |
+| Close 403 after the handshake: untrusted NodeID, or peer removed | `peer_not_in_allow_list` | refusal |
+| Close 403: no grant for this service, or grant removed | `peer_not_permitted_for_service` | refusal |
+| Error frame: the exposed socket or address cannot be reached | `service_unavailable` | fault |
+| Error frame: an exec service’s command cannot start | `spawn_failed` | fault |
+| Error frame: every session slot is attached | `session_limit_reached` | fault |
+| Error frame: a resume names a session the member no longer holds | `session_expired` | fault |
+
+The bridge decides a refusal by close code 403, which holds for every version,
+and records the code beside each attempt’s result in its measurements: `refused`
+with a refusal code, or `rejected` with an Error frame’s fault code. It keeps
+only the code, never the diagnostic. The app names a refusal as one; a fault
+falls back like any failed connection.
 
 After fabric admits the stream, **st still checks pairing and client scopes**.
 Fabric does not synthesize a person, device grant, or bearer credential. Complete
@@ -159,8 +204,9 @@ exactly the UTF-8 exposure name, here **`demo-client/0`**:
    negotiation. Verify the expected peer identity through iroh.
 2. The member checks transport trust and the exact service grant after the
    authenticated handshake. A trusted phone missing this grant is closed with
-   application code `403` and a reason containing `not permitted for service`.
-   This refusal marker is a documented wire contract. Report it as an admission
+   application code `403` and a reason starting with
+   `fabric:peer_not_permitted_for_service ` and containing
+   `not permitted for service`. This refusal marker is a documented wire contract. Report it as an admission
    problem instead of retrying forever as though the member were offline.
 3. Open **one bidirectional stream** for this connection and immediately send a
    tunnel Hello. The member’s `accept_bi()` becomes observable when bytes arrive;
@@ -177,14 +223,17 @@ HTTP/WebSocket client level; it need not implement daemon generation arbitration
 Each new local TCP connection costs a QUIC handshake and a member `tunnel_accept`
 log entry, so preserve HTTP keep-alive instead of reconnecting per request.
 
-A trusted phone still receives the daemon’s ordinary peer behavior at this pin:
-health probes every 20 seconds while online, backoff while away, and announcements
-on peer reload/network change. An outbound-only phone speaking neither
-`fabric/mux/2` nor `fabric/echo/0` cannot answer, so it is marked unreachable and
-probed on backoff even while its gateway tunnels work. This bounded cost is
-accepted for the proof, but measure it. The fabric owner proposes an inbound-only
-peer kind, without probing/announcements, before this becomes a lasting client
-surface; it does not exist in v0.2.30.
+A phone granted inbound-only gets none of the daemon’s ordinary peer behavior:
+no health probes, no announcements on start-up or peer reload, and no
+network-change checks. Its status is whether it is connected now. The
+[bridge’s pinned-daemon test](../../apps/ios/modules/st-fabric/README.md#checks)
+proves it: with probes every second, the member probes an ordinarily granted
+peer and never the inbound-only phone, while the phone’s attaches succeed. An
+ordinary grant, the only kind before fabric 0.2.41, has the member probe the
+phone every 20 seconds while online and on backoff while away, and announce to
+it on peer reload and network change. A phone speaking neither `fabric/mux/2`
+nor `fabric/echo/0` cannot answer, so the member marks it unreachable and keeps
+probing on backoff even while its gateway tunnels work.
 
 ## Mux wire reference: daemon-to-daemon routing
 
@@ -263,9 +312,10 @@ should tolerate that too.
 
 A second Hello on an attached stream is a protocol error. Error is sent in answer
 to Hello for cases such as failed target connect, a session limit, or an expired
-resume; the server finishes the stream and waits up to one second. Its text may
-include a host-local socket path. Treat it as a private diagnostic, never as
-forwarded HTTP content or uploaded user data.
+resume; the server finishes the stream and waits up to one second. Its text
+starts with the `fabric:<code> ` token (see [error codes](#error-codes)); the rest
+may include a host-local socket path. Read the code, and treat the rest as a
+private diagnostic, never as forwarded HTTP content or uploaded user data.
 
 ### Graceful teardown and abandoned sessions
 
@@ -335,9 +385,10 @@ library surface.
 
 The fabric owner recommends building the small direct-ALPN wire dialer on an
 app-owned iroh Endpoint. A proof-specific codec can be written against this pin
-with explicit provenance and compatibility fixtures. Inform the owner when the
-app begins to depend on the wire so it can be treated as a compatibility surface
-and future changes can be recorded in fabric’s CHANGELOG. Do not label such a
+with explicit provenance and compatibility fixtures. Since v0.2.41 fabric treats
+the direct wire as a compatibility surface: its `docs/tunnel-wire.md` describes
+it, a frozen-wire test guards it, and a change to it is recorded in fabric’s
+CHANGELOG. Do not label such a
 codec a stable fabric SDK. The iroh 1.0.2 target,
 TLS provider, getrandom support, and final static library/XCFramework must be
 built and linked for both simulator and device by the existing iOS builders.
@@ -389,6 +440,38 @@ with the app’s existing foreground lifecycle. On foreground, restart the adapt
 before opening the feed and refresh its ephemeral URL. No polling, fabricated
 HTTP replies, cached mutation queue, or secret logging is needed.
 
+## Several members: an ordered list
+
+The app saves an ordered list of members (at most eight), each with the name the person gave it,
+and walks it in the person's order; it never reorders the list by what worked last. Each member's
+dial, from `Endpoint.connect` to one unauthenticated `GET /v1/client/capabilities` through the
+bridge, has 4 seconds, and the whole walk 10 seconds. The bridge's listener answers before the
+member does, so that one read is what tells admitted, refused and unreachable apart. A member that
+was connected and dropped is redialed after 1, 2 and 5 seconds before the walk moves on to the
+members after it. When no member answers, the saved gateway takes over as it does after any fabric
+failure, and fabric is tried again later.
+
+A refusal is not a failure to reach. When a member refuses the phone (close code 403, or any typed
+refusal the bridge records), the walk stops at once and nothing after that member is dialed, then
+or later by itself. The screen names the member by its saved name, never a node ID or an address,
+and says what fabric refused in plain words: `peer_not_in_allow_list` as no fabric grant for this
+phone, `peer_not_permitted_for_service` as a grant that does not include the client service, and a
+refusal without a code (a member older than 0.2.41) as a refusal of fabric access. The saved gateway
+behaves as it does after a refusal today. The person can pick another member by hand.
+
+Each credential goes only to the member it was paired with. One member may use this device's own
+pairing: a single target an older app saved, the first member added to a phone paired over a
+gateway, or the member a phone paired with over fabric alone. Every other member is paired on its
+own, through fabric to that member, and keeps its own bearer, signing key and pin in its own Keychain
+entry. The walk dials only members this phone is paired with and skips the others. Pairing goes to
+the member alone, sends no credential, and leaves this device's own pairing, cache and gateway as
+they are.
+
+The list has its own key. The old single-target key keeps the member that uses this device's own
+pairing, written as an older app build wrote it, so an older build still reaches that member with
+the credential it already sends there; with no such member the key is removed and an older build
+uses its saved gateway. When an older build replaces or forgets that target, the new app follows it.
+
 ## What must be rechecked when fabric changes
 
 | Changed surface | What would break |
@@ -399,6 +482,7 @@ HTTP replies, cached mutation queue, or secret logging is needed.
 | Generic exposure framing, Hello shape, offsets, Ack/Close semantics | All HTTP/WebSocket transport or replay/half-close correctness |
 | Peer-file format, `may`, exposed-name mapping | The exact phone grant could stop admitting the gateway or change scope |
 | Session limits, lifetime, ownership/replay behavior | Concurrency and reconnect behavior; a fresh connection cannot impersonate a resume |
+| Error codes, their classes, close code 403 | Refusals read as faults (or the reverse), so the app retries a refusal or names a fault as a refusal |
 | Extracted dialer API or its build targets | Native ABI/lifecycle and device/simulator builds |
 
 A release bump with the same ALPN is not proof of compatibility: this experimental
@@ -411,7 +495,7 @@ checks, Hello-first ordering, and 15-minute default TTL. Its subsequent review o
 the document confirmed the framing/Hello/admission bytes and supplied corrections
 for teardown/reaping, Ack cadence/backpressure, Close ordering, peer creation,
 ongoing probes, and existing-session revocation. Those corrections are included
-here. The stui owner also required bridge-owned loopback selection and an
+here. The terminal UI owner also required bridge-owned loopback selection and an
 isolated-daemon proof before member provisioning.
 
 The executable proof should establish: unknown NodeID refusal; trusted phone
@@ -419,6 +503,6 @@ refusal for an ungranted exposure; exact gateway admission; st refusal without a
 paired credential; pairing/capabilities and collections over the carrier; uploads
 and WebSocket/terminal capability forwarding; half-close and concurrent requests;
 network loss/foreground recovery without replaying actions; abandoned session
-limits/reaping and final-Ack teardown; member probe cost; a recorded
+limits/reaping and final-Ack teardown; no member probes of an inbound-only phone; a recorded
 relay/direct path; and Tailscale working after disabling the development setting.
 Keep these results separate from this source-derived protocol document.

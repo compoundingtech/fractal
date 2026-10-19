@@ -281,6 +281,9 @@ pub fn list(world: &World, by: By, hours: u64) -> Listing {
     let rows = world.usage.items();
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_partial.iter().any(|name| name == "usage") {
+        items.push(Item::Note(Line::from(span(" More usage rows exist beyond this window.", theme::dim()))));
+    }
     let row = |items: &mut Vec<Item>, ids: &mut Vec<String>, id: String, first, right, second| {
         items.push(Item::Row {
             index: ids.len(),

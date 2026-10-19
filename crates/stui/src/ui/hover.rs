@@ -114,7 +114,10 @@ impl Ui {
         // The same goes for a list row that is a block of lines, such as Home's items: the lit
         // background behind a paragraph is hard to read.
         let plain = match &info.hits[target.index].1 {
-            Hit::Message | Hit::Subject => true,
+            // Messages and the rows that fold and unfold them do not light up as the pointer
+            // passes (Nathan, 2026-10-07: they flickered); the footer still says what a click does.
+            Hit::Message | Hit::Subject | Hit::ToggleTool(_) => true,
+            Hit::Pane(PaneIntent::Expand(_)) => true,
             Hit::Row(_) | Hit::SidebarRow(_) | Hit::Peek(_) => target.rect.height > 1,
             _ => false,
         };
@@ -222,6 +225,39 @@ mod tests {
 
     #[global_allocator]
     static ALLOCATOR: CountedAllocator = CountedAllocator;
+
+    #[test]
+    fn quality_adds_no_allocations_to_a_warmed_draw() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let ui = Ui::new(demo::world());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut quality = super::super::slo::Draw::new(Instant::now());
+        for _ in 0..4 {
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+        }
+        // The existing renderer allocates. Compare identical warmed frames with and
+        // without the presentation observer using this thread's counting allocator.
+        ALLOCATIONS.set(Some(0));
+        for _ in 0..100 {
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+        }
+        let baseline = ALLOCATIONS.replace(None).unwrap();
+        ALLOCATIONS.set(Some(0));
+        for _ in 0..100 {
+            quality.key();
+            quality.frame(Instant::now(), 1);
+            quality.live(true);
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let visible = ui.quality_visible();
+            assert!(!ui.terminal_ready_visible("agent/example/absent"));
+            quality.presented(true, 1, 0, visible);
+        }
+        let instrumented = ALLOCATIONS.replace(None).unwrap();
+        assert_eq!(
+            instrumented, baseline,
+            "quality recording adds no allocations"
+        );
+    }
 
     fn motion(x: u16, y: u16) -> Event {
         Event::Mouse(MouseEvent {

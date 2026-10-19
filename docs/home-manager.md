@@ -1,9 +1,10 @@
-# Smalltalk with Home Manager
+# Fractal with Home Manager
 
 Import `inputs.smalltalk.homeManagerModules.default` and configure the user service:
 
 ```nix
 services.smalltalk = {
+  accessMode = "auto";
   enable = true;
   person = "person/ada";
   declarations = {
@@ -34,6 +35,68 @@ can follow new builds without ending their harness sessions. Unchanged contents 
 Package references in the systemd unit or launchd plist still trigger daemon restarts on upgrades.
 Seats started from store paths before this change remain stale until restarted; see
 [seats across deploys](st3/seat-deploys.md).
+
+## Optional Fractal command
+
+Neither the default Nix package nor the default Home Manager configuration installs
+`fractal`; updating a Smalltalk pin does not claim that command name. To opt in for
+the Home Manager-owned stable executable:
+
+```nix
+programs.smalltalk.fractalBinary.enable = true;
+```
+
+With `services.smalltalk.enable = true` and `binary.path = null`, activation creates
+`stateDir/bin/fractal -> st3`. Add that stable bin directory to your interactive PATH
+to use it. `fractal` and `fractal tui` open the terminal UI, `fractal web` opens the web
+UI, and other arguments behave like `st`. The existing `st` and `st3` commands do not
+change.
+
+Activation leaves foreign files, directories, and symlinks at `stateDir/bin/fractal`
+untouched and prints guidance; `st` remains usable. A relative `fractal -> st3` link
+is recognized as Smalltalk-owned. Disabling the option removes only that recognized
+link, not a foreign command. With an externally deployed `binary.path`, this option
+is ignored: the external deployer remains responsible for aliases.
+
+For a standalone Nix-profile installation, explicitly select the flake's `#fractal`
+package instead of the default package. It contains only `bin/fractal`, a symlink to
+the same `st3` executable; install `#st3` alongside it if you also want the existing
+commands in your profile. Unlike module activation, Nix profile collision handling
+governs profile-installed commands.
+
+## Externally deployed binary
+
+If another deployer updates your Nix profile or installs the executable, set
+`binary.path` to its stable absolute path:
+
+```nix
+services.smalltalk = {
+  enable = true;
+  person = "person/ada";
+  binary.path = "/opt/smalltalk/bin/st3";
+};
+```
+
+The default is `null`, which keeps the installation and restart behavior above.
+When a path is set, Home Manager does not install `package`, copy an executable
+to `stateDir/bin`, or create the `st` alias there. The daemon and declaration
+commands execute `binary.path`, and their PATH starts with its containing
+directory. The daemon's `--pty-binary` also selects `pty` in that directory.
+The systemd units and launchd agents omit the Fractal and PTY package store
+paths and the package restart trigger. Changing only `package` or `ptyPackage`
+therefore does not restart the daemon on a Home Manager switch.
+
+The external deployer must install the executable before the service starts,
+provide any CLI aliases (such as `st`), install `pty` beside the configured
+executable, and restart the daemon when an upgrade needs it. `ptyPackage` is
+ignored in this mode, so a profile update selects both tools from the same
+stable directory.
+For running seats to follow replacements, use a real executable at a stable
+path: a Nix-profile symlink alone resolves to the package's store executable
+and does not provide the replaceable executable described in
+[seats across deploys](st3/seat-deploys.md).
+
+## Host setup
 
 Linux user-manager lingering and macOS `st service permissions` remain host
 setup prerequisites. Fleet/replication setup is not managed by this module.

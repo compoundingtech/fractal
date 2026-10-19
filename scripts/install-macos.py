@@ -12,14 +12,24 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 
 CERTIFICATE = os.environ.get('ST_MACOS_SIGNING_IDENTITY') or None
 TEAM = os.environ.get('ST_MACOS_SIGNING_TEAM') or None
 APP = os.environ.get('ST_MACOS_APP_PATH') or None
 BIN_DIR = os.environ.get('ST_MACOS_BIN_DIR') or None
-IDENTIFIER = os.environ.get('ST_MACOS_BUNDLE_ID', 'com.compoundingtech.smalltalk')
-SERVICES = ['com.compoundingtech.st3', 'com.compoundingtech.st3.replication']
+# A named instance (ST_INSTANCE, or --instance on the install wrappers) is a second, separate install:
+# its own app, command directory, bundle identifier, launchd services and install state, all under
+# ~/.st-instance/NAME. Without a name every default below is the shared install, as before.
+INSTANCE = os.environ.get('ST_INSTANCE') or None
+if INSTANCE and not (len(INSTANCE) <= 24 and re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', INSTANCE)):
+    raise SystemExit('invalid instance name: lowercase letters, digits and single hyphens, at most 24 characters')
+IDENTIFIER = os.environ.get('ST_MACOS_BUNDLE_ID') or (
+    'com.compoundingtech.smalltalk.instance.' + INSTANCE if INSTANCE else 'com.compoundingtech.smalltalk')
+# arn:lmig:smalltalk:2026-10-16-service-labels-fractal — service writers retain old labels.
+SERVICES = (['com.compoundingtech.st3.instance.' + INSTANCE, 'com.compoundingtech.st3.instance.' + INSTANCE + '.replication']
+            if INSTANCE else ['com.compoundingtech.st3', 'com.compoundingtech.st3.replication'])
 LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 
 
@@ -36,15 +46,26 @@ def sha(path):
     return h.hexdigest()
 
 
+def instance_root(home):
+    return Path(home) / '.st-instance' / INSTANCE
+
+
+def state_root(home):
+    base = instance_root(home) / 'state' if INSTANCE else Path(home) / '.local/state'
+    return base / 'st3/macos-installs'
+
+
 def fixed(home):
-    return Path(APP).expanduser().absolute() if APP else Path(home) / 'Applications/SmallTalk.app'
+    if APP:
+        return Path(APP).expanduser().absolute()
+    return instance_root(home) / 'app/SmallTalk.app' if INSTANCE else Path(home) / 'Applications/SmallTalk.app'
 
 
 def binaries(app):
-    return {name: Path(app) / 'Contents/MacOS' / name for name in ['st3', 'stui']}
+    return {name: Path(app) / 'Contents/MacOS' / name for name in ['st3']}
 
 
-# stui's speech helper (apps/macos/listen), when built: its own app inside SmallTalk.app, so the
+# The terminal client's speech helper (apps/macos/listen), when built: its own app inside SmallTalk.app, so the
 # microphone prompt names Small Talk with the helper's usage strings.
 HELPER = 'StListen.app'
 
@@ -91,7 +112,9 @@ def resolve_identity():
 
 
 def bin_dir(home):
-    return Path(BIN_DIR).expanduser().absolute() if BIN_DIR else Path(home) / '.local/bin'
+    if BIN_DIR:
+        return Path(BIN_DIR).expanduser().absolute()
+    return instance_root(home) / 'bin' if INSTANCE else Path(home) / '.local/bin'
 
 
 def verify(app, expected=None):
@@ -141,17 +164,17 @@ def prepare(home, job, built):
             'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'LSUIElement': True}
     if HELPER in built:
         # macOS asks on behalf of the outermost app, so its name and usage strings are the ones shown.
-        info['CFBundleDisplayName'] = 'Small Talk'
+        info['CFBundleDisplayName'] = 'Fractal'
         info['NSMicrophoneUsageDescription'] = (
-            'Small Talk listens while you dictate a message in stui, and transcribes it on this Mac.')
-        info['NSSpeechRecognitionUsageDescription'] = 'Small Talk transcribes your dictated messages on this Mac.'
+            'Fractal listens while you dictate a message in the terminal interface, and transcribes it on this Mac.')
+        info['NSSpeechRecognitionUsageDescription'] = 'Fractal transcribes your dictated messages on this Mac.'
 
     (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     metadata = resources / 'deploy-payload.json'
     metadata.write_text(json.dumps(desired, sort_keys=True) + '\n')
     for name, path in paths.items():
         command(['/usr/bin/codesign', '--force', '--sign', CERTIFICATE or '-', '--identifier',
-                 IDENTIFIER if name == 'st3' else IDENTIFIER + '.stui', '--timestamp=none', path])
+                 IDENTIFIER, '--timestamp=none', path])
     if HELPER in built:
         # Nested code is signed before the app that seals it.
         helper = app / 'Contents/Helpers' / HELPER
@@ -161,6 +184,21 @@ def prepare(home, job, built):
     command(['/usr/bin/codesign', '--force', '--sign', CERTIFICATE or '-', '--identifier', IDENTIFIER, '--timestamp=none', app])
     identity = verify(app)
     return app, dict(identity, payload_unchanged=False), payload
+
+
+def owns_fractal(path):
+    return path.is_symlink() and os.readlink(path) in ('st3', str(path.parent / 'st3'))
+
+def foreign_fractal_on_path(destination):
+    for directory in os.environ.get('PATH', '').split(os.pathsep):
+        candidate = Path(directory or '.').absolute() / 'fractal'
+        if candidate.parent.resolve() == destination.parent.resolve():
+            continue
+        if candidate.exists() or candidate.is_symlink():
+            if not (candidate.is_symlink() and os.readlink(candidate) == str(destination.parent / 'st3')):
+                return True
+    return False
+
 
 
 def backup(home, job):
@@ -179,8 +217,11 @@ def backup(home, job):
     entries = {}
     previous_bin = Path(job) / 'previous-bin'
     previous_bin.mkdir(exist_ok=True)
-    for name in ['st3', 'stui', 'st']:
+    for name in ['st3', 'stui', 'st', 'fractal']:
         path = bin_dir(home) / name
+        # A foreign fractal command is outside this transaction, including rollback.
+        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path):
+            continue
         if path.is_symlink():
             entries[name] = {'link': os.readlink(path)}
         elif path.exists():
@@ -225,13 +266,33 @@ def swap(app, home, job, suffix, expected=None):
 
 
 def install(app, home, job):
+    retired = bin_dir(home) / 'stui'
+    if retired.is_dir():
+        raise RuntimeError('refusing to remove directory: ' + str(retired))
     swap(app, home, job, 'install')
-    links = dict(binaries(fixed(home)), st=Path('st3'))
+    links = dict(binaries(fixed(home)))
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    links['st'] = Path('st3')
+    # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     for name, path in links.items():
         link = bin_dir(home) / name
         link.parent.mkdir(parents=True, exist_ok=True)
         staged = link.parent / ('.' + name + '-' + Path(job).name)
         staged.unlink(missing_ok=True); staged.symlink_to(path); os.replace(staged, link)
+    retired.unlink(missing_ok=True)
+    alias = bin_dir(home) / 'fractal'
+    if owns_fractal(alias):
+        staged = alias.parent / ('.fractal-' + Path(job).name)
+        staged.unlink(missing_ok=True)
+        staged.symlink_to('st3')
+        os.replace(staged, alias)
+    else:
+        try:
+            if foreign_fractal_on_path(alias):
+                raise FileExistsError('foreign fractal on PATH')
+            alias.symlink_to('st3')
+        except FileExistsError:
+            print('install: leaving fractal unchanged: destination ' + str(alias) + ' or PATH contains a foreign command; use st, or move the foreign fractal and reinstall to enable the alias.', file=sys.stderr)
     for service in SERVICES:
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
         if not path.exists():
@@ -267,6 +328,8 @@ def restore(home, job, had_app):
 
     for name, prior in json.loads((Path(job) / 'previous-bin.json').read_text()).items():
         path = bin_dir(home) / name
+        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path):
+            continue
         if prior is None:
             path.unlink(missing_ok=True)
         elif 'link' in prior:
@@ -299,7 +362,7 @@ def main():
     args = parser.parse_args()
     CERTIFICATE, TEAM, APP, BIN_DIR, IDENTIFIER = args.identity or None, args.team_id or None, args.app, args.bin_dir, args.identifier
     home = args.home.expanduser().absolute() if args.home is not None else Path.home()
-    lock_root = home / '.local/state/st3/macos-installs'
+    lock_root = state_root(home)
     lock_root.mkdir(parents=True, exist_ok=True)
     with open(lock_root / (hashlib.sha256(str(fixed(home)).encode()).hexdigest() + '.lock'), 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -316,7 +379,7 @@ def main():
         if args.job is None:
             if args.prepare_only or args.backup_only or args.restore_app:
                 parser.error('--job is required for preparing, backing up or restoring a transaction')
-            root = home / '.local/state/st3/macos-installs'
+            root = state_root(home)
             root.mkdir(parents=True, exist_ok=True)
             args.job = Path(tempfile.mkdtemp(prefix='install-', dir=root))
         args.job.mkdir(parents=True, exist_ok=True)
@@ -336,7 +399,7 @@ def main():
             return
         if args.source is None:
             parser.error('--from is required')
-        built = {name: args.source / name for name in ['st3', 'stui']}
+        built = {name: args.source / name for name in ['st3']}
         for path in built.values():
             if not path.is_file() or not os.access(path, os.X_OK):
                 parser.error('missing executable: ' + str(path))

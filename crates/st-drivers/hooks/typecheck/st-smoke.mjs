@@ -170,16 +170,28 @@ if (driver === "omp") {
         assert.equal(globalThis.__stOmpChannel.restoringAsk.toolCallId, "restored-ask");
         await bridgeEvents.get("tool_execution_start")({ toolName: "ask", toolCallId: "restored-ask" }, bridgeCtx);
         await untilBridge(() => read().some((frame) => frame.type === "delivery_ready"));
-        assert.equal(read().filter((frame) => frame.type === "state").at(-1).blockedOn, "human");
+        const reopened = read().filter((frame) => frame.type === "state").at(-1);
+        assert.equal(reopened.blockedOn, "human");
+        assert.equal(reopened.ask, "question");
+        assert.ok(reopened.reason.includes("restored-ask"), "human-blocking reason names the reopened ask");
         assert.equal(globalThis.__stOmpChannel.pendingAskToolCallId, "restored-ask");
         mock.timers.tick(10_001);
+        await new Promise((resolve) => realTimeout(resolve, 50));
+        assert.deepEqual(bridgeHandoffs, [], "a reopened native ask stays held past the cap");
+        assert.equal(read().filter((frame) => frame.type === "delivered").length, 0);
+        send({ type: "message", content: "HELD after reopen", meta: { messageId: "message/after-reopen" } });
+        await untilBridge(() => globalThis.__stOmpChannel.held?.length === 2);
+        await bridgeEvents.get("tool_result")({ toolCallId: "unrelated" }, bridgeCtx);
+        assert.deepEqual(bridgeHandoffs, [], "an unrelated result cannot answer the picker");
+        await bridgeEvents.get("tool_result")({ toolCallId: "restored-ask" }, bridgeCtx);
       } else {
         mock.timers.tick(120_000);
         await untilBridge(() => read().some((frame) => frame.code === "pending_ask_resume_timeout"));
         assert.equal(read().filter((frame) => frame.type === "state" && frame.state === "idle").length, 0);
       }
       await untilBridge(() => bridgeHandoffs.length === 1);
-      assert.deepEqual(bridgeHandoffs, [`HELD ${outcome}`], "both exits release mail without waiting for idle");
+      assert.deepEqual(bridgeHandoffs, [outcome === "reopened" ? "HELD reopened\n\nHELD after reopen" : "HELD timeout"],
+        "native answer or restore timeout releases ordered mail without waiting for idle");
       assert.equal(read().filter((frame) => frame.type === "delivery_ready").length, 1);
       assert.equal(globalThis.__stOmpChannel.restoringAsk, undefined);
       await bridgeEvents.get("session_shutdown")({}, bridgeCtx);

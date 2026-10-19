@@ -208,3 +208,26 @@ pub fn columns(line: &str, from: usize, to: usize) -> String {
     }
     out
 }
+
+/// Cut to `max` columns, ending in `…` when anything was dropped.
+pub fn truncate(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if UnicodeWidthStr::width(text) <= max {
+        return text.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut output = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        let w = character.width().unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        used += w;
+        output.push(character);
+    }
+    output.push('…');
+    output
+}

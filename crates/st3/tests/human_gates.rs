@@ -1,6 +1,8 @@
 //! A person answers a mission's human gate from every surface: client-v0 actions (stui, iOS),
 //! the CLI, and the HTTP API. Each test drives a real reconciler and an in-process API.
 
+use st3::MissionsStore;
+use st3::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -20,6 +22,7 @@ const NODE: &str = "human-gates";
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        owning_person: None,
         store: Arc::new(Store::open_memory(NODE).unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -394,12 +397,11 @@ async fn a_gate_asked_again_refuses_the_old_card_and_takes_the_current_one() {
 }
 
 async fn run_cli(socket: &Path, args: &[&str]) -> Output {
-    let binary = assert_cmd::cargo::cargo_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("st3-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(binary)
-            .env_remove("ST_AGENT")
+        st3::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .arg("--endpoint")
             .arg(socket)

@@ -15,7 +15,7 @@ use tokio::sync::{Notify, watch};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authored_omp_resume_publishes_binding_from_an_empty_managed_directory() {
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::canonical_tempdir();
     let subject = "agent/garden/worker";
     let id = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
     let legacy = root.path().join("legacy");
@@ -39,7 +39,7 @@ async fn authored_omp_resume_publishes_binding_from_an_empty_managed_directory()
         .map(|directory| directory.join("node"))
         .find(|candidate| candidate.is_file())
         .expect("the OMP admission stand-in needs Node on the fixture PATH");
-    let admission_host = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let admission_host = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/st3-boot-canaries/stub-pi-family.mjs");
     // The fake provider uses the actual spawned channel, not a direct API binding request.
     // Its admission mode loads the actual adapter against the loopback model fixture.
@@ -104,6 +104,7 @@ agent "garden/worker" {{
         .unwrap();
     let socket = root.path().join("api.sock");
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -120,7 +121,14 @@ agent "garden/worker" {{
     let listener_socket = socket.clone();
     let state_socket = root.path().join("state.sock");
     let server = tokio::spawn(async move {
-        st3::api::serve_unix_bound(&listener_socket, &state_socket, st3::api::router(state)).await
+        // This binding/history fixture has a synthetic runtime and no physical PTY.
+        // Exercise its already-admitted channel protocol; native authority has separate
+        // real-runtime controls using the production router.
+        st3::api::serve_unix_bound(
+            &listener_socket,
+            &state_socket,
+            st3::test_support::admitted_mailbox_protocol_router(state),
+        ).await
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -129,7 +137,7 @@ agent "garden/worker" {{
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let hooks = st3::hooks::ensure_installed(&root.path().join("hooks")).unwrap();
-    let mut command = st3::test_support::async_command(env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = st3::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
     let stop = root.path().join("provider-stop");
     command
         .env_clear()
@@ -219,7 +227,18 @@ agent "garden/worker" {{
     std::fs::write(&stop, "").unwrap();
     let output = completion.await.unwrap();
     server.abort();
-    assert_eq!(std::fs::read_link(&managed).unwrap(), legacy);
+    let metadata = std::fs::symlink_metadata(&managed).unwrap();
+    assert!(metadata.is_dir());
+    assert!(!metadata.file_type().is_symlink());
+    assert_ne!(std::fs::canonicalize(&managed).unwrap(), std::fs::canonicalize(&legacy).unwrap());
+    assert_eq!(std::fs::read_dir(&managed).unwrap().count(), 2);
+    let managed_transcript = managed.join(transcript.file_name().unwrap());
+    assert_eq!(std::fs::read_link(&managed_transcript).unwrap(), transcript);
+    assert_eq!(std::fs::read(&managed_transcript).unwrap(), std::fs::read(&transcript).unwrap());
+    let managed_artifacts = managed.join(transcript.file_stem().unwrap());
+    assert_eq!(std::fs::read_link(&managed_artifacts).unwrap(), transcript.with_extension(""));
+    assert!(managed_artifacts.is_dir());
+    assert!(!managed.join(format!("2026-10-05_{sibling_id}.jsonl")).exists());
     // This fixture has no PTY/reconciler. Releasing its provider can fence the delivery
     // subscription during teardown; the contract under test is the binding while it is live.
     let binding = binding.unwrap_or_else(|| panic!("native binding was not published: {output:?}"));

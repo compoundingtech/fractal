@@ -5,6 +5,7 @@ use tokio::sync::{Notify, watch};
 
 fn state(root: &Path) -> AppState {
     AppState {
+        owning_person: None,
         store: Arc::new(Store::open_memory("presence-test").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
@@ -42,6 +43,15 @@ async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_opti
     client.capabilities().await.unwrap();
     let listed = client.clients_list().await.unwrap().value;
     assert_eq!(listed.kind, "client-connections");
+    // The HTTP list keeps its shipped discriminator when new streamed resource kinds land.
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        schema["$defs"]["ClientConnections"]["properties"]["kind"]["const"].as_str(),
+        Some(listed.kind.as_str()),
+    );
     let unnamed = listed
         .items
         .iter()

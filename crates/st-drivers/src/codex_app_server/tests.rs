@@ -420,7 +420,7 @@ fn write_fake_codex(
 fn the_boot_canary_codex_stub_schemas_are_what_the_protocol_gate_admits() {
     let schemas = compatible_protocol_schemas();
     let directory =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3-boot-canaries/codex-schemas");
+        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3-boot-canaries/codex-schemas");
     for (filename, schema) in [
         (
             "codex_app_server_protocol.v2.schemas.json",
@@ -717,7 +717,7 @@ fn codex_context_recomputes_the_captured_reading_and_pins_its_verified_version()
     assert_eq!(CODEX_CONTEXT_VERIFIED_VERSION, "0.151.0");
     assert_eq!(CODEX_BASELINE_TOKENS, 12_000);
 
-    let frames = include_str!("../../tests/fixtures/codex_token_usage_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-h26ef19db4b45 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_token_usage_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -1135,7 +1135,7 @@ fn rollout_fallback_counts_only_new_context_compaction_completions() {
 /// reading from a turn boundary would break exactly the HC-R03 rule the record exists for.
 #[test]
 fn captured_delivery_frames_carrying_no_token_count_publish_no_record() {
-    let frames = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-h7fcfd979d0e8 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -1164,6 +1164,7 @@ fn delivery_config(root: &Path) -> CodexDeliveryConfig {
         supervisor: None,
         producer_version: Some("codex-cli 0.153.0".into()),
         model: None,
+        prompt_answers: None,
     }
 }
 
@@ -1586,7 +1587,7 @@ fn captured_usage_limit_boundary_is_retryable_capacity_and_allows_next_native_de
     // observer never reads. The second capture has the same method sequence. The recorder
     // stops at turn completion, so this test pins the boundary state only. The provider
     // source establishes that no later idle notification follows the capacity error.
-    let frames = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-hd0ccf9c8bd00 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -1637,11 +1638,11 @@ fn captured_usage_limit_boundary_is_retryable_capacity_and_allows_next_native_de
 /// capacity rather than an authentication failure.
 #[test]
 fn a_rejected_codex_credential_reads_provider_auth_while_a_quota_failure_does_not() {
-    let rejected = include_str!("../../tests/fixtures/codex_provider_auth_inbound.jsonl")
+    let rejected = /* sqlite-large-value: allow-for-now lv-hdddd4464a507 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_provider_auth_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    let quota = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let quota = /* sqlite-large-value: allow-for-now lv-hb8f448e4cc6e owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -3195,6 +3196,7 @@ fn expected_resume_waits_for_tui_loaded_thread_and_binds_from_control_response()
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: false,
                 preloaded: None,
@@ -3217,6 +3219,7 @@ fn expected_resume_waits_for_tui_loaded_thread_and_binds_from_control_response()
             sandbox: Some(sandbox),
             model: None,
             effort: None,
+                    permissions: None,
         }) if policy == "never" && sandbox == "danger-full-access"
     ));
     assert!(matches!(
@@ -3309,6 +3312,7 @@ fn declared_resume_policy_preloads_before_the_tui_can_load_read_only() {
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: true,
                 preloaded: Some(preloaded_tx),
@@ -3331,6 +3335,109 @@ fn declared_resume_policy_preloads_before_the_tui_can_load_read_only() {
     server.join().unwrap();
     let _ = shutdown.shutdown(Shutdown::Both);
     pump.join().unwrap();
+}
+
+#[test]
+fn a_failed_preload_names_the_missing_rollout_not_the_closed_channel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _stop_exclusive = stop_flag_tests();
+    let socket = tmp.path().join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialize"
+        );
+        write_json_message(
+            &mut websocket,
+            &json!({ "id": 0, "result": { "userAgent": "fake" } }),
+        )
+        .unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialized"
+        );
+        let request = read_json_message(&mut websocket).unwrap().unwrap();
+        assert_eq!(request["method"], "thread/resume");
+        write_json_message(
+            &mut websocket,
+            &json!({
+                "id": CONTROL_SUBSCRIBE_REQUEST_ID,
+                "error": {
+                    "code": -32600,
+                    "message": "no rollout found for thread id thread-prior"
+                }
+            }),
+        )
+        .unwrap();
+    });
+
+    let stream = UnixStream::connect(&socket).unwrap();
+    let shutdown = stream.try_clone().unwrap();
+    let websocket = initialize_control(stream)
+        .unwrap()
+        .expect("no stop raised in tests");
+    let binding_path = tmp.path().join("state/binding.json");
+    let control_state_path = tmp.path().join("state/control-state.json");
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let (events_tx, events_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (preloaded_tx, preloaded_rx) = mpsc::channel();
+    let pump = thread::spawn(move || {
+        pump_control(
+            websocket,
+            &binding_path,
+            &control_state_path,
+            &runtime,
+            Some(ControlResume {
+                thread_id: "thread-prior",
+                ready: ready_rx,
+                tui_loaded_timeout: TUI_LOADED_TIMEOUT,
+                permission_overrides: Some(ResumePermissionOverrides {
+                    approval_policy: Some("never".into()),
+                    approvals_reviewer: None,
+                    sandbox: Some("danger-full-access".into()),
+                    model: None,
+                    effort: None,
+                    permissions: None,
+                }),
+                preload: true,
+                preloaded: Some(preloaded_tx),
+            }),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            events_tx,
+        )
+    });
+    ready_tx.send(()).unwrap();
+    let closed = preloaded_rx
+        .recv_timeout(TEST_EVENT_TIMEOUT)
+        .map_err(anyhow::Error::from)
+        .unwrap_err();
+    server.join().unwrap();
+    let _ = shutdown.shutdown(Shutdown::Both);
+    pump.join().unwrap();
+
+    let reported = format!("{:#}", preload_failure(&events_rx, closed));
+    assert!(
+        reported.contains(
+            "saved Codex resume binding has no persisted rollout for thread thread-prior"
+        ),
+        "{reported}"
+    );
+    assert!(!reported.contains("sending half is closed"), "{reported}");
+    // With nothing recorded by the control thread the closed-channel error is all there is.
+    let (_, empty) = mpsc::channel::<ControlEvent>();
+    let fallback = format!(
+        "{:#}",
+        preload_failure(&empty, anyhow::anyhow!("closed channel"))
+    );
+    assert_eq!(fallback, "closed channel");
 }
 
 #[test]
@@ -3421,6 +3528,7 @@ fn rejected_declared_resume_settings_fail_without_downgrading_the_policy() {
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: false,
                 preloaded: None,
@@ -3549,6 +3657,7 @@ fn successful_resume_with_wrong_model_or_effort_fails_before_binding() {
                         sandbox: Some("danger-full-access".into()),
                         model: Some("gpt-6.1-sol".into()),
                         effort: Some("high".into()),
+                    permissions: None,
                     }),
                     preload: false,
                     preloaded: None,
@@ -5504,6 +5613,341 @@ fn an_unclassified_item_holds_until_the_next_idle_status() {
 }
 
 #[test]
+fn a_persons_answer_takes_each_approval_methods_own_decision_words() {
+    let none = Value::Null;
+    for (method, allow, deny) in [
+        (
+            "item/commandExecution/requestApproval",
+            json!({"decision": "accept"}),
+            json!({"decision": "decline"}),
+        ),
+        (
+            "item/fileChange/requestApproval",
+            json!({"decision": "accept"}),
+            json!({"decision": "decline"}),
+        ),
+        (
+            "execCommandApproval",
+            json!({"decision": "approved"}),
+            json!({"decision": {"denied": {"rejection": "The person denied this from st."}}}),
+        ),
+        (
+            "applyPatchApproval",
+            json!({"decision": "approved"}),
+            json!({"decision": {"denied": {"rejection": "The person denied this from st."}}}),
+        ),
+    ] {
+        assert_eq!(
+            approval_decision(method, &none, "allow"),
+            Some(allow),
+            "{method}"
+        );
+        assert_eq!(
+            approval_decision(method, &none, "deny"),
+            Some(deny),
+            "{method}"
+        );
+    }
+    // A permissions request is granted exactly what it asked for, or nothing.
+    let asked = json!({"threadId": "thread-main", "permissions": {"network": {"enabled": true}}});
+    assert_eq!(
+        approval_decision("item/permissions/requestApproval", &asked, "allow"),
+        Some(json!({"permissions": {"network": {"enabled": true}}, "scope": "turn"}))
+    );
+    assert_eq!(
+        approval_decision("item/permissions/requestApproval", &asked, "deny"),
+        Some(json!({"permissions": {}}))
+    );
+    assert_eq!(
+        approval_decision("item/commandExecution/requestApproval", &none, "maybe"),
+        None
+    );
+    assert_eq!(
+        approval_decision("item/tool/requestUserInput", &none, "allow"),
+        None
+    );
+}
+
+#[test]
+fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
+    use crate::session_control::PromptAnswer;
+    let root = tempfile::tempdir().unwrap();
+    let mut writer =
+        harness_state::Writer::new(root.path(), "h.worker", "codex", Some("h.worker".into()));
+    let mut write = |observed: CodexObservedState| {
+        writer
+            .observe(observed.harness_observation().unwrap())
+            .unwrap()
+    };
+    let waiting = || CodexObservedState::Held {
+        reason: CodexHoldReason::WaitingOnApproval,
+        turn_id: Some("turn-1".into()),
+    };
+    let active = || CodexObservedState::Active {
+        turn_id: "turn-1".into(),
+    };
+    let path = harness_state::harness_state_path(root.path());
+    let record = || harness_state::read(&path, None);
+    let sequences = || {
+        let observed = record().unwrap();
+        (
+            observed.ownership_sequence.unwrap(),
+            observed.transition_sequence.unwrap(),
+        )
+    };
+    let answered = |answer: &str| {
+        let answer = answer.to_owned();
+        move |_: u64, _: u64| {
+            Some(PromptAnswer::Answered {
+                answer: answer.clone(),
+            })
+        }
+    };
+    let request = |id: u64, thread: &str| {
+        json!({"id": id, "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": thread, "turnId": "turn-1", "command": "make"}})
+    };
+    let mut at = Instant::now();
+    let mut tick = || {
+        at += APPROVAL_ANSWER_POLL;
+        at
+    };
+    let mut approval = CodexApprovalAnswer::default();
+    write(active());
+
+    // Another thread's request, or one without an id, is never remembered.
+    approval.observe(&request(7, "thread-other"), "thread-main");
+    approval.observe(
+        &json!({"method": "item/commandExecution/requestApproval",
+            "params": {"threadId": "thread-main"}}),
+        "thread-main",
+    );
+    assert_eq!(
+        approval.answer_if_due(tick(), || unreachable!(), |_, _| unreachable!()),
+        None
+    );
+
+    // Until the request's wait is written, nothing names the prompt and st is not asked.
+    approval.observe(&request(8, "thread-main"), "thread-main");
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |_, _| unreachable!()),
+        None
+    );
+    // Then st is asked about exactly that observation, and again only a second later.
+    write(waiting());
+    let prompt = sequences();
+    let mut asked = Vec::new();
+    let now = tick();
+    assert_eq!(
+        approval.answer_if_due(now, record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Open)
+        }),
+        None
+    );
+    assert_eq!(asked, vec![prompt]);
+    assert_eq!(
+        approval.answer_if_due(
+            now + Duration::from_millis(500),
+            || unreachable!(),
+            |_, _| unreachable!()
+        ),
+        None
+    );
+    // A request for another thread does not replace this one.
+    approval.observe(&request(9, "thread-other"), "thread-main");
+    assert_eq!(
+        approval.answer_if_due(tick(), record, answered("deny")),
+        Some(json!({"id": 8, "result": {"decision": "decline"}}))
+    );
+    assert_eq!(
+        approval.answer_if_due(tick(), record, answered("deny")),
+        None,
+        "an answer is sent once"
+    );
+
+    // A second request whose wait wrote nothing new would find the first one's observation, and
+    // with it the first one's answer: it never binds, so st never answers it.
+    approval.observe(&request(10, "thread-main"), "thread-main");
+    assert_eq!(sequences(), prompt);
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |_, _| unreachable!()),
+        None
+    );
+    // Answered in the TUI: the resolution forgets it; another request's resolution does not.
+    approval.observe(
+        &json!({"method": "serverRequest/resolved",
+            "params": {"threadId": "thread-main", "requestId": 9}}),
+        "thread-main",
+    );
+    assert!(!approval.pending.is_empty());
+    approval.observe(
+        &json!({"method": "serverRequest/resolved",
+            "params": {"threadId": "thread-main", "requestId": 10}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_empty());
+
+    // A request whose wait is a new transition binds to it; st reporting it gone forgets it.
+    write(active());
+    write(waiting());
+    approval.observe(&request(11, "thread-main"), "thread-main");
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Gone)
+        }),
+        None
+    );
+    assert_ne!(asked, vec![prompt]);
+    assert_eq!(asked, vec![sequences()]);
+    assert!(approval.pending.is_empty());
+
+    // The thread moving on forgets a request too: a status without the flag, a completed turn.
+    approval.observe(&request(12, "thread-main"), "thread-main");
+    approval.observe(
+        &json!({"method": "thread/status/changed", "params": {"threadId": "thread-main",
+            "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}}}),
+        "thread-main",
+    );
+    assert!(!approval.pending.is_empty());
+    approval.observe(
+        &json!({"method": "thread/status/changed", "params": {"threadId": "thread-main",
+            "status": {"type": "active", "activeFlags": []}}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_empty());
+    approval.observe(&request(13, "thread-main"), "thread-main");
+    approval.observe(
+        &json!({"method": "turn/completed", "params": {"threadId": "thread-main",
+            "turn": {"id": "turn-1", "status": "completed"}}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_empty());
+
+    // A legacy request names its thread as a conversation and takes its own words.
+    write(active());
+    write(waiting());
+    approval.observe(
+        &json!({"id": "legacy-1", "method": "execCommandApproval",
+            "params": {"conversationId": "thread-main"}}),
+        "thread-main",
+    );
+    assert_eq!(
+        approval.answer_if_due(tick(), record, answered("allow")),
+        Some(json!({"id": "legacy-1", "result": {"decision": "approved"}}))
+    );
+}
+
+/// Codex can ask twice before either is answered. Each request is its own prompt: the oldest
+/// waits first, the next becomes the prompt once the first is resolved, and its wait is a new
+/// transition, so st's answer to one is never sent to the other.
+#[test]
+fn two_approvals_wait_in_turn_and_each_binds_to_its_own_transition() {
+    use crate::session_control::PromptAnswer;
+    let root = tempfile::tempdir().unwrap();
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let mut state = CodexControlState::new(&runtime, "thread-main".into());
+    let mut writer =
+        harness_state::Writer::new(root.path(), "h.worker", "codex", Some("h.worker".into()));
+    let path = harness_state::harness_state_path(root.path());
+    let record = || harness_state::read(&path, None);
+    let sequences = || {
+        let observed = harness_state::read(&path, None).unwrap();
+        (
+            observed.ownership_sequence.unwrap(),
+            observed.transition_sequence.unwrap(),
+        )
+    };
+    // What `CodexInboxDelivery::observe_control` does: a new request starts a transition.
+    let mut last_request = None;
+    let mut publish = |state: &CodexControlState, writer: &mut harness_state::Writer| {
+        let request = state.approval_request().cloned();
+        if request.is_some() && request != last_request {
+            writer.interrupt();
+        }
+        last_request = request;
+        writer.observe(state.harness_observation().unwrap()).unwrap();
+    };
+    let request = |id: u64, method: &str| {
+        json!({"id": id, "method": method,
+            "params": {"threadId": "thread-main", "turnId": "turn-1", "itemId": format!("item-{id}")}})
+    };
+    let mut approval = CodexApprovalAnswer::default();
+    let mut at = Instant::now();
+    let mut tick = || {
+        at += APPROVAL_ANSWER_POLL;
+        at
+    };
+    state
+        .observe(&json!({"method": "turn/started",
+            "params": {"threadId": "thread-main", "turn": {"id": "turn-1"}}}))
+        .unwrap();
+    publish(&state, &mut writer);
+
+    for message in [
+        request(1, "item/commandExecution/requestApproval"),
+        request(2, "item/fileChange/requestApproval"),
+    ] {
+        state.observe(&message).unwrap();
+        approval.observe(&message, "thread-main");
+        publish(&state, &mut writer);
+    }
+    // The oldest request is the prompt, and the record names what it asks.
+    assert_eq!(record().unwrap().reason.as_deref(), Some("commandExecution"));
+    let first = sequences();
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Answered {
+                answer: "allow".into(),
+            })
+        }),
+        Some(json!({"id": 1, "result": {"decision": "accept"}}))
+    );
+    assert_eq!(asked, vec![first]);
+    // Binding the request names the call it asks about: its item, as the conversation shows it.
+    assert_eq!(approval.bound_call.take(), Some((first.0, first.1, "item-1".into())));
+
+    // Codex resolves the first; the second is the prompt now, and its own transition.
+    let resolved = json!({"method": "serverRequest/resolved",
+        "params": {"threadId": "thread-main", "requestId": 1}});
+    state.observe(&resolved).unwrap();
+    approval.observe(&resolved, "thread-main");
+    // Before its wait is written, the second request finds only the first's observation: no bind.
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |_, _| unreachable!()),
+        None
+    );
+    publish(&state, &mut writer);
+    assert_eq!(record().unwrap().reason.as_deref(), Some("fileChange"));
+    let second = sequences();
+    assert_ne!(second, first);
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Answered {
+                answer: "deny".into(),
+            })
+        }),
+        Some(json!({"id": 2, "result": {"decision": "decline"}}))
+    );
+    assert_eq!(asked, vec![second]);
+
+    // Once nothing waits, the thread's flag alone is answered in the terminal.
+    let resolved = json!({"method": "serverRequest/resolved",
+        "params": {"threadId": "thread-main", "requestId": 2}});
+    state.observe(&resolved).unwrap();
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("waitingOnApproval")
+    );
+}
+
+#[test]
 fn approval_request_blocks_until_matching_thread_reports_resolution() {
     let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
     let mut state = CodexControlState::new(&runtime, "thread-main".into());
@@ -5549,8 +5993,32 @@ fn approval_request_blocks_until_matching_thread_reports_resolution() {
         crate::harness_state::BlockedOn::Human
     );
     assert_eq!(observation.ask, crate::harness_state::Ask::Permission);
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("commandExecution"),
+        "the wait names the request it saw"
+    );
+    // A reloaded state (an adopted connection) still waits, but never saw the request: only the
+    // terminal can answer it, until the request is seen again.
     state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
     assert!(state.approval_request_pending);
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("waitingOnApproval")
+    );
+    assert!(
+        state
+            .observe(&json!({
+                "id": 1,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"threadId": "thread-main", "turnId": "turn-1"}
+            }))
+            .unwrap()
+    );
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("commandExecution")
+    );
     assert!(
         !state
             .observe(&json!({
@@ -5558,7 +6026,8 @@ fn approval_request_blocks_until_matching_thread_reports_resolution() {
                 "method": "item/commandExecution/requestApproval",
                 "params": {"threadId": "thread-main", "turnId": "turn-1"}
             }))
-            .unwrap()
+            .unwrap(),
+        "the same request again changes nothing"
     );
 
     assert!(
@@ -6520,6 +6989,7 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
             sandbox: Some("workspace-write".into()),
             model: Some("gpt-test".into()),
             effort: None,
+                    permissions: None,
         }
     );
     assert_eq!(
@@ -6598,6 +7068,7 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
             sandbox: Some("danger-full-access".into()),
             model: Some("gpt-5.6-sol".into()),
             effort: Some("xhigh".into()),
+            permissions: None,
         })
     );
     let request = control_resume_request("thread-prior", prepared.resume_permissions.as_ref());
@@ -6622,6 +7093,33 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
         &stale,
         prepared.resume_permissions.as_ref().unwrap()
     ));
+}
+
+#[test]
+fn fractal_mission_run_controls_unattended_codex_launch() {
+    for (old, new, expected) in [
+        (None, None, false),
+        (Some("mission-run/old"), None, true),
+        (None, Some("mission-run/new"), true),
+        (Some("mission-run/old"), Some("mission-run/new"), true),
+        (Some("mission-run/old"), Some(""), false),
+        (Some("mission-run/old"), Some("  \n"), false),
+        (Some(""), None, false),
+    ] {
+        let mission_run = crate::contracts::env_with("ST_MISSION_RUN", &|key| {
+            match key {
+                "ST_MISSION_RUN" => old,
+                "FRACTAL_MISSION_RUN" => new,
+                _ => None,
+            }
+            .map(str::to_owned)
+        });
+        assert_eq!(
+            mission_run_is_unattended(mission_run.as_deref()),
+            expected,
+            "old={old:?}, new={new:?}"
+        );
+    }
 }
 
 #[test]
@@ -7726,7 +8224,7 @@ fn a_human_ask_keeps_its_reason_while_a_turn_failure_stands() {
 /// time and nothing read it.
 #[test]
 fn the_captured_usage_limit_stall_now_names_its_cause_on_both_records() {
-    let frames = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-h124dbd484e04 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -7900,7 +8398,7 @@ fn the_control_pump_reports_the_recorded_usage_limit_failure_over_its_socket() {
             read_json_message(&mut websocket).unwrap().unwrap()["method"],
             "initialized"
         );
-        for line in include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl").lines() {
+        for line in /* sqlite-large-value: allow-for-now lv-hf473d7c409b6 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl").lines() {
             let frame = serde_json::from_str::<Value>(line).unwrap();
             write_json_message(&mut websocket, &frame).unwrap();
         }
@@ -7961,6 +8459,327 @@ fn the_control_pump_reports_the_recorded_usage_limit_failure_over_its_socket() {
     assert_eq!(failure.reason, driver_diagnostic::Reason::TurnUsageLimit);
 }
 
+/// Real Codex 0.160.1 emits a typed retryable disconnect, systemError, then an
+/// unclassified final error. Its thread accepts a new turn after the failed one.
+#[test]
+fn the_control_pump_keeps_a_retryable_disconnect_alive_for_the_next_turn() {
+    let tmp = crate::canonical_tempdir();
+    let _stop_exclusive = stop_flag_tests();
+    let config = delivery_config(tmp.path());
+    let agent_dir = config.agent_dir.clone();
+    let server_config = config.clone();
+    let socket = tmp.path().join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(TEST_EVENT_TIMEOUT)).unwrap();
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialize"
+        );
+        write_json_message(
+            &mut websocket,
+            &json!({"id": 0, "result": {"userAgent": "fake"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialized"
+        );
+        for frame in [
+            json!({"method":"thread/started", "params":{"thread":{"id":"thread-main", "status":{"type":"idle"}}}}),
+            json!({"method":"turn/started", "params":{"threadId":"thread-main", "turn":{"id":"turn-failed"}}}),
+            error_frame(
+                "turn-failed",
+                json!({"responseStreamDisconnected":{"httpStatusCode":null}}),
+                true,
+            ),
+            json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"systemError"}}}),
+            error_frame("turn-failed", json!("other"), false),
+            json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-failed", "status":"failed", "error":{"codexErrorInfo":"other"}}}}),
+        ] {
+            write_json_message(&mut websocket, &frame).unwrap();
+        }
+        // Wait for the test to inspect the terminal record before admitting more work.
+        finished_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
+        let filename = message::send_to_inbox(
+            &server_config.inbox,
+            "h.sender",
+            None,
+            None,
+            &[],
+            "next turn",
+        )
+        .unwrap();
+        loop {
+            let request = read_json_message(&mut websocket).unwrap().unwrap();
+            match request["method"].as_str().unwrap() {
+                "account/read" => write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"account":{"type":"apiKey"}}})).unwrap(),
+                "thread/read" => write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"thread":{"id":"thread-main", "status":{"type":"systemError"}, "turns":[]}}})).unwrap(),
+                "turn/start" => {
+                    assert_eq!(request["params"]["threadId"], "thread-main");
+                    write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"turn":{"id":"turn-next"}}})).unwrap();
+                    for frame in [
+                        json!({"method":"turn/started", "params":{"threadId":"thread-main", "turn":{"id":"turn-next"}}}),
+                        json!({"method":"item/completed", "params":{"threadId":"thread-main", "turnId":"turn-next", "item":{"type":"userMessage", "id":"item-next", "clientId":request["params"]["clientUserMessageId"], "content":[]}}}),
+                        json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"idle"}}}),
+                        json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-next", "status":"completed"}}}),
+                    ] {
+                        write_json_message(&mut websocket, &frame).unwrap();
+                    }
+                    // Keep the connection open until the completed turn has been inspected.
+                    finished_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
+                    return filename;
+                }
+                other => panic!("unexpected request: {other}"),
+            }
+        }
+    });
+    let stream = UnixStream::connect(&socket).unwrap();
+    let shutdown = stream.try_clone().unwrap();
+    let websocket = initialize_control(stream).unwrap().unwrap();
+    let control_path = tmp.path().join("state/control-state.json");
+    let pump_path = control_path.clone();
+    let binding_path = tmp.path().join("state/binding.json");
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let pump = thread::spawn(move || {
+        pump_control(
+            websocket,
+            &binding_path,
+            &pump_path,
+            &runtime,
+            None,
+            Some(config),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        )
+    });
+    assert!(matches!(
+        rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap(),
+        ControlEvent::Bound
+    ));
+    // Each transition is published before Observed is sent: initial idle, active,
+    // system-error hold, then terminal completion. Reading on an earlier event can race it.
+    for _ in 0..4 {
+        assert!(matches!(
+            rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap(),
+            ControlEvent::Observed
+        ));
+    }
+    let state: CodexControlState =
+        serde_json::from_slice(&fs::read(&control_path).unwrap()).unwrap();
+    assert!(matches!(
+        state.observed(),
+        CodexObservedState::TerminalError { .. }
+    ));
+    let failed = observed_record(&agent_dir);
+    let failed_state = failed.state;
+    let failed_reason = failed.reason.clone();
+    let failed_diagnostic = turn_diagnostic(&agent_dir);
+    finished_tx.send(()).unwrap();
+    // The next turn publishes active, then idle. Its successful completion restates idle.
+    for _ in 0..2 {
+        assert!(matches!(
+            rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap(),
+            ControlEvent::Observed
+        ));
+    }
+    let recovered = observed_record(&agent_dir);
+    finished_tx.send(()).unwrap();
+    let filename = server.join().unwrap();
+    let _ = shutdown.shutdown(Shutdown::Both);
+    pump.join().unwrap();
+    assert_eq!(
+        failed_state,
+        harness_state::Activity::Idle,
+        "a failed network turn must not end the incarnation"
+    );
+    assert_eq!(failed_reason.as_deref(), Some("connection"));
+    let driver_diagnostic::Observed::Failure(failure) = failed_diagnostic else {
+        panic!("the completed connection failure must retain its diagnostic")
+    };
+    assert_eq!(failure.reason, driver_diagnostic::Reason::TurnConnection);
+    assert_eq!(recovered.state, harness_state::Activity::Idle);
+    assert_eq!(recovered.reason, None);
+    assert_eq!(
+        turn_diagnostic(&agent_dir),
+        driver_diagnostic::Observed::Absent
+    );
+    assert_eq!(
+        ledger_entry(tmp.path(), &filename).unwrap().phase,
+        delivery_ledger::Phase::Consumed
+    );
+}
+
+#[test]
+fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence() {
+    for final_error in [
+        None,
+        Some(json!("other")),
+        Some(json!("internalServerError")),
+        Some(json!("responseStreamDisconnected")),
+        Some(json!("futureFatalError")),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = delivery_config(tmp.path());
+        let agent_dir = config.agent_dir.clone();
+        let mut delivery = inbox_delivery(tmp.path(), config);
+        let mut state = subscribed_state(CodexObservedState::Active {
+            turn_id: "turn-a".into(),
+        });
+        pump_frame(
+            &mut state,
+            &mut delivery,
+            &error_frame("turn-a", json!("responseStreamDisconnected"), true),
+        );
+        assert_eq!(
+            observed_record(&agent_dir).state,
+            harness_state::Activity::Active,
+            "Codex owns retries while the turn is active"
+        );
+        if let Some(info) = final_error.as_ref() {
+            pump_frame(
+                &mut state,
+                &mut delivery,
+                &error_frame("turn-a", info.clone(), false),
+            );
+        }
+        pump_frame(
+            &mut state,
+            &mut delivery,
+            &json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"systemError"}}}),
+        );
+        assert!(matches!(
+            state.observed(),
+            CodexObservedState::Held {
+                reason: CodexHoldReason::SystemError,
+                ..
+            }
+        ));
+        assert!(delivery.maybe_request(&state).unwrap().is_none());
+        pump_frame(
+            &mut state,
+            &mut delivery,
+            &json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-a", "status":"failed"}}}),
+        );
+        let observation = observed_record(&agent_dir);
+        let retryable = final_error.is_none() || final_error == Some(json!("other"));
+        assert_eq!(
+            observation.state,
+            if retryable {
+                harness_state::Activity::Idle
+            } else {
+                harness_state::Activity::Ended
+            }
+        );
+        assert_eq!(
+            observation.reason.as_deref(),
+            Some(if retryable {
+                "connection"
+            } else if final_error == Some(json!("internalServerError")) {
+                "internal"
+            } else if final_error == Some(json!("responseStreamDisconnected")) {
+                "connection"
+            } else {
+                "unclassified"
+            })
+        );
+    }
+}
+
+#[test]
+fn non_retryable_and_foreign_turn_errors_cannot_inherit_connection_recovery() {
+    for (retry, final_turn) in [(false, "turn-a"), (true, "turn-other")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = delivery_config(tmp.path());
+        let agent_dir = config.agent_dir.clone();
+        let mut delivery = inbox_delivery(tmp.path(), config);
+        let mut state = subscribed_state(CodexObservedState::Active {
+            turn_id: "turn-a".into(),
+        });
+        pump_frame(
+            &mut state,
+            &mut delivery,
+            &error_frame("turn-a", json!("responseStreamDisconnected"), retry),
+        );
+        pump_frame(
+            &mut state,
+            &mut delivery,
+            &error_frame(final_turn, json!("other"), false),
+        );
+        pump_frame(
+            &mut state,
+            &mut delivery,
+            &json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"systemError"}}}),
+        );
+        pump_frame(
+            &mut state,
+            &mut delivery,
+            &json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-a", "status":"failed"}}}),
+        );
+        let observation = observed_record(&agent_dir);
+        assert_eq!(observation.state, harness_state::Activity::Ended);
+        assert_eq!(observation.reason.as_deref(), Some("unclassified"));
+    }
+}
+
+#[test]
+fn transcript_proven_completion_keeps_the_retryable_connection_class() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = delivery_config(tmp.path());
+    let agent_dir = config.agent_dir.clone();
+    message::send_to_inbox(&config.inbox, "h.sender", None, None, &[], "next").unwrap();
+    let mut delivery = inbox_delivery(tmp.path(), config);
+    let mut state = subscribed_state(CodexObservedState::Active {
+        turn_id: "turn-a".into(),
+    });
+    pump_frame(
+        &mut state,
+        &mut delivery,
+        &error_frame("turn-a", json!("responseStreamDisconnected"), true),
+    );
+    pump_frame(
+        &mut state,
+        &mut delivery,
+        &error_frame("turn-a", json!("other"), false),
+    );
+    pump_frame(
+        &mut state,
+        &mut delivery,
+        &json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"systemError"}}}),
+    );
+    let mut delivery = Some(delivery);
+    let (events, received) = mpsc::channel();
+    recover_transcript_turn_from_frames(
+        &mut state,
+        &mut delivery,
+        &[
+            json!({"type":"event_msg", "payload":{"type":"task_started", "turn_id":"turn-a"}}),
+            json!({"type":"event_msg", "payload":{"type":"task_complete", "turn_id":"turn-a", "error":{"codex_error_info":"other"}}}),
+        ],
+        &tmp.path().join("control-state.json"),
+        &events,
+    ).unwrap();
+    assert!(matches!(
+        received.try_recv().unwrap(),
+        ControlEvent::Observed
+    ));
+    let observation = observed_record(&agent_dir);
+    assert_eq!(observation.state, harness_state::Activity::Idle);
+    assert_eq!(observation.reason.as_deref(), Some("connection"));
+    assert_eq!(
+        delivery
+            .as_mut()
+            .unwrap()
+            .maybe_request(&state)
+            .unwrap()
+            .unwrap()["method"],
+        "turn/start"
+    );
+}
 #[test]
 fn an_error_with_no_optional_codex_error_info_reports_an_unclassified_failure() {
     // The generated ErrorNotification schema requires error/threadId/turnId/willRetry;
@@ -8111,4 +8930,161 @@ fn native_codex_login_recovery_requires_a_successful_current_thread_turn() {
             .provider_auth,
         None
     );
+}
+
+#[test]
+fn an_unticked_setup_box_leaves_codex_its_own_approval_defaults_in_both_modes() {
+    use crate::access::AccessMode;
+    let socket = Some("/run/example/st.sock");
+    let workspace = Path::new("/work/example");
+    let plain: Vec<String> = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
+    for mode in [AccessMode::Auto, AccessMode::Bypass] {
+        let ticked = managed_codex_argv_asking(mode, false, socket, workspace, plain.clone(), Default::default()).unwrap();
+        let asking = managed_codex_argv_asking(mode, true, socket, workspace, plain.clone(), Default::default()).unwrap();
+        assert!(ticked.len() > asking.len(), "{mode:?}: the install default adds permission arguments");
+        assert_eq!(
+            asking,
+            ["codex", "--dangerously-bypass-hook-trust", "--model", "gpt-example", "boot"],
+            "{mode:?}: only hook trust is added; no sandbox bypass, profile or reviewer"
+        );
+    }
+}
+
+#[test]
+fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resume() {
+    use crate::access::AccessMode;
+    let socket = Some("/run/example/st.sock");
+    let workspace = Path::new("/work/example");
+    let plain = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
+    let bypass = managed_codex_argv(AccessMode::Bypass, socket, workspace, plain.clone()).unwrap();
+    assert!(bypass.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    assert!(bypass.contains(&"--dangerously-bypass-hook-trust".into()));
+    assert!(bypass.ends_with(&plain[1..]));
+    let auto = managed_codex_argv(AccessMode::Auto, socket, workspace, plain).unwrap();
+    assert!(!auto.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    // The remote TUI drops the named profile's network table; only the legacy key reaches the
+    // thread, and without it a seat's claim gets EPERM on the daemon socket.
+    let has_config = |value: &str| auto.windows(2).any(|pair| pair[0] == "-c" && pair[1] == value);
+    assert!(has_config("sandbox_workspace_write.network_access=true"));
+    assert!(has_config("web_search=\"live\""));
+    assert!(!bypass.iter().any(|arg| arg.starts_with("sandbox_workspace_write") || arg.starts_with("auto_review")));
+    // Off by default: a plain auto seat leaves the approval reviewer's own judgment alone.
+    assert!(!auto.iter().any(|arg| arg.starts_with("auto_review")));
+    // A declaration that opts in (env ST_PERMISSIONS "push-own-branch") gives the reviewer the operator's
+    // authorization for the seat's own branch, as a TOML string in configuration.
+    let opted = managed_codex_argv_with(
+        AccessMode::Auto,
+        socket,
+        workspace,
+        vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()],
+        crate::access::Permissions { push_own_branch: true },
+    )
+    .unwrap();
+    let policy = opted.iter().find(|arg| arg.starts_with("auto_review.extra_policy=")).unwrap();
+    let parsed: toml::Value = toml::from_str(policy).unwrap();
+    let text = parsed["auto_review"]["extra_policy"].as_str().unwrap();
+    assert_eq!(text, crate::access::AUTO_REVIEW_EXTRA_POLICY);
+    assert!(text.starts_with("This session is an unattended fleet seat. For these actions only") && text.contains("Not authorized"));
+    assert!(text.contains("merging or closing pull requests"));
+    // Bypass has no reviewer, so the permission adds nothing there.
+    let bypass_opted = managed_codex_argv_with(
+        AccessMode::Bypass,
+        socket,
+        workspace,
+        vec!["codex".into(), "boot".into()],
+        crate::access::Permissions { push_own_branch: true },
+    )
+    .unwrap();
+    assert!(!bypass_opted.iter().any(|arg| arg.starts_with("auto_review")));
+    // The resumed TUI drops it while the app server keeps it.
+    let resumed_opted = prepare_controlled_launch_args("unix:///control.sock", &opted[1..], Some("prior")).unwrap();
+    assert!(!resumed_opted.tui_args.iter().any(|arg| arg.starts_with("auto_review")));
+    assert!(resumed_opted.server_args.iter().any(|arg| arg.starts_with("auto_review.extra_policy=")));
+    let profile = auto.iter().find(|value| value.starts_with("permissions.st-managed=")).unwrap();
+    let parsed: toml::Value = toml::from_str(profile).unwrap();
+    assert_eq!(parsed["permissions"]["st-managed"]["workspace_roots"]["/work/example"].as_bool(), Some(true));
+    assert_eq!(parsed["permissions"]["st-managed"]["network"]["unix_sockets"]["/run/example/st.sock"].as_str(), Some("allow"));
+    let resumed = prepare_controlled_launch_args("unix:///control.sock", &auto[1..], Some("prior")).unwrap();
+    // Codex 0.160.1 refuses a remote resume whose argv carries any permission config, so the
+    // resumed TUI keeps the non-permission options only; the app server holds the permission ones.
+    let tui_config: Vec<&str> = resumed
+        .tui_args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert!(tui_config.iter().all(|value| !is_permission_config(value)), "{tui_config:?}");
+    assert!(tui_config.contains(&"web_search=\"live\""), "{tui_config:?}");
+    assert_eq!(&resumed.tui_args[..3], ["--remote", "unix:///control.sock", "resume"].map(String::from));
+    assert!(resumed.tui_args.contains(&"prior".to_string()));
+    for key in ["permissions.st-managed=", "default_permissions=", "approvals_reviewer=", "sandbox_workspace_write.network_access="] {
+        assert!(resumed.server_args.iter().any(|arg| arg.starts_with(key)), "the app server keeps {key}");
+    }
+    let overrides = resumed.resume_permissions.unwrap();
+    assert_eq!(overrides.permissions.as_deref(), Some("st-managed"));
+    assert_eq!(overrides.approval_policy.as_deref(), Some("on-request"));
+    assert_eq!(overrides.approvals_reviewer.as_deref(), Some("auto_review"));
+    assert!(overrides.sandbox.is_none());
+    let request = control_resume_request("prior", Some(&overrides));
+    assert_eq!(request["params"]["permissions"], "st-managed");
+    let accepted = json!({"result":{"approvalPolicy":"on-request", "approvalsReviewer":"auto_review", "activePermissionProfile":{"id":"st-managed"}, "model":"gpt-example"}});
+    assert!(resume_permission_overrides_applied(&accepted, &overrides));
+    assert!(!resume_permission_overrides_applied(&json!({"result":{}}), &overrides));
+    for authored in [
+        vec!["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+        vec!["-s", "workspace-write"], vec!["-sworkspace-write"],
+        vec!["--config=default_permissions=custom"], vec!["-capproval_policy=never"],
+        vec!["-c", "sandbox_mode=read-only"],
+    ] {
+        let mut argv = vec!["codex".to_owned()];
+        argv.extend(authored.into_iter().map(str::to_owned));
+        argv.push("boot".into());
+        let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, argv.clone()).unwrap();
+        assert!(merged.ends_with(&argv[1..]));
+        assert!(!merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+        assert_eq!(merged.iter().filter(|arg| arg.as_str() == "--dangerously-bypass-hook-trust").count(), 1);
+    }
+    let prompt = vec!["codex".into(), "--".into(), "--dangerously-bypass-approvals-and-sandbox".into()];
+    let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, prompt).unwrap();
+    assert!(merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+}
+
+#[test]
+fn an_authored_permission_config_leaves_the_resume_argv_and_is_projected_through_thread_resume() {
+    // The remote TUI refuses permission config on a resume, with or without a managed profile, so
+    // an authored `-c` permission entry used to fail a resume too. It now leaves the TUI argv, and
+    // the typed thread/resume carries what it can express; `sandbox_workspace_write.*` and
+    // permission profile tables stay on the app server only.
+    let authored: Vec<String> = [
+        "--model", "gpt-example", "-c", "sandbox_mode=\"read-only\"", "--config=approval_policy=never",
+        "-c", "sandbox_workspace_write.network_access=true", "-c", "web_search=\"live\"", "boot",
+    ]
+    .map(String::from)
+    .to_vec();
+    let resumed = prepare_controlled_launch_args("unix:///control.sock", &authored, Some("prior")).unwrap();
+    let joined = resumed.tui_args.join(" ");
+    for gone in ["sandbox_mode", "approval_policy", "sandbox_workspace_write"] {
+        assert!(!joined.contains(gone), "{gone} must leave the resume argv: {joined}");
+    }
+    assert!(joined.contains("web_search=\"live\"") && joined.contains("--model gpt-example"), "{joined}");
+    let overrides = resumed.resume_permissions.unwrap();
+    assert_eq!(overrides.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(overrides.approval_policy.as_deref(), Some("never"));
+    for kept in ["sandbox_mode=", "approval_policy=never", "sandbox_workspace_write.network_access=true"] {
+        assert!(resumed.server_args.iter().any(|arg| arg.contains(kept)), "the app server keeps {kept}");
+    }
+}
+
+#[test]
+fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
+    use crate::access::AccessMode;
+    let workspace = Path::new("/work/example");
+    let plain = vec!["codex".into(), "boot".into()];
+    let bypass = managed_codex_argv(AccessMode::Bypass, None, workspace, plain.clone()).unwrap();
+    assert!(bypass.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    let authored = vec!["codex".into(), "--dangerously-bypass-approvals-and-sandbox".into(), "boot".into()];
+    let preserved = managed_codex_argv(AccessMode::Auto, None, workspace, authored.clone()).unwrap();
+    assert!(preserved.ends_with(&authored[1..]));
+    let error = managed_codex_argv(AccessMode::Auto, None, workspace, plain).unwrap_err();
+    assert!(error.to_string().contains("ST3_ENDPOINT"));
 }

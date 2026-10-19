@@ -424,26 +424,33 @@ fn all_open_runs_contribute_and_only_the_latest_finished_run_is_the_fallback() {
 
 #[test]
 fn only_agentless_keep_open_work_is_watching() {
-    for (path, agentless, expected) in [
-        ("keep-watch", true, Word::Watching),
-        ("nested/seat-retirement", true, Word::Watching),
-        ("keep-watch", false, Word::Working),
-        ("command", true, Word::Working),
+    // st marks keep-open steps; the name no longer decides.
+    for (keep_open, agentless, expected) in [
+        (true, true, Word::Watching),
+        (true, false, Word::Working),
+        (false, true, Word::Working),
     ] {
+        let mut open = step("keep-watch", "claimed", agentless);
+        open["keep_open"] = json!(keep_open);
         let model = input(vec![run(
             "open",
             "running",
-            vec![
-                step("done", "completed", false),
-                step(path, "claimed", agentless),
-            ],
+            vec![step("done", "completed", false), open],
         )]);
         assert_eq!(
             project(&model)[0].word,
             expected,
-            "{path}, agentless={agentless}"
+            "keep_open={keep_open}, agentless={agentless}"
         );
     }
+}
+
+#[test]
+fn st_marks_system_missions() {
+    let mut model = input(vec![]);
+    assert!(!project(&model)[0].system);
+    model.missions[0].system = true;
+    assert!(project(&model)[0].system);
 }
 
 #[test]
@@ -524,4 +531,17 @@ fn duplicate_paths_keep_run_identity_and_the_actual_seat_after_pipeline_sort() {
         assert_eq!(metadata.blocked_reason, Some(format!("reason for {id}")));
         assert_eq!(metadata.last_progress, Some(format!("progress for {id}")));
     }
+}
+
+#[test]
+fn only_running_and_queued_missions_are_active_and_the_stuck_ones_are_named_apart() {
+    use Word::*;
+    let all = [
+        Decision, Stalled, Unstaffed, Unclaimed, Queued, Working, Watching, Held, Idle, Done,
+        Failed, Cancelled, NotStarted,
+    ];
+    let active: Vec<Word> = all.into_iter().filter(|word| word.is_active()).collect();
+    assert_eq!(active, [Queued, Working]);
+    let stuck: Vec<Word> = all.into_iter().filter(|word| word.is_stuck()).collect();
+    assert_eq!(stuck, [Stalled, Unstaffed, Unclaimed]);
 }

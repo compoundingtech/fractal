@@ -29,6 +29,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+mod cost_counters;
+pub use cost_counters::snapshot as cost_snapshot;
+pub(crate) use cost_counters::managed_commit_succeeded;
+#[cfg(test)]
+pub(crate) use cost_counters::managed_commit_count;
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static STATE: OnceLock<State> = OnceLock::new();
 
@@ -150,6 +156,7 @@ pub fn init_from_env() {
         dir,
         slow_after,
         minute: Mutex::new(Minute::default()),
+        cost_window: Mutex::new(cost_counters::Window::new()),
         total: Mutex::new(BTreeMap::new()),
         unlabeled: Mutex::new(HashMap::new()),
         writer_holder: Mutex::new(None),
@@ -199,6 +206,7 @@ struct State {
     dir: PathBuf,
     slow_after: Duration,
     minute: Mutex<Minute>,
+    cost_window: Mutex<cost_counters::Window>,
     total: Mutex<BTreeMap<Arc<str>, Totals>>,
     /// Work on a thread that runs no labelled operation, by thread name.
     unlabeled: Mutex<HashMap<String, Acc>>,
@@ -352,6 +360,7 @@ struct SpanStat {
     max_wall_ns: u64,
     cpu_ns: u64,
     sql_ns: u64,
+    sql_count: u64,
 }
 
 impl Acc {
@@ -417,6 +426,7 @@ impl Totals {
             into.max_wall_ns = into.max_wall_ns.max(span.max_wall_ns);
             into.cpu_ns += span.cpu_ns;
             into.sql_ns += span.sql_ns;
+            into.sql_count += span.sql_count;
         }
         for (note, count) in &acc.notes {
             *into.notes.entry(note.clone()).or_default() += count;
@@ -691,10 +701,45 @@ pub fn enter(op: Option<&Op>) -> Option<Entered> {
 
 /// Run `work` as its own operation, unless this thread already works for one.
 pub fn task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
-    crate::performance::task(label, || profiled_task(label, work))
+    let _scope = task_scope(label);
+    work()
 }
 
-fn profiled_task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
+/// A synchronous task scope. Field order leaves profiling before performance/origin.
+pub(crate) struct TaskScope {
+    entered: Option<Entered>,
+    op: Option<Op>,
+    panicking_on_entry: bool,
+    _performance: crate::performance::TaskScope,
+    _origin: Option<crate::sqlite::telemetry::OriginScope>,
+}
+
+pub(crate) fn task_scope(label: &'static str) -> TaskScope {
+    let origin = crate::sqlite::telemetry::enter_task_origin(label);
+    let performance = crate::performance::task_scope(label);
+    let op = if enabled() && CURRENT.with(|current| current.borrow().is_none()) {
+        Op::start(label, None)
+    } else {
+        None
+    };
+    let entered = enter(op.as_ref());
+    TaskScope { entered, op, panicking_on_entry: std::thread::panicking(),
+        _performance: performance, _origin: origin }
+}
+
+impl Drop for TaskScope {
+    fn drop(&mut self) {
+        drop(self.entered.take());
+        if let Some(op) = self.op.take() {
+            // Preserve profiled_task's completion versus unwound/abandoned outcome.
+            if !std::thread::panicking() || self.panicking_on_entry {
+                op.finish();
+            }
+        }
+    }
+}
+
+pub(crate) fn profiled_task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
     if !enabled() || CURRENT.with(|current| current.borrow().is_some()) {
         return work();
     }
@@ -783,15 +828,17 @@ pub struct Span {
     started: Instant,
     cpu_started: u64,
     sql_started: u64,
+    sql_count_started: u64,
 }
 
 pub fn span(name: &str) -> Option<Span> {
     if !enabled() || CURRENT.with(|current| current.borrow().is_none()) {
         return None;
     }
-    let sql_started = CURRENT.with(|current| {
-        current.borrow().as_ref().map_or(0, |op| {
-            op.acc.lock().unwrap_or_else(PoisonError::into_inner).sql.ns
+    let (sql_started, sql_count_started) = CURRENT.with(|current| {
+        current.borrow().as_ref().map_or((0, 0), |op| {
+            let acc = op.acc.lock().unwrap_or_else(PoisonError::into_inner);
+            (acc.sql.ns, acc.sql.count)
         })
     });
     Some(Span {
@@ -799,6 +846,7 @@ pub fn span(name: &str) -> Option<Span> {
         started: Instant::now(),
         cpu_started: thread_cpu_ns(),
         sql_started,
+        sql_count_started,
     })
 }
 
@@ -813,12 +861,14 @@ impl Drop for Span {
             };
             let mut acc = op.acc.lock().unwrap_or_else(PoisonError::into_inner);
             let sql = acc.sql.ns.saturating_sub(self.sql_started);
+            let sql_count = acc.sql.count.saturating_sub(self.sql_count_started);
             let span = acc.spans.entry(self.name.clone()).or_default();
             span.count += 1;
             span.wall_ns += wall;
             span.max_wall_ns = span.max_wall_ns.max(wall);
             span.cpu_ns += cpu;
             span.sql_ns += sql;
+            span.sql_count += sql_count;
         });
     }
 }
@@ -836,6 +886,13 @@ pub fn sql(statement: &str, duration: Duration) {
 pub struct WriterWait {
     started: Instant,
     holder: Option<Arc<str>>,
+    // Keep queued jobs small beside always-on holders; allocate only for opt-in phase traces.
+    trace: Option<Box<WriterTrace>>,
+}
+
+struct WriterTrace {
+    holder: Option<crate::sqlite::telemetry::Origin>,
+    origin: crate::sqlite::telemetry::Origin,
 }
 
 pub fn writer_waiting() -> Option<WriterWait> {
@@ -847,7 +904,34 @@ pub fn writer_waiting() -> Option<WriterWait> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
+        trace: None,
     })
+}
+
+pub(crate) fn writer_waiting_for(
+    wait: Option<WriterWait>,
+    trace_holder: Option<crate::sqlite::telemetry::Origin>,
+    trace_origin: crate::sqlite::telemetry::Origin,
+) -> WriterWait {
+    let mut wait = wait.unwrap_or_else(|| WriterWait {
+        started: Instant::now(), holder: None, trace: None,
+    });
+    wait.trace = Some(Box::new(WriterTrace { holder: trace_holder, origin: trace_origin }));
+    wait
+}
+
+impl WriterWait {
+    pub(crate) fn trace_holder(&self) -> Option<crate::sqlite::telemetry::Origin> {
+        self.trace.as_ref().and_then(|trace| trace.holder.clone())
+    }
+
+    pub(crate) fn trace_origin(&self) -> Option<&crate::sqlite::telemetry::Origin> {
+        self.trace.as_ref().map(|trace| &trace.origin)
+    }
+
+    pub(crate) fn take_trace_origin(&mut self) -> crate::sqlite::telemetry::Origin {
+        self.trace.take().map_or_else(crate::sqlite::telemetry::Origin::other, |trace| trace.origin)
+    }
 }
 
 /// The writer is this thread's now. Returns when it was taken, for `writer_released`.
@@ -982,6 +1066,7 @@ fn spans_json(acc: &Acc) -> Vec<Value> {
                 "max_ms": ms(span.max_wall_ns),
                 "cpu_ms": ms(span.cpu_ns),
                 "sql_ms": ms(span.sql_ns),
+                "sql_count": span.sql_count,
             })
         })
         .collect()
@@ -1139,6 +1224,7 @@ fn process_status() -> Value {
     };
     json!({
         "cpu_ticks": field(11) + field(12),
+        "start_time_ticks": field(19),
         "threads": field(17),
         "rss_pages": field(21),
         "rchar": io_field("rchar:"),
@@ -1255,8 +1341,16 @@ fn append_in_flight(dir: &std::path::Path, sample: &Value, limit: u64) -> std::i
 }
 
 fn flush_minute(state: &State) {
-    let mut minute =
-        std::mem::take(&mut *state.minute.lock().unwrap_or_else(PoisonError::into_inner));
+    let (mut minute, boundary) = {
+        let mut minute = state.minute.lock().unwrap_or_else(PoisonError::into_inner);
+        let boundary = cost_counters::Boundary::now();
+        (std::mem::take(&mut *minute), boundary)
+    };
+    // Reuse the existing process-status read; the endpoint reads only the cached snapshot.
+    let process = process_status();
+    state.cost_window.lock().unwrap_or_else(PoisonError::into_inner).complete(
+        &minute, boundary, process["start_time_ticks"].as_u64().filter(|value| *value > 0),
+    );
     let unlabeled = std::mem::take(
         &mut *state
             .unlabeled
@@ -1310,7 +1404,7 @@ fn flush_minute(state: &State) {
     let lag = &minute.lag;
     let line = json!({
         "at_unix_ms": unix_ms(),
-        "process": process_status(),
+        "process": process,
         "runtime_lag": {
             "ticks": lag.ticks,
             "over_10ms": lag.over_10ms,
@@ -1387,9 +1481,9 @@ mod tests {
             acquired.send(()).unwrap();
             released.recv().unwrap();
             {
-                let _replay = span("projection/heal-replay");
+                let _replay = span("projection/full-replay");
                 sql("SELECT invented", Duration::from_millis(3));
-                note("projection: full replay for a heal");
+                note("projection: full replay");
             }
             writer_released(writer);
             // The entered guard must account for CPU/I/O before the worker's last Op drops.
@@ -1420,7 +1514,8 @@ mod tests {
             assert_eq!(recorded.count, 1);
             assert_eq!(recorded.acc.writer_hold.count, 1);
             assert_eq!(recorded.acc.sql.count, 1);
-            assert_eq!(recorded.acc.spans["projection/heal-replay"].count, 1);
+            assert_eq!(recorded.acc.spans["projection/full-replay"].count, 1);
+            assert_eq!(recorded.acc.spans["projection/full-replay"].sql_count, 1);
             assert!(recorded.acc.cpu_ns > 0);
         }
         let lines = fs::read_to_string(state.dir.join("slow.jsonl")).unwrap();
@@ -1430,6 +1525,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["completion"], "dropped");
+        let replay = records[0]["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|span| span["name"] == "projection/full-replay")
+            .unwrap();
+        assert_eq!(replay["sql_count"], 1);
 
         let completed = Op::start("GET /invented/completed", None).unwrap();
         let another_owner = completed.clone();
