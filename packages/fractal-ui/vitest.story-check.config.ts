@@ -1,8 +1,9 @@
 import { defineConfig } from 'vitest/config'
-import { createStylexVitePlugins } from '../../apps/fractal-web/scripts/stylex.mjs'
+import stylex from '@stylexjs/unplugin/rollup'
 
 export default defineConfig({
-  plugins: createStylexVitePlugins(),
+  // SSR checks need compilation, not the Vite adapter's browser CSS refresh timer.
+  plugins: [stylex({ useCSSLayers: false })],
   test: {
     include: ['src/scenario.story-check.test.ts'],
     environment: 'node',

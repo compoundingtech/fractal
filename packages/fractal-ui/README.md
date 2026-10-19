@@ -59,6 +59,8 @@ Slice overrides use `args=<slice>:<variant>`; the world uses
 `scenarioStoryCheck` over this real story, checking declared reads, visible data
 dependence, toolbar world changes and URL-state roundtripping. World-pin
 invariance is intentionally skipped because the story follows the toolbar.
+The SSR check uses StyleX's Rollup compiler adapter, without the Vite adapter's
+browser stylesheet refresh timer, so Vitest can close its middleware server cleanly.
 
 
 ## Strict play gate
