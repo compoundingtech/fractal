@@ -21,6 +21,19 @@ generated file (`git checkout --theirs -- clients crates/st3-client/src/contract
 crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
 
+Client transport receivers accept the deployed `st3.client.*` names and matching
+`fractal.client.*` aliases, including error and visualization version fields.
+The generated sender constants and request defaults remain `st3.*`. A sender
+cutover must offer both WebSocket subprotocols, Fractal first: servers select
+`fractal.*` only when offered, and clients retain the WebSocket library's
+offered-protocol guard. Rust and Swift models keep their existing lossless string
+decoding behavior; accepting aliases does not reject previously tolerated versions.
+The legacy terminal route likewise selects either `st3.terminal.v1` or
+`fractal.terminal.v1` and still permits upgrades with no supported subprotocol.
+This transport vocabulary does not rename signed peer envelope tags, signature
+domains, durable identities, JSON Schema annotations or local provenance labels.
+
+
 `ResourceHeader.operational` describes current versus historical state, actionability, reasons,
 and optional owner-generation/runtime-incarnation identities. Work also exposes `agentless`,
 claim expiry, execution start/elapsed time, and timeout in milliseconds. These fields are optional

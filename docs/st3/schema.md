@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `9c8c68d52d0dab4ae16ff823dc98c061674380d4265819a5a546ba4e86fc59d0`
+Storage digest: `ec50c24743da46807b7a41a95cf179371461f19b98fba3f9a60a69065251130c`
 
 ## Subject families
 
@@ -390,3 +390,17 @@ A store with no completed selector cut records resumable initialization metadata
 One worker-owned guard saves and disables SQLite automatic WAL checkpoints for the entire initial online backfill, including the foreground writes interleaved between background loans. The daemon WAL recycler owns checkpoint scheduling. Completing the cut, returning an error or unwinding drops the guard and restores the incoming policy; an explicitly disabled policy remains disabled. Explicit benchmark rebuilds additionally perform a passive checkpoint outside their chunk transactions. Checkpoint cost must be reported separately from commit-inclusive chunk duration.
 
 Each transaction records backfill progress in `meta` under `client_message_selectors_v1_backfill` as `{"cut": INITIAL_INDEX, "phase": "clear" | "headers" | "pending", "after": LAST_SUBJECT}`; `client_message_selectors_v1_fold` separately records any unfinished subject fold. A restart resumes both instead of rescanning completed work. A populated store opened with pending rows queued reconciles them without discarding its headers or resetting its epoch. The final transaction writes the completed cut `client_message_selectors_v1_cut` and deletes the backfill marker together. Until then, negotiated v2 pages return retryable HTTP 503 `message-selectors-not-ready`, while legacy unindexed readers remain available. Ordinary maintenance after initialization keeps serving the previous published frontier. Earlier local message body-version tables and their triggers are dropped when the store opens. No claim is rewritten.
+
+## Immutable claim positions
+
+`claim_positions` holds each claim's position in its batch, the canonical order's fifth
+component. Admission stores it: a replicated claim takes its record's wire position before the
+claim row is inserted, and a local claim takes the number of claims its batch already holds,
+which is where sealing places its record. A later record of the same claim can only lower the
+value, so the stored position is the least position over every record the member has held and
+does not depend on arrival order. For claims stored before this table existed, triggers store
+the legacy value (least record position, else arrival count among surviving siblings) just
+before deleting an earlier sibling, deleting a record or changing a record's claim or position
+could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
+never deleted. No history backfill runs at open; a claim without a row and without any removal
+since keeps the legacy value, which equals what would be stored.
