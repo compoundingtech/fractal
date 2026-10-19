@@ -41,6 +41,16 @@ case "$cmd" in
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       printf 'identity=%s\n' "$identity" >> "$GITHUB_OUTPUT"
     fi
+    # Identity drift is fatal even when another metadata file is absent.
+    if [ -s "$identity_file" ]; then
+      recorded=$(cat "$identity_file")
+      if [ "$recorded" != "$identity" ] \
+        || { [ -s "$cache_key_file" ] && [ "$(cat "$cache_key_file")" != "$expected_key" ]; }; then
+        printf '::error::Web shell cache key %s: recorded drvPath %s, evaluated drvPath %s; add the missing path or input to the hashed set and bump the format version.\n' \
+          "$expected_key" "$recorded" "$identity" >&2
+        exit 1
+      fi
+    fi
     complete=false
     if [ -s "$identity_file" ] && [ -s "$cache_key_file" ] \
       && [ -s "$shell_file" ] && [ -s "$env_file" ]; then
@@ -52,14 +62,6 @@ case "$cmd" in
       fi
       printf '::warning::Web shell cache key %s: missing identity or environment metadata; verification failed, treating entry as a miss.\n' "$expected_key" >&2
       exit 2
-    fi
-    if [ "$complete" = true ]; then
-      recorded=$(cat "$identity_file")
-      if [ "$(cat "$cache_key_file")" != "$expected_key" ] || [ "$recorded" != "$identity" ]; then
-        printf '::error::Web shell cache key %s: recorded drvPath %s, evaluated drvPath %s; add the missing path or input to the hashed set and bump the format version.\n' \
-          "$expected_key" "$recorded" "$identity" >&2
-        exit 1
-      fi
     fi
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       printf 'cache-complete=%s\n' "$complete" >> "$GITHUB_OUTPUT"

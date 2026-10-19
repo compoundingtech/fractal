@@ -158,8 +158,6 @@ class WebShellKeyTest(unittest.TestCase):
             for changed in (
                 original_flake.replace('fixture/web1', 'fixture/web2'),
                 original_flake.replace('inputs.effect-utils.url', 'inputs.effect-utils.flake = false; inputs.effect-utils.url'),
-                original_flake.replace('inputs.effect-utils.url = "github:fixture/web1";',
-                                       'inputs.effect-utils.follows = "nixpkgs";'),
             ):
                 flake.write_text(changed)
                 self.assertNotEqual(key(), initial,
@@ -168,9 +166,12 @@ class WebShellKeyTest(unittest.TestCase):
                 'inputs.effect-utils.url = "github:fixture/web1";',
                 'inputs.effect-utils.url = "github:fixture/web1"; inputs.effect-utils.inputs.nixpkgs.follows = "nixpkgs";')
             flake.write_text(followed)
+            key(success=False)  # New follows with a stale lock must fail closed.
+            lock['nodes']['effect-utils']['inputs']['nixpkgs'] = ['nixpkgs']
             followed_key = key()
             flake.write_text(followed.replace('fixture/rust1', 'fixture/rust2'))
             self.assertNotEqual(key(), followed_key, 'Followed root declarations are web dependencies')
+            lock = fixture_lock()
             flake.write_text(original_flake)
             lock['nodes']['rust-pkgs']['locked']['rev'] = 'rust2'
             lock['nodes']['fenix']['locked']['rev'] = 'fenix2'
@@ -348,6 +349,17 @@ printf '%s\\n' "$NIX_TEST_IDENTITY"
                         for text in (expected, recorded, evaluated,
                                      'add the missing path or input to the hashed set and bump the format version'):
                             self.assertIn(text, diagnostic)
+            for missing in ('env.sh', 'shell-path'):
+                metadata = root / missing
+                content = metadata.read_text()
+                metadata.unlink()
+                result = subprocess.run(['bash', str(SCRIPT), 'verify'], cwd=root,
+                                        env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 1,
+                                 'Missing environment metadata must not hide identity drift')
+                self.assertIn(recorded, result.stderr)
+                self.assertIn(evaluated, result.stderr)
+                metadata.write_text(content)
             (root / 'identity').unlink()
             env.update(CI_WEB_SHELL_CACHE_HIT='true', NIX_TEST_IDENTITY=recorded)
             output.write_text('')

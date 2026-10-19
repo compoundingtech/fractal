@@ -80,6 +80,18 @@ def declared_roots($declarations; $pending; $seen):
       end
   end;
 
+# A declaration-only follows change can introduce a dependency absent from the old
+# lock graph. Reject that stale lock rather than hashing an incomplete dependency set.
+def check_follows($nodes; $root; $parent; $name; $declaration):
+  input($nodes; $parent; $name) as $ref
+  | if ($declaration | has("follows")) and $ref != ($declaration.follows | split("/")) then
+      error("declared follows disagrees with lock: \($name); regenerate flake.lock")
+    else
+      resolve($nodes; $root; $ref; []) as $target
+      | reduce (($declaration.inputs // {}) | to_entries[]) as $child (true;
+          check_follows($nodes; $root; $target; $child.key; $child.value))
+    end;
+
 . as $lock
 | if ($lock.nodes | type != "object") or ($lock.root | nonempty_string | not) then
     error("missing or malformed lock graph")
@@ -96,7 +108,9 @@ def declared_roots($declarations; $pending; $seen):
     {
       system: $shell.system,
       declarations: (declared_roots($declarations; $shell.inputs; []) | map(
-        . as $name | {key: $name, value: $declarations[$name]}
+        . as $name
+        | check_follows($lock.nodes; $lock.root; $lock.root; $name; $declarations[$name])
+        | {key: $name, value: $declarations[$name]}
       ) | from_entries),
       inputs: ($shell.inputs | map(
         . as $input

@@ -671,6 +671,8 @@ workflow-level path filters. `linux-gate` does not depend on them.
   web URLs, follows or flake flags invalidate even with an unchanged lock file.
   This offline extraction never loads the flake graph, fetches inputs or evaluates IFD.
   Its elapsed time is logged separately in every key step.
+  Declared follows must match their lock references; a stale follows lock fails closed
+  rather than omitting a newly introduced dependency from the projection.
   Both publishers and consumers use the same exact key, with no prefix restoration.
   `run` requires matching `cache-key` metadata and complete identity/environment records,
   copies the closure into the store (`--no-check-sigs`) and sources `print-dev-env`.
@@ -680,6 +682,8 @@ workflow-level path filters. `linux-gate` does not depend on them.
   requiring the missing path/input to be added to the hashed set and the format bumped.
   A restored entry missing identity/environment metadata fails verification and is treated
   as a miss for fill; only this explicit miss is recoverable, never a derivation mismatch.
+  Identity drift is checked before completeness, so missing environment metadata cannot
+  turn a recorded derivation mismatch into a recoverable miss.
   The shell imports no repository source beyond its hashed definition: its upstream
   Buck capability IFD reads immutable effect-utils/dependency sources covered by the lock
   projection, not this checkout. Removing that upstream IFD is independent of cache lookup.
