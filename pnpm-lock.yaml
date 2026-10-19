@@ -47,6 +47,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@4.1.9(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+      '@smalltalk/st3-scenarios':
+        specifier: workspace:*
+        version: link:../../clients/typescript/st3-scenarios
       '@stylexjs/unplugin':
         specifier: 0.19.0
         version: 0.19.0(supports-color@8.1.1)(unplugin@2.3.11)

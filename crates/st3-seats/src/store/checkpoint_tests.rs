@@ -5,8 +5,8 @@ use crate::SeatStatusStore;
 use super::checkpoint::*;
 use super::*;
 use proptest::prelude::*;
-use st3_store::store::checkpoint_tests_shared_seats::*;
-use st3_store::store::checkpoint_tests_shared_seats::{AGENT, LIMITS_HOUR, dropped, input, limits_history, limits_reading, rollup};
+use st3_missions::store::checkpoint_tests_shared_seats::*;
+use st3_missions::store::checkpoint_tests_shared_seats::{AGENT, LIMITS_HOUR, dropped, input, limits_history, limits_reading, rollup};
 
 
 #[test]

@@ -4,8 +4,8 @@ use crate::PublicationFactsStore;
 use super::*;
 use crate::model::MemberSpec;
 use crate::publication::{Interruption, interruption};
-pub use st3_seats::store::publication::*;
-pub use st3_seats::store::publication::{Check, CommitChecks, Guard, check, launched_member};
+pub use st3_attention::store::publication::*;
+pub use st3_attention::store::publication::{Check, CommitChecks, Guard, check, launched_member};
 
 pub trait PublicationStore {
     fn publication_cache_epoch(&self) -> Option<(i64, bool)>;
@@ -62,9 +62,9 @@ impl PublicationStore for Store {
 mod tests {
     use super::*;
     use crate::graph::parse_intent;
-    use st3_seats::store::shared::*;
-    use st3_seats::store::publication_tests_shared::*;
-    use st3_seats::store::publication_tests_shared::{declaration, observe, publish};
+    use st3_attention::store::shared::*;
+    use st3_attention::store::publication_tests_shared::*;
+    use st3_attention::store::publication_tests_shared::{declaration, observe, publish};
 
     #[test]
     fn publication_check_stopped_origin_cannot_hide_another_origins_running_seat() {

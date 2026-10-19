@@ -1,3 +1,5 @@
+use st3::MissionsStore;
+use st3::PersonWorkStore;
 use st3::SeatsStoreCore;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};

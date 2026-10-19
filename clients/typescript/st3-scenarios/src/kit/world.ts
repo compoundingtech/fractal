@@ -1,3 +1,4 @@
+import { sidebarArrangement } from './arrangements.ts'
 import { drawCast, type Cast, type CastSpec } from './cast.ts'
 import { type FactoryContext } from './context.ts'
 import { fork, rngFromSeed } from './rng.ts'
@@ -98,7 +99,14 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
   const rng = rngFromSeed(definition.seed)
   const cast = drawCast(fork(rng, 'cast'), definition.cast)
   const ctx: FactoryContext = { world: definition.scope ?? definition.id, rng: fork(rng, 'slices'), cast, t: timeContext(now) }
-  const own = definition.slices(ctx)
+  const authored = definition.slices(ctx)
+  // Only named default inventories get folders; explicit slice overrides retain their own data.
+  const own: Slices = definition.id === 'fleet-mid-refactor' || definition.id === 'huge' ? {
+    ...authored,
+    roster: { ...authored.roster, state: { ...authored.roster.state,
+      arrangements: [sidebarArrangement(ctx, authored.roster.state.agents, definition.id === 'huge')],
+    } },
+  } : authored
   const table = (kind: SliceKind): Record<string, VariantBuilder<SliceKind>> => ({
     ...(generic[kind] as Record<string, VariantBuilder<SliceKind>>),
     ...((definition.variants?.[kind] ?? {}) as Record<string, VariantBuilder<SliceKind>>),
@@ -120,7 +128,9 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
       const builder = table(kind)[name]
       if (builder === undefined) throw new UnknownVariantError(`${definition.id}: no ${kind} variant ${name}`)
       const built = builder({ ...ctx, rng: fork(ctx.rng, `variant/${kind}/${name}`) }, own)
-      const source = built.source._tag === 'synthetic' ? { _tag: 'synthetic' as const, seed: definition.seed } : built.source
+      // Generic regeneration is synthetic; loading alone retains the backing source.
+      const generated = name !== 'loading' && generic[kind][name] === builder
+      const source = built.source._tag === 'synthetic' || generated ? { _tag: 'synthetic' as const, seed: definition.seed } : built.source
       slices[kind] = { ...built, variant: name, source } as AnySlice
       variants[kind] = choice === 'default' ? 'default' : name
     }

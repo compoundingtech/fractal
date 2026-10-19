@@ -40,6 +40,10 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+use st3::CustomStore;
+use st3::AdhocWorkStore;
+use st3::CoordinationStore;
+use st3::MissionsStore;
 use st3::SeatsStore;
 use st3::SeatsStoreCore;
 use st3::{GitChangesStore, WatchesStore};
