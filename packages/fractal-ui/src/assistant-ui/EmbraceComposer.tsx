@@ -9,6 +9,7 @@ import { surfaceVars as surface, textVars as text, borderVars as border, accentV
 import { readingColumnStyles } from './reading-column.stylex'
 import { Icon } from './composition/Icons'
 import { StopRunButton } from './composition/StopRunButton'
+import { NarrowLayoutContext } from './composition/NarrowLayout'
 import { EffortPicker } from './embrace-composer/EffortPicker'
 import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
@@ -65,6 +66,14 @@ export interface EmbraceComposerProps {
   readonly stopRefusal?: string
 }
 
+/**
+ * Inside a narrow (phone) host (`NarrowLayoutContext`), the composer's control sizes resolve to 44px touch targets,
+ * its field text to 16px so iOS does not zoom the page on focus, and the field grows to at most a third of the dynamic
+ * viewport so an open keyboard never pushes Send off screen. Popovers render outside this subtree and opt in separately.
+ */
+const narrowGeometry = stylex.createTheme(g, { controlMd: g.touchTarget, controlLg: g.touchTarget })
+const narrowType = stylex.createTheme(t, { bodySize: t.touchInputSize })
+
 const styles = stylex.create({
   root: {
     backgroundColor: surface.glassFill, color: text.fg, borderWidth: g.hairline,
@@ -115,6 +124,12 @@ const styles = stylex.create({
   primary: { backgroundColor: accent.primary, color: accent.onPrimary },
   submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, minWidth: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full },
   historyIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlMd, height: g.controlMd, minHeight: g.controlMd, padding: 0, borderRadius: r.full, backgroundColor: surface.transparent, borderColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover } },
+  // Narrow hosts: an icon-only control is never narrower than it is tall; menu and suggestion rows are touch rows.
+  touchControl: { minWidth: g.touchTarget },
+  touchRow: { height: 'auto', minHeight: g.touchTarget },
+  // The composer owns the left/right safe-area insets; the narrow host owns top and bottom.
+  narrowInsets: { paddingInlineStart: 'env(safe-area-inset-left, 0px)', paddingInlineEnd: 'env(safe-area-inset-right, 0px)' },
+  narrowInput: { maxHeight: `min(${g.editorMax}, 33dvh)` },
   menu: {
     backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline,
     borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.base,
@@ -161,6 +176,7 @@ const groupPreviewLimit = 4
 /** Requires the same assistant-ui thread/runtime provider as the transcript. */
 export function EmbraceComposer(props: EmbraceComposerProps) {
   const runtimeText = useAuiState(state => state.composer.text)
+  const narrow = React.useContext(NarrowLayoutContext)
   const root = React.useRef<HTMLDivElement>(null)
   const [wrapped, setWrapped] = React.useState(false)
   const [cramped, setCramped] = React.useState(false)
@@ -169,13 +185,14 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   const density = Math.max(pillLayout ? 1 : 0, footerDensity)
   const compact = density > 0
   const iconOnly = density === 2
-  const densityMinimums = React.useRef<number[] | null>(null)
+  // Per-density footer minimums; touch-sized controls invalidate them.
+  const densityMinimums = React.useRef<{ readonly narrow: boolean; readonly values: number[] } | null>(null)
   const densityContext = React.useMemo(() => ({ compact, iconOnly }), [compact, iconOnly])
   React.useLayoutEffect(() => {
     const footer = root.current?.querySelector<HTMLElement>('[data-testid="composer-footer"]')
     const surface = footer?.closest('form')
     if (!footer || !surface) return
-    const minimums = densityMinimums.current ?? (densityMinimums.current = [])
+    const minimums = densityMinimums.current?.narrow === narrow ? densityMinimums.current.values : (densityMinimums.current = { narrow, values: [] }).values
     const measure = () => {
       const css = getComputedStyle(surface)
       const inner = surface.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight)
@@ -203,7 +220,7 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
       observer.disconnect()
       document.fonts.removeEventListener('loadingdone', measure)
     }
-  }, [density, iconOnly, pillLayout, props.toolbar, props.actions])
+  }, [density, iconOnly, pillLayout, props.toolbar, props.actions, narrow])
   React.useLayoutEffect(() => {
     const field = root.current?.querySelector<HTMLElement>('textarea, [role="textbox"]')
     const footer = root.current?.querySelector<HTMLElement>('[data-testid="composer-footer"]')
@@ -251,12 +268,12 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   const composerProps = {
     ...props,
     style: [styles.adaptiveRoot, stacked ? styles.slab : props.variant === 'C3' ? styles.focusSlab : styles.pill, props.style],
-    inputStyle: [styles.input, styles.growingEditor, props.inputStyle],
+    inputStyle: [styles.input, styles.growingEditor, narrow && styles.narrowInput, props.inputStyle],
     fieldStyle: [stacked ? styles.field : styles.fieldRow, props.fieldStyle],
     footerStyle: [styles.adaptiveFooter, props.footerStyle],
     submitIcon: props.submitIcon ?? <Icon name="send" />,
   }
-  return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
+  return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" data-narrow={narrow || undefined} {...stylex.props(props.readingColumn === true && readingColumnStyles.column, narrow && narrowGeometry, narrow && narrowType, narrow && styles.narrowInsets)}>
     {(props.plainText ?? props.variant === 'C1') || props.input !== undefined ? <PlainComposer {...composerProps} /> : <TokenComposer {...composerProps} />}
   </div></CompactComposerContext.Provider>
 }
@@ -273,6 +290,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
   readonly effort: Omit<React.ComponentProps<typeof EffortPicker>, 'compact'>
 }) {
   const { compact, iconOnly } = React.useContext(CompactComposerContext)
+  const narrow = React.useContext(NarrowLayoutContext)
   const running = useAuiState(state => state.thread.isRunning)
   const readoutName = target.model === undefined ? target.label : `${target.label} · ${target.model}`
   return <>
@@ -285,7 +303,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.label}</Tooltip>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption)}>{choice.label}</MenuItem>)}</Menu></Popover>
+        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption, narrow && styles.touchRow)}>{choice.label}</MenuItem>)}</Menu></Popover>
       </MenuTrigger> : <TooltipTrigger delay={150} closeDelay={0}>
         <Focusable><span tabIndex={0} role="img" aria-label={target.model === undefined ? 'Recipient' : 'Recipient and model'} data-composer-target-readout={readoutName} data-composer-readout={!iconOnly ? true : undefined} {...stylex.props(styles.readout, compact && styles.readoutCompact)}>{iconOnly ? <Icon name="message" /> : target.label}</span></Focusable>
         <Tooltip {...stylex.props(styles.targetTooltip)}>{readoutName}</Tooltip>
@@ -298,12 +316,12 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.model ?? 'Model'}</Tooltip>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Model" onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model} {...stylex.props(styles.targetOption)}>{model}</MenuItem>)}</Menu></Popover>
+        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Model" onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model} {...stylex.props(styles.targetOption, narrow && styles.touchRow)}>{model}</MenuItem>)}</Menu></Popover>
       </MenuTrigger>}
       <EffortPicker {...effort} compact={compact} />
     </div>
-    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
-    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
+    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
+    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
   </>
 }
 
@@ -396,6 +414,7 @@ function TokenComposer({
   placeholder = 'Message, @ to mention, / for commands',
 }: EmbraceComposerProps) {
   const aui = useAui()
+  const narrow = React.useContext(NarrowLayoutContext)
   const composerStateNow = () => aui.composer.__internal_getRuntime?.().getState() ?? aui.composer.getState()
   const runtimeText = useAuiState((s) => s.composer.text)
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
@@ -572,11 +591,11 @@ function TokenComposer({
             onOpenChange={(next) => { if (!next) setDismissed(triggerKey) }} {...stylex.props(styles.menu)}>
             <ListBox autoFocus="first" aria-label={trigger.kind === '@' ? 'Mention a subject' : 'Commands'} items={previewedGroups} {...stylex.props(styles.menuList)}
               onAction={pick} disabledKeys={options.filter((option) => option.unavailable !== undefined).map((option) => option.id)}
-              renderEmptyState={() => <div {...stylex.props(styles.option)}>No matches</div>}>
+              renderEmptyState={() => <div {...stylex.props(styles.option, narrow && styles.touchRow)}>No matches</div>}>
               {(group) => <ListBoxSection id={group.id}>
                 <Header {...stylex.props(styles.menuHeader)}>{group.label}{group.hidden > 0 ? ` · ${group.options.length + group.hidden}` : ''}</Header>
                 {group.options.map(option => <ListBoxItem key={option.id} id={option.id} textValue={option.label}
-                  className={({ isFocused, isDisabled: optionDisabled }) => stylex.props(styles.option, isFocused && styles.focusedOption, optionDisabled && styles.unavailable).className ?? ''}>
+                  className={({ isFocused, isDisabled: optionDisabled }) => stylex.props(styles.option, narrow && styles.touchRow, isFocused && styles.focusedOption, optionDisabled && styles.unavailable).className ?? ''}>
                   <Text slot="label" {...stylex.props(styles.optionLabel)}>{option.label}</Text>
                   <Text slot="description" {...stylex.props(styles.helpVisibility)}>{option.unavailable ?? option.description}</Text>
                   {option.token._tag === 'Mention' ? option.hint !== undefined && <span aria-hidden="true" data-mention-hint {...stylex.props(styles.description)}>{option.hint}</span> : <span aria-hidden="true" {...stylex.props(styles.description, styles.commandDescription)}>{option.unavailable ?? option.description}</span>}

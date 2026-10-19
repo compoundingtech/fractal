@@ -152,14 +152,14 @@ export function ThreadHeader({
   onToggleSidebar?: () => void
   /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
   sidebarSheet?: { readonly open: boolean; readonly id: string }
-  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. */
+  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
   narrow?: boolean
 }) {
   const terminalReasonId = React.useId()
   return (
-    <header data-testid="thread-header" {...stylex.props(styles.header)}>
+    <header data-testid="thread-header" {...stylex.props(styles.header, narrow && styles.headerNarrow)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
-        <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { 'aria-haspopup': 'dialog' as const, 'aria-expanded': sidebarSheet.open, ...(sidebarSheet.open ? { 'aria-controls': sidebarSheet.id } : {}) })} {...stylex.props(styles.ghostMd)}>
+        <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { 'aria-haspopup': 'dialog' as const, 'aria-expanded': sidebarSheet.open, ...(sidebarSheet.open ? { 'aria-controls': sidebarSheet.id } : {}) })} {...stylex.props(styles.ghostMd, narrow && styles.touch, narrow && styles.touchLead)}>
           <Icon name="chevron-right" />
         </button>
       ) : null}
@@ -174,8 +174,8 @@ export function ThreadHeader({
         {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}
         {elapsed !== undefined ? <span role="timer" aria-label="Current conversation turn elapsed">{elapsed}</span> : null}
         <div data-testid="native-action-slot" ref={actionPortalRef}>{nativeActions}</div>
-        {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs)}>Open <Icon name="chevron-down" size={12} /></button>}
-        {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs)}>Commit <Icon name="chevron-down" size={12} /></button>}
+        {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Open <Icon name="chevron-down" size={12} /></button>}
+        {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Commit <Icon name="chevron-down" size={12} /></button>}
         {!narrow && terminalAvailable && <button type="button" aria-label="Toggle terminal drawer" title="Toggle terminal drawer" aria-pressed={drawerOpen} onClick={onToggleDrawer} {...stylex.props(styles.ghostMd, drawerOpen && styles.ghostOn)}>
           <Icon name="drawer" />
         </button>}
@@ -186,7 +186,7 @@ export function ThreadHeader({
           </Button>
           <span id={terminalReasonId} hidden>{terminalDisabledReason}</span>
         </span>}
-        {narrow ? <Button aria-label="Agent details" aria-haspopup="dialog" aria-expanded={panelOpen} onPress={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
+        {narrow ? <Button aria-label="Agent details" aria-haspopup="dialog" aria-expanded={panelOpen} onPress={onTogglePanel} {...stylex.props(styles.ghostMd, styles.touch, styles.touchTrail, panelOpen && styles.ghostOn)}>
           <Icon name="panel" />
         </Button> : <button type="button" aria-label="Toggle right panel" title="Toggle right panel" aria-pressed={panelOpen} onClick={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
           <Icon name="panel" />
@@ -212,6 +212,8 @@ const styles = stylex.create({
   splitVertical: { width: 1, alignSelf: 'stretch', backgroundColor: c.borderStrong, cursor: 'col-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', position: 'absolute', insetInline: -3, insetBlock: 0 }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   splitHorizontal: { height: 1, width: '100%', backgroundColor: c.borderStrong, cursor: 'row-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   header: { height: g.band, display: 'flex', alignItems: 'center', gap: g.gutter, paddingInline: g.gutter, flexShrink: 0, minWidth: 0 },
+  // A landscape phone's notch sits beside the header; the gutter stays the minimum.
+  headerNarrow: { paddingInlineStart: `max(${g.gutter}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${g.gutter}, env(safe-area-inset-right, 0px))` },
   breadcrumb: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
@@ -222,6 +224,11 @@ const styles = stylex.create({
   outlineXs: { height: g.controlSm, display: 'inline-flex', alignItems: 'center', paddingInline: 6, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, backgroundColor: 'rgba(255, 255, 255, 0.025)', color: c.fg, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },
   ghostMd: { width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, backgroundColor: 'transparent', color: c.fgMuted, borderRadius: r.control, cursor: 'pointer', fontSize: t.uiSize, transition: 'background-color 150ms ease, color 150ms ease', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },
   ghostOn: { color: c.fg, backgroundColor: c.rowHover },
+  // Narrow header controls are 44px touch targets; the edge controls overhang the gutter so their glyphs stay where the 28px controls put them.
+  touch: { width: g.touchTarget, height: g.touchTarget, flexShrink: 0 },
+  touchLead: { marginInlineStart: `calc((${g.controlMd} - ${g.touchTarget}) / 2)` },
+  touchTrail: { marginInlineEnd: `calc((${g.controlMd} - ${g.touchTarget}) / 2)` },
+  outlineTouch: { height: g.touchTarget },
   ghostDisabled: { color: c.fgMuted, cursor: 'default', ':hover': { backgroundColor: 'transparent', color: c.fgMuted } },
   disabledWrap: { display: 'inline-flex' },
   drawer: { display: 'flex', flexDirection: 'column', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.borderStrong, backgroundColor: c.canvas, flexShrink: 0, minHeight: 0 },

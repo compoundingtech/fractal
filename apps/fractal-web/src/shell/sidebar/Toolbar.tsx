@@ -1,7 +1,8 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import { DialogTrigger, Dialog, Popover, ToggleButton } from 'react-aria-components'
-import { compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { compositionLightTheme, NarrowLayoutContext } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { geometryVars as g, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import {
   Button,
@@ -48,6 +49,7 @@ export const SidebarToolbar = ({
   searchStyle,
 }: SidebarToolbarProps) => {
   const light = React.useSyncExternalStore(subscribeScheme, readLightScheme, () => true)
+  const narrow = React.useContext(NarrowLayoutContext)
   const search = React.useRef<HTMLDivElement>(null)
   const shortcut = React.useCallback((node: HTMLDivElement | null) => {
     if (node === null) return
@@ -90,7 +92,7 @@ export const SidebarToolbar = ({
           aria-label="Show finished agents"
           isSelected={!filters.hideEnded && !filters.hideRetired}
           onChange={(show) => update({ ...filters, hideEnded: !show, hideRetired: !show })}
-          {...stylex.props(styles.toggle)}
+          {...stylex.props(styles.toggle, narrow && styles.touchRow)}
         >
           Finished
         </ToggleButton>
@@ -101,17 +103,20 @@ export const SidebarToolbar = ({
               label={`Filter agents${activeCount > 0 ? ` · ${activeCount} active` : ''}`}
               isActive={activeCount > 0}
               icon={<FilterIcon />}
+              stylexStyle={narrow && styles.touchIcon}
             />
             <Popover placement="bottom end" {...stylex.props(styles.popover)}>
               <Dialog aria-label="Agent filters" {...stylex.props(styles.dialog)}>
                 <Checkbox
                   isSelected={filters.hideEnded}
+                  stylexStyle={narrow && styles.touchRow}
                   onChange={(hideEnded) => update({ ...filters, hideEnded })}
                 >
                   Hide ended
                 </Checkbox>
                 <Checkbox
                   isSelected={filters.hideRetired}
+                  stylexStyle={narrow && styles.touchRow}
                   onChange={(hideRetired) => update({ ...filters, hideRetired })}
                 >
                   Hide retired
@@ -122,6 +127,7 @@ export const SidebarToolbar = ({
                     <Checkbox
                       key={status}
                       isSelected={filters.statuses.includes(status)}
+                      stylexStyle={narrow && styles.touchRow}
                       onChange={(selected) =>
                         update({
                           ...filters,
@@ -138,6 +144,7 @@ export const SidebarToolbar = ({
                 <Button
                   size="sm"
                   variant="secondary"
+                  stylexStyle={narrow && styles.touchRow}
                   onPress={() =>
                     update({ ...defaultFilters, query: parsedQuery.text, sort: filters.sort })
                   }
@@ -153,6 +160,7 @@ export const SidebarToolbar = ({
               label={`Sort agents · ${sortModes[filters.sort]}`}
               isActive={filters.sort !== 'manual'}
               icon={<SortIcon />}
+              stylexStyle={narrow && styles.touchIcon}
             />
             <MenuPopover>
               <Menu
@@ -166,6 +174,7 @@ export const SidebarToolbar = ({
                     key={value}
                     id={value}
                     textValue={label}
+                    stylexStyle={narrow && styles.touchRow}
                     suffix={filters.sort === value ? <span aria-hidden="true">✓</span> : undefined}
                   >
                     {label}
@@ -188,7 +197,7 @@ export const SidebarToolbar = ({
             if (event.key === 'Escape') update({ ...filters, query: '' })
             if (event.key === 'ArrowDown' && onEnterResults !== undefined) { event.preventDefault(); onEnterResults() }
           }}
-          stylexStyle={searchStyle}
+          stylexStyle={[searchStyle, narrow && styles.touchSearch]}
         />
       </div>
     </div>
@@ -275,4 +284,8 @@ const styles = stylex.create({
     margin: 0,
   },
   menus: { display: 'flex', alignItems: 'center', gap: scale.space1 },
+  // Narrow (phone) hosts: every toolbar control is a 44px touch target; the search text is 16px so iOS does not zoom on focus.
+  touchRow: { minHeight: g.touchTarget },
+  touchIcon: { width: g.touchTarget, height: g.touchTarget },
+  touchSearch: { minHeight: g.touchTarget, fontSize: t.touchInputSize },
 })
