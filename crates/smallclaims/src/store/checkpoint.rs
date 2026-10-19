@@ -19,6 +19,7 @@ pub use tombstones::{
     checkpointed_operation, checkpointed_operations, claim_or_tombstone_exists, claim_tombstoned,
     envelope_tombstoned,
 };
+pub use super::checkpoint_space::CheckpointProofBusy;
 
 pub const DAY_MS: u128 = 86_400_000;
 
@@ -1898,6 +1899,17 @@ impl Store {
 #[doc(hidden)]
 pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
     super::checkpoint_completion::reclaim_stats()
+}
+
+/// Hold the proof lock on `scratch`, as a running proof does, until dropped.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct CheckpointProofLockForTest(#[allow(dead_code)] super::checkpoint_space::ProofOwnership);
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn hold_checkpoint_proof_lock_for_test(scratch: &Path) -> Result<CheckpointProofLockForTest> {
+    super::checkpoint_space::ProofOwnership::acquire(scratch).map(CheckpointProofLockForTest)
 }
 
 #[cfg(test)]

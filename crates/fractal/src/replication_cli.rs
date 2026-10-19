@@ -224,8 +224,7 @@ pub(super) async fn run_replication(
             command: CheckpointCommand::Plan { cut },
         } => {
             let request = fractal_daemon::store::CheckpointPlanRequest { day: cut };
-            let plan: fractal_daemon::store::CheckpointPlanView =
-                client.post("/v1/checkpoint/plan", &request).await?;
+            let plan = checkpoint_plan_waiting_for_proof(client, &request).await?;
             if json_output {
                 return print_value(&plan, true);
             }
@@ -273,6 +272,34 @@ pub(super) async fn run_replication(
             }
             print!("{}", render_checkpoint_status(&status));
             Ok(())
+        }
+    }
+}
+
+/// How long `checkpoint plan` asks again while another checkpoint proof runs, as one does right
+/// after the daemon starts. The daemon waits up to a minute itself before it refuses a plan with
+/// `checkpoint-proof-in-progress`, so this adds a few minutes more.
+const CHECKPOINT_PLAN_PROOF_WAIT: Duration = Duration::from_secs(4 * 60);
+
+async fn checkpoint_plan_waiting_for_proof(
+    client: &Client,
+    request: &fractal_daemon::store::CheckpointPlanRequest,
+) -> Result<fractal_daemon::store::CheckpointPlanView> {
+    let started = std::time::Instant::now();
+    let mut announced = false;
+    loop {
+        match client.post("/v1/checkpoint/plan", request).await {
+            Err(error)
+                if fractal_daemon::client::api_error_code(&error) == Some("checkpoint-proof-in-progress")
+                    && started.elapsed() < CHECKPOINT_PLAN_PROOF_WAIT =>
+            {
+                if !announced {
+                    eprintln!("st: waiting for the running checkpoint proof to finish");
+                    announced = true;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            result => return result,
         }
     }
 }

@@ -1064,6 +1064,12 @@ st replication checkpoint plan --cut 2026-09-27    # what it would drop here, pr
 st replication checkpoint excuse node-c --reason "away for a week" --as person/operator
 ```
 
+`plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
+runs there at a time. While another proof runs, as one does right after the daemon starts, the
+daemon holds the plan for up to a minute, and `st` asks again for up to four minutes more and
+prints that it is waiting. A proof still running after that is refused with
+`checkpoint-proof-in-progress` (HTTP 503); run the plan again shortly.
+
 An excusal fences nothing. What the excused writer wrote while away still replicates when it
 returns, and its next seal ends the excusal.
 

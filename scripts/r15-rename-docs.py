@@ -38,6 +38,15 @@ PACKAGES = {
 
 
 def rewrite(text):
+    # Historical Clippy ancestry examples name the old Git baseline, not an alias.
+    historical = {}
+    for old, new in CRATES.items():
+        pattern = r'"' + re.escape(new) + r'"\s*:\s*"' + re.escape(old) + r'"'
+        for match in re.finditer(pattern, text):
+            fragment = match.group()
+            token = f'R15_HISTORICAL_ANCESTRY_{len(historical)}'
+            historical[token] = fragment
+            text = text.replace(fragment, token)
     for old, new in sorted(CRATES.items(), key=lambda pair: -len(pair[0])):
         text = re.sub(r'crates/' + re.escape(old) + r'(?=[/`\s):*]|$)', 'crates/' + new, text)
     for stem in ('client', 'scenarios', 'views'):
@@ -59,6 +68,8 @@ def rewrite(text):
     text = re.sub(r'\bst3(?=::)', 'fractal_daemon', text)
     text = re.sub(r'\bst2(?=::)', 'fractal_legacy_runner', text)
     text = re.sub(r'\bstui(?=::)', 'fractal_tui', text)
+    for token, fragment in historical.items():
+        text = text.replace(token, fragment)
     return text
 
 
