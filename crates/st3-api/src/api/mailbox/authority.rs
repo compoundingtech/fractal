@@ -1,5 +1,7 @@
 //! Authenticate the transport peer against physical runtime and provider ownership.
 //! Request/reported PIDs, activity and ready observations never grant channel custody.
+use crate::DeliveryStore;
+use crate::MailboxLeaseStore;
 use crate::SeatsStoreCore;
 use super::*;
 use crate::mailbox::Authority;

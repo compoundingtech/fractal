@@ -171,15 +171,3 @@ pub fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeStartOperation> 
         receipted: row.get(10)?,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::runtime_starts_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
-
-
-}

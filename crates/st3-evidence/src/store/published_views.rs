@@ -1,8 +1,8 @@
 //! The part of `store::published_views` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_seats::store::published_views::*;
-pub use st3_seats::store::published_views::{PUBLISHED_COLLECTIONS, PublishedViews, Revisions, View, revision};
+pub use st3_attention::store::published_views::*;
+pub use st3_attention::store::published_views::{PUBLISHED_COLLECTIONS, PublishedViews, Revisions, View, revision};
 
 pub trait PublishedViewsStore {
     /// Say that `collection`'s running refresher governs its view while it has nothing to serve:
