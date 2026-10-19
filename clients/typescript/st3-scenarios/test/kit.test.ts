@@ -98,12 +98,16 @@ describe('worlds', () => {
     }
   })
 
-  it('derives failed-sync-socket-dropped from the authored synthetic fleet, differing only in sync', () => {
+  it('derives failed-sync-socket-dropped from the synthetic fleet with an empty sidebar inventory', () => {
     const base = buildWorld(syntheticFleetMidRefactor, genericVariants, ANCHOR_MS)
     const failed = loadWorld('failed-sync-socket-dropped', { now: ANCHOR_MS })
     for (const kind of SLICE_KINDS) {
       if (kind === 'sync') expect(failed.slices.sync).not.toEqual(base.slices.sync)
-      else expect(failed.slices[kind]).toEqual(base.slices[kind])
+      else if (kind === 'roster') {
+        const { arrangements, ...state } = base.slices.roster.state
+        expect(arrangements).toHaveLength(1)
+        expect(failed.slices.roster).toEqual({ ...base.slices.roster, state })
+      } else expect(failed.slices[kind]).toEqual(base.slices[kind])
     }
   })
 })
