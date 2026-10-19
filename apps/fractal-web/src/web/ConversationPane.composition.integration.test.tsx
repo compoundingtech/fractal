@@ -22,6 +22,8 @@ import type { ConversationRuntimeOptions, TranscriptTurn } from '@smalltalk/frac
 import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
 import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
+import * as InputPaint from '../telemetry/inputPaint.ts'
+vi.mock('../telemetry/inputPaint.ts', { spy: true })
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -169,6 +171,27 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('registers the real composer field and only the latest turn, including a newly mounted transcript tail', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    source.sendable = true
+    await mount()
+    const dock = container.querySelector('[data-testid="conversation-composer-dock"]')!
+    const registration = vi.mocked(InputPaint.registerInputPaintRegions).mock.calls.findLast(([owner]) => owner === dock)!
+    const regions = registration[1]()
+    expect(regions.map((region) => region.target)).toEqual([
+      dock.querySelector('textarea'),
+      container.querySelector('[data-testid="transcript-turn"]:last-child'),
+    ])
+    vi.mocked(InputPaint.inputPaintRegionMounted).mockClear()
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [...scenario,
+      { _tag: 'Text', id: 'owned-send', role: 'user', text: 'Send into the tail', attachments: [], streaming: false, at: at(20), sendState: { _tag: 'Pending' } },
+    ], hasOlder: false, observation: { empty: false } } }
+    await mount()
+    expect(InputPaint.inputPaintRegionMounted).toHaveBeenCalledWith(dock)
+    expect(registration[1]().at(-1)?.target).toBe(container.querySelector('[data-testid="transcript-turn"]:last-child'))
+    expect(registration[1]().at(-1)?.target.textContent).toContain('Send into the tail')
+  })
   it('waits for actual source adoption without painting stranded rows or replacing the composer', async () => {
     source.feed = { _tag: 'Waiting' }
     // Focus and caret retention need an enabled composer once the conversation loads.

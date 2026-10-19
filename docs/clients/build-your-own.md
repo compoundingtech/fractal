@@ -105,9 +105,20 @@ after the manual transport drain. The independently demanded session-trace provi
 Configured browsers also export `fractal.input.next_frame` through this same tracer,
 under `service.name=fractal-web` (the TUI uses `fractal`). This is a span-based
 SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint.
-Trusted pointer/key/paste/focus/resize/input events count only if a DOM mutation
-commits during their discrete-event dispatch or its microtasks. Capture starts
-observation. Immediately after `createRoot`, the app registers that container
+Trusted control inputs count only when an owned commit occurs during dispatch
+or its discrete React microtasks. Capture observes the initiating control, its
+`aria-controls`/`aria-owns` targets, and explicitly registered surface regions.
+The composer registers its own field and **only the final rendered transcript
+turn**. An optional kit `Transcript.tailRef` reports a newly mounted tail into
+the app-owned input window, so Send can count a new turn without observing the
+history container. Trusted field `input` events are native editing commits,
+including value-property changes. Existing overlay hosts are observed with
+`childList: true` only (no subtree, attributes, character data or old values).
+The document, React root and full transcript are never observed by this producer.
+Broad root/history targets are excluded even when referenced by ARIA.
+Effects outside these regions, including delayed async effects after the window,
+do not count; ingest closes ownership before its writes.
+Immediately after `createRoot`, the app registers that container
 with telemetry. The optional kit `PortalContainerRegistrationContext` registers
 every production portal container for its mounted lifetime. `App` owns the Aria
 provider above both the status bar and workspace, with a registered, unstyled
@@ -134,14 +145,16 @@ Those unsupported paths may include intervening task mutations; app/kit source
 contains no native instances of these paths (existing stops are React synthetic).
 `makeFrameIngest.flush` additionally drains and disconnects **before** batch writes,
 without reopening for their async React commits. No idle observation occurs.
-DOM-less React commits, native scrolling and value-only edits without DOM mutation
-do not count.
+DOM-less React commits, native scrolling and value-only changes without a trusted
+editing event do not count.
 The start is the input event timestamp. Event Timing entries bind one-to-one by
 event type and exact timestamp before retaining their interactionId; ambiguous
 matches use the paint fallback rather than cross-matching concurrent inputs.
 The fallback end is rAF after commit followed by a posted task. A later input's commit before
-paint ends the previous committed input as `coalesced`; page hiding, pagehide,
-unload or telemetry teardown ends unpainted committed input as `unacknowledged`.
+paint ends the previous committed input as `coalesced`. At page hiding, pagehide,
+unload or telemetry teardown, queued Event Timing entries are first drained through
+the same matching handler; a queued presentation remains `painted`. Only still
+unpainted committed inputs then end as `unacknowledged`.
 Only `painted` is latency-SLI eligible. There is no timer expiry.
 
 Attributes are bounded `input.kind`, `input.action`, `surface` and one final

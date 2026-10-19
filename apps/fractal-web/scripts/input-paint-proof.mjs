@@ -38,16 +38,17 @@ const vite = await createServer({ root, configFile: false, optimizeDeps: { entri
       res.setHeader('Content-Type', 'text/html')
       const html = `<!doctype html><div id="react"></div><div id="portal"></div><button id="hide">Hide before paint</button><output></output>
 <script type="module">
-import { createElement, useState } from 'react'
+import { createElement, useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
-import { installInputPaint } from '/apps/fractal-web/src/telemetry/inputPaint.ts'
+import { inputPaintRegionMounted, registerInputPaintRegions, installInputPaint } from '/apps/fractal-web/src/telemetry/inputPaint.ts'
 import { makeFrameIngest } from '/apps/fractal-web/src/data/frameIngest.ts'
 import { PortalContainerRegistrationContext, RegisteredPortal } from '/packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { App as RealAppShell } from '/apps/fractal-web/src/web/App.tsx'
 const portalContainer = document.querySelector('#portal')
 const reactRoots = new Set()
-const registerPortal = container => { reactRoots.add(container); return () => reactRoots.delete(container) }
+const overlayHosts = new Set()
+const registerPortal = container => { reactRoots.add(container); overlayHosts.add(container); return () => { reactRoots.delete(container); overlayHosts.delete(container) } }
 window.samples = []
 window.streams = 0
 const ingest = makeFrameIngest({ write: ({ value }) => {
@@ -58,9 +59,30 @@ const ingest = makeFrameIngest({ write: ({ value }) => {
 window.addEventListener('click', event => {
   if (event.target.id === 'before') ingest.accept({ key: 'stream', value: 'before' })
 }, true)
+const OwnedComposer = () => {
+  const [sent, setSent] = useState(0)
+  const dock = useRef(null)
+  const tail = useRef(null)
+  const tailRef = useCallback(node => {
+    tail.current = node
+    if (node !== null && dock.current !== null) inputPaintRegionMounted(dock.current)
+  }, [])
+  useLayoutEffect(() => registerInputPaintRegions(dock.current, () => [
+    { target: dock.current.querySelector('textarea') },
+    ...(tail.current === null ? [] : [{ target: tail.current }]),
+  ]), [])
+  return createElement('div', {},
+    createElement('div', { id: 'owned-history' }, sent === 0 ? null : createElement('section', { key: sent, ref: tailRef }, 'Sent ' + sent)),
+    createElement('div', { ref: dock }, createElement('textarea', { id: 'owned-field' }), createElement('button', { id: 'owned-send', onClick: () => setSent(n => n + 1) }, 'Send')),
+  )
+}
 const App = () => {
   const [count, setCount] = useState(0)
+  const [menuOpen, setMenuOpen] = useState(false)
   return createElement('div', {},
+    createElement(OwnedComposer),
+    createElement('button', { id: 'owned-menu', onClick: () => setMenuOpen(true) }, 'Menu'),
+    createElement(RegisteredPortal, { container: portalContainer, children: menuOpen ? createElement('div', { role: 'menu' }, 'Owned menu') : null }),
     createElement('button', { id: 'paint', onClick: () => setCount(n => n + 1) }, 'Paint ' + count),
     createElement('button', { id: 'stopped', onClick: event => { event.stopPropagation(); setCount(n => n + 1) } }, 'Stopped ' + count),
     createElement('button', { id: 'before', onClick: event => event.stopPropagation() }, 'No-op pre-registered ingest'),
@@ -98,9 +120,9 @@ const container = document.querySelector('#react')
 const reactRoot = createRoot(container)
 reactRoots.add(container)
 flushSync(() => reactRoot.render(createElement(PortalContainerRegistrationContext.Provider, { value: registerPortal }, createElement(App))))
-window.stopCapture = installInputPaint({ reactRoots, emit: sample => window.samples.push(sample) })
+window.stopCapture = installInputPaint({ reactRoots, overlayHosts, emit: sample => window.samples.push(sample) })
 document.querySelector('#hide').onclick = () => {
-  document.querySelector('output').textContent = 'unpainted'
+  document.querySelector('#hide').textContent = 'unpainted'
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
   document.dispatchEvent(new Event('visibilitychange'))
 }
@@ -113,7 +135,8 @@ window.startShell = () => {
   document.body.append(shell)
   const shellRoot = createRoot(shell)
   const roots = new Set([shell])
-  const register = element => { roots.add(element); return () => roots.delete(element) }
+  const hosts = new Set()
+  const register = element => { roots.add(element); hosts.add(element); return () => { roots.delete(element); hosts.delete(element) } }
   const Fixture = () => {
     const [count, setCount] = useState(0)
     return createElement('div', { onClick: event => {
@@ -125,7 +148,7 @@ window.startShell = () => {
   }
   flushSync(() => shellRoot.render(createElement(PortalContainerRegistrationContext.Provider, { value: register }, createElement(Fixture))))
   window.shellSamples = []
-  window.stopCapture = installInputPaint({ reactRoots: roots, emit: sample => window.shellSamples.push(sample) })
+  window.stopCapture = installInputPaint({ reactRoots: roots, overlayHosts: hosts, emit: sample => window.shellSamples.push(sample) })
 }
 window.ready = true
 </script>`
@@ -175,9 +198,17 @@ try {
       await page.waitForFunction(count => window.samples.length === count, count)
       if (await page.evaluate(() => window.samples.at(-1).attributes.outcome) !== 'painted') throw new Error('Lost stopped external portal commit')
     }
+    await page.locator('#owned-send').click()
+    await page.waitForFunction(() => window.samples.length === 5)
+    if (await page.locator('#owned-history').textContent() !== 'Sent 1') throw new Error('Missing owned transcript tail')
+    await page.locator('#owned-menu').click()
+    await page.waitForFunction(() => window.samples.length === 6)
+    await page.locator('#owned-field').fill('Typed input')
+    await page.waitForFunction(() => window.samples.length === 7)
+    if (await page.evaluate(() => window.samples[6].attributes['input.kind']) !== 'input') throw new Error('Missing native field edit')
     await page.locator('#hide').click()
     const samples = await page.evaluate(() => { window.stopCapture(); return window.samples })
-    if (samples.length !== 5 || samples[4].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
+    if (samples.length !== 8 || samples[7].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
     await page.evaluate(() => window.startShell())
     await page.getByRole('button', { name: /^Changes/ }).click()
     await page.getByRole('dialog', { name: 'Recent changes' }).waitFor()

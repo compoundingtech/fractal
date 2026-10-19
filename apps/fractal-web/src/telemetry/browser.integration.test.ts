@@ -506,15 +506,22 @@ it.live('reference-counts shared portal containers with idempotent unregistratio
   const telemetry = make()
   const { scope } = yield* open(telemetry)
   const root = new EventTarget() as Element
-  const first = telemetry.registerReactRoot(root)
-  const second = telemetry.registerReactRoot(root)
+  const first = telemetry.registerPortalHost(root)
+  const second = telemetry.registerPortalHost(root)
   const uninstall = telemetry.install()
   const roots = vi.mocked(InputPaint.installInputPaint).mock.calls.at(-1)![0].reactRoots!
+  const hosts = vi.mocked(InputPaint.installInputPaint).mock.calls.at(-1)![0].overlayHosts!
+  const pageRoot = new EventTarget() as Element
+  const unregisterPageRoot = telemetry.registerReactRoot(pageRoot)
+  expect([...hosts]).toEqual([root])
+  unregisterPageRoot()
   expect([...roots]).toEqual([root])
   first(); first()
   expect([...roots]).toEqual([root])
+  expect([...hosts]).toEqual([root])
   second()
   expect([...roots]).toEqual([])
+  expect([...hosts]).toEqual([])
   uninstall()
   yield* Scope.close(scope, Exit.void)
 }))

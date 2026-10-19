@@ -11,6 +11,7 @@ interface Input {
   readonly kind: 'key' | 'mouse' | 'paste' | 'focus' | 'resize' | 'input'
   readonly action: string
   readonly surface: InputSurface
+  readonly owner: Element
   committed: number | undefined
   interactionId: number | undefined
   cancel: (() => void) | undefined
@@ -22,6 +23,10 @@ export interface InputPaintSample {
   readonly attributes: Readonly<Record<string, string | number>>
 }
 const events = ['pointerdown', 'click', 'keydown', 'paste', 'focusin', 'focusout', 'resize', 'input'] as const
+// A control owns only its DOM, not sibling content, its React root or the page.
+const inputOwner = (target: EventTarget | null): Element | null => target instanceof Element
+  ? target.closest('button,a[href],input,textarea,select,[contenteditable="true"],[role="button"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="checkbox"],[role="radio"],[role="switch"],[role="option"],[role="combobox"],[role="spinbutton"],[role="slider"],[role="textbox"],[role="searchbox"]')
+  : null
 const surface = (target: EventTarget | null): InputSurface => {
   if (!(target instanceof Element)) return 'other'
   if (target.closest('[role="dialog"][aria-label="Command palette"]')) return 'palette'
@@ -30,6 +35,21 @@ const surface = (target: EventTarget | null): InputSurface => {
   if (target.closest('[data-conversation-entry-id],[role="region"][aria-label="Conversation history"]')) return 'conversation'
   if (target.closest('[data-perf-target="missions-list"]')) return 'missions'
   return 'other'
+}
+
+export interface InputPaintRegion { readonly target: Element; readonly subtree?: boolean }
+const ownedRegions = new Map<Element, () => ReadonlyArray<InputPaintRegion>>()
+const regionCommits = new Set<(owner: Element) => void>()
+
+/** App-side surface ownership; resolve only that surface's small field/tail at input capture. */
+export const registerInputPaintRegions = (owner: Element, regions: () => ReadonlyArray<InputPaintRegion>): (() => void) => {
+  ownedRegions.set(owner, regions)
+  return () => { if (ownedRegions.get(owner) === regions) ownedRegions.delete(owner) }
+}
+
+/** A surface's mounted DOM tail changed; not a render/Profiler notification. */
+export const inputPaintRegionMounted = (owner: Element): void => {
+  for (const commit of regionCommits) commit(owner)
 }
 
 const frameBoundaries = new Set<() => void>()
@@ -55,9 +75,10 @@ const nextTask = (callback: () => void): (() => void) => {
  * first paint following an observed DOM mutation. Thus read_to_frame_ms includes browser
  * dispatch queueing and accepted_to_frame_ms begins at capture. queue_ms is omitted: the
  * capture listener does not observe the browser's handler-entry scheduling boundary.
- * No React Profiler dependency (production React disables it). MutationObserver child/text/
- * attribute changes count as commits; no-op attributes and React commits without DOM changes
- * do not. Native value/scroll paints without a DOM mutation are deliberately outside this SLI.
+ * No React Profiler dependency (production React disables it). Commit ownership is the
+ * control, its aria-controls/owns targets, and explicitly registered field/tail regions.
+ * Overlay hosts are childList-only. No page/root/history subtree observation occurs.
+ * Effects outside those regions do not count. Trusted field input is a native edit signal.
  * React 19.2.3 flushes discrete work in microtasks (ReactFiberRootScheduler.js:
  * 265-267,345-346,671-692). Completion listeners on the registered React root run AFTER
  * React's native listeners, in bubble or (if cancelBubble is set) capture phase.
@@ -71,12 +92,13 @@ const nextTask = (callback: () => void): (() => void) => {
  * retaining its interactionId; ambiguous correlations use the paint fallback, never a
  * different input's presentation. The existing rAF + posted-task boundary handles fallback.
  */
-export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint, reactRoots = [], task = nextTask }: {
+export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint, reactRoots = [], overlayHosts = [], task = nextTask }: {
   readonly emit: (sample: InputPaintSample) => void
   readonly now?: () => number
   readonly paint?: (callback: () => void) => () => void
   /** Register containers only AFTER createRoot has installed React's native listeners. */
   readonly reactRoots?: Iterable<Element>
+  readonly overlayHosts?: Iterable<Element>
   readonly task?: (callback: () => void) => () => void
 }): (() => void) => {
   const pending = new Set<Input>()
@@ -99,13 +121,17 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
   }
   const observer = new MutationObserver((records) => commit(records))
   const commit = (records: ReadonlyArray<MutationRecord>) => {
-    const input = candidate
-    if (input === undefined || !pending.has(input)) return
+    if (candidate === undefined) return
     if (!records.some((record) => {
       if (record.type === 'attributes') return record.target instanceof Element && record.oldValue !== record.target.getAttribute(record.attributeName ?? '')
       if (record.type === 'characterData') return record.oldValue !== record.target.nodeValue
       return record.addedNodes.length > 0 || record.removedNodes.length > 0
     })) return
+    markCommitted()
+  }
+  const markCommitted = () => {
+    const input = candidate
+    if (input === undefined || !pending.has(input)) return
     for (const previous of pending) if (previous !== input && previous.committed !== undefined) finish(previous, 'coalesced')
     if (input.committed !== undefined) return
     input.committed = now()
@@ -122,21 +148,48 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     candidate = undefined
   }
   frameBoundaries.add(closeWindow)
+  const mounted = (owner: Element) => { if (ownedRegions.has(owner) && candidate !== undefined && owner.contains(candidate.owner)) markCommitted() }
+  regionCommits.add(mounted)
   const capture = (event: Event) => {
     if (disposed || !event.isTrusted || document.visibilityState === 'hidden') return
     closeWindow()
+    const owner = inputOwner(event.target)
+    if (owner === null) return
     const accepted = now()
     const input: Input = {
       type: event.type,
       start: event.timeStamp > 1e12 ? event.timeStamp - performance.timeOrigin : event.timeStamp,
-      accepted, surface: surface(event.target),
+      accepted, owner, surface: surface(event.target),
       kind: event.type === 'keydown' ? 'key' : event.type === 'paste' ? 'paste' : event.type.startsWith('focus') ? 'focus' : event.type === 'resize' ? 'resize' : event.type === 'input' ? 'input' : 'mouse',
       action: event.type === 'keydown' ? 'key' : event.type.startsWith('focus') ? (event.type === 'focusin' ? 'gained' : 'lost') : event.type,
       committed: undefined, interactionId: undefined, cancel: undefined,
     }
     candidate = input
     pending.add(input)
-    observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true })
+    const roots = [...reactRoots]
+    const observeRegion = (target: Element, subtree = true) => {
+      if (target === document.documentElement || target === document.body) return
+      // Completion roots must never become subtree observations.
+      if (roots.includes(target)) return
+      if (target.matches('[data-testid="transcript-scroll"],[data-testid="conversation-history-host"]') || target.querySelector('[data-testid="transcript-scroll"]') !== null) return
+      observer.observe(target, { subtree, childList: true, characterData: subtree, characterDataOldValue: subtree, attributes: subtree, attributeOldValue: subtree })
+    }
+    observeRegion(owner)
+    for (const key of ['aria-controls', 'aria-owns']) {
+      for (const id of (owner.getAttribute(key) ?? '').split(/\s+/)) {
+        if (id === '') continue
+        const target = document.getElementById(id)
+        if (target !== null) observeRegion(target)
+      }
+    }
+    for (const [regionOwner, regions] of ownedRegions) {
+      if (regionOwner.contains(owner)) for (const region of regions()) observeRegion(region.target, region.subtree)
+    }
+    for (const host of overlayHosts) {
+      if (host !== document.body && host !== document.documentElement) observer.observe(host, { childList: true })
+    }
+    // A trusted editing event is itself the browser's field DOM/value commit.
+    if (event.type === 'input' && (owner instanceof HTMLInputElement || owner instanceof HTMLTextAreaElement || owner.getAttribute('contenteditable') === 'true')) markCommitted()
     const closeThisInput = () => { if (candidate === input) closeWindow() }
     const bubble = (dispatched: Event) => {
       if (dispatched === event) queueMicrotask(closeThisInput)
@@ -144,7 +197,6 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     const stoppedCapture = (dispatched: Event) => {
       if (dispatched === event && dispatched.cancelBubble) queueMicrotask(closeThisInput)
     }
-    const roots = [...reactRoots]
     for (const root of roots) {
       root.addEventListener(event.type, stoppedCapture, true)
       root.addEventListener(event.type, bubble)
@@ -161,23 +213,25 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     }
   }
   let eventObserver: PerformanceObserver | undefined
+  const handleEventEntries = (entries: PerformanceEntryList) => {
+    for (const entry of entries) {
+      if (!('interactionId' in entry) || typeof entry.interactionId !== 'number' || entry.interactionId === 0) continue
+      const matches = [...pending].filter((input) => entry.name === input.type && Math.abs(entry.startTime - input.start) < 0.001)
+      if (matches.length !== 1) continue
+      const input = matches[0]!
+      if (input.interactionId !== undefined && input.interactionId !== entry.interactionId) continue
+      input.interactionId = entry.interactionId
+      const end = entry.startTime + entry.duration
+      if (input.committed !== undefined && end >= input.committed && end <= now()) finish(input, 'painted', end)
+    }
+  }
   if (typeof PerformanceObserver !== 'undefined' && PerformanceObserver.supportedEntryTypes.includes('event')) {
-    eventObserver = new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        if (!('interactionId' in entry) || typeof entry.interactionId !== 'number' || entry.interactionId === 0) continue
-        const matches = [...pending].filter((input) => entry.name === input.type && Math.abs(entry.startTime - input.start) < 0.001)
-        if (matches.length !== 1) continue
-        const input = matches[0]!
-        if (input.interactionId !== undefined && input.interactionId !== entry.interactionId) continue
-        input.interactionId = entry.interactionId
-        const end = entry.startTime + entry.duration
-        if (input.committed !== undefined && end >= input.committed && end <= now()) finish(input, 'painted', end)
-      }
-    })
+    eventObserver = new PerformanceObserver((list) => handleEventEntries(list.getEntries()))
     eventObserver.observe({ type: 'event', durationThreshold: 16 } as PerformanceObserverInit)
   }
   const abandon = () => {
     closeWindow()
+    handleEventEntries(eventObserver?.takeRecords() ?? [])
     for (const input of pending) finish(input, 'unacknowledged')
   }
   const visibility = () => { if (document.visibilityState === 'hidden') abandon() }
@@ -190,6 +244,7 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     abandon()
     disposed = true
     frameBoundaries.delete(closeWindow)
+    regionCommits.delete(mounted)
     observer.disconnect()
     eventObserver?.disconnect()
     for (const type of events) window.removeEventListener(type, capture, true)

@@ -15,6 +15,7 @@ import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
+import { inputPaintRegionMounted, registerInputPaintRegions, type InputPaintRegion } from '../telemetry/inputPaint.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
 
@@ -122,6 +123,24 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
 }) {
   const source = useDataSource()
   const grants = useGrants()
+  const composer = React.useRef<HTMLDivElement>(null)
+  const tail = React.useRef<HTMLElement | null>(null)
+  const tailRef = React.useCallback((node: HTMLElement | null) => {
+    const changed = node !== null && node !== tail.current
+    tail.current = node
+    if (changed && composer.current !== null) inputPaintRegionMounted(composer.current)
+  }, [])
+  React.useLayoutEffect(() => {
+    const owner = composer.current
+    if (owner === null) return
+    return registerInputPaintRegions(owner, () => {
+      const regions: InputPaintRegion[] = []
+      const field = owner.querySelector('textarea,input,[contenteditable="true"]')
+      if (field !== null) regions.push({ target: field })
+      if (tail.current !== null) regions.push({ target: tail.current })
+      return regions
+    })
+  }, [agentRef])
   const [refusal, setRefusal] = React.useState<SendRefusal>()
   const binding = composerSendBinding({
     source, agentRef, grants,
@@ -166,6 +185,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       viewportKey={agentRef}
       turns={state._tag === 'Observed' ? state.turns : []}
       scrollToBottomKey={feed._tag === 'Observed' ? feed.value.lastSendId : undefined}
+      tailRef={tailRef}
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
@@ -189,7 +209,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
-    <div data-testid="conversation-composer-dock" onInputCapture={(event) => {
+    <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')

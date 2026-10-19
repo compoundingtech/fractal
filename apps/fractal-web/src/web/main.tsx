@@ -52,7 +52,7 @@ void Promise.all([live.ready, stylesReady]).then(() => {
   if (disposed) return
   root.render(
     <StrictMode>
-      <PortalContainerRegistrationContext.Provider value={telemetry.registerReactRoot}><App /></PortalContainerRegistrationContext.Provider>
+      <PortalContainerRegistrationContext.Provider value={telemetry.registerPortalHost}><App /></PortalContainerRegistrationContext.Provider>
     </StrictMode>,
   )
 })

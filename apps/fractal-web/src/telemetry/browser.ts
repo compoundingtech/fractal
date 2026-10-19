@@ -58,6 +58,8 @@ export interface Telemetry {
   readonly install: () => () => void
   /** Call immediately after createRoot, before rendering; removes the completion root on cleanup. */
   readonly registerReactRoot: (root: Element) => () => void
+  /** Portal hosts are completion roots and cheap child-list commit signals, never whole-page roots. */
+  readonly registerPortalHost: (host: Element) => () => void
 }
 
 interface PendingInteraction {
@@ -179,6 +181,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
   let closeExporter: (() => void) | undefined
   let uninstallInputPaint: (() => void) | undefined
   const reactRoots = new Map<Element, number>()
+  const overlayHosts = new Map<Element, number>()
 
   /** Replay only pre-exporter spans, retaining the IDs already propagated to the SDK/gateway. */
   const exportEarlySpan = ({ span, events }: EarlySpanCapture, target: Tracer.Tracer) => {
@@ -490,7 +493,10 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
   const install = () => {
     if (uninstall !== undefined) return uninstall
-    uninstallInputPaint = otlpTracesUrl === undefined ? undefined : installInputPaint({ emit, reactRoots: { [Symbol.iterator]: () => reactRoots.keys() } })
+    uninstallInputPaint = otlpTracesUrl === undefined ? undefined : installInputPaint({
+      emit, reactRoots: { [Symbol.iterator]: () => reactRoots.keys() },
+      overlayHosts: { [Symbol.iterator]: () => overlayHosts.keys() },
+    })
     for (const type of interactionEvents)
       window.addEventListener(type, onInteraction, { capture: true })
 
@@ -628,19 +634,25 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
     return uninstall
   }
 
+  const register = (roots: Map<Element, number>, root: Element): (() => void) => {
+    if (otlpTracesUrl === undefined) return () => {}
+    roots.set(root, (roots.get(root) ?? 0) + 1)
+    let registered = true
+    return () => {
+      if (!registered) return
+      registered = false
+      const count = roots.get(root)
+      if (count === 1) roots.delete(root)
+      else if (count !== undefined) roots.set(root, count - 1)
+    }
+  }
   return {
     ring, layer, onCommit, install, get ux() { return getUx() },
-    registerReactRoot: (root) => {
-      if (otlpTracesUrl === undefined) return () => {}
-      reactRoots.set(root, (reactRoots.get(root) ?? 0) + 1)
-      let registered = true
-      return () => {
-        if (!registered) return
-        registered = false
-        const count = reactRoots.get(root)
-        if (count === 1) reactRoots.delete(root)
-        else if (count !== undefined) reactRoots.set(root, count - 1)
-      }
+    registerReactRoot: (root) => register(reactRoots, root),
+    registerPortalHost: (host) => {
+      const unregisterRoot = register(reactRoots, host)
+      const unregisterHost = register(overlayHosts, host)
+      return () => { unregisterRoot(); unregisterHost() }
     },
   }
 }

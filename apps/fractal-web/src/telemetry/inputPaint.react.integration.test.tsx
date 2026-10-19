@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { createElement, useState } from 'react'
+import { createElement, useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import { makeFrameIngest } from '../data/frameIngest.ts'
-import { installInputPaint, type InputPaintSample } from './inputPaint.ts'
+import { inputPaintRegionMounted, registerInputPaintRegions, installInputPaint, type InputPaintSample } from './inputPaint.ts'
 import { PortalContainerRegistrationContext, RegisteredPortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { App as RealAppShell } from '../web/App.tsx'
 
@@ -21,7 +21,24 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup()
   vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren()
 })
-const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer = '', portal = false, captureNoop = false, appShell = false } = {}) => {
+const OwnedComposer = () => {
+  const [sent, setSent] = useState(0)
+  const dock = useRef<HTMLDivElement>(null)
+  const tail = useRef<HTMLElement | null>(null)
+  const tailRef = useCallback((node: HTMLElement | null) => {
+    tail.current = node
+    if (node !== null && dock.current !== null) inputPaintRegionMounted(dock.current)
+  }, [])
+  useLayoutEffect(() => registerInputPaintRegions(dock.current!, () => [
+    { target: dock.current!.querySelector('textarea')! },
+    ...(tail.current === null ? [] : [{ target: tail.current }]),
+  ]), [])
+  return createElement('div', {},
+    createElement('div', { id: 'history' }, sent === 0 ? null : createElement('section', { key: sent, ref: tailRef }, 'Sent ' + sent)),
+    createElement('div', { ref: dock }, createElement('textarea', { defaultValue: 'Message' }), createElement('button', { id: 'send', onClick: () => setSent((value) => value + 1) }, 'Send')),
+  )
+}
+const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer = '', portal = false, captureNoop = false, appShell = false, scenario = '' } = {}) => {
   const frames = new Map<number, FrameRequestCallback>()
   const paints = new Set<() => void>()
   const samples: InputPaintSample[] = []
@@ -60,15 +77,22 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
   const container = document.createElement('div')
   const portalContainer = document.createElement('div')
   const reactRoots = new Set<Element>([container])
+  const overlayHosts = new Set<Element>()
   const registerPortal = vi.fn((element: Element) => {
     reactRoots.add(element)
-    return () => { reactRoots.delete(element) }
+    overlayHosts.add(element)
+    return () => { reactRoots.delete(element); overlayHosts.delete(element) }
   })
   const stream = document.createElement('output')
   document.body.append(container, portalContainer, stream)
   const ingest = makeFrameIngest<string, string>({ write: ({ value }) => { stream.textContent = value } })
   const App = () => {
     const [count, setCount] = useState(0)
+    if (scenario === 'send') return createElement(OwnedComposer)
+    if (scenario === 'menu') return createElement('div', {},
+      createElement('button', { id: 'menu', onClick: () => setCount((value) => value + 1) }, 'Open'),
+      createElement(RegisteredPortal, { container: portalContainer, children: count === 0 ? null : createElement('div', { role: 'menu' }, 'Opened') }),
+    )
     if (appShell) return createElement('div', { onClick: (event: React.MouseEvent) => {
       if ((event.target as Element).closest('[data-changelog-popover]') !== null) {
         event.stopPropagation()
@@ -89,7 +113,7 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
           else flushSync(() => setCount((previous) => previous + 1))
         }, 0)
       } }, 'no-op'),
-      createElement('button', { id: 'capture', onClickCapture: (event) => { event.stopPropagation(); setCount((previous) => previous + 1) } }, 'capture'),
+      createElement('button', { id: 'capture', onClickCapture: (event) => { event.stopPropagation(); setCount((previous) => previous + 1) } }, 'capture ' + count),
     )
     return portal ? createElement(RegisteredPortal, { container: portalContainer, children: content }) : content
   }
@@ -106,7 +130,7 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
     })
   }
   cleanups.push(() => root.unmount(), () => ingest.dispose())
-  cleanups.push(installInputPaint({ reactRoots, emit: (sample) => samples.push(sample), paint: (callback) => { paints.add(callback); return () => { paints.delete(callback) } } }))
+  cleanups.push(installInputPaint({ reactRoots, overlayHosts, emit: (sample) => samples.push(sample), paint: (callback) => { paints.add(callback); return () => { paints.delete(callback) } } }))
   const click = (id: string) => {
     const event = new MouseEvent('click', { bubbles: true })
     trusted.add(event)
@@ -232,4 +256,26 @@ it('uses the registered app-shell host for the real status-bar changelog and exc
   expect(document.querySelector('#shell-timer')!.textContent).toBe('1')
   await run.frame()
   expect(run.samples).toEqual([])
+})
+
+it('records Send whose only visible commit appends an explicitly owned transcript tail', async () => {
+  const run = setup({ scenario: 'send' })
+  run.click('#send')
+  await Promise.resolve(); await Promise.resolve()
+  expect(document.querySelector('#send')!.textContent).toBe('Send')
+  expect(document.querySelector('#history')!.textContent).toBe('Sent 1')
+  await run.frame()
+  expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
+})
+
+it('records a menu trigger whose only commit opens a registered portal, using childList only', async () => {
+  const observed = vi.spyOn(MutationObserver.prototype, 'observe')
+  const run = setup({ scenario: 'menu' })
+  run.click('#menu')
+  await Promise.resolve(); await Promise.resolve()
+  await run.frame()
+  expect(document.querySelector('#menu')!.textContent).toBe('Open')
+  expect(run.portalContainer.textContent).toBe('Opened')
+  expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
+  expect(observed.mock.calls.find(([target]) => target === run.portalContainer)?.[1]).toEqual({ childList: true })
 })

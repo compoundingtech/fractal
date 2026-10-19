@@ -46,6 +46,8 @@ export interface TranscriptProps {
   /** Omit to subscribe only elapsed/sync labels to the host HumanClockProvider. */
   readonly now?: number
   readonly observedAt: number
+  /** Optional host ownership of the final rendered turn; no additional DOM or rendering policy. */
+  readonly tailRef?: React.Ref<HTMLElement>
   /** Open output in the host's detail surface. No split/controller is hidden in the kit. */
   readonly onOpenTool?: (call: WorkLogCall) => void
   readonly onRetrySync?: () => void
@@ -235,7 +237,7 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
+const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
   // The work log lists tool calls separately, so every thought of the turn is visually adjacent: one disclosure.
   const reasoning = turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
@@ -248,7 +250,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
     const end = continues.indexOf(false, index + 1)
     return shown.slice(index, end === -1 ? undefined : end).map(entry => entry._tag === 'Text' ? entry.text : '').join('\n\n')
   })
-  return <section data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
+  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
     {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
     {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
@@ -311,7 +313,7 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, showHeader = true, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
   const scrollId = React.useId()
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
@@ -388,7 +390,7 @@ export function Transcript({ turns, title, showHeader = true, sync, now, observe
       {(startIndex, revealRow) => <>
       {history._tag === 'HasOlder' && startIndex === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
       {committed.length === 0 ? empty : <TranscriptSearch turns={committed} startIndex={startIndex} revealRow={revealRow} {...stylex.props(styles.timeline)}>
-        {committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}
+        {committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} tailRef={turn === committed[committed.length - 1] ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}
       </TranscriptSearch>}</>}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider>
