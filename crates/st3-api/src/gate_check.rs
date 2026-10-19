@@ -38,7 +38,7 @@ pub struct CheckHost<'a> {
     pub pty_root: &'a Path,
 }
 
-struct Check {
+pub struct Check {
     started_at: u128,
     /// Holds each gate's output and report files; removed with the check.
     directory: PathBuf,
@@ -49,7 +49,7 @@ struct Check {
     items: Vec<Item>,
 }
 
-struct Item {
+pub struct Item {
     view: GateCheckItemView,
     environment: BTreeMap<String, String>,
     time_limit_ms: u64,
@@ -134,7 +134,7 @@ pub fn poll(id: &str) -> Option<GateCheckView> {
     Some(view(id, check))
 }
 
-fn view(id: &str, check: &Check) -> GateCheckView {
+pub fn view(id: &str, check: &Check) -> GateCheckView {
     GateCheckView {
         id: id.to_owned(),
         host: check.host.clone(),
@@ -388,7 +388,7 @@ fn stand_in_variables(
 }
 
 /// What a check's gates expand with: run variables, the inputs nobody gave, and the workspace.
-struct Scope<'a> {
+pub struct Scope<'a> {
     variables: &'a BTreeMap<String, String>,
     missing_inputs: &'a std::collections::BTreeSet<String>,
     workspace: &'a str,

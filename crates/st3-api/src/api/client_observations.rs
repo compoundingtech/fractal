@@ -18,7 +18,7 @@ const REPORTS: usize = 4096;
 const FILE_BYTES: u64 = 4 * 1024 * 1024;
 const FILES: usize = 8;
 
-type Key = (String, String, Option<String>);
+pub type Key = (String, String, Option<String>);
 
 use st3_client::{ObservationReport, ObservationSample};
 
@@ -213,7 +213,7 @@ fn validate(report: &ObservationReport, now: u64) -> Result<Vec<Validated>, ApiE
     Ok(out)
 }
 
-struct Accepted {
+pub struct Accepted {
     id: String,
     digest: [u8; 32],
     scope: [u8; 32],
@@ -221,12 +221,12 @@ struct Accepted {
     intervals: Vec<(Key, u64)>,
 }
 #[derive(Default)]
-struct Admission {
+pub struct Admission {
     reports: VecDeque<Accepted>,
 }
 static ADMISSION: OnceLock<Mutex<Admission>> = OnceLock::new();
 static BUSY: AtomicBool = AtomicBool::new(false);
-struct Ticket;
+pub struct Ticket;
 impl Drop for Ticket {
     fn drop(&mut self) {
         BUSY.store(false, Ordering::Release);

@@ -464,7 +464,7 @@ async fn conversation(
 /// The current screen of one exactly named terminal incarnation and screen revision, as
 /// text, cut on a character boundary to the budget. The shared screen is borrowed, never
 /// rendered whole: only the returned characters are copied. One screen, never a stream.
-async fn terminal(
+pub async fn terminal(
     state: &AppState,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,

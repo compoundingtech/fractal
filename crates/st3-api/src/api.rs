@@ -95,7 +95,7 @@ mod terminal_gate_evidence;
 mod message_bodies;
 mod client_adapters;
 mod client_presence;
-mod client_v0;
+pub mod client_v0;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
@@ -106,14 +106,14 @@ mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
 mod github_watch;
-mod harness_events;
-mod mailbox;
-mod mail_backlog;
+pub mod harness_events;
+pub mod mailbox;
+pub mod mail_backlog;
 pub mod mission_eligibility_doctor;
-mod read_deadline;
+pub mod read_deadline;
 mod response_body;
 mod owned_sets;
-mod published_attention;
+pub mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{published_attention_rows, refresh_attention_list};
@@ -129,9 +129,9 @@ mod client_push;
 pub use client_push::start_push_registration_cleanup;
 mod terminal_view;
 mod work_response;
-mod published_lists;
+pub mod published_lists;
 #[cfg(target_os = "linux")]
-mod tile_endpoint;
+pub mod tile_endpoint;
 #[cfg(target_os = "linux")]
 pub use tile_endpoint::{
     SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
@@ -145,16 +145,16 @@ mod legacy_handler_guard_tests;
 // Route families: each file holds the handlers of one group of routes; the router below names
 // them as family::handler.
 mod agents;
-mod client_reads;
+pub mod client_reads;
 mod fleet;
-mod launches;
-mod messages;
-mod operations;
-mod records;
-mod replication;
+pub mod launches;
+pub mod messages;
+pub mod operations;
+pub mod records;
+pub mod replication;
 mod runs;
-mod sessions;
-mod work;
+pub mod sessions;
+pub mod work;
 // Other api code calls these handlers directly.
 use launches::{
     approve_planning_session, cancel_planning_session, mission, preview_named_planning_candidate,
@@ -172,13 +172,11 @@ use client_reads::{
     client_launches_detail, client_work,
 };
 #[cfg(test)]
-use messages::list_messages;
-#[cfg(test)]
-use operations::{doctor, events};
+use operations::events;
 #[cfg(test)]
 use records::post_claim;
 #[cfg(test)]
-use replication::{replication_export, replication_receive, replication_wake};
+use replication::{replication_export, replication_wake};
 
 pub use client_v0::raw_terminal::splice as raw_terminal_splice;
 
@@ -237,7 +235,7 @@ fn client_page_cache() -> &'static Mutex<VecDeque<CachedClientPage>> {
 }
 
 #[derive(Clone, Copy)]
-enum ClientTransportBoundary {
+pub enum ClientTransportBoundary {
     Unix,
     FabricLoopback,
 }
@@ -252,7 +250,7 @@ impl ClientTransportBoundary {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct ClientSnapshot {
+pub struct ClientSnapshot {
     id: String,
     host_id: String,
     store_index: u64,
@@ -264,10 +262,10 @@ struct ClientSnapshot {
 }
 
 /// A client page and the snapshot it was read in, which the envelope names.
-type ClientPageResponse = (Extension<ClientSnapshot>, Json<ClientResourcePage>);
+pub type ClientPageResponse = (Extension<ClientSnapshot>, Json<ClientResourcePage>);
 
 #[derive(Clone, Debug, Default, Deserialize)]
-struct ClientListQuery {
+pub struct ClientListQuery {
     limit: Option<usize>,
     cursor: Option<String>,
     #[serde(default)]
@@ -316,7 +314,7 @@ struct ClientPageCursor {
     expires_at_unix_ms: u128,
 }
 
-fn signal_changed(state: &AppState) {
+pub fn signal_changed(state: &AppState) {
     crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::Api, None);
     state.notify.notify_one();
     signal_visible_change(state);
@@ -351,13 +349,13 @@ fn signal_claim_changed(state: &AppState, kind: &str) {
 // and harness readiness still wake the reconciler through their own paths.
 // Local telemetry only wakes clients following this node. Harness observations also
 // affect work eligibility and acknowledgement deadlines; their transitions wake reconciliation.
-fn signal_local_change(state: &AppState) {
+pub fn signal_local_change(state: &AppState) {
     state
         .event_notify
         .send_modify(|generation| *generation = generation.saturating_add(1));
 }
 
-fn signal_visible_change(state: &AppState) {
+pub fn signal_visible_change(state: &AppState) {
     state
         .event_notify
         .send_modify(|generation| *generation = generation.saturating_add(1));
@@ -379,7 +377,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn bad(error: St3Error) -> Self {
+    pub fn bad(error: St3Error) -> Self {
         let status = match error.code {
             "recipient-retired"
             | "lifecycle-unavailable"
@@ -470,41 +468,33 @@ impl IntoResponse for ApiError {
 /// Build routes only. The owner starts background publications with
 /// [`start_published_lists`]; a bare router refuses unpublished current runtime reads.
 pub fn router(state: AppState) -> Router {
+    router_with(state, &[])
+}
+
+/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// the route table before the envelope and leave layers wrap it, so it is served exactly as the
+/// routes listed here. `router` without them is the route table this crate alone answers.
+pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
+
+/// [`router`] with the route families of the crates above.
+pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
     delivery_presence::start();
-    router_for_transport(state, ClientTransportBoundary::Unix)
-}
-
-/// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
-/// into this router: real native custody controls and the daemon use `router`.
-#[cfg(feature = "test-support")]
-pub fn admitted_mailbox_protocol_router(state: AppState) -> Router {
-    Router::new()
-        .route("/v1/mailbox/bind", post(mailbox::bind_admitted_fixture))
-        .route("/v1/mailbox", get(mailbox::subscribe_admitted_fixture))
-        .fallback_service(router(state.clone()))
-        .with_state(state)
-}
-
-/// Synthetic private-store transport controls; never physical native admission.
-#[cfg(feature = "test-support")]
-pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
-    assert!(subject.starts_with("agent/example/"));
-    admitted_mailbox_protocol_router(state).layer(Extension(NativeDeliveryPeer {
-        agent: subject.into(),
-        transport: "omp-channel",
-        pid: std::process::id(),
-        archives_inbox: false,
-    }))
+    router_for_transport(state, ClientTransportBoundary::Unix, families)
 }
 
 /// Build the loopback-only client gateway. Unlike the local Unix boundary, every ordinary
 /// client request on this router requires a paired bearer credential.
 pub fn fabric_router(state: AppState) -> Router {
-    router_for_transport(state, ClientTransportBoundary::FabricLoopback)
+    fabric_router_with(state, &[])
 }
 
-fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> Router {
+/// [`fabric_router`] with the route families of the crates above.
+pub fn fabric_router_with(state: AppState, families: &[RouteFamily]) -> Router {
+    router_for_transport(state, ClientTransportBoundary::FabricLoopback, families)
+}
+
+fn router_for_transport(state: AppState, transport: ClientTransportBoundary, families: &[RouteFamily]) -> Router {
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -794,13 +784,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
-        .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
         .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
-        .route("/v1/mailbox/bind", post(mailbox::bind))
-        .route("/v1/mailbox/attachment", get(mailbox::attachment))
-        .route("/v1/mailbox/receipts", post(mailbox::receipt))
         .route("/v1/messages/{message_id}/claims", post(messages::post_message_claim))
         .route("/v1/messages/read/{*subject}", get(messages::read_message))
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
@@ -959,6 +945,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             "/v1/hosts/{host}/agent-workspace",
             get(host_agent_workspace),
         );
+    let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
             (state.clone(), transport),
@@ -978,7 +965,7 @@ async fn schema() -> Json<Value> {
     }))
 }
 
-async fn response_envelope(
+pub async fn response_envelope(
     State(state): State<(AppState, ClientTransportBoundary)>,
     request: Request<Body>,
     next: Next,
@@ -1629,7 +1616,7 @@ pub fn set_client_clock_skew_ms(skew_ms: u64) {
     CLIENT_CLOCK_SKEW_MS.store(skew_ms, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn client_now_ms() -> u128 {
+pub fn client_now_ms() -> u128 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -5738,7 +5725,7 @@ where
     .map_err(ApiError::internal)
 }
 
-async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
+pub async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, St3Error> + Send + 'static,
@@ -6292,11 +6279,11 @@ fn harness_ancestor(_pid: u32) -> Option<String> {
 }
 
 #[derive(Clone)]
-struct NativeDeliveryPeer {
-    agent: String,
-    transport: &'static str,
-    pid: u32,
-    archives_inbox: bool,
+pub struct NativeDeliveryPeer {
+    pub agent: String,
+    pub transport: &'static str,
+    pub pid: u32,
+    pub archives_inbox: bool,
 }
 
 fn native_delivery_peer(pid: u32) -> Option<NativeDeliveryPeer> {
@@ -6372,7 +6359,7 @@ fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
+pub fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     let split = |bytes: Vec<u8>| {
         bytes
             .split(|byte| *byte == 0)
@@ -6387,7 +6374,7 @@ fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
 }
 
 #[cfg(target_os = "macos")]
-fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
+pub fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     let mut mib = [
         libc::CTL_KERN,
         libc::KERN_PROCARGS2,
@@ -6444,7 +6431,7 @@ fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn local_process_arguments(_pid: u32) -> Option<(Vec<String>, Vec<String>)> {
+pub fn local_process_arguments(_pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     None
 }
 
@@ -8692,7 +8679,7 @@ pub fn request_resume(
     Ok(claim)
 }
 
-async fn apply(
+pub async fn apply(
     State(state): State<AppState>,
     Json(request): Json<ApplyRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
@@ -8908,7 +8895,7 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
 }
 
 #[derive(Deserialize)]
-struct SloHistoryQuery {
+pub struct SloHistoryQuery {
     id: String,
     since_ms: Option<u64>,
     until_ms: Option<u64>,
@@ -9448,16 +9435,16 @@ fn settle_answered_message(
 }
 
 #[derive(Deserialize)]
-struct MessagesQuery {
-    to: Option<String>,
+pub struct MessagesQuery {
+    pub to: Option<String>,
     #[serde(default)]
-    include_closed: bool,
+    pub include_closed: bool,
 }
 
 /// One message as it is read, with who signed it when a person wrote it (see
 /// `client_v0::message_provenance`).
 #[derive(Serialize)]
-struct MessageRead {
+pub struct MessageRead {
     #[serde(flatten)]
     message: MessageView,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -9473,7 +9460,7 @@ fn message_subject(value: &str) -> String {
 }
 
 #[derive(Deserialize)]
-struct EventQuery {
+pub struct EventQuery {
     #[serde(default, alias = "after_index")]
     after: u64,
     subject: Option<String>,
@@ -9830,7 +9817,7 @@ async fn cancel_revision_proposal(
 }
 
 #[derive(Deserialize)]
-struct WorkQuery {
+pub struct WorkQuery {
     actor: Option<String>,
     #[serde(default)]
     include_terminal: bool,
@@ -9887,7 +9874,7 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
 /// The process at the other end of a local socket connection, as the kernel reports it, and
 /// the agent its ancestry names.
 #[derive(Clone, Debug)]
-struct LocalPeer {
+pub struct LocalPeer {
     pid: u32,
     ancestor: Option<String>,
 }
@@ -9989,7 +9976,7 @@ async fn work_action_response(
 }
 
 #[derive(Clone, Debug)]
-struct LiveSession {
+pub struct LiveSession {
     runtime_id: String,
     incarnation_id: String,
     owner_host_id: String,
@@ -10455,8 +10442,15 @@ fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared;
 
 #[cfg(test)]
 mod work_incarnation_tests;
 #[cfg(test)]
 mod message_bodies_tests;
+
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod mailbox_tests_shared;
+
