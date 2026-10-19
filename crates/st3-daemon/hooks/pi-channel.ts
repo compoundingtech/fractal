@@ -29,16 +29,13 @@ const legacyName = (name: string) => name.replace(/^ST3?_/, "ST2_");
 const readEnv = (name: string, identity = false) => {
   const preferred = preferredName(name);
   const value = process.env[preferred];
-  if (identity && value) {
-    const conflict = [name, legacyName(name)].find(
-      (legacy) => process.env[legacy] !== undefined && process.env[legacy] !== value,
-    );
-    if (conflict) {
-      console.error(`Conflicting identity environment variables: ${preferred} and ${conflict}`);
-      return undefined;
-    }
+  const legacy = process.env[name] !== undefined ? name : legacyName(name);
+  const legacyValue = process.env[legacy];
+  if (identity && value && legacyValue !== undefined && legacyValue !== value) {
+    console.error(`Conflicting identity environment variables: ${preferred} and ${legacy}`);
+    return undefined;
   }
-  return value ?? process.env[name] ?? process.env[legacyName(name)];
+  return value ?? legacyValue;
 };
 const removeEnv = (name: string) => {
   delete process.env[preferredName(name)];

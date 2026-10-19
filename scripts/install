@@ -30,12 +30,12 @@ if [[ -n $instance ]]; then
     echo "install: an instance name is lowercase letters, digits and single hyphens, at most 24 characters" >&2
     exit 2
   }
-# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  export FRACTAL_INSTANCE=$instance ST_INSTANCE=$instance
   # A named instance installs below its own directory unless told otherwise.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   [[ -n $bin_dir ]] || bin_dir=${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.st-instance/$instance/bin}}
 fi
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — normalize shared installs too.
+export FRACTAL_INSTANCE=$instance ST_INSTANCE=$instance
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 bin_dir=${bin_dir:-${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}}
 

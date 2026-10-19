@@ -75,12 +75,13 @@ printf '#!/bin/sh\necho Darwin\n' > "$work/platform-bin/uname"
 cat > "$work/package/install-macos.py" <<'PY'
 import os
 import sys
+assert os.environ.get('FRACTAL_INSTANCE') == os.environ.get('ST_INSTANCE') == ''
 if os.environ.get('INSTALL_HELPER_FAIL'):
     print('helper failure', file=sys.stderr)
     raise SystemExit(1)
 print('app receipt')
 PY
-"$work/package/install.sh" --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
+FRACTAL_INSTANCE= ST_INSTANCE=masked-old "$work/package/install.sh" --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
 test ! -s "$work/quiet.out"
 test ! -s "$work/quiet.err"
 "$work/package/install.sh" --bin-dir "$work/installed" > "$work/notices.out"

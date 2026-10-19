@@ -28,16 +28,13 @@ const legacyName = (name: string) => name.replace(/^ST3?_/, "ST2_");
 const readEnv = (name: string, identity = false) => {
   const preferred = preferredName(name);
   const value = process.env[preferred];
-  if (identity && value) {
-    const conflict = [name, legacyName(name)].find(
-      (legacy) => process.env[legacy] !== undefined && process.env[legacy] !== value,
-    );
-    if (conflict) {
-      console.error(`Conflicting identity environment variables: ${preferred} and ${conflict}`);
-      return undefined;
-    }
+  const legacy = process.env[name] !== undefined ? name : legacyName(name);
+  const legacyValue = process.env[legacy];
+  if (identity && value && legacyValue !== undefined && legacyValue !== value) {
+    console.error(`Conflicting identity environment variables: ${preferred} and ${legacy}`);
+    return undefined;
   }
-  return value ?? process.env[name] ?? process.env[legacyName(name)];
+  return value ?? legacyValue;
 };
 const removeEnv = (name: string) => {
   delete process.env[preferredName(name)];
@@ -425,7 +422,7 @@ const stash = (): Stash => {
       runtimeId: readEnv(RUNTIME_ID, true),
       session: readEnv(SESSION, true),
       seq: readEnv(SEQ, true),
-      expectedNativeSession: readEnv(EXPECTED_NATIVE_SESSION),
+      expectedNativeSession: readEnv(EXPECTED_NATIVE_SESSION, true),
       resumeGeneration: readEnv(RESUME_GENERATION, true),
     };
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf

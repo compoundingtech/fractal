@@ -20,8 +20,9 @@ for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
   if (harness === "omp") Object.assign(fields, { EXPECTED_NATIVE_SESSION: "expectedNativeSession", RESUME_GENERATION: "resumeGeneration" });
   const constants = Object.keys(fields).map(name => `const ${name} = ${JSON.stringify(prefix + name)};`).join("\n");
   const bridge = file === "st-omp" ? 'const PENDING_ASK = "ST3_OMP_PENDING_ASK";' : "";
-  const identityFields = new Set(["IDENTITY", "RUNTIME_ID", "SESSION", "SEQ", "RESUME_GENERATION"]);
-  const modes = ["unset", "preferred", "current", "legacy", "equal", "conflict", "legacy-empty", "empty", "current-empty", "reload"];
+  const identityFields = new Set(["IDENTITY", "RUNTIME_ID", "SESSION", "SEQ", "EXPECTED_NATIVE_SESSION", "RESUME_GENERATION"].filter(suffix => suffix in fields));
+  const modes = ["unset", "preferred", "current", "legacy", "equal", "conflict", "legacy-conflict", "legacy-empty", "empty", "current-empty", "reload"];
+  if (harness === "omp") modes.push("expected-session-conflict");
   if (!file.startsWith("st-")) modes.push("reload-legacy");
   for (const mode of modes) {
     const env = {};
@@ -29,9 +30,13 @@ for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
     const context = vm.createContext({ process: { env }, console: { error: message => reports.push(message) } });
     vm.runInContext(`${helpers}\n${constants}\n${bridge}\n${stashSource}\nglobalThis.contract = { readEnv, removeEnv, writeEnv, stash };`, context);
     for (const suffix of Object.keys(fields)) {
-      if (["preferred", "equal", "conflict", "legacy-empty", "empty"].includes(mode)) env[preferred + suffix] = mode === "empty" ? "" : "preferred-value";
+      if (["preferred", "equal", "conflict", "legacy-conflict", "legacy-empty", "empty"].includes(mode)) env[preferred + suffix] = mode === "empty" ? "" : "preferred-value";
       if (["current", "equal", "conflict", "legacy-empty", "empty", "current-empty"].includes(mode)) env[prefix + suffix] = mode === "equal" ? "preferred-value" : ["legacy-empty", "current-empty"].includes(mode) ? "" : "current-value";
-      if (["legacy", "current-empty", "empty"].includes(mode)) env[old + suffix] = "legacy-value";
+      if (["legacy", "equal", "legacy-conflict", "current-empty", "empty"].includes(mode)) env[old + suffix] = "legacy-value";
+      if (mode === "expected-session-conflict" && suffix === "EXPECTED_NATIVE_SESSION") {
+        env[preferred + suffix] = "preferred-value";
+        env[prefix + suffix] = "current-value";
+      }
     }
     const held = Object.fromEntries(Object.values(fields).map(field => [field, "retained"]));
     const stashKey = harness === "omp" ? "__stOmpChannel" : "__stPiChannel";
@@ -44,17 +49,19 @@ for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
     for (const [suffix, field] of Object.entries(fields)) {
       let expected;
       if (mode.startsWith("reload")) expected = "retained";
-      else if (["preferred", "equal", "conflict", "legacy-empty"].includes(mode)) expected = ["conflict", "legacy-empty"].includes(mode) && identityFields.has(suffix) ? undefined : "preferred-value";
+      else if (["preferred", "equal", "conflict", "legacy-conflict", "legacy-empty"].includes(mode)) expected = ["conflict", "legacy-conflict", "legacy-empty"].includes(mode) && identityFields.has(suffix) ? undefined : "preferred-value";
       else if (mode === "current") expected = "current-value";
       else if (mode === "legacy") expected = "legacy-value";
       else if (["empty", "current-empty"].includes(mode)) expected = "";
       assert.equal(state[field], expected, `${file} ${mode} ${field}`);
       for (const name of [preferred + suffix, prefix + suffix, old + suffix]) assert.equal(env[name], undefined, `${file} ${mode} clears ${name}`);
     }
-    assert.equal(reports.length, ["conflict", "legacy-empty"].includes(mode) ? identityFields.size - (harness === "pi" ? 1 : 0) : 0, `${file} ${mode} conflict count`);
+    const conflictCount = ["conflict", "legacy-conflict", "legacy-empty"].includes(mode) ? identityFields.size : mode === "expected-session-conflict" ? 1 : 0;
+    assert.equal(reports.length, conflictCount, `${file} ${mode} conflict count`);
     for (const report of reports) {
-      assert.ok(report.includes("FRACTAL_") && report.includes("ST_"), "diagnostic names both variables");
-      assert.ok(!report.includes("preferred-value") && !report.includes("current-value"), "diagnostic excludes values");
+      const legacyPrefix = mode === "legacy-conflict" ? old : prefix;
+      assert.ok(report.includes(preferred) && report.includes(legacyPrefix), "diagnostic names preferred and selected legacy variables");
+      assert.ok(!report.includes("preferred-value") && !report.includes("current-value") && !report.includes("legacy-value"), "diagnostic excludes values");
     }
     if (mode.startsWith("reload")) assert.equal(state, held, "reload preserves ownership");
     for (const value of [undefined, "", "owned"]) {
