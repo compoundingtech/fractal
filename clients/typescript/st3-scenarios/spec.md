@@ -777,6 +777,14 @@ collection window, snapshot or sync fields, just like the server's conversation 
 subscription remains registered. HTTP timeline reads for that known session return an empty
 `timeline-page` in the normal fenced envelope; recorded HTTP reconstruction uses the same
 current-roster identity if its thread and explicit recorded session id are absent.
+HTTP timeline selectors are full or prefixless session ids only, never agent ids. Removal
+terminates pending followers through their canonical agent binding, including session selectors.
+An authoritative `replace` event after the empty snapshot retains replacement semantics,
+newest-page slicing and `has_more`; it is not converted to a delta.
+
+Explicit limitation: pending-thread resolution covers running agent runtimes only. The server's
+observed-incarnation owner inventory can also resolve stopped or retired agents; that broader
+subset is not modeled here.
 
 ### Consumer folds
 

@@ -275,7 +275,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       case 'thread-remove': {
         const previous = foldSlice(world.slices.conversation, event.at_ms - 1).state.threads.find((thread) => thread.agent === event.agent)
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
-          if (sub.collection === 'conversation' && (sub.conversation === event.agent || previous !== undefined && followsThread(sub, previous))) refuse(connection, sub, 'not-found', false)
+          if (sub.collection === 'conversation' && (sub.threadAgent === event.agent || sub.conversation === event.agent || previous !== undefined && followsThread(sub, previous))) refuse(connection, sub, 'not-found', false)
         }
         return
       }
@@ -297,13 +297,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         if (thread === undefined) return
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
           if (!sub.ready || sub.collection !== 'conversation' || !followsThread(sub, thread)) continue
-          if (sub.threadState === 'pending') {
-            if (event.items.length === 0) continue
-            sub.threadState = 'present'
-            emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation',
-              session_id: thread.session_id, replace: false, items: event.items })
-            continue
-          }
+          sub.threadState = 'present'
           emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: thread.session_id,
             replace: event._tag === 'replace', items: event._tag === 'replace' ? thread.items.slice(-thread.page_size) : event.items,
             ...(event._tag === 'replace' ? { has_more: thread.has_more || thread.items.length > thread.page_size } : {}) })
@@ -613,7 +607,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       const session = parts[1]
       const thread = state('conversation').threads.find((thread) => thread.session_id === session || thread.session_id.replace(/^session\//, '') === session)
       if (thread === undefined) {
-        const pending = pendingConversation(session)
+        const pending = session?.startsWith('agent/') ? undefined : pendingConversation(session)
         if (pending === undefined) return json(errorEnvelope('not-found', 'Session not found'), 404)
         const value: TimelinePage = { kind: 'timeline-page', session_id: pending.session_id, items: [], page: pageInfo(0, 0) }
         return json(envelope(value))

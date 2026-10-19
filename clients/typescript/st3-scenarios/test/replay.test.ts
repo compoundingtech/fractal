@@ -156,8 +156,8 @@ describe('conversation dispatch and consumer fold', () => {
     expect(errors(h.frames)).toEqual([])
     const frames = h.frames.filter((frame): frame is Extract<CollectionFrame, { kind: 'conversation' }> => frame.kind === 'conversation' && frame.id === 'agent')
     expect(frames.length).toBeGreaterThan(1)
-    expect(frames[1]).toMatchObject({ replace: false })
-    expect(frames[1]).not.toHaveProperty('has_more')
+    expect(frames[1]).toMatchObject({ replace: source === 'recorded' })
+    if (source === 'synthetic') expect(frames[1]).not.toHaveProperty('has_more')
     for (const id of ['session', 'short']) {
       expect(h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === id)).toHaveLength(frames.length)
     }
@@ -169,6 +169,64 @@ describe('conversation dispatch and consumer fold', () => {
     expect(conversation?.entries).toEqual(expected.items.filter(isConversational).sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence))
     h.clock.advance(11_000)
     if (source === 'synthetic') expect(h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === 'agent').length).toBeGreaterThan(frames.length)
+  })
+
+  it('terminates pending session followers on removal before creation', async () => {
+    const world = base()
+    const thread = world.slices.conversation.state.threads[0]!
+    const h = setup(world.with({ conversation: { ...world.slices.conversation, state: { threads: [] }, timeline: [
+      { _tag: 'thread-remove', at_ms: 1_000, store: 0, agent: thread.agent },
+      { _tag: 'thread-create', at_ms: 2_000, store: 0, thread },
+    ] } }))
+    const stream = await h.connect()
+    stream.subscribeConversation('session', thread.session_id)
+    stream.subscribeConversation('short', thread.session_id.replace(/^session\//, ''))
+    h.clock.advance(0)
+    expect(h.frames).toHaveLength(2)
+    h.clock.advance(1_000)
+    expect(errors(h.frames)).toMatchObject([
+      { id: 'session', code: 'not-found', retryable: false },
+      { id: 'short', code: 'not-found', retryable: false },
+    ])
+    h.clock.advance(1_000)
+    expect(h.frames).toHaveLength(4)
+  })
+
+  it('accepts only session selectors on the HTTP timeline route before and after creation', async () => {
+    const h = setup(buildWorld(syntheticFirstRunOnboarding, genericVariants, ANCHOR_MS))
+    const member = h.world.cast.agents[0]!
+    h.clock.advance(3_000)
+    for (const advance of [0, 2_000]) {
+      h.clock.advance(advance)
+      for (const session of [member.session, member.session.replace(/^session\//, '')]) {
+        expect((await h.client.timelineList(session)).value.session_id).toBe(member.session)
+      }
+      const response = await h.replay.fetch(`http://scenario.invalid/v1/client/sessions/${encodeURIComponent(member.id)}/timeline`)
+      expect(response.status).toBe(404)
+    }
+  })
+
+  it('preserves the first authoritative replacement page after an empty pending snapshot', async () => {
+    const world = base()
+    const thread = world.slices.conversation.state.threads[0]!
+    const items = thread.items.slice(0, 3)
+    expect(items).toHaveLength(3)
+    const h = setup(world.with({ conversation: { ...world.slices.conversation, state: { threads: [] }, timeline: [
+      { _tag: 'thread-create', at_ms: 1_000, store: 0, thread: { ...thread, items: [], page_size: 2, has_more: false } },
+      { _tag: 'replace', at_ms: 2_000, store: 0, agent: thread.agent, session_id: thread.session_id, items, has_more: true },
+    ] } }))
+    const stream = await h.connect()
+    stream.subscribeConversation('page', thread.agent)
+    h.clock.advance(0)
+    expect(h.frames[0]).toMatchObject({ kind: 'conversation', replace: true, items: [], has_more: false })
+    h.clock.advance(2_000)
+    const frame = h.frames.at(-1)
+    expect(frame).toMatchObject({ kind: 'conversation', replace: true, items: items.slice(-2), has_more: true })
+    if (frame?.kind !== 'conversation') throw new Error('Missing replacement page')
+    const conversation = applyConversation<TimelineEntry>(undefined, {
+      replace: frame.replace, items: frame.items, hasMore: frame.has_more ?? false, sessionId: frame.session_id,
+    })
+    expect(conversation.hasOlder).toBe(true)
   })
 
   it('does not resolve future or unknown agents and sessions from the cast or timeline', async () => {
