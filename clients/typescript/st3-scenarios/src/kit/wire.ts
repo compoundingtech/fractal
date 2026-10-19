@@ -3,6 +3,7 @@ import type { AnySlice } from './slice.ts'
 /** Client-v0 schema definition names that slices carry. */
 export type WireDefinition =
   | 'Agent'
+  | 'Arrangement'
   | 'Runtime'
   | 'Machine'
   | 'Mission'
@@ -35,6 +36,7 @@ export const wireValues = (slice: AnySlice): WireValue[] => {
   switch (slice.kind) {
     case 'roster':
       list('/state/agents', slice.state.agents, 'Agent')
+      list('/state/arrangements', slice.state.arrangements ?? [], 'Arrangement')
       list('/state/resources', slice.state.resources ?? [], 'Resource')
       list('/state/runtimes', slice.state.runtimes, 'Runtime')
       list('/state/machines', slice.state.machines, 'Machine')

@@ -1,5 +1,5 @@
 import type {
-  ActionRequest, ActionResult, CollectionName, CollectionSocket, CollectionSocketFactory,
+  ActionRequest, ActionResult, ArrangementPage, CollectionName, CollectionSocket, CollectionSocketFactory,
   ErrorCode, ErrorEnvelope, Operation, Snapshot, SyncNotice,
   TerminalAttachment, TimelinePage,
 } from '@smalltalk/st3-client'
@@ -24,7 +24,7 @@ export interface Replay {
   readonly close: () => void
 }
 
-type Filters = { status?: string; actor?: string; person?: string; owner?: string; state?: string }
+type Filters = { status?: string; actor?: string; person?: string; subject?: string; owner?: string; state?: string }
 type Subscription = {
   id: string
   collection: CollectionName | 'conversation' | 'terminal' | 'terminals'
@@ -42,7 +42,7 @@ type Subscription = {
 type Connection = { socket: CollectionSocket; open: boolean; closed: boolean; subscriptions: Map<string, Subscription>; legacy: boolean; recorded_socket_id?: string }
 const collectionKind = (collection: string): SliceKind | undefined => {
   switch (collection) {
-    case 'agents': case 'runtimes': case 'machines': return 'roster'
+    case 'agents': case 'runtimes': case 'machines': case 'arrangements': return 'roster'
     case 'missions': case 'work': return 'details'
     case 'attention': case 'messages': return 'attention'
     case 'conversation': case 'timeline': case 'sessions': return 'conversation'
@@ -60,7 +60,12 @@ const selectorKey = (selector: Selector): string => JSON.stringify(selector)
 const filtered = (items: WireResource[], filters: Filters): WireResource[] => items.filter((item) => {
   if (filters.status !== undefined && (item.kind !== 'agent' || !('state' in item) || item.state !== filters.status)) return false
   if (filters.actor !== undefined && (item.kind !== 'work' || (!('assigned_to' in item) || item.assigned_to !== filters.actor) && (!('claimant' in item) || item.claimant !== filters.actor))) return false
-  if (filters.person !== undefined && (item.kind !== 'attention' || !('person_id' in item) || item.person_id !== filters.person)) return false
+  if (filters.person !== undefined) {
+    if (item.kind === 'arrangement') {
+      if (!('owner' in item) || item.owner !== filters.person) return false
+    } else if (item.kind !== 'attention' || !('person_id' in item) || item.person_id !== filters.person) return false
+  }
+  if (filters.subject !== undefined && item.id !== filters.subject) return false
   if (filters.owner !== undefined && (item.kind !== 'runtime' || !('owner_id' in item) || item.owner_id !== filters.owner)) return false
   if (filters.state !== undefined && (!('state' in item) || item.state !== filters.state)) return false
   return true
@@ -117,6 +122,21 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: `request/scenario-${++request}`,
     code, message, retryable, details: {},
   })
+  const arrangementRefusal = (person: string | undefined, subject?: string): { code: ErrorCode; message: string; status: number } | undefined => {
+    const capabilities = state('sync').capabilities?.capabilities
+    if (!capabilities?.some((capability) => capability.id === 'read.arrangements' && capability.state === 'granted')) {
+      return { code: 'forbidden', message: 'the authenticated client session is not granted `read.arrangements`', status: 403 }
+    }
+    if (person === undefined) return { code: 'validation-failed', message: 'arrangements require an explicit person/NAME owner', status: 400 }
+    if (!/^person\/[^/\s]+$/.test(person)) return { code: 'validation-failed', message: 'arrangement owner must be person/NAME', status: 400 }
+    if (subject !== undefined) {
+      if (!/^arrangement\/person\/[^/\s]+\/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(subject)) {
+        return { code: 'validation-failed', message: 'invalid arrangement subject', status: 400 }
+      }
+      if (!subject.startsWith(`arrangement/${person}/`)) return { code: 'validation-failed', message: 'selected arrangement owner must match person', status: 400 }
+    }
+    return undefined
+  }
   const rows = (collection: string): WireResource[] => {
     switch (collection) {
       case 'agents': {
@@ -127,6 +147,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       case 'runtimes': return [...state('roster').runtimes, ...state('terminal').terminals.map((terminal) => terminal.runtime)]
       case 'terminals': return state('terminal').terminals.map((terminal) => terminal.runtime)
       case 'machines': return state('roster').machines
+      case 'arrangements': return state('roster').arrangements ?? []
       case 'missions': return [...state('details').missions, ...(state('details').resources ?? [])]
       case 'work': return state('details').work
       case 'attention': return [...state('attention').attention, ...(state('attention').resources ?? [])]
@@ -164,6 +185,18 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     if ([...held].some((key) => matches(sub, JSON.parse(key) as Selector))) return
     sub.ready = true
     if (kind !== undefined) consumed.add(kind)
+    if (sub.collection === 'arrangements') {
+      const refusal = arrangementRefusal(sub.filters.person, sub.filters.subject)
+      if (refusal !== undefined) {
+        emit(connection, { kind: 'error', id: sub.id, collection: sub.collection, code: refusal.code, message: refusal.message, retryable: false })
+        connection.subscriptions.delete(sub.id)
+        return
+      }
+      const window = windowOf(sub)
+      sub.window = window
+      emit(connection, { kind: 'snapshot', id: sub.id, collection: sub.collection, snapshot: fence(), ...window, order: window.items.map((item) => item.id) })
+      return
+    }
     if (world.recording !== undefined) {
       if (sub.collection === 'terminal') {
         const terminal = state('terminal').terminals.find((item) => item.terminal === sub.terminal)
@@ -252,7 +285,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       }
       case 'changes':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
-          if (!sub.ready || collectionKind(sub.collection) !== kind || sub.window === undefined) continue
+          if (!sub.ready || sub.collection === 'arrangements' || collectionKind(sub.collection) !== kind || sub.window === undefined) continue
           const previous = sub.window
           const next = windowOf(sub)
           if (equal(previous, next)) continue
@@ -414,7 +447,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         if (collection !== 'agents' && collection !== 'terminals' && collection !== 'missions' && collection !== 'work' && collection !== 'attention' && collection !== 'conversation' && collection !== 'terminal' && collection !== 'glasses' && collection !== 'arrangements') return
         const sub: Subscription = { id: command.id, collection, ready: false,
           limit: typeof command.limit === 'number' ? Math.max(1, Math.min(200, Math.trunc(command.limit))) : 100,
-          filters: { status: stringField(command, 'status'), actor: stringField(command, 'actor'), person: stringField(command, 'person') },
+          filters: { status: stringField(command, 'status'), actor: stringField(command, 'actor'), person: stringField(command, 'person'), subject: stringField(command, 'subject') },
           conversation: stringField(command, 'conversation'), terminal: stringField(command, 'terminal'),
           incarnation: stringField(command, 'incarnation'), capability: stringField(command, 'capability') }
         connection.subscriptions.set(sub.id, sub)
@@ -508,7 +541,14 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     const parts = url.pathname.replace(/^\/v1\/client\/?/, '').split('/').map(decodeURIComponent)
     const route = parts[0] ?? ''
     const family = parts.includes('timeline') ? 'timeline' : route
-    if (world.recording !== undefined) {
+    // Arrangements are a synthetic read-only overlay, never attributed to recorded transport.
+    if (route === 'actions' && req.method === 'POST') {
+      const action: unknown = await req.clone().json()
+      if (record(action) && typeof action.type === 'string' && action.type.startsWith('arrangement.')) {
+        return json(errorEnvelope('unsupported-capability', 'Arrangement writes are not supported by replay'), 405)
+      }
+    }
+    if (world.recording !== undefined && route !== 'arrangements' && !(route === 'capabilities' && req.method === 'GET' && state('sync').capabilities !== undefined)) {
       const metadata = world.recording.http.find((entry) => entry.at_ms === offset() && entry.method === req.method &&
         entry.path === url.pathname && entry.query === url.searchParams.toString())
       if (metadata === undefined) throw new Error(`No recorded HTTP transport for ${req.method} ${url.pathname} at ${offset()}`)
@@ -536,6 +576,12 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       if (req.signal.aborted) abort()
     })
     for (const kind of sources) consumed.add(kind)
+    if (route === 'arrangements') {
+      const person = parts.length === 1 ? url.searchParams.get('person') ?? undefined : `person/${parts[1]}`
+      const subject = parts.length === 1 ? undefined : `arrangement/${person}/${parts[2] ?? ''}`
+      const refusal = arrangementRefusal(person, subject)
+      if (refusal !== undefined) return json(errorEnvelope(refusal.code, refusal.message), refusal.status)
+    }
     const capabilities = state('sync').capabilities
     if (capabilities === undefined) throw new Error('Unrecorded replay requires observed capabilities')
     if (route === 'capabilities' && req.method === 'GET') return json(envelope(capabilities))
@@ -572,6 +618,21 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     const start = cursor === null ? 0 : Number(cursor.replace(/^scenario-cursor\//, ''))
     if (!Number.isSafeInteger(start) || start < 0) return json(errorEnvelope('page-cursor-expired', 'Invalid page cursor'), 410)
     const pageInfo = (length: number, next: number) => ({ limit, has_more: next < length, ...(next < length ? { next_cursor: `scenario-cursor/${next}` } : {}) })
+    if (route === 'arrangements') {
+      const person = parts.length === 1 ? url.searchParams.get('person') ?? undefined : `person/${parts[1]}`
+      const subject = parts.length === 1 ? undefined : `arrangement/${person}/${parts[2] ?? ''}`
+      if (subject !== undefined) {
+        const value = parts.length === 3 ? (state('roster').arrangements ?? []).find((item) => item.id === subject && item.owner === person) : undefined
+        return value === undefined ? json(errorEnvelope('not-found', 'the arrangement is absent or retired'), 404) : json(envelope(value))
+      }
+      if (url.searchParams.has('actor') || url.searchParams.get('history') === 'true') {
+        return json(errorEnvelope('validation-failed', 'arrangements select a person and current state only'), 400)
+      }
+      const items = (state('roster').arrangements ?? []).filter((item) => item.owner === person)
+      const value: ArrangementPage = { kind: 'page', collection: 'arrangements', filters: person === undefined ? {} : { person },
+        items: items.slice(start, start + limit), page: pageInfo(items.length, start + limit), ...(sync === undefined ? {} : { sync }) }
+      return json(envelope(value))
+    }
     if (family === 'timeline') {
       const session = parts[1]
       const thread = state('conversation').threads.find((thread) => thread.session_id === session || thread.session_id.replace(/^session\//, '') === session)

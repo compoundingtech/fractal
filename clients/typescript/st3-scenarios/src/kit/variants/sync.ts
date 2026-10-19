@@ -135,6 +135,21 @@ export const syncVariants: VariantTable['sync'] = {
       { surface: `terminal:${base.terminal.state.terminals[0]?.terminal ?? 'attach'}`, at_ms: 0, status: { _tag: 'Failed', cause: { _tag: 'Local', kind: 'unsupported' } }, compare: 'shape' },
     ] },
   }),
+  'arrangements-absent': (ctx, base) => {
+    const live = liveSync(ctx, base)
+    return {
+      ...live,
+      variant: 'arrangements-absent',
+      state: {
+        ...live.state,
+        capabilities: {
+          ...live.state.capabilities,
+          capabilities: live.state.capabilities.capabilities.map((row) =>
+            row.id === 'arrangements' ? { ...row, state: 'ungranted' } : row),
+        },
+      },
+    }
+  },
   'rate-limited': (ctx, base) => httpFailure(ctx, base, 'rate-limited', 'resources', 429, 'Too many resource list requests'),
   'cursor-gap': (ctx, base) => httpFailure(ctx, base, 'cursor-gap', 'events', 409, 'The event cursor is outside retained history'),
   'page-cursor-expired': (ctx, base) => httpFailure(ctx, base, 'page-cursor-expired', 'timeline', 410, 'The older page cursor has expired'),

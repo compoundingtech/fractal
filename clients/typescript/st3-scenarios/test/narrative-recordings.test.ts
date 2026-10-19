@@ -49,7 +49,7 @@ describe('narrative recording inputs', () => {
       (row.receive_ms >= 0 || row.socket_id === baselineSocket))
     const sockets = new Set(replacements.map((row) => row.socket_id))
     expect(sockets.size).toBe(4)
-    expect(catalog).toHaveLength(24)
+    expect(catalog).toHaveLength(25)
   })
 
   it('retains the forty-minute hunt, rejected hypotheses and real older-page walk', () => {
