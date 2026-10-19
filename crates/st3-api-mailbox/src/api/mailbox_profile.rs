@@ -1,11 +1,13 @@
-//! Repeatable before/after fixture: real WAL store and Unix WebSockets, separate load process.
-//! Run this ignored test alone with --nocapture; ST_MAILBOX_PROFILE_DIR retains raw evidence.
+//! The part of `api::mailbox::profile` that moved up from st3-api.
+#![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::client::Client;
 use tokio_tungstenite::tungstenite::Message;
 
 const SEATS: usize = 128;
+
 const WRITES: usize = 3_000;
+
 const TEST: &str = "api::mailbox::profile::many_streams";
 
 fn claim(subject: String, kind: &str, fields: Value) -> ClaimInput {
@@ -34,7 +36,7 @@ fn cpu_ms() -> f64 {
 
 async fn daemon(root: &Path) {
     crate::profile::init_from_env();
-    let mut state = super::super::tests::state(root);
+    let mut state = crate::api::tests_shared::state(root);
     state.store = Arc::new(Store::open(&root.join("graph.db"), "fixture-host").unwrap());
     for seat in 0..SEATS {
         let subject = format!("agent/fixture-{seat}");
@@ -125,6 +127,7 @@ async fn daemon(root: &Path) {
 }
 
 struct Child(std::process::Child);
+
 impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
