@@ -991,8 +991,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
         if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Isolate test home and XDG state
@@ -1122,8 +1120,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Materialize megarepo members
@@ -1306,8 +1302,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -1460,8 +1454,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -1642,8 +1634,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -1821,8 +1811,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -2000,8 +1988,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -2193,8 +2179,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -2390,8 +2374,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -2573,8 +2555,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
         if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
       - name: Isolate test home and XDG state
@@ -2994,8 +2974,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
       - name: Isolate test home and XDG state
         run: |
@@ -3139,8 +3117,6 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
-            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
-            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
         if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
       - name: Isolate test home and XDG state

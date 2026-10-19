@@ -1,3 +1,4 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -71,7 +72,7 @@ fi`,
   ],
 })
 
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
@@ -170,4 +171,4 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       before: [perfStoresCache('cost')],
     }),
   },
-}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."}))
+}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
