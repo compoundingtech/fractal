@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
-run_tag="mission-run:$ST_MISSION_RUN"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+run_tag="mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
 latest_critique=0
 
 for recipient in fd.a fd.b fd.c; do
-  recipient_agent="agent/$ST_MISSION_RUN/$recipient"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  recipient_agent="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$recipient"
   inbox="$(st3 conversations ls "$recipient_agent" --json)"
   archive="$(st3 conversations ls "$recipient_agent" --archive --json)"
   messages="$(jq -s 'add | unique_by(.subject)' <(printf '%s' "$inbox") <(printf '%s' "$archive"))"
-  critiques="$(jq --arg recipient "$recipient_agent" --arg prefix "agent/$ST_MISSION_RUN/fd." --arg run_tag "$run_tag" '
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  critiques="$(jq --arg recipient "$recipient_agent" --arg prefix "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/fd." --arg run_tag "$run_tag" '
     [.[] | select(
       (.from | startswith($prefix))
       and .from != $recipient
@@ -27,7 +32,8 @@ done
 requester_inbox="$(st3 conversations ls person/eval-requester --json)"
 requester_archive="$(st3 conversations ls person/eval-requester --archive --json)"
 requester_messages="$(jq -s 'add | unique_by(.subject)' <(printf '%s' "$requester_inbox") <(printf '%s' "$requester_archive"))"
-recommendations="$(jq --arg run_tag "$run_tag" --arg sup "agent/$ST_MISSION_RUN/fd.sup" '
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+recommendations="$(jq --arg run_tag "$run_tag" --arg sup "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/fd.sup" '
   [.[] | select(.from == $sup and (.tags | index($run_tag)))]' <<<"$requester_messages")"
 
 test "$(jq 'length' <<<"$recommendations")" -eq 1

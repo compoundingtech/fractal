@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+# Identity conflicts never select either alias; diagnostics contain names only.
+for fractal_legacy in ST_AGENT; do
+  fractal_preferred=FRACTAL_${fractal_legacy#*_}
+  eval 'fractal_new_set=${'"$fractal_preferred"'+x}; fractal_new=${'"$fractal_preferred"'-}; fractal_old_set=${'"$fractal_legacy"'+x}; fractal_old=${'"$fractal_legacy"'-}'
+  if [ "$fractal_new_set" = x ] && [ -n "$fractal_new" ] && [ "$fractal_old_set" = x ] && [ "$fractal_new" != "$fractal_old" ]; then
+    printf 'conflicting identity environment: %s and %s\n' "$fractal_preferred" "$fractal_legacy" >&2
+    unset "$fractal_preferred" "$fractal_legacy"
+    return 1 2>/dev/null || exit 1
+  fi
+done
+unset fractal_legacy fractal_preferred fractal_new_set fractal_new fractal_old_set fractal_old
+
 # Prove, with a live Codex seat, that a saved thread resumes under the managed minimal profile and
 # keeps its access: after an `agents restart` the same thread still reaches the st daemon socket and
 # the network, and is still refused a write outside its workspace.
@@ -14,7 +27,7 @@
 set -Eeuo pipefail
 
 # A seat running this must not act as itself against the throwaway daemon.
-unset ST_AGENT ST3_INCARNATION ST_MISSION_RUN ST3_ENDPOINT ST_HOOKS
+unset FRACTAL_AGENT ST_AGENT FRACTAL_INCARNATION ST3_INCARNATION FRACTAL_MISSION_RUN ST_MISSION_RUN FRACTAL_ENDPOINT ST3_ENDPOINT FRACTAL_HOOKS ST_HOOKS
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -49,7 +62,8 @@ for _ in $(seq 1 150); do
   sleep 0.2
 done
 [[ -S "$root/st3.sock" ]] || { echo "the daemon did not open its socket" >&2; exit 1; }
-export ST3_ENDPOINT="$root/st3.sock"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_ENDPOINT="$root/st3.sock" ST3_ENDPOINT="$root/st3.sock"
 st="$root/bin/st3"
 operator=person/eval-operator
 seat=agent/resume-check/worker
