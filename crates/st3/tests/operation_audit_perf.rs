@@ -163,6 +163,11 @@ fn measure(path: &Path, audit: &str) -> Value {
         ])
         .env(CHILD_STORE, path)
         .env(CHILD_AUDIT, audit)
+        // The peak resident set would also count the store pages a reader maps, which are the
+        // kernel's reclaimable file cache, not memory the audit holds. The kernel keeps no peak
+        // of anonymous memory alone, so measure with mapping off: the audit's own allocations
+        // are the same either way, only where SQLite finds page bytes differs.
+        .env("SMALLCLAIMS_READ_MMAP_MIB", "0")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

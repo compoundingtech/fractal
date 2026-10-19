@@ -1,10 +1,10 @@
 //! Helpers the moved tests share (copies of the store tests' own).
 #![allow(unused_imports, dead_code)]
 
-use st3_store::store::*;
+use crate::store::*;
 use crate::model::*;
 use crate::store::Store;
-use st3_store::store::runtime;
+use crate::store::runtime;
 
 pub const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
