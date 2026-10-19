@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
+    assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
+    let cli = Cli::try_parse_from([
+        "st", "store", "prepare-indexes", "--store", "/private/claims.sqlite3",
+    ]).unwrap();
+    assert!(matches!(cli.command, Command::Store {
+        command: StoreCommand::PrepareIndexes { store },
+    } if store == std::path::Path::new("/private/claims.sqlite3")));
+    assert!(!cli_help::root_help(false).contains("prepare-indexes"));
+    assert!(cli_help::root_help(false).contains("store"));
+    let mut command = Cli::command();
+    let store = command.find_subcommand_mut("store").unwrap();
+    assert!(store.render_help().to_string().contains("prepare-indexes"));
+}
+
+#[test]
 fn cli_environment_aliases_are_normalized_before_parsing() {
     const CHILD: &str = "ST_TEST_CLI_ENV_CHILD";
     if let Ok(case) = std::env::var(CHILD) {

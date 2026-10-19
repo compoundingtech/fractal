@@ -92,6 +92,7 @@ pub enum ErrorCode {
     CursorGap,
     PageCursorExpired,
     AgentRosterCutNotReady,
+    MessageSelectorsNotReady,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,
