@@ -823,7 +823,7 @@ mod tests {
             self.check(subject);
             claim
         }
-        fn capture(&self, claim: &ClaimRecord) {
+        pub fn capture(&self, claim: &ClaimRecord) {
             let mut connection = self.store.connection.write();
             let tx = connection.transaction().unwrap();
             self.capture_tx(&tx, claim);

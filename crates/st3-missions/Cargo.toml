@@ -11,6 +11,8 @@ test-support = ["st3-delivery/test-support"]
 
 [dependencies]
 st3-delivery = { path = "../st3-delivery" }
+# Shared test modules of the store are named by their own path.
+st3-store = { path = "../st3-store" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 flate2 = "1"

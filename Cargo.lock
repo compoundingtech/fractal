@@ -5208,6 +5208,7 @@ dependencies = [
  "st3-kernel",
  "st3-missions",
  "st3-schema",
+ "st3-store",
  "tempfile",
  "tracing",
  "uuid",
