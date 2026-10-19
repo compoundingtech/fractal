@@ -1,6 +1,15 @@
-//! Statement budgets for a live mailbox stream's update, counted on the calling thread.
+#![allow(unused_imports)]
 use super::*;
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
+
+#[derive(Debug)]
+pub struct Costs {
+    pub full: SqliteWork,
+    pub change: SqliteWork,
+    pub steady: SqliteWork,
+    pub idle: SqliteWork,
+}
+
 
 struct Mailbox {
     store: Store,
@@ -98,14 +107,6 @@ impl Mailbox {
     fn view(&self) -> serde_json::Value {
         serde_json::to_value(&self.previous.as_ref().unwrap().1).unwrap()
     }
-}
-
-#[derive(Debug)]
-struct Costs {
-    full: SqliteWork,
-    change: SqliteWork,
-    steady: SqliteWork,
-    idle: SqliteWork,
 }
 
 fn costs(open: usize) -> Costs {

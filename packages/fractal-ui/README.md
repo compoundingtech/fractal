@@ -62,6 +62,8 @@ The runner uses one Chromium with up to six concurrent isolated pages, bounded b
 Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
 Navigation waits for DOM readiness, then the unchanged strict guard waits for the story's lifecycle completion; global network idleness is not substituted for a successful play.
 Plays look up a tooltip with `tooltipFor(anchor, name)` from `src/story-play.ts`, never with a document-wide `findByRole('tooltip')`. The helper resolves the tooltip through the anchor's `aria-describedby` and asserts its role, exact accessible name and visibility. Its cost does not grow with the page size.
+TranscriptPress and TranscriptComposer wait for the history controls' existing `data-state="complete"` commit signal before checking the exact mounted turn count. Their shared `committedTranscriptHistory` helper observes that attribute directly; scroll and interaction assertions retain their existing bounds.
+The helper follows the play's `abortSignal` and bounds failure with Testing Library's configured `getConfig().asyncUtilTimeout`, without changing it. An aborted or timed-out wait reports the expected completion state, last observed state and mounted turn count. Its mutation observer, deadline and abort listener are always removed in `finally`.
 
 To run only the gate after building Storybook, inside `nix develop .#web`:
 

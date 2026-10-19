@@ -19,7 +19,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { ChromeControl, SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
 // Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
 import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
@@ -501,8 +501,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                   <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" />
                 ) : null}
                 <SidebarChromeFooter onToggleScheme={() => setScheme(scheme === 'dark' ? 'light' : 'dark')}>
-                  <Aria.Button onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} {...stylex.props(styles.textButton)}>Missions</Aria.Button>
-                  <Aria.Button onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} {...stylex.props(styles.textButton)}>Usage</Aria.Button>
+                  <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} />
+                  <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} />
                 </SidebarChromeFooter>
               </ResponsiveAgentSidebar>
               <section aria-label="Agent workspace" onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
