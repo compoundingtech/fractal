@@ -767,7 +767,18 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let store = Store::open_memory("grove").unwrap();
+            Self::initialize(Store::open_memory("grove").unwrap())
+        }
+        /// A fixture on a file store; reopening the same path keeps the persisted outputs.
+        fn open(path: &std::path::Path) -> Self {
+            let fresh = !path.exists();
+            let store = Store::open(path, "grove").unwrap();
+            if fresh {
+                return Self::initialize(store);
+            }
+            Self { store, views: Views::new(definitions()).unwrap() }
+        }
+        fn initialize(store: Store) -> Self {
             let views = Views::new(definitions()).unwrap();
             let mut connection = store.connection.write();
             let tx = connection.transaction().unwrap();
@@ -886,6 +897,56 @@ mod tests {
         }
     }
     const SEAT: &str = "agent/grove.cedar";
+
+    /// Deliver `envelopes` one at a time, capturing what each admitted, checking the oracle.
+    fn deliver_one_by_one(f: &Fixture, envelopes: &[ReplicaEnvelope]) {
+        for envelope in envelopes {
+            let before = f.store.index().unwrap();
+            receive_and_project(&f.store, "relay", &exchange_of("relay", vec![envelope.clone()]));
+            let claims = {
+                let connection = f.store.readers.get();
+                connection.prepare(&format!("SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.store_index>?1 ORDER BY claims.store_index")).unwrap()
+                    .query_map([before], claim_from_row).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            };
+            f.capture_many(&claims);
+            f.check(SEAT);
+        }
+    }
+
+    #[test]
+    fn agent_view_survives_reopen_and_redelivery_after_permuted_arrival() {
+        let alder = Store::open_memory("alder").unwrap();
+        let birch = Store::open_memory("birch").unwrap();
+        for source in [&alder, &birch] {
+            source.set_write_clock_at(1_800_000_000_000).unwrap();
+        }
+        alder.append_claim(&Fixture::input(SEAT, "runtime.observed",
+            json!({"status":"running","incarnation_id":"one"}))).unwrap();
+        alder.append_claim(&Fixture::input(SEAT, "harness.observed",
+            json!({"state":"working","incarnation_id":"one","driver":"codex","reason":"first"}))).unwrap();
+        birch.append_claim(&Fixture::input(SEAT, "harness.observed",
+            json!({"state":"idle","incarnation_id":"one","transport":"native","reason":null}))).unwrap();
+        let mut envelopes = exchange_from(&alder, &ReplicationInventory::default()).envelopes;
+        envelopes.extend(exchange_from(&birch, &ReplicationInventory::default()).envelopes);
+        envelopes.reverse();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("view.sqlite3");
+        let before = {
+            let f = Fixture::open(&path);
+            deliver_one_by_one(&f, &envelopes);
+            read_harness(&f.store.readers.get(), &f.views, SEAT).unwrap()
+        };
+        assert!(before.is_some(), "the view holds the seat before the restart");
+        // Reopened, the persisted output reads as before and matches the oracle; repeated
+        // deliveries then admit nothing, so only the persisted row can answer.
+        let f = Fixture::open(&path);
+        assert_eq!(
+            serde_json::to_value(read_harness(&f.store.readers.get(), &f.views, SEAT).unwrap()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        f.check(SEAT);
+        deliver_one_by_one(&f, &envelopes);
+    }
     #[test]
     fn ordered_agent_sparse_fields_legacy_since_and_incarnation_reset_match_canonical() {
         let f = Fixture::new();
