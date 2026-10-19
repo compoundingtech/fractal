@@ -866,7 +866,7 @@ export type UsageContext = typeof UsageContext.Type
 export type UsageContextEncoded = typeof UsageContext.Encoded
 
 export const UsageSummary = /*#__PURE__*/ (() => Schema.Struct({
-  "aggregation": Schema.Literal("cumulative-per-incarnation-else-response-deltas"),
+  "aggregation": Schema.Literals(["cumulative-per-incarnation-else-response-deltas","rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas"]),
   "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "context": optionalKey(UsageContext),
@@ -3386,6 +3386,8 @@ export type ParticipantRefEncoded = typeof ParticipantRef.Encoded
 
 /** Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not. */
 export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
+  /** The complete local authorization model supplying this judgment. Absent on older producers; the label alone does not certify candidate migration or authority. */
+  "authorization_model": optionalKey(Schema.Literals(["legacy","candidate"])).annotate({ description: "The complete local authorization model supplying this judgment. Absent on older producers; the label alone does not certify candidate migration or authority." }),
   /** The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label. */
   "device": optionalKey(Schema.String).annotate({ description: "The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label." }),
   /** The public key that signed (`p256:…` or a bare Ed25519 key). */
@@ -3788,7 +3790,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
-/** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
+/** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
 export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "recipient-retired",
   "lifecycle-unavailable",
@@ -3823,6 +3825,8 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "rate-limited",
   "runtime-not-local",
   "runtime-authority-indeterminate",
+  "runtime-list-not-ready",
+  "runtime-list-ended",
   "remote-unavailable",
   "terminal-unavailable",
   "terminal-ended",
@@ -3843,7 +3847,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "response-budget-exceeded",
   "content-not-text",
   "internal"
-]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
+]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 

@@ -467,10 +467,21 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
         stale = other_trees_have(repo, everything, tree, check)
         raise Failure('stale_tree' if stale else 'no_record',
                       f'check {check} has records only for other trees' if stale else f'no record for check {check}')
-    # The latest record decides, so a newer failure supersedes an older pass.
-    commit, statement, principal = max(
-        with_check,
-        key=lambda c: (parse_time(c[1]['predicate']['observed_at']), c[1]['predicate']['observed']['checks'][check]['exit_code'] != 0))
+    # The latest record decides, so a newer failure supersedes an older pass. observed_at is the signer's own clock, so the order is
+    # biased toward failure: a pass replaces a failure only when it is dated MORE than FUTURE_SKEW after it. A pass dated equal,
+    # inverted or within the margin of a failure never hides it (a signer or a skewed clock cannot bury a failure by dating a pass).
+    def failed(entry):
+        return entry[1]['predicate']['observed']['checks'][check]['exit_code'] != 0
+
+    def dated(entry):
+        return parse_time(entry[1]['predicate']['observed_at'])
+
+    chosen = max(with_check, key=lambda c: (dated(c), failed(c)))
+    if not failed(chosen):
+        shadowing = [c for c in with_check if failed(c) and dated(c) >= dated(chosen) - FUTURE_SKEW]
+        if shadowing:
+            chosen = max(shadowing, key=dated)
+    commit, statement, principal = chosen
     predicate = statement['predicate']
     observed = predicate['observed']
     result = observed['checks'][check]

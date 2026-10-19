@@ -1,18 +1,17 @@
 //! Invocation-local work metadata. Reads stay fresh; no context survives this call.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::reconcile_work_context_shared_seats::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::reconcile_work_context_shared_seats::{AFTER_OWNERS, AFTER_SUPPORT, MAX_SNAPSHOT_CALL_NS};
 use super::*;
 
-const CHUNK: usize = 128;
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static MAX_SNAPSHOT_CALL_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
-    static AFTER_OWNERS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static AFTER_SUPPORT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
+pub const CHUNK: usize = 128;
 
 // LEFT JOIN keeps missing owner rows equivalent to the old optional lookup. json_each is
 // the outer loop, and every relation is reached through its existing primary key.
-const OWNERS: &str = "SELECT requested.key,
+pub const OWNERS: &str = "SELECT requested.key,
     (runs.id IS NOT NULL AND generations.id IS NOT NULL AND roots.id IS NOT NULL),
     runs.status, runs.phase, runs.current_generation_id, generations.status,
     roots.status, roots.phase
@@ -23,14 +22,14 @@ const OWNERS: &str = "SELECT requested.key,
       AND generations.run_id=runs.id
     LEFT JOIN mission_runs AS roots ON roots.id=runs.root_run_id";
 
-const DEFINITIONS: &str = "SELECT requested.value, revisions.body
+pub const DEFINITIONS: &str = "SELECT requested.value, revisions.body
     FROM json_each(?1) AS requested
     LEFT JOIN run_generations AS generations ON generations.id=requested.value
     LEFT JOIN mission_runs AS runs ON runs.id=generations.run_id
     LEFT JOIN mission_revisions AS revisions
       ON revisions.mission_id=runs.mission_id AND revisions.revision=generations.revision";
 
-const PHASES: &str = "SELECT id, phase FROM mission_runs
+pub const PHASES: &str = "SELECT id, phase FROM mission_runs
     WHERE id IN (SELECT value FROM json_each(?1) AS requested)";
 
 // These are conservative existence proofs, not lifecycle/authority decisions. Any release
@@ -38,7 +37,7 @@ const PHASES: &str = "SELECT id, phase FROM mission_runs
 // The readers still decide attempts and accepted-time/ack boundaries. Responses join an ask;
 // orphan answers cannot enrich a view. No proof survives this snapshot or skips a present input.
 // The origin index is installed by Store's schema before readers become available.
-const SUPPORT: &str = "SELECT requested.key,
+pub const SUPPORT: &str = "SELECT requested.key,
     EXISTS(SELECT 1 FROM claims AS released
            WHERE released.subject=requested.value AND released.kind='work.released'),
     (EXISTS(SELECT 1 FROM claims AS asked
@@ -48,27 +47,27 @@ const SUPPORT: &str = "SELECT requested.key,
                  AND json_extract(origin.body,'$.fields.origin_step')=requested.value))
     FROM json_each(?1) AS requested";
 
-struct Inputs {
+pub struct Inputs {
     views: Vec<StepRunView>,
     definitions: BTreeMap<String, Option<String>>,
     phases: BTreeMap<String, String>,
 }
 
-struct DefinitionFields {
-    queue: Option<String>,
-    queue_position: Option<u32>,
-    timeout_ms: Option<u64>,
-    fresh_context: bool,
+pub struct DefinitionFields {
+    pub queue: Option<String>,
+    pub queue_position: Option<u32>,
+    pub timeout_ms: Option<u64>,
+    pub fresh_context: bool,
 }
 
 #[derive(Default)]
-struct DefinitionIndex {
+pub struct DefinitionIndex {
     fields: BTreeMap<String, DefinitionFields>,
     missing_reference: Option<String>,
 }
 
 impl DefinitionIndex {
-    fn from_mission(mission: &MissionSpec) -> Self {
+    pub fn from_mission(mission: &MissionSpec) -> Self {
         let mut index = Self::default();
         index.visit(mission);
         index
@@ -99,7 +98,7 @@ impl DefinitionIndex {
         true
     }
 
-    fn get(&self, path: &str) -> Result<Option<&DefinitionFields>> {
+    pub fn get(&self, path: &str) -> Result<Option<&DefinitionFields>> {
         if let Some(fields) = self.fields.get(path) {
             return Ok(Some(fields));
         }
@@ -182,7 +181,7 @@ pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
     Ok(inputs.views)
 }
 
-fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
+pub fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
     let connection = store.readers.get();
     let mut views = connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hba5d9054968a owner=st3_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ &seat_work_at_snapshot_query(false))?
@@ -249,7 +248,7 @@ fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
     })
 }
 
-fn support(connection: &Connection, views: &[StepRunView]) -> Result<Vec<(bool, bool)>> {
+pub fn support(connection: &Connection, views: &[StepRunView]) -> Result<Vec<(bool, bool)>> {
     let mut support = Vec::with_capacity(views.len());
     for chunk in views.chunks(CHUNK) {
         let subjects = chunk.iter().map(|view| &view.subject).collect::<Vec<_>>();
@@ -278,7 +277,7 @@ fn support(connection: &Connection, views: &[StepRunView]) -> Result<Vec<(bool, 
     Ok(support)
 }
 
-fn owners(
+pub fn owners(
     connection: &Connection,
     views: &[StepRunView],
 ) -> Result<Vec<Option<EffectiveStepOwner>>> {
@@ -349,3 +348,6 @@ fn owners(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;

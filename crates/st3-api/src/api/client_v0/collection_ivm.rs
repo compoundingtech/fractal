@@ -1,13 +1,14 @@
 //! Current collection cursors. The source adapter owns complete keyed dependency coverage,
 //! authorized bounded ranking and row reads; this consumer owns delivery acknowledgment.
 //! Registration alone does not select a production adapter.
+use crate::EvidenceStore;
 use super::*;
 use crate::graph_watch_ivm::{IvmViewBridge, ViewPage};
 use smallclaims::ivm::{Readiness, events};
 use std::cell::RefCell;
 
-type Window = (ClientSnapshot, Vec<Value>, bool);
-type RowReader = dyn Fn(
+pub type Window = (ClientSnapshot, Vec<Value>, bool);
+pub type RowReader = dyn Fn(
         &AppState,
         &ClientSession,
         &CollectionSubscribe,

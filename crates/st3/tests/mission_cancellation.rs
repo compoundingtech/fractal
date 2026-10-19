@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 //! Cancellation owns both declared execs and directly launched gates, including after restart.
+use st3::DeliveryStore;
+use st3::MissionsStore;
 use std::fs::File;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;

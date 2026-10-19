@@ -1,5 +1,6 @@
 mod roster_fresh;
 
+use crate::RolloutsStore;
 use super::*;
 use crate::model::SESSION_CLAIMS;
 use axum::body::to_bytes;
@@ -1613,6 +1614,21 @@ fn native_title_subscriptions_recognize_the_outer_pi_and_omp_drivers() {
 }
 
 #[test]
+fn delivery_identity_accepts_new_names_and_rejects_masked_or_conflicting_aliases() {
+    let args = ["st3", "driver", "codex"].map(str::to_owned);
+    for (values, expected) in [
+        (vec!["ST_AGENT=agent/seat"], Some("agent/seat")),
+        (vec!["FRACTAL_AGENT=agent/seat"], Some("agent/seat")),
+        (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT=agent/seat"], Some("agent/seat")),
+        (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT=agent/other"], None),
+        (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT="], None),
+    ] {
+        let env: Vec<_> = values.into_iter().map(str::to_owned).collect();
+        assert_eq!(native_delivery_identity(37, &args, &env).map(|peer| peer.agent).as_deref(), expected);
+    }
+}
+
+#[test]
 fn legacy_claude_mcp_is_a_delivery_peer_but_ordinary_mailbox_queries_are_not() {
     let env = vec!["ST_AGENT=agent/example/legacy".into()];
     let args = ["st3", "driver", "claude-mcp"].map(str::to_owned);
@@ -1773,23 +1789,7 @@ fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     );
 }
 
-pub fn state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("node").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "node".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-    }
-}
+pub use crate::api::tests_shared::state;
 
 #[test]
 fn doctor_distinguishes_no_fleet_from_explicitly_leaving_a_fleet() {

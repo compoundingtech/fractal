@@ -1392,7 +1392,10 @@ async fn missing_sealed_root_proof_does_not_consume_code_or_create_a_bearer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key() {
     let root = tempfile::tempdir().unwrap();
-    let state = state(root.path());
+    // The two completions write at once. A shared-memory store answers that contention with
+    // SQLITE_LOCKED where the daemon's file store waits, so this race uses a file.
+    let store = Store::open(&root.path().join("signing.sqlite"), "signing-node").unwrap();
+    let state = state_on(root.path(), store);
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
     let app = st3::api::router(state.clone());
@@ -1431,7 +1434,7 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
         (Err(a), Ok(b)) => (b.value, second_request.device_public_key.clone(), a),
         _ => unreachable!(),
     };
-    assert!(refused.to_string().contains("already used"));
+    assert!(refused.to_string().contains("already used"), "{refused}");
     assert_eq!(
         state
             .store
@@ -1466,7 +1469,10 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
 }
 
 fn state(root: &Path) -> AppState {
-    let store = Store::open_memory("signing-node").unwrap();
+    state_on(root, Store::open_memory("signing-node").unwrap())
+}
+
+fn state_on(root: &Path, store: Store) -> AppState {
     store.bind_fleet(FLEET).unwrap();
     store
         .set_node_key(Arc::new(
