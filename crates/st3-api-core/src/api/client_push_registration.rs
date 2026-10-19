@@ -371,6 +371,7 @@ mod tests {
 
     fn state(root: &Path) -> AppState {
         AppState {
+            owning_person: Some("person/fixture".into()),
             store: Arc::new(Store::open(&root.join("claims.sqlite3"), "push-test").unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0u64).0,
