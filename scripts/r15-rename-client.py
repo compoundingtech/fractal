@@ -5,6 +5,7 @@ Run: python3 scripts/r15-rename-client.py
 Generated artifacts are deliberately left to their owning generators:
   cargo run -p fractal-client-codegen --bin st3-client-codegen
   genie (root package/workspace and fractal-sdk package manifests)
+  python3 scripts/ci-fractal-web-licenses (after pnpm lockfile regeneration)
 This script does not change wire values, service names, or NSError domains.
 """
 from pathlib import Path
