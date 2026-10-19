@@ -7,5 +7,5 @@
   "compatibility": {"status": "changed", "detail": "Local terminal streams subscribe before their initial authority read. Subsequent reads follow relevant claim, canonical-order, repair, operation-conflict and desired-projection changes instead of broad API wake notifications. Multiple viewers share notification routing; actual changes retain the existing 250 ms coalescing bound."},
   "downtime": {"status": "none", "detail": "No migration; the notification change takes effect on process restart."},
   "manual": {"status": "none", "detail": "No configuration changes."},
-  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration. If native dependency coverage fails, terminal readers are immediately invalidated and fall back to conservative writer-resolution and broad API wakes until physical coverage is positively verified again."}
 }
