@@ -309,6 +309,11 @@ enum Command {
         #[command(subcommand)]
         command: RepairCommand,
     },
+    /// Maintain an existing store offline, without contacting the daemon.
+    Store {
+        #[command(subcommand)]
+        command: StoreCommand,
+    },
     /// Remove st3 from this machine: leave its fleet, then its services, state, and settings.
     Uninstall(UninstallArgs),
     /// Join machines into a fleet: create, invite, join, and inspect members.
@@ -1915,6 +1920,9 @@ struct AssistantGrantTerms {
     #[arg(long, value_parser = parse_assistant_grant_expiry)]
     expires_in: Option<u64>,
     /// One exact assistant scope; repeat for each scope. Nothing is granted implicitly.
+    /// Add write.assistant.answers to answer supported owner alerts immediately;
+    /// read.assistant.attention only permits reads. write.assistant.messages permits
+    /// messages to any existing agent, never a person.
     #[arg(long = "scope", value_parser = parse_assistant_scope)]
     scopes: Vec<AssistantScope>,
     /// Consent that every assistant read is disclosed to OpenAI.
@@ -1936,7 +1944,7 @@ enum AssistantGrantCommand {
         grant: String,
         #[command(flatten)]
         terms: AssistantGrantTerms,
-        /// Exact agent IDs permitted as low-risk assistant message recipients.
+        /// Stored recipient metadata; does not restrict sends to existing agents.
         #[arg(long = "allow-recipient")]
         recipients: Vec<String>,
     },
@@ -2073,6 +2081,16 @@ enum RepairCommand {
     DryRun,
     /// Apply exactly the plan identified by a dry-run token.
     Apply { token: String },
+}
+
+#[derive(Subcommand)]
+enum StoreCommand {
+    /// Build and verify mandatory owner indexes offline; stop all store writers first.
+    PrepareIndexes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4832,6 +4850,11 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Evidence(args) = cli.command {
         return st3::evidence::cli::run(args);
     }
+    if let Command::Store {
+        command: StoreCommand::PrepareIndexes { ref store },
+    } = cli.command {
+        return st3::owner_indexes::prepare(store, &mut cli_output::stdout());
+    }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
         let code = st3::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
@@ -5001,6 +5024,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Doctor(args) => run_doctor(&immediate, args, cli.json, &unknown_config_keys).await,
         Command::Recorder { command } => run_recorder(command, &config, cli.json),
         Command::Repair { command } => run_repair(&client, command, cli.json).await,
+        Command::Store {
+            command: StoreCommand::PrepareIndexes { store },
+        } => st3::owner_indexes::prepare(&store, &mut cli_output::stdout()),
         Command::Backup { command } => match command {
             BackupCommand::Create {
                 file,
@@ -6107,6 +6133,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 ready_at.duration_since(started_at).as_secs_f64() * 1_000.0,
             );
             startup.serving();
+            // Index population must not compete with either API's first bind.
+            tokio::spawn(st3::maintenance::run_client_message_selectors(
+                Arc::downgrade(&store), notify.clone(), event_notify.clone(),
+            ));
             eprintln!("st: local API listening at {}", config.socket.display());
             eprintln!(
                 "st: paired client gateway listening at {}",
@@ -12824,6 +12854,18 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
             "Person answer: {typed}: {} ({}, {})",
             response.summary, response.respondent, response.ask
         );
+        if let Some(sender_class) = &response.sender_class {
+            let _ = writeln!(output, "  Sender class: {sender_class}");
+        }
+        if let Some(grant) = &response.assistant_grant_id {
+            let _ = writeln!(output, "  Assistant grant: {grant}");
+        }
+        if let Some(owner) = &response.assistant_owner {
+            let _ = writeln!(output, "  Assistant owner: {owner}");
+        }
+        if let Some(session_actor) = &response.assistant_session_actor {
+            let _ = writeln!(output, "  Assistant session actor: {session_actor}");
+        }
     }
     if let Some(usage) = &work.usage {
         let _ = writeln!(output, "Usage: {}", render_usage(usage));

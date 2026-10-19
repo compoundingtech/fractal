@@ -1016,7 +1016,7 @@ mission "expiring-work" state="ready" {
     // Shorten this fixture's lease before any cache is built; no claims are changed.
     let expires = client_now_ms() + 1_000;
     store.connection.lock().expect("fixture writer").execute(
-        /* sqlite-large-value: allow-for-now lv-hc6f68b0fab3e owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?1 WHERE subject=?2",
+        /* sqlite-large-value: allow-for-now lv-h427a91114277 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?1 WHERE subject=?2",
         rusqlite::params![expires.to_string(), step],
     ).unwrap();
     let index = store.index().unwrap();
@@ -1101,6 +1101,14 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
     let resources = client_message_resources(&store, None, false, Some(seat)).unwrap();
     assert_eq!(resources.len(), 3);
     assert!(resources.iter().all(|resource| resource["delivery"]["state"] == "waiting"));
+    let now = client_now_ms();
+    let rows = store.client_messages_page(None, Some(seat), false, store.index().unwrap(), None, 20).unwrap();
+    assert_eq!(rows.len(), 3);
+    for (message, metadata, current) in rows {
+        let resource = client_message_resource(&store, message, &metadata, current, now).unwrap();
+        assert_eq!(resource["delivery"]["state"], "waiting");
+        assert_eq!(resource["delivery"]["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
+    }
     // A different message's clear cannot release the head or its queued successors.
     diagnostic(&messages[2].0, "first", "ready", "preparation succeeded; FIFO blocker cleared");
     assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
@@ -3037,7 +3045,7 @@ async fn retention_quick_response_failure_rolls_back_declaration() {
         .connection
         .write()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h2f874c96b1d3 owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_quick_failure BEFORE INSERT ON idempotency
+            /* sqlite-large-value: allow-for-now lv-hbf2e5059645c owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_quick_failure BEFORE INSERT ON idempotency
              WHEN json_type(NEW.response,'$.runtime_id') IS NOT NULL
              BEGIN SELECT RAISE(ABORT,'injected lost quick response'); END;",
         )
@@ -3059,7 +3067,7 @@ async fn retention_quick_response_failure_rolls_back_declaration() {
         .store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-ha1f13b5ab4db owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_quick_failure")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hbf45397bea0a owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_quick_failure")
         .unwrap();
     let first = quick_agent(&state, retention_quick_request(root.path()), "codex")
         .await
@@ -3129,7 +3137,7 @@ async fn retention_quick_legacy_missing_receipt_is_explicitly_reconstructed() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hfa89d2d90c01 owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h6a9151d65224 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id=?1",
             [smallclaims::store::opaque_cache_key(
                 "quick-agent-response:retention-quick",
             )],
@@ -3435,7 +3443,7 @@ async fn retention_event_http_envelope_preserves_pacing_continuation_and_410() {
     assert_eq!(page["next_after"], json!(indexes[1]));
 
     state.store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-he1b6b0291d8c owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('event_resume_floor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-hd87f0a4e8b07 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('event_resume_floor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [indexes[1].to_string()],
     ).unwrap();
     let (status, gap) = get_request(
@@ -3545,7 +3553,7 @@ async fn retention_global_empty_wait_pages_are_paced_without_losing_eligible_eve
     };
     let floor = append(&store, "custom/test/old");
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h50c972a0cb89 owner=st3_api::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
+        /* sqlite-large-value: allow-for-now lv-h696e3efde158 owner=st3_api_core::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
              CREATE TABLE legacy_fixture_events(store_index INTEGER PRIMARY KEY,kind TEXT,subject TEXT,body TEXT);
              INSERT INTO legacy_fixture_events SELECT * FROM events;
              DROP VIEW events;
@@ -3653,7 +3661,7 @@ async fn retention_event_upgrade_resyncs_lagging_cursors_and_continues_the_front
         })
         .unwrap();
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hd1cdcb84e491 owner=st3_api::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
+        /* sqlite-large-value: allow-for-now lv-h952e81396315 owner=st3_api_core::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
              CREATE TABLE legacy_fixture_events(store_index INTEGER PRIMARY KEY,kind TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL);
              INSERT INTO legacy_fixture_events SELECT store_index,kind,subject,body FROM events;
              DROP VIEW events;
@@ -8726,10 +8734,10 @@ fn agent_card_status_preserves_declared_and_canonical_fallback_revisions() {
     {
         let connection = store.connection.write();
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h29bfe1d8c90f owner=st3_api::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1000' WHERE subject='agent/undeclared'", [],
+            /* sqlite-large-value: allow-for-now lv-h151abd991a67 owner=st3_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1000' WHERE subject='agent/undeclared'", [],
         ).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h493cbc90a7d9 owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin='zz-card-tie' WHERE id=?1", [&runtime.batch_id]).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h65bbb3b76007 owner=st3_api::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET origin='zz-card-tie' WHERE batch_id=?1", [&runtime.batch_id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h1953646ea387 owner=st3_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin='zz-card-tie' WHERE id=?1", [&runtime.batch_id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hd52e3b357d23 owner=st3_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET origin='zz-card-tie' WHERE batch_id=?1", [&runtime.batch_id]).unwrap();
     }
     store.forget_current_views();
     let index = store.index().unwrap();
@@ -8950,6 +8958,10 @@ mission "agent-health" state="ready" {
         .unwrap();
     materialize_run_agents(&state, &run);
     let subject = format!("agent/{}/worker", run.id);
+    // This test isolates harness evidence. Supply the independent local delivery proof:
+    // absent polls become stale after the process-wide startup grace, so relying on that
+    // grace makes the running assertions depend on which tests ran before this one.
+    delivery_presence::record_legacy(&subject, "app-server", std::process::id());
     let queued = run.steps[0].subject.clone();
     store.set_step_state(&queued, "ready", None).unwrap();
     store
@@ -8999,7 +9011,8 @@ mission "agent-health" state="ready" {
         .unwrap();
     let resources =
         client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
-    assert_eq!(resources[0]["state"], "running");
+    assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
+    assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
 
     let healthy_cut = store.index().unwrap();
     let harness = |driver: &str, incarnation: &str, key: &str| {
