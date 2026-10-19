@@ -15,9 +15,10 @@ const run = (args) => new Promise((resolve, reject) => {
 })
 const vite = await createServer({ root, configFile: false, optimizeDeps: { entries: [] }, server: { host: '127.0.0.1', port: 0 }, plugins: [{
   name: 'input-paint-proof', configureServer(server) {
-    server.middlewares.use('/input-paint-proof', (_req, res) => {
+    server.middlewares.use('/input-paint-proof', async (req, res, next) => {
+      if (req.url?.includes('html-proxy')) { next(); return }
       res.setHeader('Content-Type', 'text/html')
-      res.end(`<!doctype html><div id="react"></div><button id="hide">Hide before paint</button><output></output>
+      const html = `<!doctype html><div id="react"></div><button id="hide">Hide before paint</button><output></output>
 <script type="module">
 import { createElement, useState } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -54,7 +55,8 @@ document.querySelector('#hide').onclick = () => {
   document.dispatchEvent(new Event('visibilitychange'))
 }
 window.ready = true
-</script>`)
+</script>`
+      res.end(await server.transformIndexHtml('/input-paint-proof.html', html))
     })
   },
 }] })
