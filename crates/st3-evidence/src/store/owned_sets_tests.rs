@@ -1,15 +1,16 @@
 #![allow(unused_imports)]
+use crate::MissionsStore;
 use crate::RolloutsStore;
 use crate::OwnedSetsStore;
 use super::owned_sets::{Options, Source};
 use super::*;
 use crate::parse_intent;
-use st3_seats::store::card_fold_tests_shared::*;
-use st3_seats::store::card_fold_tests_shared::{agent_subjects, assert_card_fold_parity, assert_card_reads_parity, assert_card_reads_parity_with, per_subject_card_status};
-use st3_seats::store::owned_sets_tests_shared::*;
-use st3_seats::store::owned_sets_tests_shared::{bundle, direct, share, signed_fleet, signed_share};
-use st3_seats::store::tests_shared::*;
-use st3_seats::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
+use st3_attention::store::card_fold_tests_shared::*;
+use st3_attention::store::card_fold_tests_shared::{agent_subjects, assert_card_fold_parity, assert_card_reads_parity, assert_card_reads_parity_with, per_subject_card_status};
+use st3_attention::store::owned_sets_tests_shared::*;
+use st3_attention::store::owned_sets_tests_shared::{bundle, direct, share, signed_fleet, signed_share};
+use st3_attention::store::tests_shared::*;
+use st3_attention::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 mod empty_authority_guard;
 
 fn options(store: &Store, sequence: u64) -> Options {
@@ -318,10 +319,10 @@ fn repaired_receipt_eligibility_is_rechecked_between_passes() {
     let second = source.owned_sets().unwrap().remove(0);
     let new = source.desired_subjects().unwrap();
     // Repair addresses envelope records, which the legacy claim-only transport does not create.
-    st3_seats::store::tests_shared::receive_and_project(
+    st3_attention::store::tests_shared::receive_and_project(
         &target,
         &source.origin,
-        &st3_seats::store::tests_shared::exchange_from(&source, &target.replication_inventory().unwrap()),
+        &st3_attention::store::tests_shared::exchange_from(&source, &target.replication_inventory().unwrap()),
     );
     assert!(target.owned_desired_subjects(&old).unwrap().is_empty());
     assert_pass_candidates_match_effect_guards(&target, &new);
@@ -1614,7 +1615,7 @@ fn the_agent_card_fold_reads_set_owned_declarations_as_the_reduction_does() {
         transaction.rollback().unwrap();
     }
     let indexes = (0..=store.index().unwrap()).collect::<Vec<_>>();
-    st3_seats::store::card_fold_tests_shared::assert_card_fold_parity(&store, &indexes);
+    st3_attention::store::card_fold_tests_shared::assert_card_fold_parity(&store, &indexes);
     let reads = store
         .agent_card_reads(&["agent/garden/orchard".to_owned()], store.index().unwrap(), &HashMap::new())
         .unwrap();

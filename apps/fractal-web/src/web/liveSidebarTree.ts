@@ -1,26 +1,49 @@
 import type { Agent } from '../data/source.ts'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
 import { isSidebarFiltering, matchesRow, parseSidebarQuery, sortMembers, type SidebarMatchRow } from '../shell/sidebar/filter.ts'
+import type { ShowRow } from '../shell/sidebar/show.ts'
 import type { SidebarFilters } from '../shell/sidebar/state.ts'
 import { sidebarRow, subagentRowId } from './sidebarRow.ts'
 
+const matchRows = ({ agents, needsYou, asking, stale }: {
+  readonly agents: readonly Agent[]
+  readonly needsYou: ReadonlySet<string>
+  readonly asking: ReadonlySet<string>
+  readonly stale: boolean
+}): ReadonlyMap<string, SidebarMatchRow> =>
+  new Map(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale }).status, needsMe: needsYou.has(agent.ref), asking: asking.has(agent.ref) }]))
+
+/** Show menu counts: each row passes every filter outside the Show menu (`is:asking` and machines). */
+export const liveShowRows = ({ agents, needsYou, asking, filters, stale }: {
+  readonly agents: readonly Agent[]
+  readonly needsYou: ReadonlySet<string>
+  readonly asking: ReadonlySet<string>
+  readonly filters: SidebarFilters
+  readonly stale: boolean
+}): readonly ShowRow[] => {
+  const others = { ...parseSidebarQuery(filters.query), asking: false, machines: [] }
+  const rows = matchRows({ agents, needsYou, asking, stale })
+  return agents.map(agent => ({ host: agent.host, asking: asking.has(agent.ref), others: matchesRow({ row: rows.get(agent.ref)!, filters, query: others }) }))
+}
+
 /** View-only filtering keeps the canonical arrangement and its move fences untouched. */
-export const liveSidebarTree = ({ tree, agents, needsYou, filters, stale }: {
+export const liveSidebarTree = ({ tree, agents, needsYou, asking, filters, stale }: {
   readonly tree: readonly SidebarNode[]
   readonly agents: readonly Agent[]
   readonly needsYou: ReadonlySet<string>
+  readonly asking: ReadonlySet<string>
   readonly filters: SidebarFilters
   readonly stale: boolean
 }): readonly SidebarNode[] => {
   const query = parseSidebarQuery(filters.query)
-  const rows = new Map<string, SidebarMatchRow>(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale }).status, needsMe: needsYou.has(agent.ref) }]))
+  const rows = new Map(matchRows({ agents, needsYou, asking, stale }))
   const childDrivers = new Map<string, string>()
   for (const agent of agents) for (const child of agent.subagents ?? []) {
     const id = subagentRowId({ parent: agent.ref, id: child.id })
     childDrivers.set(id, child.driver)
     rows.set(id, {
       workspace: { title: `${child.description ?? ''} ${child.id}`, host: agent.host },
-      agent: undefined, status: 'unobserved', needsMe: false,
+      agent: undefined, status: 'unobserved', needsMe: false, asking: false,
     })
   }
   const filtering = isSidebarFiltering(filters, query)

@@ -18,6 +18,7 @@ import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
 import type { ConnectionState } from '@st3/sdk/effect'
+import { ViewportStore } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -41,7 +42,8 @@ beforeEach(() => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/?open=resource/example:detail')
   registry = AtomRegistry.make()
-  agents = Atom.make<Feed<readonly Agent[]>>(waiting)
+  // Live gateway feeds are keepAlive and outlive the roster's subscription; an autoDispose fixture would reset on unmount.
+  agents = Atom.make<Feed<readonly Agent[]>>(waiting).pipe(Atom.keepAlive)
   gatewaySync = Atom.make<FeedSyncObservation>({ status: { _tag: 'Live', since: 0 }, observedAt: 0 })
   source = {
     ...fixtureSource({ world: { now: 5000, gateway, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }),
@@ -78,6 +80,12 @@ const band = () => host.querySelector('[data-connection-state]')
 
 it('nests authoritative children in the same tree, keeps parent filter context and omits invented child facts', async () => {
   if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
+  const retainedStores: ViewportStore[] = []
+  const retain = ViewportStore.prototype.retain
+  const retention = vi.spyOn(ViewportStore.prototype, 'retain').mockImplementation(function (this: ViewportStore, keys) {
+    retainedStores.push(this)
+    retain.call(this, keys)
+  })
   const child = {
     id: 'reviewer', driver: 'omp', description: Option.some('Review changes'),
     session_id: Option.some('session/review'), started_at: Option.none(),
@@ -117,6 +125,21 @@ it('nests authoritative children in the same tree, keeps parent filter context a
   // RAC performs a row's Enter action on keyup, after a complete native key press.
   await act(async () => childRow.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
   expect(window.location.pathname).toBe('/w/session/review')
+  // A child session owns its reading position independently of its parent's agent ref.
+  const store = retainedStores.at(-1)!
+  const reading = { top: 120, following: false, unread: false, firstRenderedId: 'message/earlier' }
+  store.save('session/review', reading)
+  await act(async () => (parent as HTMLElement).focus())
+  await act(async () => parent.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  await act(async () => parent.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  expect(window.location.pathname).toBe('/w/agent/example')
+  expect(store.get('session/review')).toEqual(reading)
+  await act(async () => (childRow as HTMLElement).focus())
+  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
+  expect(window.location.pathname).toBe('/w/session/review')
+  expect(store.get('session/review')).toEqual(reading)
+  retention.mockRestore()
 })
 it('keeps workspace providers and unchanged roster rows out of the one-second clock render', async () => {
   const now = Atom.make(5000)
@@ -346,7 +369,7 @@ describe('shipped live sidebar search', () => {
     registry.set(agents, observed({ value: candidates }))
     await mount(1440)
     const input = sidebar().querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
-    expect(input.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
+    expect(input.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use is:asking for agents waiting for an answer, repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
     const search = async (value: string) => {
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
@@ -379,7 +402,10 @@ describe('shipped live sidebar search', () => {
     await search('Alpha machine:synthetic-138/1')
     expect([...roster().querySelectorAll('mark')].map(mark => mark.textContent).join('')).toContain('Alpha')
     expect([...roster().querySelectorAll('mark')].some(mark => mark.textContent?.includes('machine:'))).toBe(false)
+    // Complete machine choices are remembered browser-wide; clear it so later mounts start unfiltered.
+    await search('')
   })
+
   it('names each native tree row with the displayed freshness-qualified status', async () => {
     registry.set(agents, observed({ value: [agent] }))
     await mount(1440)
@@ -411,5 +437,74 @@ describe('workspace overlays', () => {
     const menu = document.querySelector('[role="menu"]')
     expect(menu).not.toBeNull()
     expect(host.querySelector('[data-testid="live-agent-workspace"]')!.contains(menu)).toBe(true)
+  })
+})
+
+// Remembered machines live in module state shared across tests; keep these after the suites that expect an unfiltered roster.
+describe('shipped live sidebar Show filter', () => {
+  it('filters Waiting for answer from st questions only and keeps the persisted query across remount', async () => {
+    registry.set(agents, observed({ value: [
+      { ...agent, id: 'agent/asker', name: 'Asker', host_id: Option.some('host/host-b'), blocked_on: Option.some('human'), ask: Option.some('question') },
+      { ...agent, id: 'agent/permission', name: 'Permission', host_id: Option.some('host/host-b'), blocked_on: Option.some('human'), ask: Option.some('permission') },
+      { ...agent, id: 'agent/elsewhere', name: 'Elsewhere', host_id: Option.some('host/host-a'), blocked_on: Option.some('human'), ask: Option.some('question') },
+    ] }))
+    await mount(1440)
+    const input = () => sidebar().querySelector<HTMLInputElement>('input')!
+    const names = () => [...roster().querySelectorAll('[data-testid="taste-agent-row"]')].map(row => row.textContent ?? '')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input(), 'is:asking machine:host-b')
+      input().dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(names()).toHaveLength(1)
+    expect(names()[0]).toContain('Asker')
+    const trigger = [...sidebar().querySelectorAll('button')].find(button => button.textContent?.startsWith('Show'))
+    expect(trigger?.textContent).toContain(', 2 active')
+    await act(async () => root.unmount())
+    root = createRoot(host)
+    await mount(1440)
+    // The gateway's persisted filters return the whole query; remembered machines only seed it.
+    expect(input().value).toBe('is:asking machine:host-b')
+    expect(names()).toHaveLength(1)
+  })
+
+  it('keeps complete remembered machine groups when a partial prefix is typed before remount', async () => {
+    registry.set(agents, observed({ value: [
+      { ...agent, id: 'agent/a', host_id: Option.some('host/host-a') },
+      { ...agent, id: 'agent/b', host_id: Option.some('host/host-b') },
+    ] }))
+    await mount(1440)
+    const input = () => sidebar().querySelector<HTMLInputElement>('input')!
+    for (const query of ['machine:host-a machine:host-b', 'machine:h']) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input(), query)
+        input().dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      expect(input().value).toBe(query)
+    }
+    await act(async () => root.unmount())
+    root = createRoot(host)
+    await mount(1440)
+    expect(input().value).toBe('machine:host-a machine:host-b')
+    expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(0)
+  })
+
+  it('updates remembered machines after a token with duplicate values changes', async () => {
+    registry.set(agents, observed({ value: [
+      { ...agent, id: 'agent/a', host_id: Option.some('host/host-a') },
+      { ...agent, id: 'agent/b', host_id: Option.some('host/host-b') },
+    ] }))
+    await mount(1440)
+    const input = () => sidebar().querySelector<HTMLInputElement>('input')!
+    for (const query of ['machine:host-a,host-a', 'machine:host-a,host-b']) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input(), query)
+        input().dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+    await act(async () => root.unmount())
+    root = createRoot(host)
+    await mount(1440)
+    expect(input().value).toBe('machine:host-a,host-b')
+    expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(2)
   })
 })

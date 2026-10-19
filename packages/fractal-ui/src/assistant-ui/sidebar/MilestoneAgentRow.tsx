@@ -30,10 +30,7 @@ export interface MilestoneAgentRowProps {
   readonly focused?: boolean
   /** Standalone tree hosts only: the item's disclosure button, in a fixed trailing column. `SidebarTree` draws its own. */
   readonly chevron?: React.ReactNode
-  /**
-   * Any of these enables the shared row menu (`[data-agent-menu]`: Open conversation, Reported agent details, host
-   * actions). Keep them identity-stable: the row is memoized. Without them the row renders no menu.
-   */
+  /** Host callbacks enable the corresponding actions; reported details are always available. */
   readonly onOpen?: (row: Row) => void
   readonly actions?: SidebarActions
   readonly onMarkRead?: (ref: string) => void
@@ -60,7 +57,6 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const anchor = React.useRef<HTMLDivElement>(null)
   const [hovered, setHovered] = React.useState(false)
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
-  const hasMenu = onOpen !== undefined || actions !== undefined || onMarkRead !== undefined
   const fields: React.ReactNode[] = [<span key="status" data-row-field="status-label">{row.statusLabel}</span>, <span key="host" data-row-field="host">{row.host}</span>]
   if (row.usage._tag === 'Known') {
     const { usd, tokens, scope } = row.usage
@@ -72,7 +68,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
-    onContextMenu={hasMenu ? event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() } : undefined}
+    onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
     {...stylex.props(styles.row, chevron !== undefined && styles.withChevron, active && styles.active, focused && styles.focused)}>
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
@@ -82,8 +78,8 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="signal" {...stylex.props(styles.signal)}>{signal}</span>
     {chevron !== undefined && <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>}
     <span data-row-column="line2" {...stylex.props(styles.line2)}>{fields.flatMap((field, index) => index === 0 ? [field] : [<span key={`sep-${index}`} aria-hidden="true" {...stylex.props(styles.sep)}>·</span>, field])}</span>
-    {hasMenu && <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
-      menuButtonClassName={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible).className ?? ''} />}
+    <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
+      menuButtonClassName={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible).className ?? ''} />
     {hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
       <AgentHoverCard row={row} now={now} />
     </Popover>}

@@ -1,6 +1,7 @@
 //! Attachment files in the client API: upload, read, and the one-hop reads that carry them
 //! between members. See [`crate::blobs`] for where the bytes live and why they never replicate.
 
+use crate::PersonWorkStore;
 use super::client_v0::{ClientSession, require_scope};
 use super::*;
 use crate::blobs::{self, BlobDir, MAX_BLOB_BYTES, UPLOAD_QUOTA_BYTES};

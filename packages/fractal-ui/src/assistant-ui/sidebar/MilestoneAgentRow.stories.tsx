@@ -60,14 +60,17 @@ function TreeAndStandalone() {
   </div>
 }
 
+const noSessionChild: Row = { ...subagent, ref: 'agent/parent/subagent/no-session', title: 'Child without session', status: 'unobserved', statusLabel: 'Unobserved', subagent: { id: 'no-session', lease_expires_at: '2026-10-17T10:00:00Z' } }
+const actionTreeItems: readonly Item[] = [toItem({ ...parent, children: [...parent.children, noSessionChild] }, 0)]
+
 function TreeWithActions() {
   const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([parent.ref]))
   const [opened, setOpened] = React.useState<string>()
   // Stable callbacks: the row is memoized.
   const onOpen = React.useCallback((row: Row) => setOpened(row.ref), [])
-  const renderRow = React.useCallback((item: Item) => <MilestoneAgentRow row={item.row} now={storyNow} onOpen={onOpen} />, [onOpen])
+  const renderRow = React.useCallback((item: Item) => <MilestoneAgentRow row={item.row} now={storyNow} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />, [onOpen])
   return <section aria-label="With actions" data-host="actions" data-opened={opened} {...stylex.props(styles.column, styles.tree)}>
-    <SidebarTree aria-label="Agents with actions" items={treeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow}
+    <SidebarTree aria-label="Agents with actions" items={actionTreeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow}
       onRowContextMenu={(_item, event) => { if (openAgentRowMenu(event.currentTarget)) event.preventDefault() }} />
   </section>
 }
@@ -213,6 +216,21 @@ export const RowActions: Story = {
     await userEvent.click(within(again).getByRole('menuitem', { name: 'Reported agent details' }))
     await waitFor(() => expect(document.querySelector(`[role="dialog"][aria-label="Reported details for ${parent.title}"]`)).not.toBeNull())
     await userEvent.keyboard('{Escape}')
+    const child = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(row => row.textContent?.includes(noSessionChild.title) && row.closest('[inert]') === null)!
+    for (const keyboard of [false, true]) {
+      if (keyboard) {
+        child.closest<HTMLElement>('[role="row"]')!.focus()
+        // A keyboard context-menu event targets the focused tree row, not its inner painted frame.
+        child.closest<HTMLElement>('[role="row"]')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 0 }))
+      } else await userEvent.click(child.querySelector<HTMLElement>('[data-agent-menu]')!)
+      const childMenu = await waitFor(() => { const element = document.querySelector<HTMLElement>('[role="menu"]'); expect(element).not.toBeNull(); return element! })
+      await expect(within(childMenu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAttribute('aria-disabled', 'true')
+      await expect(childMenu).toHaveTextContent('No session reported for this subagent')
+      await userEvent.click(within(childMenu).getByRole('menuitem', { name: 'Reported agent details' }))
+      await waitFor(() => expect(document.querySelector(`[role="dialog"][aria-label="Reported details for ${noSessionChild.title}"]`)).not.toBeNull())
+      await userEvent.keyboard('{Escape}')
+      await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
+    }
   },
 }
 
