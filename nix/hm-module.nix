@@ -385,6 +385,8 @@ in
           Description = "Fractal claims graph daemon";
           ConditionPathExists = receipt;
           After = [ "network.target" ];
+        } // lib.optionalAttrs (!externallyManaged) {
+          X-Restart-Triggers = [ effectivePackage ];
         };
         Service = {
           Type = "simple";
@@ -414,6 +416,8 @@ in
           Type = "oneshot";
           ExecCondition = toString targetGuard;
           ExecStart = toString targetApplyScript;
+          Restart = "on-failure";
+          RestartSec = "5s";
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") targetEnvironment;
         };
         Install = lib.optionalAttrs completed { WantedBy = [ "default.target" ]; };

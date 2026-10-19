@@ -1090,6 +1090,9 @@
             in
             !(unstaged.systemd.user.services ? fractal)
             && daemon.Service.Type == "simple"
+            && daemon.Unit.X-Restart-Triggers == unstaged.systemd.user.services.smalltalk.Unit.X-Restart-Triggers
+            && apply.Service.Restart == unstaged.systemd.user.services.smalltalk-apply.Service.Restart
+            && apply.Service.RestartSec == unstaged.systemd.user.services.smalltalk-apply.Service.RestartSec
             && (daemon.Install.WantedBy or [ ]) == [ ]
             && (apply.Install.WantedBy or [ ]) == [ ]
             && daemon.Unit.ConditionPathExists == receipt
