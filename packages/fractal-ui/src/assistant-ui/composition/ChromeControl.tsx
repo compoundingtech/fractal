@@ -36,6 +36,7 @@ export interface ChromeControlProps {
 /**
  * One quiet 28px icon button for the chrome: borderless, filled on hover, named by the kit tooltip.
  * Inside a React Aria trigger (MenuTrigger, DialogTrigger) it is the trigger's button.
+ * Tooltips follow hover or user keyboard navigation, never autofocus or programmatic focus restoration.
  */
 export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltip, ref, tooltipPlacement = 'bottom' }: ChromeControlProps) {
   const reasonId = React.useId()
@@ -46,7 +47,7 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
     // handler on the button, which opens on Enter, Space and the arrows unless the event is default-prevented,
     // so the capture phase prevents those keys before any trigger sees them. Tab and Escape still pass.
     return <>
-      <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement}>
+      <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement} navigationFocusOnly>
         <Focusable>
           <Pressable isDisabled>
             <button
@@ -66,7 +67,7 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
       <span id={reasonId} hidden>{disabledReason}</span>
     </>
   }
-  return <Tooltip label={tooltip ?? label} placement={tooltipPlacement}>
+  return <Tooltip label={tooltip ?? label} placement={tooltipPlacement} navigationFocusOnly>
     <Button
       {...(ref === undefined ? {} : { ref })}
       aria-label={label}
