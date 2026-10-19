@@ -627,7 +627,7 @@ fn retain_generation(fixture: &Fixture, profile: usize, number: u64, forced: &st
     let generation = fixture.root.path().join(format!("generation-{number}"));
     fs::create_dir(&generation)?;
     let checker = generation.join("fixture-check-link-targets.sh");
-    fs::write(&checker, format!("forcedPaths=({forced})\n"))?;
+    fs::write(&checker, format!("forcedPaths=({forced})\nfor forcedPath in \"${{forcedPaths[@]}}\"; do\n:\ndone\n"))?;
     let activation = format!("find \"$newGenFiles\" -exec bash {} \"$newGenFiles\" {{}} +\n", checker.display());
     if wrapped {
         fs::write(generation.join("activate"), "exec \"$activation_dir/activate-uninstrumented\" \"$@\"\n")?;
@@ -693,6 +693,24 @@ fn unreadable_or_dynamic_retained_generations_fail_closed_without_execution() ->
         let error = home_manager::preflight(&fixture.layout).unwrap_err();
         assert!(format!("{error:#}").contains("retained Home Manager generation 7"));
         assert!(!sentinel.exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_generation_array_mutations_refuse_with_generation_number() -> Result<()> {
+    for mutation in ["forcedPaths+=(\"$HOME\"/config/st3/config)", "forcedPaths[0]=\"$HOME/config/st3/config\""] {
+        let fixture = Fixture::new()?;
+        let link = retain_generation(&fixture, 0, 17, "", false)?;
+        let checker = fs::read_link(link)?.join("fixture-check-link-targets.sh");
+        let mut source = fs::read_to_string(&checker)?;
+        source.push_str(mutation);
+        fs::write(checker, source)?;
+        let error = home_manager::preflight(&fixture.layout).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("retained Home Manager generation 17"), "{message}");
+        assert!(message.contains("unsupported forcedPaths references"), "{message}");
+        assert!(!fixture.manager.changed_services());
     }
     Ok(())
 }

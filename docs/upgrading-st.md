@@ -130,6 +130,9 @@ are idle. Preserve the backups above. Do not move named instances or workspace r
    containing directories. Prune the reported generations before retrying; no generation
    is removed automatically. Unreadable or unrecognized collision scripts also refuse
    cutover. Activation scripts are inspected, never executed by preflight.
+   Inspection accepts only the pinned checker's single `forcedPaths` initializer and
+   read-only loop; extra references, including append/indexed assignments, are refused
+   with their retained generation number rather than trusting the initial array.
 3. Run `fractal migrate host --json` and retain its host receipt. It persistently disables
    legacy boot/login activation **before** stopping services and waiting for their state lock.
    Atomic directory/bridge exchanges move config/state without ever leaving an absent legacy

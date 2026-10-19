@@ -53,7 +53,14 @@ fn generation_forced_paths(generation: &Path, home: &Path) -> Result<Vec<String>
 // Parse only the literal array grammar emitted by lib.escapeShellArg, with HOME
 // expansion. Unknown shell expressions fail closed rather than running old code.
 fn forced_paths(source: &str, home: &Path) -> Result<Vec<String>> {
-    ensure!(source.matches("forcedPaths=(").count() == 1, "unrecognized forcedPaths assignment count");
+    // Inspect the whole script before returning the initial array: any later
+    // append/indexed assignment (or other use) invalidates that initial value.
+    let references = source.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| *token == "forcedPaths").count();
+    ensure!(references == 2
+        && source.lines().filter(|line| line.trim_start().starts_with("forcedPaths=(")).count() == 1
+        && source.lines().filter(|line| line.trim() == "for forcedPath in \"${forcedPaths[@]}\"; do").count() == 1,
+        "unsupported forcedPaths references: expected one initializer and only the pinned checker's read-only loop");
     let (_, array) = source.split_once("forcedPaths=(").context("missing forcedPaths array")?;
     let home = home.to_str().context("Home Manager HOME is not UTF-8")?;
     let mut chars = array.chars().peekable();
@@ -109,7 +116,7 @@ mod tests {
 
     #[test]
     fn generated_array_grammar_preserves_literals_and_expands_only_home() -> Result<()> {
-        let source = "forcedPaths=(\"$HOME\"/'config/st3/config' \\\n            '${HOME}/literal' \"${HOME}/space path\" 'quote'\\''path' \"back\\\\slash\" )";
+        let source = "forcedPaths=(\"$HOME\"/'config/st3/config' \\\n            '${HOME}/literal' \"${HOME}/space path\" 'quote'\\''path' \"back\\\\slash\" )\nfor forcedPath in \"${forcedPaths[@]}\"; do\n:\ndone\n";
         assert_eq!(forced_paths(source, Path::new("/tmp/hm-fixture"))?, vec![
             "/tmp/hm-fixture/config/st3/config", "${HOME}/literal", "/tmp/hm-fixture/space path",
             "quote'path", "back\\slash",
@@ -119,13 +126,24 @@ mod tests {
 
     #[test]
     fn dynamic_or_unknown_arrays_are_refused_without_shell_evaluation() {
-        for source in [
+        for array in [
             "forcedPaths=($(touch sentinel))", "forcedPaths=($OTHER)",
             "forcedPaths=($HOME_SUFFIX)", "forcedPaths=(~/.config)",
             "forcedPaths=({a,b})", "forcedPaths=('unterminated)",
             "forcedPaths=(", "forcedPaths=() forcedPaths=()",
         ] {
-            assert!(forced_paths(source, Path::new("/tmp/hm-fixture")).is_err(), "{source}");
+            let source = format!("{array}\nfor forcedPath in \"${{forcedPaths[@]}}\"; do\n:\ndone\n");
+            assert!(forced_paths(&source, Path::new("/tmp/hm-fixture")).is_err(), "{array}");
+        }
+    }
+
+    #[test]
+    fn later_array_mutations_are_not_hidden_by_the_initial_literal() {
+        let upstream = "forcedPaths=()\nfor forcedPath in \"${forcedPaths[@]}\"; do\n:\ndone\n";
+        assert!(forced_paths(upstream, Path::new("/tmp/hm-fixture")).is_ok());
+        for mutation in ["forcedPaths+=(\"$HOME\"/config/st3/config)", "forcedPaths[0]=\"$HOME/config/st3/config\""] {
+            let source = format!("{upstream}{mutation}\n");
+            assert!(forced_paths(&source, Path::new("/tmp/hm-fixture")).is_err(), "{mutation}");
         }
     }
 }
