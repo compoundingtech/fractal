@@ -111,6 +111,8 @@ impl Fixture {
         fs::create_dir_all(&units)?;
         fs::create_dir_all(&state)?;
         let layout = Layout {
+            home: root.path().to_owned(),
+            profiles: Some(vec![root.path().join("profiles"), root.path().join("legacy-profiles")]),
             directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
@@ -158,6 +160,18 @@ impl Fixture {
                 idle_failure: None, probe_failure: false, target_protection: None,
                 fail_target_enable_once: false, omit_missing: false, fail_legacy_start_once: false },
         })
+    }
+
+    fn use_home_manager(&mut self) -> Result<()> {
+        let old = &mut self.manager.services.legacy[0];
+        let name = if cfg!(target_os = "macos") { "org.nix-community.home.smalltalk" } else { "smalltalk.service" };
+        let filename = if cfg!(target_os = "macos") { format!("{name}.plist") } else { name.into() };
+        let file = old.file.parent().unwrap().join(filename);
+        fs::rename(&old.file, &file)?;
+        fs::rename(dropins(&old.file), dropins(&file))?;
+        old.name = name.into();
+        old.file = file;
+        Ok(())
     }
 
     async fn run(&mut self, dry_run: bool, rollback: bool) -> Result<Receipt> {
@@ -585,14 +599,7 @@ fn home_manager_config_fence_restores_original_symlink_at_every_publication_boun
 async fn home_manager_cutover_retains_fence_and_failure_restores_original_config() -> Result<()> {
     for failed in [false, true] {
         let mut fixture = Fixture::new()?;
-        let old = &mut fixture.manager.services.legacy[0];
-        let name = if cfg!(target_os = "macos") { "org.nix-community.home.smalltalk" } else { "smalltalk.service" };
-        let filename = if cfg!(target_os = "macos") { format!("{name}.plist") } else { name.into() };
-        let file = old.file.parent().unwrap().join(filename);
-        fs::rename(&old.file, &file)?;
-        fs::rename(dropins(&old.file), dropins(&file))?;
-        old.name = name.into();
-        old.file = file;
+        fixture.use_home_manager()?;
         let immutable = fixture.root.path().join("immutable-config");
         fs::write(&immutable, b"node = \"test\"\n")?;
         symlink(&immutable, fixture.layout.directories[0].0.join("config.toml"))?;
@@ -610,6 +617,82 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
             assert!(fs::read_to_string(target.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
             assert!(!target.join(PENDING_RECEIPT).exists());
         }
+    }
+    Ok(())
+}
+
+fn retain_generation(fixture: &Fixture, profile: usize, number: u64, forced: &str, wrapped: bool) -> Result<PathBuf> {
+    let profile = &fixture.layout.profiles.as_ref().unwrap()[profile];
+    fs::create_dir_all(profile)?;
+    let generation = fixture.root.path().join(format!("generation-{number}"));
+    fs::create_dir(&generation)?;
+    let checker = generation.join("fixture-check-link-targets.sh");
+    fs::write(&checker, format!("forcedPaths=({forced})\n"))?;
+    let activation = format!("find \"$newGenFiles\" -exec bash {} \"$newGenFiles\" {{}} +\n", checker.display());
+    if wrapped {
+        fs::write(generation.join("activate"), "exec \"$activation_dir/activate-uninstrumented\" \"$@\"\n")?;
+        fs::write(generation.join("activate-uninstrumented"), activation)?;
+    } else {
+        fs::write(generation.join("activate"), activation)?;
+    }
+    let link = profile.join(format!("home-manager-{number}-link"));
+    symlink(&generation, &link)?;
+    Ok(link)
+}
+
+#[tokio::test]
+async fn retained_forced_generations_refuse_cutover_with_sorted_prune_numbers() -> Result<()> {
+    for dry_run in [true, false] {
+        let mut fixture = Fixture::new()?;
+        fixture.use_home_manager()?;
+        fs::write(fixture.layout.directories[0].0.join("config.toml"), b"node = \"test\"\n")?;
+        let config = retain_generation(&fixture, 0, 9, "\"$HOME\"/'config/st3/config'", true)?;
+        let state = retain_generation(&fixture, 1, 2, "\"$HOME\"/'state/st'", false)?;
+        let safe = retain_generation(&fixture, 0, 20, "\"$HOME\"/'unrelated'", false)?;
+        symlink(safe.file_name().unwrap(), fixture.layout.profiles.as_ref().unwrap()[0].join("home-manager"))?;
+        let before = fixture.snapshot()?;
+        let error = fixture.run(dry_run, false).await.unwrap_err();
+        assert!(format!("{error:#}").contains("prune generation numbers [2, 9]"));
+        assert_eq!(fixture.snapshot()?, before);
+        assert!(!fixture.manager.changed_services());
+        assert!(!fixture.layout.journal.exists());
+        fs::remove_file(config)?;
+        fs::remove_file(state)?;
+        fixture.run(true, false).await?;
+        assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_generation_scan_accepts_empty_and_unrelated_literal_force_arrays() -> Result<()> {
+    let fixture = Fixture::new()?;
+    for (number, forced) in [
+        (1, ""),
+        (2, "\"$HOME\"/'config/st3/config.toml.backup' \"$HOME\"/'state/st30'"),
+        (3, "\"$HOME\"/'other path/with '\\''quotes'"),
+    ] {
+        retain_generation(&fixture, 0, number, forced, number == 3)?;
+    }
+    home_manager::preflight(&fixture.layout)?;
+    Ok(())
+}
+
+#[test]
+fn unreadable_or_dynamic_retained_generations_fail_closed_without_execution() -> Result<()> {
+    for bad in ["dynamic", "unknown", "missing"] {
+        let fixture = Fixture::new()?;
+        let sentinel = fixture.root.path().join("must-not-run");
+        let link = retain_generation(&fixture, 0, 7, &format!("$(touch {})", sentinel.display()), false)?;
+        let generation = fs::read_link(&link)?;
+        if bad == "unknown" {
+            fs::write(generation.join("activate"), "exec unknown-wrapper\n")?;
+        } else if bad == "missing" {
+            fs::remove_file(generation.join("fixture-check-link-targets.sh"))?;
+        }
+        let error = home_manager::preflight(&fixture.layout).unwrap_err();
+        assert!(format!("{error:#}").contains("retained Home Manager generation 7"));
+        assert!(!sentinel.exists());
     }
     Ok(())
 }

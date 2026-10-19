@@ -81,16 +81,18 @@
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
               config.programs.smalltalk.fractalBinary.enable = extraConfig.fractalBinary or false;
-              config.xdg.configFile = lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
-                "st3/config.toml".force = true;
-              };
+              config.home.file = extraConfig.homeFiles or { };
+              config.xdg.configFile = (extraConfig.configFiles or { })
+                // lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
+                  "st3/config.toml".force = true;
+                };
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
                 socket = "/tmp/smalltalk-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/st3/seats/claude.kdl ];
-              } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" ];
+              } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" "homeFiles" "configFiles" ];
             })
           ];
         };
@@ -1077,6 +1079,39 @@
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
             legacyPreflight = unstaged.home.activation.fractalMigrationPreflight;
+            forcedPathFixtures = [
+              # Config-file exact, ancestor, raw sibling prefix, and unrelated paths.
+              { target = ".config/st3/config.toml"; rejected = true; }
+              { target = ".config/st3"; rejected = true; }
+              { target = ".config/st3/config"; rejected = true; }
+              { target = ".config/st3/config.toml.other"; rejected = false; }
+              { target = ".config/unrelated"; rejected = false; }
+              # State-root equivalents: "st" is a prefix despite not being an ancestor.
+              { target = ".local/state/st3"; rejected = true; }
+              { target = ".local/state"; rejected = true; }
+              { target = ".local/state/st"; rejected = true; }
+              { target = ".local/state/st3-other"; rejected = false; }
+              { target = ".local/state/unrelated"; rejected = false; }
+            ];
+            forcedPathsMatch = phase: builtins.all (fixture:
+              builtins.all (target:
+                let evaluated = (mkHmModuleEval {
+                  fractalMigration.phase = phase;
+                  homeFiles."forced-path-fixture" = { inherit target; force = true; };
+                }).config;
+                in (builtins.all (item: item.assertion) evaluated.assertions) == !fixture.rejected
+              ) [ fixture.target "/home/example/${fixture.target}" ]
+            ) forcedPathFixtures;
+            forcedConfigPathsMatch = phase: builtins.all (fixture:
+              let evaluated = (mkHmModuleEval {
+                fractalMigration.phase = phase;
+                configFiles."forced-path-fixture" = {
+                  target = pkgs.lib.removePrefix ".config/" fixture.target;
+                  force = true;
+                };
+              }).config;
+              in (builtins.all (item: item.assertion) evaluated.assertions) == !fixture.rejected
+            ) (builtins.filter (fixture: pkgs.lib.hasPrefix ".config/" fixture.target) forcedPathFixtures);
             collisionSource = pkgs.fetchurl {
               url = "https://raw.githubusercontent.com/nix-community/home-manager/380c55aeae9745bc94c010996753850d975b8f59/modules/files/check-link-targets.sh";
               hash = "sha256-B1fuVMJwkhg2AhuDSPK1440zQOsq8Wdd8+vtvghGrTg=";
@@ -1101,6 +1136,8 @@
             '';
           in
           assert builtins.all (item: item.assertion) rendered.assertions;
+          assert builtins.all forcedPathsMatch [ "stage" "completed" ];
+          assert builtins.all forcedConfigPathsMatch [ "stage" "completed" ];
           assert !(builtins.all (item: item.assertion) (mkHmModuleEval {
             fractalMigration.phase = "stage";
             forceLegacyConfig = true;

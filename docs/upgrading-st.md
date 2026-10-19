@@ -123,6 +123,13 @@ are idle. Preserve the backups above. Do not move named instances or workspace r
    same-filesystem renames. Both service families running is a hard error. A populated
    `~/.config/fractal` or `~/.local/state/fractal` is never merged or overwritten, even if it
    has a receipt. Move the unrelated dotfiles Fractal TUI data to `fractalite` first.
+   For Home Manager, preflight also reads every retained `home-manager-N-link` in the
+   XDG/default user and legacy per-user Nix profiles. It refuses forced targets that
+   raw-prefix-match legacy `config.toml` or the state root, listing the generation
+   numbers to prune. This includes sibling prefixes such as `st3/config`, not just
+   containing directories. Prune the reported generations before retrying; no generation
+   is removed automatically. Unreadable or unrecognized collision scripts also refuse
+   cutover. Activation scripts are inspected, never executed by preflight.
 3. Run `fractal migrate host --json` and retain its host receipt. It persistently disables
    legacy boot/login activation **before** stopping services and waiting for their state lock.
    Atomic directory/bridge exchanges move config/state without ever leaving an absent legacy
@@ -138,9 +145,9 @@ are idle. Preserve the backups above. Do not move named instances or workspace r
    activation. Legacy and staging generations reject receipt-bearing roots. A persistent
    foreign `config.toml -> config.home-manager.toml` symlink also blocks immutable older
    generations at their normal collision check, including backup modes. Completed activation
-   updates only the guarded backing TOML. Before cutover, remove retained generations that
-   force ownership of the legacy config or a containing directory: Home Manager's explicit
-   `force = true` bypasses collision checks and is not a supported migration configuration.
+   updates only the guarded backing TOML. Home Manager's explicit `force = true` bypasses
+   collision checks using raw string prefixes, so both the module assertion and retained
+   generation preflight reject force prefixes of legacy config/state paths.
 
 The write-ahead journal lives at
 `${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`, recording the service plan,

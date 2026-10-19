@@ -267,17 +267,24 @@ in
       assertion = cfg.stateDir == "${config.xdg.stateHome}/st3";
       message = "services.smalltalk.fractalMigration requires the default st3 stateDir.";
     } ++ lib.optional staging {
-      assertion = !(config.xdg.configFile."st3/config.toml".force or false)
-        && !(builtins.any (forced: forced) (lib.mapAttrsToList (name: file:
-          let
-            target = file.target or name;
-            absolute = if lib.hasPrefix "/" target then target else "${config.home.homeDirectory}/${target}";
-          in
-          (file.force or false)
-          && (absolute == "${config.xdg.configHome}/st3/config.toml"
-            || lib.hasPrefix "${lib.removeSuffix "/" absolute}/" "${config.xdg.configHome}/st3/config.toml")
-        ) config.home.file));
-      message = "Fractal migration requires unforced legacy config ownership; remove forced old generations before cutover.";
+      # Match HM's check-link-targets.sh literally: $targetPath == $forcedPath*.
+      # This is a raw string prefix, not a path-component/ancestor comparison.
+      assertion = !(builtins.any (absolute:
+        lib.hasPrefix absolute "${config.xdg.configHome}/st3/config.toml"
+        || lib.hasPrefix absolute "${config.xdg.stateHome}/st3"
+      ) (
+        lib.concatLists (lib.mapAttrsToList (name: file:
+          let target = file.target or name;
+          in lib.optional (file.force or false)
+            (if lib.hasPrefix "/" target then target else "${config.home.homeDirectory}/${target}")
+        ) config.home.file)
+        ++ lib.concatLists (lib.mapAttrsToList (name: file:
+          let target = file.target or name;
+          in lib.optional (file.force or false)
+            (if lib.hasPrefix "/" target then target else "${config.xdg.configHome}/${target}")
+        ) config.xdg.configFile)
+      ));
+      message = "Fractal migration requires unforced legacy config and state ownership (including raw forced-path prefixes); remove forced old generations before cutover.";
     };
     home.file = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin) {
       "Library/LaunchAgents/com.compoundingtech.fractal.plist".text =

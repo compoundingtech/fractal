@@ -56,7 +56,12 @@ An unchanged payload with the same signing settings keeps its existing signed bu
 A changed app replaces the whole bundle through an atomic directory swap on the same
 filesystem. The installer keeps the prior app, CLI links/files and service plists under
 `~/.local/state/st3/macos-installs/`. The helper restores them if its own installation
-fails, while still holding its shared transaction lock.
+fails, while still holding its shared transaction lock. LaunchAgent backups distinguish
+missing definitions, regular files and symlinks. Rollback and `--restore-app` atomically
+restore a symlink object with its exact original target, including relative or dangling
+Home Manager links, rather than copying the target's bytes into a regular plist.
+Regular definitions retain their saved contents; previously missing definitions are
+removed. Restoring a link neither modifies nor recreates its target and never loads jobs.
 
 The extracted archive caller also keeps prior command files and transaction locks.
 If a later archive step fails after the helper completes its backup, the caller leaves

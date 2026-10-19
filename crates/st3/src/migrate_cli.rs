@@ -16,6 +16,7 @@ use st3::config::Config;
 use st3_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
 
 mod native;
+mod home_manager;
 #[cfg(test)]
 mod tests;
 
@@ -64,6 +65,8 @@ struct Receipt {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Layout {
+    home: PathBuf,
+    profiles: Option<Vec<PathBuf>>,
     directories: [(PathBuf, PathBuf); 2],
     journal: PathBuf,
     lock: PathBuf,
@@ -75,7 +78,15 @@ impl Layout {
         let config = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from);
         let state = std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), PathBuf::from);
         ensure!(config.is_absolute() && state.is_absolute(), "XDG config/state directories must be absolute");
+        let profiles = std::env::var_os("USER").map(|user| {
+            let nix_state = std::env::var_os("NIX_STATE_DIR").map_or_else(|| PathBuf::from("/nix/var/nix"), PathBuf::from);
+            let mut profiles = vec![state.join("nix/profiles"), nix_state.join("profiles/per-user").join(user)];
+            let default = home.join(".local/state/nix/profiles");
+            if profiles[0] != default { profiles.push(default); }
+            profiles
+        });
         Ok(Self {
+            home, profiles,
             directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
@@ -347,6 +358,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         }
     }
     if home_manager(&services) {
+        home_manager::preflight(layout)?;
         let config = &layout.directories[0].0;
         for name in [CONFIG_BACKING, CONFIG_BACKUP, CONFIG_PENDING] {
             ensure!(fs::symlink_metadata(config.join(name)).is_err(), "legacy config contains reserved migration file {name}");

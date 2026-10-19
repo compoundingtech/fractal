@@ -140,10 +140,19 @@ be sufficient: Home Manager's backup extension/command modes accept regular-file
 collisions, but reject this foreign symlink.
 
 Home Manager's explicit `force = true` bypasses collision checks altogether.
-Stage/completed configurations reject forced ownership of `st3/config.toml` or
-a containing path. Do not remove the foreign link; old generations with force
-overrides are not safe rollback candidates and must be removed before cutover.
-Likewise, do not bypass `checkLinkTargets` when invoking
+Stage/completed configurations reject forced paths that are raw string prefixes
+of either the legacy `~/.config/st3/config.toml` path or the legacy
+`~/.local/state/st3` root (using the configured XDG directories). This matches
+the pinned Home Manager checker's `$targetPath == $forcedPath*`, not a
+path-component comparison: exact paths and ancestors are rejected, but so are
+prefixes such as `.config/st3/config` and `.local/state/st`. An unrelated path
+such as `.config/other`, or a longer sibling such as `.local/state/st3-other`,
+does not match. Both `home.file` and `xdg.configFile` forced ownership count.
+
+Do not remove the foreign link. Old generations with matching force overrides
+are not safe rollback candidates and must be removed before cutover; the host
+migrator scans retained generations and refuses cutover with their unsafe
+generation numbers. Likewise, do not bypass `checkLinkTargets` when invoking
 old activation scripts. The migrator must install the journaled fence before
 publishing the legacy configuration directory bridge and disable old boot/login
 activation before moving directories, so an interrupted cutover cannot leave

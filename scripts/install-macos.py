@@ -250,9 +250,13 @@ def backup(home, job, stage_fractal=False):
     definitions = {}
     for service in service_labels(stage_fractal):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
-        if path.exists():
+        if path.is_symlink():
+            definitions[service] = {'present': True, 'link': os.readlink(path)}
+        elif path.exists():
             shutil.copy2(path, plists / path.name)
-        definitions[service] = {'present': path.exists()}
+            definitions[service] = {'present': True}
+        else:
+            definitions[service] = {'present': False}
         if stage_fractal:
             # No override means enabled by default. launchctl has no per-label
             # unset operation; restore that effective state with `enable`.
@@ -388,7 +392,12 @@ def restore(home, job, had_app):
             os.replace(current, moved)
     for service, prior in definitions.items():
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
-        if prior['present']:
+        if 'link' in prior:
+            staged = path.parent / ('.' + path.name + '-' + Path(job).name + '-restore')
+            staged.unlink(missing_ok=True)
+            staged.symlink_to(prior['link'])
+            os.replace(staged, path)
+        elif prior['present']:
             original = Path(job) / 'previous-launchd' / path.name
             write_atomic(path, original.read_bytes())
         else:

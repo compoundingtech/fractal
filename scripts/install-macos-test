@@ -373,6 +373,112 @@ class Installer(unittest.TestCase):
                            if call[:2] in (['launchctl', 'enable'], ['launchctl', 'disable'])]
                 self.assertTrue(set(changed).issubset(m.FRACTAL_SERVICES))
 
+    def test_hm_launchagent_symlink_rollback_preserves_the_link_object(self):
+        for mode in ('failed-install', 'restore-app', 'stage-refusal'):
+            for kind in ('absolute', 'relative', 'dangling'):
+                with self.subTest(mode=mode, kind=kind):
+                    home = self.home / (mode + '-' + kind)
+                    job = home / 'job'
+                    job.mkdir(parents=True)
+                    label = m.FRACTAL_SERVICES[0]
+                    service = home / 'Library/LaunchAgents' / (label + '.plist')
+                    service.parent.mkdir(parents=True)
+                    target = home / 'hm-generation' / service.name
+                    original = plistlib.dumps({
+                        'Label': label,
+                        'ProgramArguments': ['/nix/store/example/bin/fractal-daemon'],
+                        'RunAtLoad': True,
+                    })
+                    if kind != 'dangling':
+                        target.parent.mkdir()
+                        target.write_bytes(original)
+                    link = (str(target) if kind == 'absolute' else
+                            '../../hm-generation/' + service.name)
+                    service.symlink_to(link)
+                    replacements = []
+                    replace = os.replace
+                    def replace_object(source, destination):
+                        if Path(destination) == service:
+                            self.assertTrue(Path(source).is_symlink())
+                            self.assertEqual(os.readlink(source), link)
+                            replacements.append(Path(source))
+                        return replace(source, destination)
+                    def output(args):
+                        args = list(map(str, args))
+                        if args[:2] == ['launchctl', 'print-disabled']:
+                            self.calls.append(args)
+                            return 'disabled services = {\n    "' + label + '" => true\n}\n'
+                        if mode == 'failed-install' and args[0] == m.LSREGISTER:
+                            self.calls.append(args)
+                            raise subprocess.CalledProcessError(1, args, 'injected registration failure')
+                        if mode == 'stage-refusal' and args[-3:] == ['service', 'install', '--stage-fractal']:
+                            self.calls.append(args)
+                            self.assertTrue(service.is_symlink())
+                            raise subprocess.CalledProcessError(1, args, 'refusing Home Manager definition')
+                        return self.command(args)
+                    argv = ['install-macos', '--from', str(self.source), '--home', str(home),
+                            '--job', str(job)]
+                    if mode == 'stage-refusal':
+                        argv.append('--stage-fractal')
+                    with patch.dict(os.environ, PATH=''), \
+                            patch.object(m, 'command', side_effect=output), \
+                            patch.object(m, 'exchange', side_effect=self.exchange), \
+                            patch.object(m.os, 'replace', side_effect=replace_object), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        if mode == 'restore-app':
+                            with patch.object(sys, 'argv', argv + ['--backup-only']):
+                                m.main()
+                            # Restore must replace a changed definition, not follow
+                            # the old link or recreate its referent as a regular file.
+                            service.unlink()
+                            service.write_bytes(b'replacement definition')
+                            with patch.object(sys, 'argv', [
+                                    'install-macos', '--home', str(home), '--job', str(job),
+                                    '--restore-app']):
+                                m.main()
+                        else:
+                            with patch.object(sys, 'argv', argv):
+                                with self.assertRaises(subprocess.CalledProcessError):
+                                    m.main()
+                    recorded = json.loads((job / 'previous-launchd.json').read_text())[label]
+                    self.assertTrue(recorded['present'])
+                    self.assertEqual(recorded['link'], link)
+                    self.assertFalse((job / 'previous-launchd' / service.name).exists())
+                    self.assertTrue(service.is_symlink())
+                    self.assertEqual(os.readlink(service), link)
+                    self.assertEqual(service.exists(), kind != 'dangling')
+                    self.assertEqual(len(replacements), 1)
+                    self.assertFalse(replacements[0].is_symlink())
+                    if kind != 'dangling':
+                        self.assertEqual(target.read_bytes(), original)
+                    else:
+                        self.assertFalse(target.exists())
+                    self.assertFalse(m.fixed(home).exists())
+                    if mode == 'stage-refusal':
+                        self.assertTrue(recorded['disabled'])
+                        self.assertIn(['launchctl', 'disable',
+                                       'gui/' + str(os.getuid()) + '/' + label], self.calls)
+                    self.assertFalse(any('bootstrap' in call or 'kickstart' in call or 'bootout' in call
+                                         for call in self.calls))
+
+    def test_hm_symlink_stage_restore_refuses_loaded_target_before_restoring(self):
+        label = m.FRACTAL_SERVICES[0]
+        service = self.home / 'Library/LaunchAgents' / (label + '.plist')
+        service.parent.mkdir(parents=True)
+        service.symlink_to('../../missing-hm-generation/definition.plist')
+        with patch.object(m, 'command', side_effect=self.command):
+            had_app = m.backup(self.home, self.job, stage_fractal=True)
+        service.unlink()
+        service.write_bytes(b'new definition')
+        self.calls.clear()
+        with patch.object(m, 'command', return_value='loaded') as command:
+            with self.assertRaisesRegex(RuntimeError, 'loaded launchd service'):
+                m.restore(self.home, self.job, had_app)
+        self.assertFalse(service.is_symlink())
+        self.assertEqual(service.read_bytes(), b'new definition')
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(command.call_args.args[0][:2], ['launchctl', 'print'])
+
     def test_full_bundle_plists_cli_restore_and_unchanged_payload(self):
         bin_dir = m.bin_dir(self.home)
         bin_dir.mkdir(parents=True)
