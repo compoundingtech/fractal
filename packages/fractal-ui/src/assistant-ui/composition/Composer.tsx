@@ -9,6 +9,7 @@ import { EmbraceComposer } from '../EmbraceComposer'
 
 export interface ComposerProps {
   agent: string; running?: boolean; folder?: string; branch?: string
+  conversationLabel?: string
   onSend?: (text: string) => void | Promise<void>
   onStop?: () => void | Promise<void>
   onSteer?: (text: string) => void | Promise<void>
@@ -25,7 +26,7 @@ export const Composer = React.memo(function Composer(props: ComposerProps) {
   const key = props.draftKey ?? `${props.folder}/${props.agent}`
   return <ComposerEditor key={key} {...props} storageKey={key} />
 })
-function ComposerEditor({ agent, running, folder, branch, onSend, onStop, onSteer, onQueue, history, storageKey }: ComposerProps & { storageKey: string }) {
+function ComposerEditor({ agent, conversationLabel, running, folder, branch, onSend, onStop, onSteer, onQueue, history, storageKey }: ComposerProps & { storageKey: string }) {
   const aui = useAui()
   const [value, setValue] = React.useState(() => readDraft(storageKey))
   const [queued, setQueued] = React.useState<readonly string[]>(() => queues.get(storageKey) ?? [])
@@ -92,6 +93,7 @@ function ComposerEditor({ agent, running, folder, branch, onSend, onStop, onStee
     {failed ? <div role="alert" {...stylex.props(styles.banner)}>Message could not be sent.<Button onPress={() => { edit([current.current, failed].filter(Boolean).join('\n\n')); setFailed(undefined); input.current?.focus() }}>Restore message</Button></div> : null}
     <EmbraceComposer
       variant="C2"
+      conversationLabel={conversationLabel}
       plainText
       showQueue={false}
       onRequestSubmit={modified => send(modified)}

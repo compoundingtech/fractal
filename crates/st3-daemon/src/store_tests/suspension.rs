@@ -2,6 +2,7 @@
 
 #![allow(unused_imports)]
 
+use crate::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use super::common::*;
 use anyhow::Result;
 use rusqlite::params;
 use smallclaims::store::now_ms;
-use st3_store::suspension::*;
+use crate::suspension::*;
 
 #[test]
 fn a_move_survives_a_crash_after_placement_and_a_later_label_change() {

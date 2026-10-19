@@ -1,3 +1,12 @@
+use crate::AccountsStore;
+use crate::EvidenceSeatsStore;
+use crate::RetirementsStore;
+use crate::RosterAdmissionStore;
+use crate::SeatStatusStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
+use crate::EvidenceStore;
+use crate::PublishedViewsStore;
 use super::*;
 use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
@@ -5,6 +14,8 @@ use axum::http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use std::collections::BTreeSet;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+pub(super) mod published_runtimes;
 
 /// Socket ownership ends this root only after the first data frame reaches the client.
 struct FirstFrame {
@@ -142,7 +153,6 @@ mod agents_window_tests;
 const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
 const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
 const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
-const TERMINAL_CAPABILITY_PROTOCOL_PREFIX: &str = "st3.cap.";
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 
 pub async fn request_latency(
@@ -340,14 +350,12 @@ pub async fn collection_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [COLLECTION_SUBPROTOCOL] {
-        return Err(validation(
-            "the collection WebSocket requires exactly st3.client.collections.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, COLLECTION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the collection WebSocket requires exactly one supported collections protocol"))?
+        .to_owned();
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     Ok(websocket
-        .protocols([COLLECTION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
 }
 
@@ -3871,20 +3879,32 @@ fn runtime_resources_from_status(
     session: &ClientSession,
     status: crate::model::StatusResponse,
 ) -> anyhow::Result<Vec<Value>> {
+    runtime_resources_from_status_access(&state.store, &snapshot.id, &snapshot.created_at, status,
+        session.allows("terminal.read"), session.allows("terminal.control"))
+}
+
+fn runtime_resources_from_status_access(
+    store: &Store,
+    _snapshot_id: &str,
+    created_at: &str,
+    status: crate::model::StatusResponse,
+    read: bool,
+    control: bool,
+) -> anyhow::Result<Vec<Value>> {
     #[cfg(test)]
     if let Some(count) = RUNTIME_DETAIL_SUBJECT_COUNTS.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&snapshot.id) {
+        .unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(_snapshot_id) {
         *count += status.subjects.len();
     }
     // Each runtime's declaration and observation time, in one statement apiece for the list.
-    let desired_tokens = state.store.selected_desired_tokens(
+    let desired_tokens = store.selected_desired_tokens(
         &status
             .subjects
             .iter()
             .map(|selected| selected.subject.as_str())
             .collect::<Vec<_>>(),
     )?;
-    let claim_times = state.store.claim_acceptance_times(
+    let claim_times = store.claim_acceptance_times(
         &status
             .subjects
             .iter()
@@ -3928,13 +3948,13 @@ fn runtime_resources_from_status(
         if !authoritative {
             runtime_state = "unreachable";
         }
-        let local = authoritative && observed == "running" && actual_origin == state.store.origin();
+        let local = authoritative && observed == "running" && actual_origin == store.origin();
         let incarnation_id = fields.get("incarnation_id").and_then(Value::as_str);
         let desired_revision = desired_tokens.get(&owner_id).cloned();
         let updated_at = claim_times
             .get(actual_claim)
             .map(|accepted_at| client_timestamp(*accepted_at))
-            .unwrap_or_else(|| snapshot.created_at.clone());
+            .unwrap_or_else(|| created_at.to_owned());
         let reasons = selected.reason.into_iter().collect::<Vec<_>>();
         values.push(json!({
             "id": format!("runtime/{runtime_id}"),
@@ -3953,9 +3973,9 @@ fn runtime_resources_from_status(
             // Screen fences come from terminal.screen, never from a graph projection.
             "terminal_sequence": null,
             "terminal_access": terminal.then(|| json!({
-                "read": if local && session.allows("terminal.read") { "granted" } else { "unavailable" },
-                "input": if local && session.allows("terminal.control") { "granted" } else { "unavailable" },
-                "resize": if local && session.allows("terminal.control") { "granted" } else { "unavailable" }
+                "read": if local && read { "granted" } else { "unavailable" },
+                "input": if local && control { "granted" } else { "unavailable" },
+                "resize": if local && control { "granted" } else { "unavailable" }
             })),
             "operational": {
                 "layer": selected.projection.layer,
@@ -5236,6 +5256,9 @@ pub async fn runtimes(
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
     require_scope(&session, "read.projections")?;
+    if !query.history {
+        return published_runtimes::page(&state, snapshot, &session, &query);
+    }
     let history = query.history;
     client_snapshot_page(
         &state,
@@ -5732,14 +5755,15 @@ pub fn message_provenance(state: &AppState, claim: &ClaimRecord) -> Option<Value
     {
         return None;
     }
-    let verdict = state.store.claim_verdict(&claim.id).ok()?;
-    let mut provenance = json!({"verdict": verdict.name()});
+    let authorization = state.store.claim_authorization(&claim.id).ok()?;
+    let verdict = authorization.verdict;
+    let mut provenance = json!({"verdict": verdict.name(), "authorization_model": authorization.model});
     if let smallclaims::principal::Verdict::Held(reason)
     | smallclaims::principal::Verdict::Invalid(reason) = &verdict
     {
         provenance["reason"] = json!(reason);
     }
-    if let Some(signature) = state.store.claim_signature(&claim.id).ok().flatten() {
+    if let Some(signature) = authorization.signature {
         provenance["signer"] = json!(signature.signer);
         provenance["key"] = json!(signature.key);
         let label = signature
@@ -8092,11 +8116,9 @@ pub async fn conversation_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [CONVERSATION_SUBPROTOCOL] {
-        return Err(validation(
-            "the conversation WebSocket requires exactly st3.client.conversation.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, CONVERSATION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the conversation WebSocket requires exactly one supported conversation protocol"))?
+        .to_owned();
     let session_id = conversation_session_id(&state, &id)?;
     let snapshot = new_client_snapshot(&state);
     let remote = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
@@ -8123,7 +8145,7 @@ pub async fn conversation_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("conversation", format!("conversation:{id}"));
     Ok(websocket
-        .protocols([CONVERSATION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             conversation_stream_socket(socket, state, session, session_id, query.after, remote, (upgrade, first_frame)).await
@@ -8680,7 +8702,7 @@ pub async fn pairing_begin(
             "the pairing person must match the authenticated Unix person",
         ));
     }
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || request.device_name.trim().is_empty()
         || request.device_name.len() > 120
         || !request.person_id.starts_with("person/")
@@ -8776,6 +8798,25 @@ pub struct PairingComplete {
     key_storage: Option<String>,
 }
 
+/// Proof bytes and their authorization model come from one pinned snapshot. The model
+/// label does not make legacy proofs evidence for the corrected candidate semantics.
+fn signature_grant_proofs(state: &AppState, ids: &[String]) -> Result<Option<Vec<Value>>, ApiError> {
+    state.store.read_snapshot(|_| {
+        let mut proofs=Vec::new();
+        for id in ids {
+            let Some(grant)=state.store.claim_by_id(id)? else { return Ok(None); };
+            let authorization=state.store.claim_authorization(id)?;
+            let Some(signature)=authorization.signature else { return Ok(None); };
+            proofs.push(json!({
+                "id":grant.id,"batch_id":grant.batch_id,"subject":grant.subject,"kind":grant.kind,
+                "origin":grant.origin,"actor":grant.actor,"body":grant.body,"predecessors":grant.predecessors,
+                "signature":signature,"authorization_model":authorization.model,
+            }));
+        }
+        Ok(Some(proofs))
+    }).map_err(ApiError::internal)
+}
+
 fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, ApiError> {
     let Some((_, id)) = state
         .store
@@ -8793,21 +8834,8 @@ fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, A
             "the member cannot produce a verifiable person-root grant; the pairing code was not consumed. Inspect the member's signing history",
         )
     };
-    let grant = state
-        .store
-        .claim_by_id(&id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(cannot_prove)?;
-    let signature = state
-        .store
-        .claim_signature(&id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(cannot_prove)?;
-    let proof = json!({
-        "id": grant.id, "batch_id": grant.batch_id, "subject": grant.subject,
-        "kind": grant.kind, "origin": grant.origin, "actor": grant.actor,
-        "body": grant.body, "predecessors": grant.predecessors, "signature": signature,
-    });
+    let proof=signature_grant_proofs(state, &[id])?.ok_or_else(cannot_prove)?
+        .into_iter().next().ok_or_else(cannot_prove)?;
     st3_client::device::verify_person_root_key_proof(person, &proof, None)
         .map_err(|_| cannot_prove())?;
     Ok(Some(proof))
@@ -8868,7 +8896,7 @@ pub async fn pairing_complete(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PairingComplete>,
 ) -> Result<Json<Value>, ApiError> {
-    if request.api_version != CLIENT_API_VERSION || request.device_public_key.len() < 32 {
+    if !super::wire_names::api_version(&request.api_version) || request.device_public_key.len() < 32 {
         return Err(validation(
             "the pairing completion has an invalid version or public key",
         ));
@@ -8989,24 +9017,7 @@ pub async fn pairing_complete(
                     "the member cannot produce verifiable enrollment grants; the pairing code was not consumed. Inspect the member's signing history",
                 )
             };
-            let mut proofs = Vec::new();
-            for id in &chain {
-                let grant = state
-                    .store
-                    .claim_by_id(id)
-                    .map_err(ApiError::internal)?
-                    .ok_or_else(cannot_prove)?;
-                let signature = state
-                    .store
-                    .claim_signature(id)
-                    .map_err(ApiError::internal)?
-                    .ok_or_else(cannot_prove)?;
-                proofs.push(json!({
-                    "id": grant.id, "batch_id": grant.batch_id, "subject": grant.subject,
-                    "kind": grant.kind, "origin": grant.origin, "actor": grant.actor,
-                    "body": grant.body, "predecessors": grant.predecessors, "signature": signature,
-                }));
-            }
+            let proofs=signature_grant_proofs(&state, &chain)?.ok_or_else(cannot_prove)?;
             st3_client::device::verify_device_key_proofs(&person_id, &chain, &proofs, key)
                 .map_err(|_| cannot_prove())?;
             Some((chain, proofs))
@@ -9393,29 +9404,14 @@ pub async fn terminal_stream(
         .map(str::trim)
         .filter(|protocol| !protocol.is_empty())
         .collect::<Vec<_>>();
-    let normative_count = protocols
-        .iter()
-        .filter(|protocol| **protocol == TERMINAL_SUBPROTOCOL)
-        .count();
-    let secondary = protocols
-        .iter()
-        .filter(|protocol| **protocol != TERMINAL_SUBPROTOCOL)
-        .copied()
-        .collect::<Vec<_>>();
-    let stream_capability = secondary
-        .first()
-        .and_then(|protocol| protocol.strip_prefix(TERMINAL_CAPABILITY_PROTOCOL_PREFIX))
-        .filter(|capability| !capability.is_empty());
-    if normative_count != 1 || secondary.len() != 1 || stream_capability.is_none() {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "validation-failed".into(),
-            message: format!(
-                "the terminal WebSocket must request exactly `{TERMINAL_SUBPROTOCOL}` plus one `st3.cap.*` capability protocol"
-            ),
-            details: Box::default(),
-        });
-    }
+    let (selected, stream_capability) =
+        super::wire_names::terminal_protocol(&protocols, TERMINAL_SUBPROTOCOL, false)
+            .ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "validation-failed".into(),
+                message: "the terminal WebSocket requires one supported terminal protocol plus one capability protocol".into(),
+                details: Box::default(),
+            })?;
     let follow = prepare_terminal_follow(
         &state,
         &session,
@@ -9426,7 +9422,7 @@ pub async fn terminal_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("terminal", format!("terminal:{id}"));
     Ok(websocket
-        .protocols([TERMINAL_SUBPROTOCOL])
+        .protocols([selected.to_owned()])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             follow.run(state, TerminalSink::Socket(Box::new(socket)), upgrade, first_frame).await
@@ -12199,7 +12195,7 @@ fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
 ) -> Result<(), ApiError> {
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
     {
@@ -12674,6 +12670,198 @@ mod published_attention_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn published_runtimes_refresher_publishes_after_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        observe_published_runtime(&state, "agent/published-before", "running", false);
+        let mut changes = state.store.published_runtime_list().subscribe();
+        super::super::published_lists::start_published_lists(&state);
+        let first_cut = state.store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), changes.wait_for(|_| {
+            state.store.published_runtime_list().newest().is_some_and(|p| p.cut >= first_cut)
+        })).await.unwrap().unwrap();
+        observe_published_runtime(&state, "agent/published-after", "running", false);
+        let next_cut = state.store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), changes.wait_for(|_| {
+            state.store.published_runtime_list().newest().is_some_and(|p| p.cut >= next_cut)
+        })).await.unwrap().unwrap();
+        let publication = state.store.published_runtime_list().newest().unwrap();
+        assert_eq!(publication.rows.items.len(), 2);
+        assert!(published_runtimes::fold(&state.store, Some(&publication)).unwrap().is_none(),
+            "an unchanged store index does not rebuild the list");
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_readiness_errors_survive_http_encoding() {
+        for ended in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            if ended {
+                let list = state.store.published_runtime_list();
+                let _wake = list.start();
+                list.end();
+            }
+            let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+            let error = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Query(ClientListQuery::default())).await.unwrap_err();
+            let response = super::super::response_body::Context {
+                state, client_request: true, observation_report: false,
+                request_id: "request/runtime-readiness".into(), client_snapshot: None,
+                server: None, roster: false,
+            }.wrap(error.into_response()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
+            assert_eq!(envelope["retryable"], !ended);
+            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["details"], json!({}));
+        }
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_repeated_first_pages_keep_existing_cursors() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for subject in ["agent/cache-a", "agent/cache-b", "agent/cache-c"] {
+            observe_published_runtime(&state, subject, "running", false);
+        }
+        publish_runtimes_once(&state);
+        let snapshot = new_client_snapshot(&state);
+        let query = ClientListQuery { limit: Some(1), ..ClientListQuery::default() };
+        let other = client_page_read(&state, &snapshot, "runtime-cache-probe",
+            vec![json!({"id":"first"}), json!({"id":"second"})], &query, true).unwrap();
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+        let (_, Json(first)) = runtimes(State(state.clone()), Extension(snapshot.clone()),
+            Extension(session.clone()), Query(query.clone())).await.unwrap();
+        let original = first.page.next_cursor.unwrap();
+        for _ in 0..33 {
+            let (_, Json(repeated)) = runtimes(State(state.clone()), Extension(snapshot.clone()),
+                Extension(session.clone()), Query(query.clone())).await.unwrap();
+            assert_eq!(repeated.page.next_cursor.as_deref(), Some(original.as_str()),
+                "identical first pages reuse the original cache entry and expiry");
+        }
+        let cursor = decode_client_cursor(&original).unwrap();
+        let (_, Json(next)) = runtimes(State(state.clone()), Extension(cursor.snapshot),
+            Extension(session), Query(ClientListQuery { cursor: Some(original), ..query.clone() })).await.unwrap();
+        assert_eq!(next.items[0]["owner_id"], "agent/cache-b");
+        let next_other = client_page_read(&state, &snapshot, "runtime-cache-probe", Vec::new(),
+            &ClientListQuery { cursor: other.page.next_cursor, ..query }, true).unwrap();
+        assert_eq!(next_other.items[0]["id"], "second");
+    }
+
+    fn observe_published_runtime(state: &AppState, subject: &str, status: &str, terminal: bool) {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({
+                "status": status, "runtime_id": subject, "incarnation_id": "one", "terminal": terminal
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn publish_runtimes_once(state: &AppState) {
+        let list = state.store.published_runtime_list();
+        let _wake = list.start();
+        let (base, generation) = list.base();
+        if let Some((publication, _)) = published_runtimes::fold(&state.store, base.as_deref()).unwrap() {
+            assert!(list.publish(publication, generation).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_match_legacy_and_freeze_cursors_across_republish() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada",
+            &["read.projections", "terminal.read"]);
+        for (subject, status, terminal) in [
+            ("exec/runtime-c", "running", true),
+            ("agent/runtime-a", "running", false),
+            ("agent/runtime-b", "running", false),
+            ("exec/runtime-old", "stopped", true),
+        ] {
+            observe_published_runtime(&state, subject, status, terminal);
+        }
+        publish_runtimes_once(&state);
+        let snapshot = new_client_snapshot(&state);
+        let expected = runtime_resources(&state, false, &snapshot, &session).unwrap();
+        assert_eq!(expected.len(), 3);
+        let query = ClientListQuery { limit: Some(1), ..ClientListQuery::default() };
+        let (Extension(first_snapshot), Json(first)) = runtimes(State(state.clone()),
+            Extension(snapshot), Extension(session.clone()), Query(query.clone())).await.unwrap();
+        assert_eq!(first.items, expected[..1]);
+        observe_published_runtime(&state, "agent/runtime-0", "running", false);
+        observe_published_runtime(&state, "agent/runtime-b", "stopped", false);
+        publish_runtimes_once(&state);
+        let mut got = first.items;
+        let mut cursor = first.page.next_cursor;
+        while let Some(encoded) = cursor {
+            let continuation = decode_client_cursor(&encoded).unwrap();
+            let (Extension(next_snapshot), Json(next)) = runtimes(State(state.clone()),
+                Extension(continuation.snapshot), Extension(session.clone()),
+                Query(ClientListQuery { cursor: Some(encoded), ..query.clone() })).await.unwrap();
+            assert_eq!(next_snapshot.id, first_snapshot.id);
+            got.extend(next.items);
+            cursor = next.page.next_cursor;
+        }
+        assert_eq!(got, expected);
+        let (_, Json(newest)) = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Query(ClientListQuery::default())).await.unwrap();
+        assert_eq!(newest.items, runtime_resources(&state, false, &new_client_snapshot(&state), &session).unwrap());
+        let (_, Json(history)) = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Query(ClientListQuery { history: true, ..ClientListQuery::default() })).await.unwrap();
+        assert_eq!(history.items, runtime_resources(&state, true, &new_client_snapshot(&state), &session).unwrap());
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_not_ready_never_reduces_on_request() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        observe_published_runtime(&state, "agent/not-ready", "running", false);
+        let snapshot = new_client_snapshot(&state);
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let error = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
+            Query(ClientListQuery::default())).await.unwrap_err();
+        assert_eq!(work.finish(), smallclaims::sqlite::work::SqliteWork::default());
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "runtime-list-not-ready");
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_page_cost_is_flat_with_historical_population() {
+        for historical in [10, 2000] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            for index in 0..historical {
+                let subject = format!("agent/old-{index:04}");
+                observe_published_runtime(&state, &subject, "running", false);
+                observe_published_runtime(&state, &subject, "stopped", false);
+            }
+            for index in 0..110 {
+                observe_published_runtime(&state, &format!("agent/live-{index:04}"), "running", false);
+            }
+            publish_runtimes_once(&state);
+            let snapshot = new_client_snapshot(&state);
+            let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+            let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+            let started = Instant::now();
+            let (_, Json(page)) = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
+                Query(ClientListQuery { limit: Some(100), ..ClientListQuery::default() })).await.unwrap();
+            let elapsed = started.elapsed();
+            let cost = work.finish();
+            assert_eq!(cost, smallclaims::sqlite::work::SqliteWork::default(),
+                "published reads must execute zero SQLite VM steps or status queries at population {historical}");
+            assert_eq!(page.items.len(), 100);
+            assert!(page.page.has_more);
+            assert!(elapsed < Duration::from_millis(100), "published read took {elapsed:?}");
+            println!("published runtimes historical={historical} page=100 elapsed_us={} sqlite={cost:?}", elapsed.as_micros());
+        }
+    }
 
     #[tokio::test]
     async fn request_latency_keeps_scope_and_routes_with_a_memory_only_cost_snapshot() {
@@ -15665,6 +15853,112 @@ mission "differential" state="ready" {
         assert_eq!(cut["body"]["code"], "timeline-entry-too-large");
         assert!(cut["body"]["message"].as_str().unwrap().contains("st truncated"));
         assert!(serde_json::to_vec(cut).unwrap().len() < 1024);
+    }
+
+    #[test]
+    fn signature_state_faults_are_visible_in_doctor_and_fault_snapshot() {
+        use smallclaims::{
+            fleet::MemberKey,
+            principal::{ClaimSignature, content_digest},
+            store::{append_claim_record_tx, principals::store_claim_signature_tx},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let key = Arc::new(MemberKey::generate().unwrap().0);
+        state.store.set_node_key(key.clone()).unwrap();
+        let claim = {
+            let mut connection = state.store.connection.write();
+            let tx = connection.transaction().unwrap();
+            let claim = append_claim_record_tx(
+                &tx,
+                &state.store.origin,
+                "note/signature-state",
+                "example.note",
+                None,
+                &json!({"fields":{"text":"Diagnostic fault visibility"}}),
+                &[],
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            claim
+        };
+        state.store.replication_snapshot().unwrap();
+        let genuine = state.store.claim_signature(&claim.id).unwrap().unwrap();
+        let content = content_digest(
+            &claim.subject,
+            &claim.kind,
+            claim.actor.as_deref(),
+            &claim.body,
+        );
+        {
+            let mut connection = state.store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for _ in 1..65 {
+                let signature = ClaimSignature::sign(
+                    &key,
+                    &content,
+                    &genuine.signer,
+                    None,
+                    vec![],
+                    genuine.signed_at_unix_ms,
+                );
+                store_claim_signature_tx(&tx, &claim.id, &signature).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        state.store.judge_claims(true).unwrap();
+        let codes = || {
+            doctor_report(&state)
+                .unwrap()
+                .0
+                .checks
+                .into_iter()
+                .map(|check| check.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(codes().contains(&"signature-candidate-count".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-candidate-count"
+                    && fault.item.detail.contains(&state.store.origin))
+        );
+        state
+            .store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claim_signature_migration SET phase='envelopes',cursor=0 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(codes().contains(&"signature-migration-incomplete".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-migration-incomplete")
+        );
+        state
+            .store
+            .fail_signature_migration("fixture corrupt local payload")
+            .unwrap();
+        assert!(codes().contains(&"signature-state-corrupt".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-state-corrupt")
+        );
+        assert!(state.store.claim_by_id(&claim.id).unwrap().is_some());
     }
 
     #[test]

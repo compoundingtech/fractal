@@ -68,9 +68,11 @@ async function settleFrames() {
 }
 async function ready(canvasElement: HTMLElement) {
   await document.fonts.ready
+  const canvas = within(canvasElement)
+  // Press stability exercises older rows, which tail-first mounting deliberately defers.
+  await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
   const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < initialTurns.length) throw new Error('History not committed'); return found })
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
-  const canvas = within(canvasElement)
   return { viewport, canvas, jump: canvas.getByText('New messages ↓'), retries: canvas.getByTestId('retry-count') }
 }
 /** A mouse press by coordinates: the release lands on whatever is under the pointer after `during`, and the click goes to the common ancestor, as in a browser. */
