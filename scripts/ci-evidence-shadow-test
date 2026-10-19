@@ -104,6 +104,30 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'check=linux-tests result=would-reject reason=not_on_remote' in done.stdout, done.stdout
     print('passed: a record absent from the remote is would-reject even when this job still holds the ref')
 
+    # A tree-prefixed ref named in the publish result is the one fetched; first-layout entries still work.
+    moved = f'refs/notes/evidence/{tree}/{record}'
+    git(publisher, 'update-ref', moved, record)
+    git(publisher, 'push', '-q', 'sink', f'{moved}:{moved}')
+    for a in published['accepted']:
+        if a['record'] == record:
+            a['ref'] = moved
+    result_file.write_text(json.dumps(published))
+    # The verifier of this checkout does not read the new layout yet, so a stand-in verifier shows what the scratch repository holds.
+    stub = tmp / 'stub-verifier'
+    stub.write_text('#!/usr/bin/env python3\nimport subprocess, sys\n'
+                    'repo = sys.argv[sys.argv.index("--repo") + 1]\n'
+                    f'out = subprocess.run(["git", "-C", repo, "for-each-ref", "--format=%(refname)"], capture_output=True, text=True).stdout.split()\n'
+                    f'ok = {moved!r} in out\nimport json; print(json.dumps({{"satisfied": ok, "reason": "refs_" + "_".join(out).replace("/", "")}}))\nsys.exit(0 if ok else 1)\n')
+    done = shadow('--verifier', str(stub), checks='linux-tests')
+    assert 'check=linux-tests' in done.stdout and 'reason=verifier_exit_1' not in done.stdout and 'ok=1 ' in done.stdout, done.stdout
+    published['accepted'][0]['ref'] = 'refs/heads/main'
+    result_file.write_text(json.dumps(published))
+    done = shadow(checks='linux-tests')
+    assert 'error=unreadable_publish_result' in done.stdout, done.stdout
+    print('passed: an entry that names a tree-prefixed ref is fetched by that ref; a ref outside refs/notes/evidence is refused')
+    published['accepted'][0].pop('ref')
+    result_file.write_text(json.dumps(published))
+
     # A key list that does not name the signer rejects.
     other = tmp / 'other-keys'
     other.write_text('fleet/ci namespaces="git" ' + ' '.join(keygen(tmp / 'third', 'fleet/ci')[:2]) + '\n')

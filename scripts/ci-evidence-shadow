@@ -35,6 +35,7 @@ sys.dont_write_bytecode = True
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 CHECK = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}\Z')
 NOTES = 'refs/notes/evidence/'
+REF = re.compile(r'^refs/notes/evidence/(?:[0-9a-f]{40,64}/)?[0-9a-f]{40,64}\Z')
 TOKEN = re.compile(r'^[A-Za-z0-9._:/@+=-]+\Z')
 HERE = Path(__file__).resolve().parent
 
@@ -94,7 +95,11 @@ def main(argv):
         data = json.loads(Path(args.publish_result).read_text())
         tree = data['tree']
         accepted = data.get('accepted') or []
-        published = {a['check']: a['record'] for a in accepted if OID.match(a.get('record', ''))}
+        # An entry may name its ref (the tree-prefixed layout); without one it is refs/notes/evidence/<record>.
+        refs = {a['record']: a.get('ref') or f'{NOTES}{a["record"]}' for a in accepted if OID.match(a.get('record', ''))}
+        if not all(REF.match(ref) for ref in refs.values()):
+            raise ValueError('bad ref')
+        published = {a['check']: a['record'] for a in accepted if a.get('record') in refs}
         refs_added = len(accepted) + sum(1 for a in accepted if a.get('input_ref'))
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'evidence-shadow v1 total error=unreadable_publish_result detail={token(type(error).__name__)}')
@@ -110,7 +115,7 @@ def main(argv):
         remote = run('git', '-C', args.repo, 'remote', 'get-url', args.remote).stdout.decode().strip() or args.remote
         for record in sorted(set(published.values())):
             done = run('git', '-C', str(scratch), 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', remote,
-                       f'{NOTES}{record}:{NOTES}{record}')
+                       f'{refs[record]}:{refs[record]}')
             if done.returncode == 0:
                 fetched.add(record)
         results = lane_lines(lanes, published, fetched, scratch, tree, args.verifier, args.keys)
