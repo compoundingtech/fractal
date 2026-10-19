@@ -13,7 +13,7 @@ import {
 } from './workspace-ci.ts'
 
 // The long lanes, once a day on main: the ones that need a VM, real sockets across restarts or an older
-// st3 (docs/ci.md, Daily long lanes). Each runs exactly as Workspace CI runs it, from the same shared
+// st3, and the whole test selection at full scale (docs/ci.md, Daily long lanes). Each runs exactly as Workspace CI runs it, from the same shared
 // steps, on Namespace and at the lowest job priority. There is no pick-runner (its token is a secret), no
 // evidence signing and no cache write the warm-up jobs own. Job names carry a `daily-` prefix so no check
 // on main ever looks like a required check. The report job writes each lane's result, time and failed
@@ -27,10 +27,27 @@ const lanes = {
   'isolation-vm': 'daily-isolation-vm',
   'mail-redelivery-canaries': 'daily-mail-redelivery-canaries',
   'linux-fleet-compat': 'daily-fleet-compat',
+  'daily-tests': 'daily-tests',
+  'daily-tests-shard-2': 'daily-tests-shard-2',
 } as const
 
 const onMain = "github.ref == 'refs/heads/main'"
 const consumer = { needs: ['linux-test-build'], if: `\${{ !cancelled() && ${onMain} }}` } as const
+
+// The whole selection Workspace CI's shards run, at full scale: tests that keep a smaller size or fewer
+// proptest cases on pull requests read ST_TEST_SCALE=full and run their original size here.
+const fullScaleShard = (shard: 1 | 2) => ({
+  ...linuxStageJob({
+    name: lanes[shard === 1 ? 'daily-tests' : 'daily-tests-shard-2'],
+    stage: 'tests',
+    description: 'Run nextest at full scale',
+    setup: testArchiveConsumerSetup,
+    cacheSaveSetup: [],
+    env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: `hash:${shard}/2`, CI_TEST_THREADS: '8', ST_TEST_SCALE: 'full' },
+    extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+  }),
+  ...consumer,
+})
 
 export default githubWorkflow(auditCaches({
   actionlint: linuxActionlintConfig,
@@ -79,6 +96,8 @@ export default githubWorkflow(auditCaches({
       }),
       ...consumer,
     },
+    'daily-tests': fullScaleShard(1),
+    'daily-tests-shard-2': fullScaleShard(2),
     'linux-fleet-compat': {
       ...linuxStageJob({
         name: lanes['linux-fleet-compat'],

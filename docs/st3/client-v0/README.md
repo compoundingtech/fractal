@@ -1361,6 +1361,16 @@ grant, policy and disclosure class; unfiltered requests retain existing fleet pa
 An empty page means no matching published alerts, not absence of work or priorities.
 This narrows output pagination, not native publication scanning, and adds no read authority.
 
+`agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
+`agent/...` identifier. `st_agents_list` exposes the same selector: for a known agent,
+`{"agent_id":"agent/chief-of-staff"}` returns at most that agent's existing metadata row,
+or an empty page if it is absent from the assistant-visible publication. This is not alias
+resolution or an assertion that an absent agent has no work. Filtering precedes page
+construction and byte packing; continuations bind the exact selector as well as the
+grant, policy and disclosure class. Omitting it preserves fleet pagination. The selector
+avoids output pagination for a known ID, not native roster scanning, and does not provide
+priorities, planning conversations, or additional disclosure authority.
+
 The adapter uses `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
 under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
 the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only

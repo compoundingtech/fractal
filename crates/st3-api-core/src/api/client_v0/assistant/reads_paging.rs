@@ -13,7 +13,7 @@ pub async fn page(
     binding: &str,
     context: &response_body::Context,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
-    let agent_id = if matches!(projection, "attention" | "attention-rich") {
+    let agent_id = if matches!(projection, "agents" | "agents-rich" | "attention" | "attention-rich") {
         allow(parameters, &["cursor", "limit", "max_response_bytes", "agent_id"], max_bytes)?;
         parameters.get("agent_id").map(|id| {
             if identifier_allowed(id) && id.starts_with("agent/") && id.len() > "agent/".len() {
@@ -144,7 +144,8 @@ fn read_page(
         let mut visible_len = 0;
         let mut selected = Vec::new();
         for card in cards.iter().filter(|card| card["id"].as_str()
-            .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")))
+            .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")
+                && agent_id.is_none_or(|target| target == id)))
         {
             if window.contains(&visible_len) {
                 selected.push(card.clone());
@@ -164,7 +165,8 @@ fn read_page(
         let refs = if cursor.is_some() { Vec::new() } else {
             let mut refs = client_agent_page_refs(&state.store, false, index).map_err(ApiError::internal)?;
             refs.retain(|reference| reference["id"].as_str()
-                .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")));
+                .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")
+                    && agent_id.is_none_or(|target| target == id)));
             refs
         };
         let page = client_page_read_projected(

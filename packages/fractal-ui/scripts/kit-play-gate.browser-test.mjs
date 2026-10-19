@@ -36,7 +36,8 @@ const runGate = async ({ env = {}, report } = {}) => {
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
-      env: { ...inherited, ...env },
+      // The one-story fixture index has none of the kit's strict-policy stories.
+      env: { ...inherited, KIT_PLAY_CASE_OVERRIDES: '[]', ...env },
       stdio: 'ignore',
     })
     const code = await new Promise((resolve, reject) => {

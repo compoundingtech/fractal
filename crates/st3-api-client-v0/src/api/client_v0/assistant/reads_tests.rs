@@ -515,6 +515,66 @@ async fn targeted_attention_preserves_actionable_rows_and_filtered_continuations
 }
 
 #[tokio::test]
+async fn exact_agent_selector_filters_before_paging_and_binds_continuations() {
+    for published_agents in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        fleet(&state, root.path(), published_agents);
+        let source = format!("version 2\n{}", (0..=CLIENT_DEFAULT_PAGE_ITEMS)
+            .map(|index| format!("agent \"selector-{index:04}\" {{ workspace \"/tmp\"; command \"true\"; }}\n"))
+            .collect::<String>());
+        let intent = crate::graph::parse_internal_intent(&source, "selector-fixture").unwrap();
+        state.store.apply_internal(&intent, "selector-fixture-publication").unwrap();
+        crate::api::refresh_agent_roster(&state.store, false).unwrap();
+        for projection in ["agents", "agents-rich"] {
+            let all = read(&state, projection, &[("limit", &CLIENT_MAX_PAGE_ITEMS.to_string())],
+                MAX_RESPONSE_BYTES).await.unwrap();
+            let all_items = all["items"].as_array().unwrap();
+            assert!(all_items.len() >= 2);
+            let (default_snapshot, default) = project(&state, &new_client_snapshot(&state), projection,
+                &params(&[]), MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+            let default_cursor = default["page"]["next_cursor"].as_str().unwrap();
+            let (_, following) = project(&state, &default_snapshot, projection,
+                &params(&[("cursor", default_cursor)]), MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+            let target_row = &following["items"][0];
+            let target = target_row["id"].as_str().unwrap();
+            assert!(!default["items"].as_array().unwrap().iter().any(|row| row["id"] == target));
+            let (snapshot, first) = project(&state, &new_client_snapshot(&state), projection,
+                &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+            assert_ne!(first["items"][0]["id"], target);
+            let cursor = first["page"]["next_cursor"].as_str().unwrap();
+            let selected = read(&state, projection, &[("agent_id", target), ("limit", "1")],
+                MAX_RESPONSE_BYTES).await.unwrap();
+            assert_eq!(selected["items"], json!([target_row]));
+            assert_eq!(selected["page"]["has_more"], false);
+            assert!(selected["page"]["next_cursor"].is_null());
+            assert_no_source_text(&selected);
+            assert!(read(&state, projection, &[("agent_id", target)], 1).await.is_err());
+            assert!(read(&state, projection, &[("agent_id", "agent/absent")],
+                MAX_RESPONSE_BYTES).await.unwrap()["items"].as_array().unwrap().is_empty());
+            // A fleet continuation must not be reinterpreted as a targeted continuation.
+            assert_eq!(project(&state, &snapshot, projection,
+                &params(&[("cursor", cursor), ("agent_id", target)]),
+                MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap_err().code, "page-cursor-expired");
+            // Exercise the reverse binding without inventing a cursor signature.
+            let mut targeted_cursor = decode_client_cursor(cursor).unwrap();
+            targeted_cursor.collection = format!("assistant.{projection}:test-grant:1:agent_id={target}");
+            let targeted_cursor = encode_client_cursor(&targeted_cursor).unwrap();
+            assert_eq!(project(&state, &snapshot, projection,
+                &params(&[("cursor", &targeted_cursor)]),
+                MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap_err().code, "page-cursor-expired");
+            for invalid in ["chief-of-staff", "agent/", "person/operator", "agent/private prose"] {
+                assert_eq!(read(&state, projection, &[("agent_id", invalid)],
+                    MAX_RESPONSE_BYTES).await.unwrap_err().status, StatusCode::UNPROCESSABLE_ENTITY);
+            }
+            let (_, second) = project(&state, &snapshot, projection, &params(&[("cursor", cursor)]),
+                MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+            assert_eq!(second["items"][0], all_items[1]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn collection_cursors_are_stable_and_bound_to_disclosure_grant_and_policy() {
     for published_agents in [false, true] {
         let root = tempfile::tempdir().unwrap();
