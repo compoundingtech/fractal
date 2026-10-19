@@ -2737,15 +2737,27 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
         }
         // Only authenticated, allowlisted machine codes survive. Never retain peer prose.
         let safe_code = match code {
-            "replication-exchange-metadata-too-large" => "replication-exchange-metadata-too-large",
-            "replication-request-failed" => "replication-request-failed",
+            code @ ("replication-exchange-metadata-too-large"
+                | "replication-request-failed"
+                | "member-conflicted"
+                | "member-signature-required"
+                | "member-left"
+                | "member-removed"
+                | "not-a-member") => code,
             _ => "replication-peer-rejected",
         };
         return Err(ReplicationExchangeFailure {
             code: safe_code.into(),
-            phase: refusal.as_ref()
-                .and_then(|value| serde_json::from_value(value["failure"]["phase"].clone()).ok())
-                .unwrap_or(ReplicationFailurePhase::ResponseBody),
+            phase: if matches!(
+                safe_code, "member-conflicted" | "member-signature-required"
+                    | "member-left" | "member-removed" | "not-a-member"
+            ) {
+                ReplicationFailurePhase::Verify
+            } else {
+                refusal.as_ref()
+                    .and_then(|value| serde_json::from_value(value["failure"]["phase"].clone()).ok())
+                    .unwrap_or(ReplicationFailurePhase::ResponseBody)
+            },
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             http_status: Some(status.as_u16()),
             cause: "authenticated peer rejected the exchange; body withheld".into(),

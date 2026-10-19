@@ -1105,6 +1105,10 @@ async fn members_exchange_with_signatures_and_a_removed_member_is_refused() {
         unsigned.to_string().contains("member-signature-required"),
         "{unsigned:#}"
     );
+    let failure = unsigned.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    assert_eq!(failure.code, "member-signature-required");
+    assert_eq!(failure.phase, ReplicationFailurePhase::Verify);
+    assert_eq!(failure.http_status, Some(401));
 
     // a removes b; b's next exchange gets a signed refusal that names its key.
     fleet_claim(
