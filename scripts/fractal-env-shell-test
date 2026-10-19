@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+# Exercise the real standalone hook and eval clear boundaries, without starting a daemon.
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/bin"
+cat >"$work/bin/st2" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" >"$OBSERVED"
+SH
+cat >"$work/bin/st3" <<'SH'
+#!/bin/sh
+printf '%s:%s\n' "${FRACTAL_AGENT+x}" "${ST_AGENT+x}" >>"$OBSERVED"
+printf '{}\n'
+SH
+cat >"$work/bin/jq" <<'SH'
+#!/bin/sh
+cat >/dev/null
+SH
+chmod +x "$work/bin/st2" "$work/bin/st3" "$work/bin/jq"
+hook=$repo/crates/st-drivers/hooks/claude-observe.sh
+fail() { printf 'fractal-env-shell-test: %s\n' "$*" >&2; exit 1; }
+run_hook() {
+  rm -f "$work/observed"
+  env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" FRACTAL_ROOT="$work/catalog" "$@" bash "$hook" ToolUse >"$work/out" 2>"$work/err"
+}
+# Preferred-only and legacy-only launch identities both reach the same hook boundary.
+run_hook FRACTAL_AGENT=agent/new
+grep -qx 'agent/new' "$work/observed" || fail 'preferred-only identity was not selected'
+grep -qx "$work/catalog" "$work/observed" || fail 'preferred-only catalog was not selected'
+run_hook ST_AGENT=agent/old
+grep -qx 'agent/old' "$work/observed" || fail 'legacy-only identity was not selected'
+run_hook FRACTAL_AGENT=agent/same ST_AGENT=agent/same
+grep -qx 'agent/same' "$work/observed" || fail 'equal identities were refused'
+# Identity errors disclose names, never either value, and never invoke the driver.
+for old in private-old ''; do
+  if run_hook FRACTAL_AGENT=private-new "ST_AGENT=$old"; then fail 'conflicting aliases were accepted'; fi
+  test ! -e "$work/observed" || fail 'a conflicting identity reached the driver'
+  grep -q 'FRACTAL_AGENT and ST_AGENT' "$work/err" || fail 'conflict omitted variable names'
+  if grep -Eq 'private-new|private-old' "$work/err"; then fail 'conflict disclosed an identity'; fi
+done
+# An explicitly empty preferred identity masks, rather than falls back to, the legacy identity.
+run_hook FRACTAL_AGENT= ST_AGENT=private-old
+test ! -e "$work/observed" || fail 'empty preferred identity fell back to legacy'
+# An empty preferred config value also masks the legacy root without selecting it.
+run_hook FRACTAL_AGENT=agent/new FRACTAL_ROOT= ST_ROOT=private-root
+test ! -e "$work/observed" || fail 'empty preferred root fell back to legacy'
+# Eval operator reads clear BOTH inherited identities at the actual child command boundary.
+rm -f "$work/observed"
+env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" FRACTAL_MISSION_RUN=fixture \
+  FRACTAL_AGENT=private-new ST_AGENT=private-old \
+  bash "$repo/evals/st3/ghost-bug/judges/graph.sh" >/dev/null
+IFS= read -r cleared <"$work/observed"
+test "$cleared" = : || fail 'operator command retained an inherited identity alias'
+# The installer hands both updated config aliases to its macOS child, replacing inherited values.
+cat >"$work/bin/uname" <<'SH'
+#!/bin/sh
+printf 'Darwin\n'
+SH
+cat >"$work/bin/python3" <<'SH'
+#!/bin/sh
+printf '%s:%s\n' "$FRACTAL_INSTANCE" "$ST_INSTANCE" >"$OBSERVED"
+cp "$3/st3" "$5/st3"
+SH
+mkdir -p "$work/source" "$work/home"
+printf '#!/bin/sh\nexit 0\n' >"$work/source/st3"
+cp "$work/source/st3" "$work/source/st3-migrate"
+chmod +x "$work/bin/uname" "$work/bin/python3" "$work/source/st3" "$work/source/st3-migrate"
+env -i HOME="$work/home" PATH="$work/bin:$PATH" OBSERVED="$work/observed" \
+  FRACTAL_INSTANCE=inherited-new ST_INSTANCE=inherited-old \
+  bash "$repo/scripts/install" --from "$work/source" --instance selected >/dev/null
+test "$(cat "$work/observed")" = selected:selected || fail 'installer did not replace both inherited config aliases'
+printf 'shell environment alias tests passed\n'

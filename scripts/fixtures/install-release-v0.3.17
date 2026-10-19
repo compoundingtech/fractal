@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Install an extracted Smalltalk release without restarting any service.
 set -Eeuo pipefail
 source_dir=$(cd "$(dirname "$0")" && pwd)/bin
-bin_dir="${ST_MACOS_BIN_DIR:-$HOME/.local/bin}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+bin_dir="${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}"
 while (($#)); do
   case $1 in
     --bin-dir) bin_dir=${2:?--bin-dir needs a directory}; shift 2 ;;

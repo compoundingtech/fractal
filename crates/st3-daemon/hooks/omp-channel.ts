@@ -21,6 +21,35 @@ import type {
 
 const PROTOCOL = 2;
 
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+// Inline because this asset is embedded and published as a standalone file.
+const preferredName = (name: string) => name.replace(/^ST3?_/, "FRACTAL_");
+const legacyName = (name: string) => name.replace(/^ST3?_/, "ST2_");
+const readEnv = (name: string, identity = false) => {
+  const preferred = preferredName(name);
+  const value = process.env[preferred];
+  if (identity && value) {
+    const conflict = [name, legacyName(name)].find(
+      (legacy) => process.env[legacy] !== undefined && process.env[legacy] !== value,
+    );
+    if (conflict) {
+      console.error(`Conflicting identity environment variables: ${preferred} and ${conflict}`);
+      return undefined;
+    }
+  }
+  return value ?? process.env[name] ?? process.env[legacyName(name)];
+};
+const removeEnv = (name: string) => {
+  delete process.env[preferredName(name)];
+  delete process.env[name];
+  delete process.env[legacyName(name)];
+};
+const writeEnv = (env: NodeJS.ProcessEnv, name: string, value: string | undefined) => {
+  if (value === undefined) return;
+  env[preferredName(name)] = value;
+  env[name] = value;
+};
+
 const BIN = "ST_OMP_CHANNEL_BIN";
 const IDENTITY = "ST_OMP_CHANNEL_IDENTITY";
 const RUNTIME_ID = "ST_OMP_CHANNEL_RUNTIME_ID";
@@ -390,16 +419,18 @@ const stash = (): Stash => {
   const globals = globalThis as { __stOmpChannel?: Stash };
   if (!globals.__stOmpChannel) {
     globals.__stOmpChannel = {
-      bin: process.env[BIN],
-      identity: process.env[IDENTITY],
-      runtimeId: process.env[RUNTIME_ID],
-      session: process.env[SESSION],
-      seq: process.env[SEQ],
-      expectedNativeSession: process.env[EXPECTED_NATIVE_SESSION],
-      resumeGeneration: process.env[RESUME_GENERATION],
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      bin: readEnv(BIN),
+      identity: readEnv(IDENTITY, true),
+      runtimeId: readEnv(RUNTIME_ID, true),
+      session: readEnv(SESSION, true),
+      seq: readEnv(SEQ, true),
+      expectedNativeSession: readEnv(EXPECTED_NATIVE_SESSION),
+      resumeGeneration: readEnv(RESUME_GENERATION, true),
     };
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-    const pendingAsk = process.env[PENDING_ASK];
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    const pendingAsk = readEnv(PENDING_ASK);
     if (pendingAsk?.trim()) {
       globals.__stOmpChannel.restoringAsk = {
         toolCallId: pendingAsk,
@@ -408,16 +439,17 @@ const stash = (): Stash => {
         retried: false,
       };
     }
-    delete process.env[PENDING_ASK];
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-    delete process.env[BIN];
-    delete process.env[IDENTITY];
-    delete process.env[RUNTIME_ID];
-    delete process.env[SESSION];
-    delete process.env[SEQ];
-    delete process.env[EXPECTED_NATIVE_SESSION];
-    delete process.env[RESUME_GENERATION];
   }
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  removeEnv(PENDING_ASK);
+  removeEnv(BIN);
+  removeEnv(IDENTITY);
+  removeEnv(RUNTIME_ID);
+  removeEnv(SESSION);
+  removeEnv(SEQ);
+  removeEnv(EXPECTED_NATIVE_SESSION);
+  removeEnv(RESUME_GENERATION);
   return globals.__stOmpChannel;
 };
 
@@ -538,15 +570,15 @@ export default function (pi: ExtensionAPI) {
 
     cancelSettle();
     const channelEnv: NodeJS.ProcessEnv = { ...process.env };
-    if (runtimeId) channelEnv[RUNTIME_ID] = runtimeId;
-    if (session) channelEnv[SESSION] = session;
-    if (seq) channelEnv[SEQ] = seq;
-    if (expectedNativeSession) {
-      channelEnv[EXPECTED_NATIVE_SESSION] = expectedNativeSession;
-    }
-    if (resumeGeneration) channelEnv[RESUME_GENERATION] = resumeGeneration;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    writeEnv(channelEnv, RUNTIME_ID, runtimeId);
+    writeEnv(channelEnv, SESSION, session);
+    writeEnv(channelEnv, SEQ, seq);
+    writeEnv(channelEnv, EXPECTED_NATIVE_SESSION, expectedNativeSession);
+    writeEnv(channelEnv, RESUME_GENERATION, resumeGeneration);
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-    if (state.restoringAsk) channelEnv[PENDING_ASK] = state.restoringAsk.toolCallId;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    if (state.restoringAsk) writeEnv(channelEnv, PENDING_ASK, state.restoringAsk.toolCallId);
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     const child = childProcess.spawn(
       bin,

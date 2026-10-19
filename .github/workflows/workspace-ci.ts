@@ -251,8 +251,9 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
-printf 'ST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" >> "$GITHUB_ENV"`,
+printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
   },
   {
     name: 'Prepare provider component fixtures',

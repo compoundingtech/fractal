@@ -21,11 +21,33 @@ import type {
 
 const PROTOCOL = 1;
 
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+// Kept inline in both channel assets: each is embedded and published as a standalone file.
+const preferredName = (name: string) => `FRACTAL_${name.slice(3)}`;
 const legacyName = (name: string) => `ST2_${name.slice(3)}`;
-const readEnv = (name: string) => process.env[name] ?? process.env[legacyName(name)];
+const readEnv = (name: string, identity = false) => {
+  const preferred = preferredName(name);
+  const value = process.env[preferred];
+  if (identity && value) {
+    const conflict = [name, legacyName(name)].find(
+      (legacy) => process.env[legacy] !== undefined && process.env[legacy] !== value,
+    );
+    if (conflict) {
+      console.error(`Conflicting identity environment variables: ${preferred} and ${conflict}`);
+      return undefined;
+    }
+  }
+  return value ?? process.env[name] ?? process.env[legacyName(name)];
+};
 const removeEnv = (name: string) => {
+  delete process.env[preferredName(name)];
   delete process.env[name];
   delete process.env[legacyName(name)];
+};
+const writeEnv = (env: NodeJS.ProcessEnv, name: string, value: string | undefined) => {
+  if (value === undefined) return;
+  env[preferredName(name)] = value;
+  env[name] = value;
 };
 
 const BIN = "ST_OMP_CHANNEL_BIN";
@@ -226,12 +248,13 @@ const stash = (): Stash => {
     globals.__stOmpChannel = {
       bin: readEnv(BIN),
       catalog: readEnv(CATALOG),
-      identity: readEnv(IDENTITY),
-      runtimeId: readEnv(RUNTIME_ID),
-      session: readEnv(SESSION),
-      seq: readEnv(SEQ),
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      identity: readEnv(IDENTITY, true),
+      runtimeId: readEnv(RUNTIME_ID, true),
+      session: readEnv(SESSION, true),
+      seq: readEnv(SEQ, true),
       expectedNativeSession: readEnv(EXPECTED_NATIVE_SESSION),
-      resumeGeneration: readEnv(RESUME_GENERATION),
+      resumeGeneration: readEnv(RESUME_GENERATION, true),
     };
   }
   removeEnv(BIN);
@@ -355,13 +378,12 @@ export default function (pi: ExtensionAPI) {
 
     cancelSettle();
     const channelEnv: NodeJS.ProcessEnv = { ...process.env };
-    if (runtimeId) channelEnv[RUNTIME_ID] = runtimeId;
-    if (session) channelEnv[SESSION] = session;
-    if (seq) channelEnv[SEQ] = seq;
-    if (expectedNativeSession) {
-      channelEnv[EXPECTED_NATIVE_SESSION] = expectedNativeSession;
-    }
-    if (resumeGeneration) channelEnv[RESUME_GENERATION] = resumeGeneration;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    writeEnv(channelEnv, RUNTIME_ID, runtimeId);
+    writeEnv(channelEnv, SESSION, session);
+    writeEnv(channelEnv, SEQ, seq);
+    writeEnv(channelEnv, EXPECTED_NATIVE_SESSION, expectedNativeSession);
+    writeEnv(channelEnv, RESUME_GENERATION, resumeGeneration);
     const child = childProcess.spawn(
       bin,
       ["--catalog", catalog, "driver", "omp-channel", "--identity", identity],

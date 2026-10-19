@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Install st3 and its tools from one source build. `st` is always a symlink to the installed `st3`,
 # never a separate build, so the two names cannot drift apart.
 #
@@ -11,7 +12,8 @@
 set -Eeuo pipefail
 
 bin_dir=""
-instance="${ST_INSTANCE:-}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+instance="${FRACTAL_INSTANCE-${ST_INSTANCE:-}}"
 from=""
 while (($#)); do
   case $1 in
@@ -28,11 +30,14 @@ if [[ -n $instance ]]; then
     echo "install: an instance name is lowercase letters, digits and single hyphens, at most 24 characters" >&2
     exit 2
   }
-  export ST_INSTANCE=$instance
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  export FRACTAL_INSTANCE=$instance ST_INSTANCE=$instance
   # A named instance installs below its own directory unless told otherwise.
-  [[ -n $bin_dir ]] || bin_dir=${ST_MACOS_BIN_DIR:-$HOME/.st-instance/$instance/bin}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  [[ -n $bin_dir ]] || bin_dir=${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.st-instance/$instance/bin}}
 fi
-bin_dir=${bin_dir:-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+bin_dir=${bin_dir:-${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}}
 
 binaries=(st3 st3-migrate)
 
