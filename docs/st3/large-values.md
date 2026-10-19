@@ -83,6 +83,22 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Push registration inventory review (PR #2875)
+
+`st3_api_core::api::client_push_registration` owns `lv-h5bc99b17569a`
+(member-local table and expiry index), `lv-h0c44db750e92` (replacement
+write), and `lv-h856e73310339`, `lv-he1c521550a4b`,
+`lv-ha9526bb90c6f`, `lv-h28418e899454` (deletion paths). One row is
+kept per person and device. The API bounds token bytes, bundle ID and app
+version, but the person, device and grant identifiers remain variable text;
+the primary key and deletion predicates depend on them. The issuer stores
+these values outside the graph, and SQLite journal copies or host backups
+may retain old rows. The source module's maintainers own the transitional
+`allow-for-now` entries. They must qualify bounded physical values or
+references for variable columns and keys, then preserve exact-grant
+replacement and cleanup semantics when changing the representation.
+These entries record the current paths; they do not prove a size bound.
+
 ### Conversation-owner inventory review (PR #3116)
 
 The [owner-once change](https://github.com/compoundingtech/smalltalk/pull/3116)

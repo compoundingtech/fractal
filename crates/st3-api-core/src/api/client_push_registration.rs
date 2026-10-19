@@ -116,7 +116,7 @@ fn open(dir: &Path) -> Result<Connection, ApiError> {
     let connection = Connection::open(path).map_err(|_| unavailable())?;
     connection
         .execute_batch(
-            "PRAGMA secure_delete=ON;
+            /* sqlite-large-value: allow-for-now lv-h5bc99b17569a owner=st3_api_core::api::client_push_registration TODO=chunk-or-reference-variable-columns */ "PRAGMA secure_delete=ON;
     CREATE TABLE IF NOT EXISTS push_registrations (
         person TEXT NOT NULL, device TEXT NOT NULL, grant TEXT NOT NULL,
         token TEXT NOT NULL, environment TEXT NOT NULL, bundle_id TEXT NOT NULL,
@@ -194,7 +194,7 @@ pub(super) async fn register(
         let connection = open(&state.state_dir)?;
         connection
             .execute(
-                "INSERT INTO push_registrations
+                /* sqlite-large-value: allow-for-now lv-h0c44db750e92 owner=st3_api_core::api::client_push_registration TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO push_registrations
             (person,device,grant,token,environment,bundle_id,app_version,expires_at)
             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
             ON CONFLICT(person,device) DO UPDATE SET grant=excluded.grant,token=excluded.token,
@@ -233,7 +233,7 @@ pub(super) async fn revoke(
         let connection = open(&state.state_dir)?;
         connection
             .execute(
-                "DELETE FROM push_registrations WHERE person=?1 AND device=?2 AND grant=?3",
+                /* sqlite-large-value: allow-for-now lv-h856e73310339 owner=st3_api_core::api::client_push_registration TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM push_registrations WHERE person=?1 AND device=?2 AND grant=?3",
                 params![person, device, grant],
             )
             .map_err(|_| unavailable())?;
@@ -251,7 +251,7 @@ pub fn revoked_pairing(state: &AppState, grant: &str) -> Result<(), ApiError> {
         .map_err(|_| unavailable())?;
     let connection = open(&state.state_dir)?;
     connection
-        .execute("DELETE FROM push_registrations WHERE grant=?1", [grant])
+        .execute(/* sqlite-large-value: allow-for-now lv-he1c521550a4b owner=st3_api_core::api::client_push_registration TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM push_registrations WHERE grant=?1", [grant])
         .map_err(|_| unavailable())?;
     Ok(())
 }
@@ -264,7 +264,7 @@ fn clean(state: &AppState) -> Result<Option<u64>, ApiError> {
     let connection = open(&state.state_dir)?;
     let now = i64::try_from(client_now_ms()).map_err(|_| unavailable())?;
     connection
-        .execute("DELETE FROM push_registrations WHERE expires_at<=?1", [now])
+        .execute(/* sqlite-large-value: allow-for-now lv-ha9526bb90c6f owner=st3_api_core::api::client_push_registration TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM push_registrations WHERE expires_at<=?1", [now])
         .map_err(|_| unavailable())?;
     let mut statement = connection
         .prepare("SELECT person,device,grant,expires_at FROM push_registrations")
@@ -318,7 +318,7 @@ fn clean(state: &AppState) -> Result<Option<u64>, ApiError> {
         if !live {
             connection
                 .execute(
-                    "DELETE FROM push_registrations WHERE person=?1 AND device=?2 AND grant=?3",
+                    /* sqlite-large-value: allow-for-now lv-h28418e899454 owner=st3_api_core::api::client_push_registration TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM push_registrations WHERE person=?1 AND device=?2 AND grant=?3",
                     params![person, device, grant],
                 )
                 .map_err(|_| unavailable())?;
