@@ -33,6 +33,7 @@ type Subscription = {
   conversation?: string
   /** Canonical agent binding survives a replacement session while keeping the original selector. */
   threadAgent?: string
+  threadState?: 'pending' | 'present'
   terminal?: string
   incarnation?: string
   capability?: string
@@ -98,6 +99,19 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
   let recordedSocket = 0
   const offset = () => clock.now() - world.now
   const state = <K extends SliceKind>(kind: K) => foldSlice(world.slices[kind], offset()).state
+  // The roster publishes the managed runtime's already-derived conversation identity.
+  // Never consult future thread-create events to decide whether a target exists.
+  const pendingConversation = (target: string | undefined): { agent: string; session_id: string } | undefined => {
+    const roster = state('roster')
+    const agent = roster.agents.find((agent) =>
+      (agent.id === target || agent.current_session_id === target || agent.current_session_id === `session/${target}`) &&
+      agent.current_session_id != null && roster.runtimes.some((runtime) =>
+        runtime.owner_id === agent.id && runtime.runtime_kind === 'agent' && runtime.state === 'running' &&
+        agent.runtime_ids.includes(runtime.id)))
+    if (world.slices.conversation.timeline.some((event) =>
+      event.at_ms <= offset() && event._tag === 'thread-remove' && event.agent === agent?.id)) return undefined
+    return agent?.current_session_id == null ? undefined : { agent: agent.id, session_id: agent.current_session_id }
+  }
   const events = SLICE_KINDS.flatMap((kind) => world.slices[kind].timeline.map((event) => ({ kind, event })))
     .sort((a, b) => a.event.at_ms - b.event.at_ms)
   const fence = (): Snapshot => {
@@ -177,8 +191,17 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     switch (sub.collection) {
       case 'conversation': {
         const thread = state('conversation').threads.find((thread) => followsThread(sub, thread))
-        if (thread === undefined) return refuse(connection, sub, 'not-found', false)
+        if (thread === undefined) {
+          const pending = pendingConversation(sub.conversation)
+          if (pending === undefined) return refuse(connection, sub, 'not-found', false)
+          sub.threadAgent = pending.agent
+          sub.threadState = 'pending'
+          emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: pending.session_id,
+            replace: true, items: [], has_more: false })
+          return
+        }
         sub.threadAgent = thread.agent
+        sub.threadState = 'present'
         emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: thread.session_id,
           replace: true, items: thread.items.slice(-thread.page_size), has_more: thread.has_more || thread.items.length > thread.page_size })
         return
@@ -221,7 +244,13 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
           if (sub.collection !== 'conversation' || !(followsThread(sub, event.thread) || previous !== undefined && followsThread(sub, previous))) continue
           sub.threadAgent = event.thread.agent
           if (!sub.ready) first(connection, sub)
-          else emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: event.thread.session_id,
+          else if (sub.threadState === 'pending') {
+            if (event.thread.items.length > 0) {
+              sub.threadState = 'present'
+              emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation',
+                session_id: event.thread.session_id, replace: false, items: event.thread.items })
+            }
+          } else emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: event.thread.session_id,
             replace: true, items: event.thread.items.slice(-event.thread.page_size), has_more: event.thread.has_more || event.thread.items.length > event.thread.page_size })
         }
         return
@@ -246,7 +275,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       case 'thread-remove': {
         const previous = foldSlice(world.slices.conversation, event.at_ms - 1).state.threads.find((thread) => thread.agent === event.agent)
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
-          if (sub.collection === 'conversation' && (sub.conversation === event.agent || previous !== undefined && followsThread(sub, previous))) refuse(connection, sub, 'not-found', false)
+          if (sub.collection === 'conversation' && (sub.threadAgent === event.agent || sub.conversation === event.agent || previous !== undefined && followsThread(sub, previous))) refuse(connection, sub, 'not-found', false)
         }
         return
       }
@@ -268,6 +297,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         if (thread === undefined) return
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
           if (!sub.ready || sub.collection !== 'conversation' || !followsThread(sub, thread)) continue
+          sub.threadState = 'present'
           emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: thread.session_id,
             replace: event._tag === 'replace', items: event._tag === 'replace' ? thread.items.slice(-thread.page_size) : event.items,
             ...(event._tag === 'replace' ? { has_more: thread.has_more || thread.items.length > thread.page_size } : {}) })
@@ -463,7 +493,8 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       }
       case 'timeline': {
         const thread = state('conversation').threads.find((thread) => thread.agent === source.agent)
-        if (thread === undefined && source.session_id === undefined) throw new Error('Missing recorded HTTP conversation')
+        const sessionId = source.session_id ?? thread?.session_id ?? pendingConversation(source.agent)?.session_id
+        if (sessionId === undefined) throw new Error('Missing recorded HTTP conversation')
         const items = source.items.map((selection) => {
           const event = selection.history !== undefined ? world.slices.conversation.state.recorded_history?.[selection.history]
             : selection.event === undefined ? undefined : world.slices.conversation.timeline[selection.event]
@@ -474,7 +505,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
           const { blocks: _blocks, ...body } = item.body
           return { ...item, body }
         })
-        value = { kind: 'timeline-page', session_id: source.session_id ?? thread?.session_id, items, page: source.page }
+        value = { kind: 'timeline-page', session_id: sessionId, items, page: source.page }
         consumed.add('conversation')
         break
       }
@@ -575,7 +606,12 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     if (family === 'timeline') {
       const session = parts[1]
       const thread = state('conversation').threads.find((thread) => thread.session_id === session || thread.session_id.replace(/^session\//, '') === session)
-      if (thread === undefined) return json(errorEnvelope('not-found', 'Session not found'), 404)
+      if (thread === undefined) {
+        const pending = session?.startsWith('agent/') ? undefined : pendingConversation(session)
+        if (pending === undefined) return json(errorEnvelope('not-found', 'Session not found'), 404)
+        const value: TimelinePage = { kind: 'timeline-page', session_id: pending.session_id, items: [], page: pageInfo(0, 0) }
+        return json(envelope(value))
+      }
       const total = thread.history === undefined ? thread.items.length : Math.max(thread.history.total_entries, thread.items.at(-1)?.sequence ?? 0)
       const end = Math.max(0, total - start)
       const begin = Math.max(0, end - limit)
