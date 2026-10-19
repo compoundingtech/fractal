@@ -60,15 +60,15 @@ export function validateCaseOverrides(entries, overrides = FULL_CASE_OVERRIDES) 
 export const diagonalCase = id => FULL[createHash('sha256').update(id).digest()[0] % 2 === 0 ? 0 : 3]
 
 // The cases of the per-commit set for the critical story ids, plus what the set leaves out.
-export function commitSetCases(criticalIds, { mergeOnlyIds = MERGE_ONLY, bothWidthsIds = BOTH_WIDTHS } = {}) {
+export function commitSetCases(criticalIds, { mergeOnlyIds = MERGE_ONLY, bothWidthsIds = BOTH_WIDTHS, overrides = FULL_CASE_OVERRIDES } = {}) {
   const critical = new Set(criticalIds)
   for (const id of [...mergeOnlyIds, ...bothWidthsIds]) {
     if (!critical.has(id)) throw new Error(`The per-commit set names ${id}, which is not a critical story`)
   }
   const mergeOnly = new Set(mergeOnlyIds), bothWidths = new Set(bothWidthsIds)
-  const ids = criticalIds.filter(id => !mergeOnly.has(id) && FULL_CASE_OVERRIDES.get(id)?.length !== 0)
+  const ids = criticalIds.filter(id => !mergeOnly.has(id) && overrides.get(id)?.length !== 0)
   const cases = ids.flatMap(id => (bothWidths.has(id) ? [FULL[0], FULL[1]] : [diagonalCase(id)]).map(([scheme, width]) => ({ id, scheme, width })))
-  return { ids, cases, omittedStories: criticalIds.filter(id => mergeOnly.has(id) || FULL_CASE_OVERRIDES.get(id)?.length === 0), omittedCases: criticalIds.length * 4 - cases.length }
+  return { ids, cases, omittedStories: criticalIds.filter(id => mergeOnly.has(id) || overrides.get(id)?.length === 0), omittedCases: criticalIds.length * 4 - cases.length }
 }
 
-export const fullCases = ids => ids.flatMap(id => (FULL_CASE_OVERRIDES.get(id) ?? FULL).map(([scheme, width]) => ({ id, scheme, width })))
+export const fullCases = (ids, overrides = FULL_CASE_OVERRIDES) => ids.flatMap(id => (overrides.get(id) ?? FULL).map(([scheme, width]) => ({ id, scheme, width })))
