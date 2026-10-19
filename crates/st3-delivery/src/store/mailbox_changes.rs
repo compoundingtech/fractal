@@ -75,7 +75,7 @@ impl MailboxChangesStore for Store {
                       WHERE kind IN ('owned-set.revised','record.repaired') AND store_index>?2)",
             )?
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-h683c78122842 owner=st3_store::store::mailbox_changes TODO=trace-statement-and-value-representation */ params![fence.subject, previous.index, previous.local],
+                /* sqlite-large-value: allow-for-now lv-hcb2cb0335c6f owner=st3_delivery::store::mailbox_changes TODO=trace-statement-and-value-representation */ params![fence.subject, previous.index, previous.local],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
         // Configuration publication or replication repair may change message projections
@@ -89,7 +89,7 @@ impl MailboxChangesStore for Store {
             .unwrap_or(&recipient);
         let messages = if fence.component == "delivery" && mark.index != previous.index {
             connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h71e88df34a6d owner=st3_store::store::mailbox_changes TODO=trace-statement-and-value-representation */ MESSAGE_CHANGES)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hdeef8c32d774 owner=st3_delivery::store::mailbox_changes TODO=trace-statement-and-value-representation */ MESSAGE_CHANGES)?
                 .query_map(
                     params![
                         previous.index,
@@ -146,7 +146,7 @@ impl MailboxChangesStore for Store {
                       AND claims.kind IN ('message.sent','intent.desired')")
             });
             let connection = self.readers.get();
-            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf223e97778f4 owner=st3_store::store::mailbox_changes TODO=trace-statement-and-value-representation */ &QUERY)?;
+            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfe7678430904 owner=st3_delivery::store::mailbox_changes TODO=trace-statement-and-value-representation */ &QUERY)?;
             let mut rows = statement.query([serde_json::to_string(&missing)?])?;
             // ClaimKey order is the canonical order, so a subject's least key is its first claim.
             while let Some(row) = rows.next()? {

@@ -98,7 +98,7 @@ impl ConversationReadsStore for Store {
     fn conversation_local_position(&self) -> Result<u64> {
         Ok(self.readers.get().prepare_cached(
             "SELECT COALESCE(MAX(id),0) FROM local_observations",
-        )?.query_row(/* sqlite-large-value: allow-for-now lv-habc805ead653 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hb1ff1b52b636 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
     }
 
     fn conversation_changed_at(
@@ -107,8 +107,8 @@ impl ConversationReadsStore for Store {
         if after == through && local_after == local_through {
             return Ok(false);
         }
-        Ok(self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h4efd41a52c02 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h45d36e7500b9 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
+        Ok(self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h5d6619ff3fff owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hc9cc1afde011 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
     }
 
     fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>> {
@@ -173,7 +173,7 @@ impl ConversationReadsStore for Store {
             _ => {
                 let connection = self.readers.get();
                 let names = connection
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha23eba9eba40 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h33a3d5939c7f owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                     .query_map(params![through, "agent/", "agent0"], |row| {
                         row.get::<_, String>(0)
                     })?
@@ -299,14 +299,14 @@ impl ConversationReadsStore for Store {
                         "SELECT store_index FROM claims WHERE kind='message.sent' AND store_index<?1
                      ORDER BY store_index DESC LIMIT 1 OFFSET 9999",
                     )?
-                    .query_row(/* sqlite-large-value: allow-for-now lv-hcb1b500a91e2 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ [before], |row| row.get::<_, u64>(0))
+                    .query_row(/* sqlite-large-value: allow-for-now lv-hd856db76cb0f owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [before], |row| row.get::<_, u64>(0))
                     .optional()?
                     .unwrap_or(0)
                     .max(after.saturating_add(1))
             };
             connection
                 .prepare_cached(
-                    /* sqlite-large-value: allow-for-now lv-h3a9634183bde owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
+                    /* sqlite-large-value: allow-for-now lv-h8a2180677f3c owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
                     SELECT store_index FROM claims INDEXED BY claims_message_to_order_index
                     WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1
                       AND store_index>=?2 AND store_index<?3
@@ -339,7 +339,7 @@ impl ConversationReadsStore for Store {
         let ids = {
             let connection = self.readers.get();
             connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h36d6b51b6db9 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ TIMELINE_OWNER_IDS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h274133e2032c owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ TIMELINE_OWNER_IDS)?
                 .query_map(params![owner, before.unwrap_or(i64::MAX as u64)], |row| {
                     row.get::<_, String>(0)
                 })?
@@ -360,7 +360,7 @@ impl ConversationReadsStore for Store {
             let batch = &ids[offset..end];
             let raw = {
                 let connection = self.readers.get();
-                let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4443f57124d5 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
+                let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h48b93e361562 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
                     "SELECT {CLAIM_COLUMNS} FROM claims
                      WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY store_index DESC",
                 ))?;
@@ -432,22 +432,22 @@ impl ConversationReadsStore for Store {
         ) -> Result<(Option<u128>, Option<u128>)> {
         let connection = self.readers.get();
         let started: Option<String> = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6cf5556bd84f owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6446ec9963c5 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
             "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_incarnation_accepted_index
              WHERE subject=?1 AND {INCARNATION_OF_CLAIM}=?2 AND kind='runtime.observed'
                AND json_type(body,'$.fields.incarnation_id')='text'
              ORDER BY length(accepted_at_unix_ms), accepted_at_unix_ms LIMIT 1",
         ))?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h82623bc162bc owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h2f9d8b58ce93 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation], |row| row.get(0))
             .optional()?;
         let ended = started.as_ref().map(|started| -> Result<Option<String>> {
-            Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h48b7c7b8a3dc owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
+            Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h61ad8a2f63e4 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_kind_accepted_index
                  WHERE subject=?1 AND kind='runtime.observed' AND json_type(body,'$.fields.incarnation_id')='text'
                    AND {INCARNATION_OF_CLAIM}!=?2
                    AND (length(accepted_at_unix_ms),accepted_at_unix_ms)>(length(?3),?3)
                  ORDER BY length(accepted_at_unix_ms),accepted_at_unix_ms LIMIT 1",
-            ))?.query_row(/* sqlite-large-value: allow-for-now lv-hdebe6021cf64 owner=st3_store::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation, started], |row| row.get(0)).optional()?)
+            ))?.query_row(/* sqlite-large-value: allow-for-now lv-hb991a5d01744 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, incarnation, started], |row| row.get(0)).optional()?)
         }).transpose()?.flatten();
         Ok((
             started.and_then(|value| value.parse().ok()),

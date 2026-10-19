@@ -91,7 +91,7 @@ fn signed_send_commits_once_and_retries_keep_the_original_signature() {
 fn failed_signed_send_rolls_back_its_message_and_temporary_signature() {
     let store = Store::open_memory("node").unwrap();
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hafe7a9268997 owner=st3_store::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER reject_fixture_send BEFORE INSERT ON claims
+        /* sqlite-large-value: allow-for-now lv-hf2a8515684a3 owner=st3_delivery::store::message_send_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER reject_fixture_send BEFORE INSERT ON claims
          WHEN NEW.subject='message/local-signed-send' BEGIN SELECT RAISE(ABORT,'injected send failure'); END;",
     ).unwrap();
     let input = request();
@@ -118,7 +118,7 @@ fn failed_signed_send_rolls_back_its_message_and_temporary_signature() {
     store
         .connection
         .write()
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-hb3ec307860fa owner=st3_store::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_fixture_send")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h43318ab397d3 owner=st3_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_fixture_send")
         .unwrap();
     assert!(store.append_signed_message(&input, &signature).unwrap().1);
     assert_eq!(
@@ -143,7 +143,7 @@ fn digest_mismatched_message_operation_repair_persists_across_reopen() {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hbb4b945bb48d owner=st3_store::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET request_digest='invented-stale-digest' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h7f1b3620b9cf owner=st3_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET request_digest='invented-stale-digest' WHERE id=?1",
             [&operation],
         )
         .unwrap();

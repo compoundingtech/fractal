@@ -1,7 +1,7 @@
 //! Current person context, never authorization evidence. Claims remain authoritative.
 use super::*;
 use smallclaims::store::canonical;
-use st3_schema::directive_notes::KIND;
+
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, Serialize)]
 pub struct DirectiveNote {

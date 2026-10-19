@@ -1,7 +1,7 @@
 //! A daily planning estimate. Message subjects contribute once; receipts never contribute.
 //! Only explicit probe/test metadata is excluded. No turn attribution or content classifier.
 use super::*;
-use serde::Deserialize;
+
 
 pub const DAY_MS: u64 = 86_400_000;
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6d2b3ebed355 owner=st3_store::store::agent_messages TODO=chunk-or-reference-variable-columns */ r#"

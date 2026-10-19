@@ -377,7 +377,7 @@ proptest! {
                 if *flavor == 1 {
                     // Legacy imported sends store their fields at the body root.
                     store.connection.lock().unwrap().execute(
-                        /* sqlite-large-value: allow-for-now lv-h54935775c2df owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_extract(body,'$.fields')
+                        /* sqlite-large-value: allow-for-now lv-hc92bb6c3583d owner=st3_delivery::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_extract(body,'$.fields')
                          WHERE subject=?1 AND kind='message.sent'",
                         [&resource],
                     ).unwrap();
@@ -639,11 +639,11 @@ version 2
 mod actual_purity_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-h15874c268ef9 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("actual_purity_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-h89ceeb4d8537 owner=st3_delivery::store::tests TODO=trace-statement-and-value-representation */ include!("actual_purity_tests.rs");
 }
 
 mod projection_divergence_tests {
     use super::*;
 
-    /* sqlite-large-value: allow-for-now lv-he73cbf11f1e7 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("projection_divergence_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-ha726df1c2ce1 owner=st3_delivery::store::tests TODO=trace-statement-and-value-representation */ include!("projection_divergence_tests.rs");
 }

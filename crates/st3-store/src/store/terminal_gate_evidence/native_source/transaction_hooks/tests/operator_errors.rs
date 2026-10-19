@@ -6,8 +6,7 @@ pub use crate::store::terminal_gate_evidence::native_source_transaction_hooks_te
 #[allow(unused_imports)]
 pub use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_operator_errors_shared_delivery::{Pages, pages, sqlite};
 use super::super::operator_error::{Cell, Disposition, Origin, classify};
-use super::*;
-use rusqlite::{ErrorCode, ffi};
+use rusqlite::ffi;
 
 #[test]
 fn managed_operator_error_typed_primary_extended_and_unknown_policy() {

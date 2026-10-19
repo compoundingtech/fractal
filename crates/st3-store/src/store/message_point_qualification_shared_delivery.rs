@@ -334,7 +334,7 @@ pub fn admit_desired(db: &Connection, subject: &str, accounting: &mut Accounting
         "SELECT {} FROM desired WHERE subject=?1",
         metadata_sql(&DESIRED_FIELDS)
     );
-    let mut statement = db.prepare_cached(/* sqlite-large-value: allow-for-now lv-h66df0e0a7593 owner=st3_store::store::message_point_qualification TODO=trace-statement-and-value-representation */ &sql)?;
+    let mut statement = db.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0a255cdb8c8a owner=st3_store::store::message_point_qualification_shared_delivery TODO=trace-statement-and-value-representation */ &sql)?;
     let mut rows = statement.query([subject])?;
     if let Some(row) = rows.next()? {
         accounting.auxiliary()?;
@@ -398,7 +398,7 @@ pub fn domains(db: &Connection, subject: &str, recipient: &str) -> Qualified<(bo
     let normalized = normalize_message_party(recipient);
     let bare = message_bare_recipient(&normalized);
     let (sent, desired, closed): (bool, bool, bool) =
-        db.query_row(/* sqlite-large-value: allow-for-now lv-h5c67e462f17a owner=st3_store::store::message_point_qualification TODO=trace-statement-and-value-representation */ sql, params![normalized, bare, subject], |row| {
+        db.query_row(/* sqlite-large-value: allow-for-now lv-h6c05fe55db30 owner=st3_store::store::message_point_qualification_shared_delivery TODO=trace-statement-and-value-representation */ sql, params![normalized, bare, subject], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
     check()?;

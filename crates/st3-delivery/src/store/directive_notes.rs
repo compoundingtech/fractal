@@ -85,7 +85,7 @@ impl DirectiveNotesStore for Store {
             smallclaims::touched::note_read(|| format!("actor:{actor}"));
             for column in ["assignee", "lease_owner"] {
                 let connection = self.readers.get();
-                let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0132769160de owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
+                let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0faef02e09e9 owner=st3_delivery::store::directive_notes TODO=trace-statement-and-value-representation */ &format!(
                     "SELECT s.subject,r.requester FROM (
                          SELECT subject,run_id,generation_id FROM step_runs WHERE {column}=?1
                          AND status IN ('pending','ready','claimed','working','submitted','verifying','blocked','waiting-person')

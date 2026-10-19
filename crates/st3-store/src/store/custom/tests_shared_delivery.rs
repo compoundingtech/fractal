@@ -2,7 +2,7 @@
 use crate::store::custom::*;
 
 pub fn example() -> Manifest {
-    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h908629c8b2f9 owner=st3_store::store::custom::tests TODO=trace-statement-and-value-representation */ include_str!(
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hf24807207cc1 owner=st3_store::store::custom::tests_shared_delivery TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/custom-review.json"
     ))
     .unwrap()
@@ -99,7 +99,7 @@ pub const DECIDER: &str = "person/lichen";
 pub const RAW_KINDS: [&str; 6] = ["opened", "requested", "answered", "assumed", "promoted", "damaged"];
 
 pub fn decision_tree() -> Manifest {
-    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hf193d5d798aa owner=st3_store::store::custom::tests TODO=trace-statement-and-value-representation */ include_str!(
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h312cacd7d57f owner=st3_store::store::custom::tests_shared_delivery TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/decision-tree.json"
     ))
     .unwrap()

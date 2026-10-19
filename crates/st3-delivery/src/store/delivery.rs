@@ -68,7 +68,7 @@ fn mailbox_owner_key(
         )
         .map_err(internal)?
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-ha6c9433a6d4b owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ params![fence.subject, fence.component, fence.token],
+            /* sqlite-large-value: allow-for-now lv-h6945d622fc28 owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ params![fence.subject, fence.component, fence.token],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
@@ -333,7 +333,7 @@ impl DeliveryStore for Store {
     fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String> {
         let connection = self.readers.get();
         let (count, newest): (u64, u64) = connection.query_row(
-            /* sqlite-large-value: allow-for-now lv-h0199956fe1a1 owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ "WITH sent AS (
+            /* sqlite-large-value: allow-for-now lv-h6b6836be9712 owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ "WITH sent AS (
                 SELECT store_index FROM claims INDEXED BY claims_message_to_index
                 WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1 AND store_index<=?2
                 UNION SELECT store_index FROM claims INDEXED BY claims_message_from_index
@@ -362,7 +362,7 @@ impl DeliveryStore for Store {
 
     fn conversation_search_messages(&self, person: &str, through: u64) -> Result<Vec<MessageView>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h37b2971c2e7e owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hcd8d13214540 owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
             "WITH candidates AS (
                 SELECT id FROM claims INDEXED BY claims_message_to_index
                 WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1 AND store_index<=?2
@@ -528,7 +528,7 @@ impl DeliveryStore for Store {
              WHERE (?1 IS NULL AND ?2 IS NULL) AND created_index>?3 AND created_index<=?4
              ORDER BY created_index, subject"
         };
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6391c133e57e owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ sql)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hdbc9da731846 owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ sql)?;
         let bare_sender = sender.as_deref().map(message_bare_recipient);
         let mut rows = statement.query(params![
             sender.as_deref(), bare_sender, after.unwrap_or(0), through,
@@ -553,7 +553,7 @@ impl DeliveryStore for Store {
             // discovered by that endpoint; a matching declaration/native send can be.
             if let Some(recipient) = recipient.as_deref() {
                 let discovered: bool = recipient_discovery.query_row(
-                    /* sqlite-large-value: allow-for-now lv-hcc7d35c718c7 owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ params![recipient, message_bare_recipient(recipient), &resource],
+                    /* sqlite-large-value: allow-for-now lv-hd35f5f4e19cf owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ params![recipient, message_bare_recipient(recipient), &resource],
                     |row| row.get(0),
                 )?;
                 if !discovered {
@@ -704,7 +704,7 @@ impl DeliveryStore for Store {
         // Every pass asks this for every subscription. The finished requests are listed once, not
         // scanned for each request: a correlated NOT EXISTS read every finished claim once per
         // request, 0.4 s a pass for a subscription with hundreds of runs.
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hffa8e6007728 owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0921ef2fa7fa owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT request.id, request.store_index, request.batch_id, request.subject,
                     request.kind, request.origin, request.actor, request.body,
                     request.predecessors, request.accepted_at_unix_ms
@@ -757,7 +757,7 @@ impl DeliveryStore for Store {
             return Ok(None);
         }
         let deadline: Option<u64> = connection.query_row(
-            /* sqlite-large-value: allow-for-now lv-h0a91a2eb933f owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
+            /* sqlite-large-value: allow-for-now lv-hfcd6a3ed4b8c owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT CAST(json_extract(body, '$.fields.not_before_unix_ms') AS INTEGER)
              FROM claims
              WHERE subject=?1 AND kind='subscription.mission-deferred'
@@ -781,7 +781,7 @@ impl DeliveryStore for Store {
         self.connection
             .batched(|transaction| {
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hacfab36b481e owner=st3_store::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_subscription_mission_deferrals
+                    /* sqlite-large-value: allow-for-now lv-h991d2baac7ad owner=st3_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_subscription_mission_deferrals
                          (subject, request, not_before_unix_ms, attempts)
                      VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(subject, request) DO UPDATE SET
@@ -914,7 +914,7 @@ impl DeliveryStore for Store {
             .filter(|epoch| *epoch <= i64::MAX as u64)
             .ok_or_else(|| St3Error::new("internal", "mailbox epoch exhausted"))?;
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h545ceded7cb4 owner=st3_store::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_bindings VALUES (?1,?2,?3,?4,?5)",
+            /* sqlite-large-value: allow-for-now lv-h16ab92e2aec9 owner=st3_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_bindings VALUES (?1,?2,?3,?4,?5)",
             params![
                 bound.token,
                 bound.subject,
@@ -924,7 +924,7 @@ impl DeliveryStore for Store {
             ],
         )
         .map_err(internal)?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h7558bb328605 owner=st3_store::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h7fc278ec0d26 owner=st3_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
             ON CONFLICT(subject,component) DO UPDATE SET incarnation=excluded.incarnation, epoch=excluded.epoch",
             params![bound.subject, bound.component, bound.incarnation, bound.epoch]).map_err(internal)?;
         if let Some(authority) = authority {
@@ -955,14 +955,14 @@ impl DeliveryStore for Store {
             .prepare_cached("SELECT COALESCE((SELECT MAX(store_index) FROM claims),0),
                                     COALESCE((SELECT MAX(id) FROM local_observations),0)")
             .map_err(internal)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h086970e18a4f owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hdfcf52d4f139 owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(internal)?;
         Ok(MailboxWatermark {
             index,
             local,
             owner: mailbox_owner_key(&connection, fence)?,
             desired: connection.prepare_cached("SELECT claim_id FROM desired WHERE subject=?1")
-                .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hae7454051bc6 owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ [&fence.subject], |row| row.get(0))
+                .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-h7aa1bd143d93 owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ [&fence.subject], |row| row.get(0))
                 .optional().map_err(internal)?,
         })
     }
@@ -998,7 +998,7 @@ impl DeliveryStore for Store {
             )
             .map_err(internal)?
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-h047b0168b641 owner=st3_store::store::delivery TODO=trace-statement-and-value-representation */ params![
+                /* sqlite-large-value: allow-for-now lv-hee8001f277f6 owner=st3_delivery::store::delivery TODO=trace-statement-and-value-representation */ params![
                     fence.subject,
                     mark.index,
                     recipient,

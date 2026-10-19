@@ -49,7 +49,7 @@ fn project_wrongly(store: &Store) {
         .lock()
         .unwrap()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hdbbc7e6e62f4 owner=st3_store::store::projection_divergence_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE wrong_desired AS SELECT * FROM desired WHERE subject='exec/work';
+            /* sqlite-large-value: allow-for-now lv-h081dcafc1546 owner=st3_delivery::store::projection_divergence_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE wrong_desired AS SELECT * FROM desired WHERE subject='exec/work';
              PRAGMA foreign_keys=OFF;
              DELETE FROM desired WHERE subject='exec/work';
              PRAGMA foreign_keys=ON;",
@@ -63,7 +63,7 @@ fn project_rightly(store: &Store) {
         .lock()
         .unwrap()
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h2e4e575d5dc7 owner=st3_store::store::projection_divergence_tests TODO=bound-or-reference-values-and-reclamation */ "PRAGMA foreign_keys=OFF;
+            /* sqlite-large-value: allow-for-now lv-hec149eda5d50 owner=st3_delivery::store::projection_divergence_tests TODO=bound-or-reference-values-and-reclamation */ "PRAGMA foreign_keys=OFF;
              INSERT INTO desired SELECT * FROM wrong_desired;
              PRAGMA foreign_keys=ON;
              DROP TABLE wrong_desired;",

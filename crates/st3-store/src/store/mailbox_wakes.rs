@@ -1,7 +1,7 @@
 //! Local, disposable routing of mailbox wakes. Durable claims remain the source of truth.
 //! One dispatcher follows the existing post-commit feed, instead of every stream querying it.
 use super::*;
-use crate::model::DoctorCheck;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch;
 

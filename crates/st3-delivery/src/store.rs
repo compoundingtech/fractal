@@ -163,7 +163,7 @@ pub fn runtime_only_authority(
     through: u64,
     fields: &[&str],
 ) -> Result<Option<(Value, String)>> {
-    let mut sources = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9891440d7982 owner=st3_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut sources = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0ae5e6c1c684 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT DISTINCT claims.kind, claims.origin FROM claims INDEXED BY claims_subject_kind_index
          WHERE claims.subject=?1 AND claims.store_index<=?2 AND {ACTUAL_STATE_CLAIM}
            AND {UNREPAIRED_CLAIM} LIMIT 2"
@@ -177,12 +177,12 @@ pub fn runtime_only_authority(
     if rows.next()?.is_some() {
         return Ok(None);
     }
-    let body: String = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9528a3e72b8b owner=st3_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let body: String = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h504931f32da7 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ &format!(
         "{} LIMIT 1", newest_claims_of_kind_query("claims.body", "runtime.observed"),
-    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h1c9720a2cf39 owner=st3_store::store TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h805550de30f9 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
     let latest: Value = serde_json::from_str(&body)?;
     let latest = latest.get("fields").unwrap_or(&latest);
-    let mut older = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he27033da738c owner=st3_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut older = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7d40261a11f4 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.body FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='runtime.observed' AND claims.store_index<=?4
@@ -199,7 +199,7 @@ pub fn runtime_only_authority(
             actual.insert(field.into(), value.clone());
         } else {
             let body: Option<String> = older.query_row(
-                /* sqlite-large-value: allow-for-now lv-h9f7b93264cbb owner=st3_store::store TODO=trace-statement-and-value-representation */ params![subject, root_path, fields_path, through],
+                /* sqlite-large-value: allow-for-now lv-h41dabf229cb0 owner=st3_delivery::store TODO=trace-statement-and-value-representation */ params![subject, root_path, fields_path, through],
                 |row| row.get(0),
             ).optional()?;
             if let Some(body) = body {

@@ -211,7 +211,7 @@ fn directive_note_repaired_original_is_excluded_after_round_trip_and_replay() {
         [&original.revision], |row| row.get(0),
     ).unwrap();
     peer.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h5eaded31768a owner=st3_store::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record_ref])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-ha3a62ff8fd3d owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record_ref])?;
         Ok(())
     }).unwrap().unwrap();
     peer.repair_replica_record(&record_ref, &fallback.revision,
@@ -228,17 +228,17 @@ fn directive_note_repaired_original_is_excluded_after_round_trip_and_replay() {
     }
     // Exercise the incremental dirty selector without the repair-triggered full replay.
     source.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-ha1377f5a319b owner=st3_store::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='valid',replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h86fc8255624d owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='valid',replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
         flush(tx)?;
         assert_eq!(current(tx, "person/avery", now_ms()).unwrap(), Some(original.clone()));
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h51fff4c3fd1f owner=st3_store::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired',replacement_claim_id=?2 WHERE record_ref=?1",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h3046ff7110fa owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired',replacement_claim_id=?2 WHERE record_ref=?1",
             params![record_ref, fallback.revision])?;
         flush(tx)?;
         assert_eq!(current(tx, "person/avery", now_ms()).unwrap(), Some(fallback.clone()));
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h6e0b45baafa0 owner=st3_store::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4d5006271587 owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=NULL WHERE record_ref=?1", [&record_ref])?;
         let dirty: usize = tx.query_row("SELECT COUNT(*) FROM local_directive_note_dirty WHERE subject='person/avery'", [], |row| row.get(0))?;
         assert_eq!(dirty, 1, "replacement-only changes must invalidate the person's note");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-ha60723829ed8 owner=st3_store::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=?2 WHERE record_ref=?1",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4d33e3b464fe owner=st3_delivery::store::directive_notes::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET replacement_claim_id=?2 WHERE record_ref=?1",
             params![record_ref, fallback.revision])?;
         flush(tx)?;
         assert_eq!(current(tx, "person/avery", now_ms()).unwrap(), Some(fallback.clone()));
@@ -259,13 +259,13 @@ fn directive_note_projection_rollback_and_canonical_metadata_corrections() {
     assert_eq!(store.directive_notes("person/avery").unwrap(), vec![first.clone()]);
     let second = store.set_directive_note("person/avery", "person/avery", Some("Second"), None).unwrap().unwrap();
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h1a35fba008b5 owner=st3_store::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms+100000 WHERE id=?1", [&first.revision])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h032e0c3fe4b3 owner=st3_delivery::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms+100000 WHERE id=?1", [&first.revision])?;
         flush(tx)?;
         Ok(())
     }).unwrap().unwrap();
     assert_eq!(store.directive_notes("person/avery").unwrap()[0].revision, first.revision);
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h5157200a913e owner=st3_store::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&first.revision])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hbee5a86c2688 owner=st3_delivery::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&first.revision])?;
         flush(tx)?;
         Ok(())
     }).unwrap().unwrap();
@@ -286,8 +286,8 @@ fn directive_note_keyed_read_work_and_statements_ignore_history_size() {
         assert_eq!(store.directive_notes("person/avery").unwrap().len(), 1);
         let statements = STATEMENTS_RUN.with(std::cell::Cell::get) - before;
         let connection = store.readers.get();
-        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h116aab628102 owner=st3_store::store::directive_notes::tests TODO=trace-statement-and-value-representation */ CURRENT_QUERY).unwrap();
-        query.query_row(/* sqlite-large-value: allow-for-now lv-hc8fe8e33a31b owner=st3_store::store::directive_notes::tests TODO=trace-statement-and-value-representation */ ["person/avery"], claim_from_row).unwrap();
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8f1c8289710b owner=st3_delivery::store::directive_notes::tests TODO=trace-statement-and-value-representation */ CURRENT_QUERY).unwrap();
+        query.query_row(/* sqlite-large-value: allow-for-now lv-h0c2d6d7a8196 owner=st3_delivery::store::directive_notes::tests TODO=trace-statement-and-value-representation */ ["person/avery"], claim_from_row).unwrap();
         let vm = query.get_status(StatementStatus::VmStep);
         assert_eq!(query.get_status(StatementStatus::FullscanStep), 0);
         assert!(vm < 100, "one person and one claim lookup must stay keyed: {vm}");

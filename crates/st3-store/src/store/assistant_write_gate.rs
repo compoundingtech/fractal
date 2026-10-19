@@ -1,5 +1,6 @@
 //! Test-support scheduling gate: delay a real mutation before it acquires the writer.
-use std::{path::{Path, PathBuf}, sync::OnceLock, time::{Duration, Instant}};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use crate::model::St3Error;
 pub struct Gate {
     pub root: PathBuf,
