@@ -12,6 +12,7 @@ interface Input {
   readonly action: string
   readonly surface: InputSurface
   committed: number | undefined
+  interactionId: number | undefined
   cancel: (() => void) | undefined
 }
 export interface InputPaintSample {
@@ -31,6 +32,15 @@ const surface = (target: EventTarget | null): InputSurface => {
   return 'other'
 }
 
+/** A task boundary without background-tab timer clamping. */
+const nextTask = (callback: () => void): (() => void) => {
+  const channel = new MessageChannel()
+  channel.port1.onmessage = () => { cancel(); callback() }
+  const cancel = () => { channel.port1.close(); channel.port2.close() }
+  channel.port2.postMessage(undefined)
+  return cancel
+}
+
 /**
  * TUI read_at -> event.timeStamp; accepted_at -> capture-listener entry; terminal flush ->
  * first paint following an observed DOM mutation. Thus read_to_frame_ms includes browser
@@ -39,25 +49,29 @@ const surface = (target: EventTarget | null): InputSurface => {
  * No React Profiler dependency (production React disables it). MutationObserver child/text/
  * attribute changes count as commits; no-op attributes and React commits without DOM changes
  * do not. Native value/scroll paints without a DOM mutation are deliberately outside this SLI.
- * Attribution is the latest input before the mutation, bounded by that input's next paint;
- * it does not claim to attribute unrelated async work after that boundary to an input.
- * A later input's DOM commit supersedes an earlier unpainted commit. No timeout expires slow
- * committed inputs: lifecycle termination ends them unacknowledged, once. Event Timing's
- * interactionId and event timestamp identify presentation ends when already available; the
- * existing rAF + posted-task boundary handles fast/unsupported events otherwise.
+ * Observation is scoped to discrete input dispatch and its microtasks: capture starts it,
+ * and a posted MessageChannel task drains records and disconnects it. Stream-ingest tasks
+ * after that boundary cannot create samples or coalesce pending inputs. No observer runs
+ * during idle frames. A later input's DOM commit supersedes an earlier unpainted commit.
+ * No timeout expires committed inputs: lifecycle termination ends them unacknowledged.
+ * Event Timing is bound one-to-one by event type and exact timestamp correlation before
+ * retaining its interactionId; ambiguous correlations use the paint fallback, never a
+ * different input's presentation. The existing rAF + posted-task boundary handles fallback.
  */
-export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint }: {
+export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint, task = nextTask }: {
   readonly emit: (sample: InputPaintSample) => void
   readonly now?: () => number
   readonly paint?: (callback: () => void) => () => void
+  readonly task?: (callback: () => void) => () => void
 }): (() => void) => {
   const pending = new Set<Input>()
   let candidate: Input | undefined
+  let cancelTask: (() => void) | undefined
   let disposed = false
   const finish = (input: Input, outcome: Outcome, end = now()) => {
     if (!pending.delete(input)) return
     input.cancel?.()
-    if (candidate === input) candidate = undefined
+    if (candidate === input) closeWindow()
     if (input.committed === undefined) return
     emit({ name: inputPaintSpanName, startMs: input.start, endMs: Math.max(end, input.start), attributes: {
       'span.label': 'input.next_frame', 'input.kind': input.kind, 'input.action': input.action,
@@ -83,11 +97,17 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     input.cancel?.()
     input.cancel = paint(() => finish(input, 'painted'))
   }
-  observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true })
+  const closeWindow = () => {
+    commit(observer.takeRecords())
+    observer.disconnect()
+    cancelTask?.()
+    cancelTask = undefined
+    if (candidate?.committed === undefined && candidate !== undefined) pending.delete(candidate)
+    candidate = undefined
+  }
   const capture = (event: Event) => {
     if (disposed || !event.isTrusted || document.visibilityState === 'hidden') return
-    // Drain the previous dispatch's records before changing attribution.
-    commit(observer.takeRecords())
+    closeWindow()
     const accepted = now()
     const input: Input = {
       type: event.type,
@@ -95,27 +115,31 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
       accepted, surface: surface(event.target),
       kind: event.type === 'keydown' ? 'key' : event.type === 'paste' ? 'paste' : event.type.startsWith('focus') ? 'focus' : event.type === 'resize' ? 'resize' : event.type === 'input' ? 'input' : 'mouse',
       action: event.type === 'keydown' ? 'key' : event.type.startsWith('focus') ? (event.type === 'focusin' ? 'gained' : 'lost') : event.type,
-      committed: undefined, cancel: undefined,
+      committed: undefined, interactionId: undefined, cancel: undefined,
     }
     candidate = input
     pending.add(input)
-    input.cancel = paint(() => finish(input, 'painted'))
+    observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true })
+    cancelTask = task(closeWindow)
   }
   let eventObserver: PerformanceObserver | undefined
   if (typeof PerformanceObserver !== 'undefined' && PerformanceObserver.supportedEntryTypes.includes('event')) {
     eventObserver = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         if (!('interactionId' in entry) || typeof entry.interactionId !== 'number' || entry.interactionId === 0) continue
-        for (const input of pending) {
-          const end = entry.startTime + entry.duration
-          if (entry.name === input.type && Math.abs(entry.startTime - input.start) <= 1 && input.committed !== undefined && end >= input.committed && end <= now()) finish(input, 'painted', end)
-        }
+        const matches = [...pending].filter((input) => entry.name === input.type && Math.abs(entry.startTime - input.start) < 0.001)
+        if (matches.length !== 1) continue
+        const input = matches[0]!
+        if (input.interactionId !== undefined && input.interactionId !== entry.interactionId) continue
+        input.interactionId = entry.interactionId
+        const end = entry.startTime + entry.duration
+        if (input.committed !== undefined && end >= input.committed && end <= now()) finish(input, 'painted', end)
       }
     })
     eventObserver.observe({ type: 'event', durationThreshold: 16 } as PerformanceObserverInit)
   }
   const abandon = () => {
-    commit(observer.takeRecords())
+    closeWindow()
     for (const input of pending) finish(input, 'unacknowledged')
   }
   const visibility = () => { if (document.visibilityState === 'hidden') abandon() }

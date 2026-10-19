@@ -13,16 +13,25 @@ const run = (args) => new Promise((resolve, reject) => {
   child.once('error', reject)
   child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`playwright-cli exited ${code}`)))
 })
-const vite = await createServer({ root, configFile: false, server: { host: '127.0.0.1', port: 0 }, plugins: [{
+const vite = await createServer({ root, configFile: false, optimizeDeps: { entries: [] }, server: { host: '127.0.0.1', port: 0 }, plugins: [{
   name: 'input-paint-proof', configureServer(server) {
     server.middlewares.use('/input-paint-proof', (_req, res) => {
       res.setHeader('Content-Type', 'text/html')
-      res.end(`<!doctype html><button id="paint">Paint</button><button id="hide">Hide before paint</button><output></output>
+      res.end(`<!doctype html><button id="paint">Paint</button><button id="noop">No-op during stream</button><button id="hide">Hide before paint</button><output></output>
 <script type="module">
 import { installInputPaint } from '/apps/fractal-web/src/telemetry/inputPaint.ts'
 window.samples = []
 window.stopCapture = installInputPaint({ emit: sample => window.samples.push(sample) })
 document.querySelector('#paint').onclick = () => { document.querySelector('output').textContent = 'painted' }
+document.querySelector('#noop').onclick = () => {
+  const channel = new MessageChannel()
+  channel.port1.onmessage = () => {
+    document.querySelector('output').textContent = 'streamed in another task'
+    window.streamDone = true
+    channel.port1.close(); channel.port2.close()
+  }
+  channel.port2.postMessage(undefined)
+}
 document.querySelector('#hide').onclick = () => {
   document.querySelector('output').textContent = 'unpainted'
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
@@ -46,11 +55,15 @@ try {
     if (painted.attributes.outcome !== 'painted' || painted.attributes['input.kind'] !== 'mouse' || painted.attributes.read_to_frame_ms <= 0 || painted.attributes.read_to_frame_ms > 2000) throw new Error(JSON.stringify(painted))
     await page.evaluate(() => new Promise(resolve => { let n = 0; const tick = () => ++n === 8 ? resolve() : requestAnimationFrame(tick); requestAnimationFrame(tick) }))
     if (await page.evaluate(() => window.samples.length) !== 1) throw new Error('Idle emitted input samples')
+    await page.locator('#noop').click()
+    await page.waitForFunction(() => window.streamDone)
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    if (await page.evaluate(() => window.samples.length) !== 1) throw new Error('Separate-task stream mutation was attributed to a no-op click')
     await page.locator('#hide').click()
     const samples = await page.evaluate(() => { window.stopCapture(); return window.samples })
     if (samples.length !== 2 || samples[1].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
-    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, samples }))
-    return { status: 'pass', idleFrames: 8, samples }
+    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, separateTaskStreamExcluded: true, samples }))
+    return { status: 'pass', idleFrames: 8, separateTaskStreamExcluded: true, samples }
   }`])
 } finally {
   try { await run(['close']) } finally { await vite.close() }

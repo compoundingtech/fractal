@@ -7,9 +7,14 @@ afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); vi.restor
 const setup = () => {
   let time = 100
   const callbacks = new Set<() => void>()
+  const tasks = new Set<() => void>()
   const samples: InputPaintSample[] = []
   const listeners = vi.spyOn(window, 'addEventListener')
-  const stop = installInputPaint({ emit: (sample) => samples.push(sample), now: () => time, paint: (callback) => { callbacks.add(callback); return () => { callbacks.delete(callback) } } })
+  const stop = installInputPaint({
+    emit: (sample) => samples.push(sample), now: () => time,
+    paint: (callback) => { callbacks.add(callback); return () => { callbacks.delete(callback) } },
+    task: (callback) => { tasks.add(callback); return () => { tasks.delete(callback) } },
+  })
   cleanups.push(stop)
   const button = document.createElement('button')
   document.body.append(button)
@@ -20,8 +25,9 @@ const setup = () => {
     listener.call(window, event)
   }
   const mutate = async () => { button.textContent = String(time); await Promise.resolve() }
-  const paint = () => { time += 16; for (const callback of [...callbacks]) callback() }
-  return { samples, input, mutate, paint, stop, advance: () => { time += 10 } }
+  const endTask = () => { for (const callback of [...tasks]) callback() }
+  const paint = () => { endTask(); time += 16; for (const callback of [...callbacks]) callback() }
+  return { samples, input, mutate, paint, endTask, stop, advance: () => { time += 10 } }
 }
 it('records once after a DOM commit and paint, with only bounded contract attributes', async () => {
   const run = setup()
@@ -73,7 +79,7 @@ it('ends committed input on hidden visibility and ignores subsequent input', asy
 })
 
 it('uses matched Event Timing presentation ends with a nonzero interaction id', async () => {
-  let deliver: ((entries: PerformanceEntry[]) => void) | undefined
+  let deliver: ((entries: Array<PerformanceEntry & { readonly interactionId: number }>) => void) | undefined
   vi.stubGlobal('PerformanceObserver', class {
     static supportedEntryTypes = ['event']
     constructor(callback: PerformanceObserverCallback) {
@@ -88,8 +94,15 @@ it('uses matched Event Timing presentation ends with a nonzero interaction id', 
     takeRecords() { return [] }
   })
   const run = setup()
-  run.input(); await run.mutate(); run.advance()
+  run.input()
+  // Correlate the entry before commit; subsequent entries must retain this exact identity.
   const entry = { name: 'click', entryType: 'event', startTime: 95, duration: 10, interactionId: 42, toJSON: () => ({}) }
+  deliver?.([entry])
+  await run.mutate(); run.advance()
+  run.input('keydown')
+  deliver?.([{ ...entry, name: 'keydown', interactionId: 99 }])
+  deliver?.([{ ...entry, startTime: 95.5 }, { ...entry, interactionId: 43 }])
+  expect(run.samples).toHaveLength(0)
   deliver?.([entry])
   run.paint()
   expect(run.samples[0]?.endMs).toBe(105)
@@ -108,4 +121,28 @@ it('ignores unchanged attribute and text assignments', async () => {
   await Promise.resolve()
   run.paint()
   expect(run.samples).toEqual([])
+})
+
+it('does not attribute separate-task stream mutations or coalesce a prior real input', async () => {
+  const observe = vi.spyOn(MutationObserver.prototype, 'observe')
+  const disconnect = vi.spyOn(MutationObserver.prototype, 'disconnect')
+  const run = setup()
+  expect(observe).not.toHaveBeenCalled()
+  await run.mutate()
+  run.input(); await run.mutate(); run.endTask()
+  run.advance(); run.input('keydown'); run.endTask()
+  expect(disconnect).toHaveBeenCalled()
+  // The deterministic task seam has closed both discrete-event dispatch windows.
+  // This separate task models makeFrameIngest's streamed transcript DOM updates.
+  await new Promise<void>((resolve) => {
+    const channel = new MessageChannel()
+    channel.port1.onmessage = () => {
+      document.querySelector('button')!.textContent = 'streamed'
+      channel.port1.close(); channel.port2.close(); resolve()
+    }
+    channel.port2.postMessage(undefined)
+  })
+  expect(run.samples).toEqual([])
+  run.paint()
+  expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
 })

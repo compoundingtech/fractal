@@ -106,11 +106,14 @@ Configured browsers also export `fractal.input.next_frame` through this same tra
 under `service.name=fractal-web` (the TUI uses `fractal`). This is a span-based
 SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint.
 Trusted pointer/key/paste/focus/resize/input events count only if a DOM mutation
-commits before their next paint boundary. DOM-less React commits, idle updates,
-native scrolling and value-only edits without a DOM mutation do not count.
-The start is the input event timestamp. Event Timing presentation ends are used
-when available and matched by event timestamp and interaction ID; otherwise the
-end is rAF after commit followed by a posted task. A later input's commit before
+commits during their discrete-event dispatch or its microtasks. Capture starts
+the observer; a posted MessageChannel task drains records and disconnects it.
+There is no idle observation. Stream updates in subsequent tasks, DOM-less React
+commits, native scrolling and value-only edits without DOM mutation do not count.
+The start is the input event timestamp. Event Timing entries bind one-to-one by
+event type and exact timestamp before retaining their interactionId; ambiguous
+matches use the paint fallback rather than cross-matching concurrent inputs.
+The fallback end is rAF after commit followed by a posted task. A later input's commit before
 paint ends the previous committed input as `coalesced`; page hiding, pagehide,
 unload or telemetry teardown ends unpainted committed input as `unacknowledged`.
 Only `painted` is latency-SLI eligible. There is no timer expiry.

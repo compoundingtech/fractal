@@ -480,3 +480,18 @@ it.live('exports the shared input span contract under the distinct web resource'
   expect(JSON.stringify(payloads)).not.toContain('never-export-this')
   yield* Scope.close(scope, Exit.void)
 }))
+
+it.live('does not construct input observation or task windows in ring-only mode', () => Effect.gen(function* () {
+  vi.stubGlobal('window', new EventTarget())
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }))
+  vi.stubGlobal('PerformanceObserver', class { static readonly supportedEntryTypes: string[] = [] })
+  const observer = vi.fn()
+  vi.stubGlobal('MutationObserver', observer)
+  const telemetry = makeTelemetry({ otlpTracesUrl: undefined, resourceAttributes: {}, production: true })
+  const { scope } = yield* open(telemetry)
+  const uninstall = telemetry.install()
+  expect(observer).not.toHaveBeenCalled()
+  expect(OtlpTracer.make).not.toHaveBeenCalled()
+  uninstall()
+  yield* Scope.close(scope, Exit.void)
+}))
