@@ -151,7 +151,9 @@ proptest! {
         let mut shuffled = (0..exchange.envelopes.len()).collect::<Vec<_>>();
         shuffled.sort_by_key(|&index| (ranks[index], index));
         for order in [(0..exchange.envelopes.len()).rev().collect::<Vec<_>>(), shuffled] {
-            let target = Store::open_memory("cedar").unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("claims.sqlite3");
+            let target = Store::open(&path, "cedar").unwrap();
             for chunk in order.chunks(width) {
                 let envelopes = chunk.iter().flat_map(|&index|
                     std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
@@ -170,6 +172,10 @@ proptest! {
             ).unwrap();
             prop_assert_eq!(actual_snapshot(&target, subject), expected.clone());
             target.replay_replication_graph().unwrap();
+            prop_assert_eq!(actual_snapshot(&target, subject), expected.clone());
+            // A reopened store reads the same.
+            drop(target);
+            let target = Store::open(&path, "cedar").unwrap();
             prop_assert_eq!(actual_snapshot(&target, subject), expected.clone());
         }
     }

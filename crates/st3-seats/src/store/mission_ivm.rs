@@ -214,6 +214,24 @@ mod tests {
                 expected
             );
         }
+        // Split: reverse order in batches of one and two, each batch's predecessor delivered
+        // again with it, with parity against the real store after every batch.
+        for width in [1, 2] {
+            let (target, views) = fixture();
+            let order = exchange.envelopes.iter().rev().cloned().collect::<Vec<_>>();
+            let mut previous = Vec::new();
+            for chunk in order.chunks(width) {
+                let mut batch = chunk.to_vec();
+                batch.extend(previous.iter().cloned());
+                receive_and_project(&target, "cedar", &st3_store::store::tests_shared_seats::exchange_of("cedar", batch));
+                parity(&target, &views, at);
+                previous = chunk.to_vec();
+            }
+            assert_eq!(
+                window(&target.readers.get(), &views, true, at, None, None, 501).unwrap(),
+                source.mission_collection_page(true, 0, 501, None).unwrap()
+            );
+        }
     }
 
     #[test]
