@@ -11,7 +11,7 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup()
   vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren()
 })
-const setup = ({ stopped = false, scheduleAfter = false, nested = false } = {}) => {
+const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer = '' } = {}) => {
   const frames = new Map<number, FrameRequestCallback>()
   const paints = new Set<() => void>()
   const samples: InputPaintSample[] = []
@@ -25,8 +25,7 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false } = {}) 
   const wrapped = new Map<EventListenerOrEventListenerObject, EventListener>()
   const add = window.addEventListener.bind(window)
   const remove = window.removeEventListener.bind(window)
-  vi.spyOn(window, 'addEventListener').mockImplementation((type, listener, options) => {
-    if (listener === null) return
+  const adapt = (listener: EventListenerOrEventListenerObject): EventListener => {
     let wrapper = wrapped.get(listener)
     if (wrapper === undefined) {
       wrapper = (event) => {
@@ -40,7 +39,10 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false } = {}) 
       }
       wrapped.set(listener, wrapper)
     }
-    add(type, wrapper, options)
+    return wrapper
+  }
+  vi.spyOn(window, 'addEventListener').mockImplementation((type, listener, options) => {
+    if (listener !== null) add(type, adapt(listener), options)
   })
   vi.spyOn(window, 'removeEventListener').mockImplementation((type, listener, options) => {
     if (listener !== null) remove(type, wrapped.get(listener) ?? listener, options)
@@ -60,13 +62,26 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false } = {}) 
       createElement('button', { id: 'noop', onClick: (event) => {
         if (stopped) event.stopPropagation()
         if (scheduleAfter) ingest.accept({ key: 'stream', value: 'streamed' })
+        if (timer !== '') setTimeout(() => {
+          if (timer === 'dom') stream.textContent = 'timer'
+          else flushSync(() => setCount((previous) => previous + 1))
+        }, 0)
       } }, 'no-op'),
+      createElement('button', { id: 'capture', onClickCapture: (event) => { event.stopPropagation(); setCount((previous) => previous + 1) } }, 'capture'),
     )
   }
   const root = createRoot(container)
   flushSync(() => root.render(createElement(App)))
+  const rootAdd = container.addEventListener.bind(container)
+  const rootRemove = container.removeEventListener.bind(container)
+  vi.spyOn(container, 'addEventListener').mockImplementation((type, listener, options) => {
+    if (listener !== null) rootAdd(type, adapt(listener), options)
+  })
+  vi.spyOn(container, 'removeEventListener').mockImplementation((type, listener, options) => {
+    if (listener !== null) rootRemove(type, wrapped.get(listener) ?? listener, options)
+  })
   cleanups.push(() => root.unmount(), () => ingest.dispose())
-  cleanups.push(installInputPaint({ emit: (sample) => samples.push(sample), paint: (callback) => { paints.add(callback); return () => { paints.delete(callback) } } }))
+  cleanups.push(installInputPaint({ reactRoots: [container], emit: (sample) => samples.push(sample), paint: (callback) => { paints.add(callback); return () => { paints.delete(callback) } } }))
   const click = (id: string) => {
     const event = new MouseEvent('click', { bubbles: true })
     trusted.add(event)
@@ -127,6 +142,24 @@ it('ignores nested untrusted dispatch without losing the trusted outer React com
   const run = setup({ nested: true })
   run.click('#real')
   await Promise.resolve(); await Promise.resolve()
+  await run.frame()
+  expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
+})
+
+it.each(['dom', 'react'])('excludes an actual %s timer commit before rAF after a stopped no-op click', async (timer) => {
+  const run = setup({ stopped: true, timer })
+  run.click('#noop')
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  if (timer === 'dom') expect(run.stream.textContent).toBe('timer')
+  else expect(document.querySelector('#real')!.textContent).toBe('1')
+  await run.frame()
+  expect(run.samples).toEqual([])
+})
+it('attributes a React capture-phase handler that stops native propagation', async () => {
+  const run = setup()
+  run.click('#capture')
+  await Promise.resolve(); await Promise.resolve()
+  expect(document.querySelector('#real')!.textContent).toBe('1')
   await run.frame()
   expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
 })

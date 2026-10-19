@@ -31,7 +31,7 @@ const ingest = makeFrameIngest({ write: ({ value }) => {
   document.querySelector('output').textContent = value
   window.streams++
 } })
-// Registered before telemetry: this ingest rAF precedes capture's fallback rAF.
+// Registered before telemetry to retain coverage of the explicit ingest boundary.
 window.addEventListener('click', event => {
   if (event.target.id === 'before') ingest.accept({ key: 'stream', value: 'before' })
 }, true)
@@ -45,10 +45,20 @@ const App = () => {
       event.stopPropagation()
       ingest.accept({ key: 'stream', value: 'after' })
     } }, 'No-op handler-registered ingest'),
+    createElement('button', { id: 'timer-dom', onClick: event => {
+      event.stopPropagation()
+      setTimeout(() => { document.querySelector('output').textContent = 'timer'; window.timerDomDone = true }, 0)
+    } }, 'No-op DOM timer'),
+    createElement('button', { id: 'timer-react', onClick: event => {
+      event.stopPropagation()
+      setTimeout(() => { flushSync(() => setCount(n => n + 1)); window.timerReactDone = true }, 0)
+    } }, 'No-op React timer'),
   )
 }
-flushSync(() => createRoot(document.querySelector('#react')).render(createElement(App)))
-window.stopCapture = installInputPaint({ emit: sample => window.samples.push(sample) })
+const container = document.querySelector('#react')
+const reactRoot = createRoot(container)
+flushSync(() => reactRoot.render(createElement(App)))
+window.stopCapture = installInputPaint({ reactRoots: [container], emit: sample => window.samples.push(sample) })
 document.querySelector('#hide').onclick = () => {
   document.querySelector('output').textContent = 'unpainted'
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
@@ -79,14 +89,20 @@ try {
     await page.waitForFunction(() => window.streams === 2)
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     if (await page.evaluate(() => window.samples.length) !== 1) throw new Error('rAF ingest mutation was attributed to a no-op click')
+    await page.locator('#timer-dom').click()
+    await page.waitForFunction(() => window.timerDomDone)
+    await page.locator('#timer-react').click()
+    await page.waitForFunction(() => window.timerReactDone)
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    if (await page.evaluate(() => window.samples.length) !== 1) throw new Error('Intervening timer commit was attributed to a stopped no-op click')
     await page.locator('#stopped').click()
     await page.waitForFunction(() => window.samples.length === 2)
     if (await page.evaluate(() => window.samples[1].attributes.outcome) !== 'painted') throw new Error('Stopped propagation lost the React microtask commit')
     await page.locator('#hide').click()
     const samples = await page.evaluate(() => { window.stopCapture(); return window.samples })
     if (samples.length !== 3 || samples[2].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
-    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, stoppedReactCommitPainted: true, samples }))
-    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, stoppedReactCommitPainted: true, samples }
+    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, samples }))
+    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, samples }
   }`])
 } finally {
   try { await run(['close']) } finally { await vite.close() }

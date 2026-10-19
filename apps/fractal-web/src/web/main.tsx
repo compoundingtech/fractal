@@ -8,7 +8,7 @@ import { createRoot } from 'react-dom/client'
 import { setTheme } from '../ui-compat/foundations.ts'
 
 import { App } from './App.tsx'
-import { live } from './liveRuntime.ts'
+import { live, telemetry } from './liveRuntime.ts'
 import { installPageLifecycle } from './pageLifecycle.ts'
 import { markStart } from './perfMarks.ts'
 
@@ -32,6 +32,7 @@ if (rootElement === null) {
 }
 
 const root = createRoot(rootElement)
+const unregisterTelemetryRoot = telemetry.registerReactRoot(rootElement)
 // Production: every deferred bundle stylesheet. Development: the StyleX runtime sheet; the
 // runtime replaces its link with an inline stylesheet, so link.sheet is no readiness signal.
 const stylesReady = window.__wfStylexReady
@@ -41,6 +42,7 @@ installPageLifecycle({
   source: live,
   beforeDispose: () => {
     disposed = true
+    unregisterTelemetryRoot()
     root.unmount()
   },
 })

@@ -7,15 +7,13 @@ afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); vi.restor
 const setup = () => {
   let time = 100
   const callbacks = new Set<() => void>()
-  const frames = new Map<number, FrameRequestCallback>()
-  let nextFrame = 0
-  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { const id = ++nextFrame; frames.set(id, callback); return id })
-  vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
+  const tasks = new Set<() => void>()
   const samples: InputPaintSample[] = []
   const listeners = vi.spyOn(window, 'addEventListener')
   const stop = installInputPaint({
     emit: (sample) => samples.push(sample), now: () => time,
     paint: (callback) => { callbacks.add(callback); return () => { callbacks.delete(callback) } },
+    task: (callback) => { tasks.add(callback); return () => { tasks.delete(callback) } },
   })
   cleanups.push(stop)
   const button = document.createElement('button')
@@ -28,8 +26,7 @@ const setup = () => {
   }
   const mutate = async () => { button.textContent = String(time); await Promise.resolve() }
   const paint = () => {
-    const ready = [...frames.entries()]
-    for (const [id, callback] of ready) if (frames.delete(id)) callback(time)
+    for (const callback of [...tasks]) callback()
     time += 16
     for (const callback of [...callbacks]) callback()
   }

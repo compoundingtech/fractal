@@ -42,6 +42,14 @@ export const beforeInputPaintFrameIngest = (): void => {
   for (const close of frameBoundaries) close()
 }
 
+const nextTask = (callback: () => void): (() => void) => {
+  const channel = new MessageChannel()
+  const cancel = () => { channel.port1.close(); channel.port2.close() }
+  channel.port1.onmessage = () => { cancel(); callback() }
+  channel.port2.postMessage(undefined)
+  return cancel
+}
+
 /**
  * TUI read_at -> event.timeStamp; accepted_at -> capture-listener entry; terminal flush ->
  * first paint following an observed DOM mutation. Thus read_to_frame_ms includes browser
@@ -50,21 +58,26 @@ export const beforeInputPaintFrameIngest = (): void => {
  * No React Profiler dependency (production React disables it). MutationObserver child/text/
  * attribute changes count as commits; no-op attributes and React commits without DOM changes
  * do not. Native value/scroll paints without a DOM mutation are deliberately outside this SLI.
- * React 19.2.3 queues discrete flush work in microtasks (ReactFiberRootScheduler.js:
- * 265-267,345-346,671-692). A window bubble listener queues our drain after React's
- * handler-scheduled microtask, before HTML's next rendering opportunity. Stopped propagation
- * instead closes at a capture-registered rAF. An earlier-registered ingest rAF is NOT assumed
- * to run later: makeFrameIngest explicitly drains/disconnects before any of its writes.
- * No observation remains active during ingest's synchronous OR async React commits.
+ * React 19.2.3 flushes discrete work in microtasks (ReactFiberRootScheduler.js:
+ * 265-267,345-346,671-692). Completion listeners on the registered React root run AFTER
+ * React's native listeners, in bubble or (if cancelBubble is set) capture phase.
+ * stopPropagation does not skip same-node listeners. Their queued microtask drains after
+ * React's flush and before timers/rendering. Window bubble covers non-React targets.
+ * No rAF fallback: MessageChannel is only a last resort for native propagation stops below
+ * the registered root or stopImmediatePropagation; those unsupported paths can include
+ * intervening tasks. makeFrameIngest also explicitly drains before its writes.
  * No timeout expires committed inputs: lifecycle termination ends them unacknowledged.
  * Event Timing is bound one-to-one by event type and exact timestamp correlation before
  * retaining its interactionId; ambiguous correlations use the paint fallback, never a
  * different input's presentation. The existing rAF + posted-task boundary handles fallback.
  */
-export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint }: {
+export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint, reactRoots = [], task = nextTask }: {
   readonly emit: (sample: InputPaintSample) => void
   readonly now?: () => number
   readonly paint?: (callback: () => void) => () => void
+  /** Register containers only AFTER createRoot has installed React's native listeners. */
+  readonly reactRoots?: Iterable<Element>
+  readonly task?: (callback: () => void) => () => void
 }): (() => void) => {
   const pending = new Set<Input>()
   let candidate: Input | undefined
@@ -126,15 +139,25 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true })
     const closeThisInput = () => { if (candidate === input) closeWindow() }
     const bubble = (dispatched: Event) => {
-      if (dispatched !== event) return
-      window.removeEventListener(event.type, bubble)
-      queueMicrotask(closeThisInput)
+      if (dispatched === event) queueMicrotask(closeThisInput)
+    }
+    const stoppedCapture = (dispatched: Event) => {
+      if (dispatched === event && dispatched.cancelBubble) queueMicrotask(closeThisInput)
+    }
+    const roots = [...reactRoots]
+    for (const root of roots) {
+      root.addEventListener(event.type, stoppedCapture, true)
+      root.addEventListener(event.type, bubble)
     }
     window.addEventListener(event.type, bubble)
-    const frame = requestAnimationFrame(closeThisInput)
+    const cancelTask = task(closeThisInput)
     cancelBoundary = () => {
+      for (const root of roots) {
+        root.removeEventListener(event.type, stoppedCapture, true)
+        root.removeEventListener(event.type, bubble)
+      }
       window.removeEventListener(event.type, bubble)
-      cancelAnimationFrame(frame)
+      cancelTask()
     }
   }
   let eventObserver: PerformanceObserver | undefined

@@ -107,20 +107,25 @@ under `service.name=fractal-web` (the TUI uses `fractal`). This is a span-based
 SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint.
 Trusted pointer/key/paste/focus/resize/input events count only if a DOM mutation
 commits during their discrete-event dispatch or its microtasks. Capture starts
-observation. A same-event window bubble listener queues the drain microtask after
-React's handler-scheduled discrete flush; it disconnects before the next rendering
-opportunity. React 19.2.3's scheduling is in
+observation. Immediately after `createRoot`, the app registers that container
+with telemetry. Same-event completion listeners run after React's native root
+listeners: bubble handles stopped React bubble handlers; capture handles
+`cancelBubble` already set by React capture handlers. Native `stopPropagation`
+does not skip later same-node listeners. Their queued microtask drains after
+React's discrete flush and disconnects before timers or rendering. Window bubble
+provides the same completion for non-React targets. React 19.2.3's scheduling is in
 [ReactFiberRootScheduler.js:265-267,345-346,671-692](https://github.com/facebook/react/blob/v19.2.3/packages/react-reconciler/src/ReactFiberRootScheduler.js#L265-L267);
 the browser's [event-loop microtask checkpoint](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model)
 precedes rendering. An older dispatch's queued closure cannot close a newer capture.
 
-Stopped propagation uses a capture-registered rAF drain, but this does **not**
-assume it precedes callbacks registered earlier. `makeFrameIngest.flush` explicitly
-drains input records and disconnects observation **before** its batch writes.
-Observation is not reopened: React work triggered asynchronously by that ingest
-is also excluded. This covers ingest rAF registered both before and after capture.
-There is no idle observation. DOM-less React commits, native scrolling and
-value-only edits without DOM mutation do not count.
+There is **no rAF attribution fallback**. A MessageChannel task is the last resort
+if native propagation stops below the root or uses `stopImmediatePropagation`.
+Those unsupported paths may include intervening task mutations; app/kit source
+contains no native instances of these paths (existing stops are React synthetic).
+`makeFrameIngest.flush` additionally drains and disconnects **before** batch writes,
+without reopening for their async React commits. No idle observation occurs.
+DOM-less React commits, native scrolling and value-only edits without DOM mutation
+do not count.
 The start is the input event timestamp. Event Timing entries bind one-to-one by
 event type and exact timestamp before retaining their interactionId; ambiguous
 matches use the paint fallback rather than cross-matching concurrent inputs.

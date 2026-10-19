@@ -56,6 +56,8 @@ export interface Telemetry {
   readonly onCommit: React.ProfilerOnRenderCallback
   /** Installs event listeners and PerformanceObservers; returns the uninstaller. */
   readonly install: () => () => void
+  /** Call immediately after createRoot, before rendering; removes the completion root on cleanup. */
+  readonly registerReactRoot: (root: Element) => () => void
 }
 
 interface PendingInteraction {
@@ -176,6 +178,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
   let shutdownRequested = false
   let closeExporter: (() => void) | undefined
   let uninstallInputPaint: (() => void) | undefined
+  const reactRoots = new Set<Element>()
 
   /** Replay only pre-exporter spans, retaining the IDs already propagated to the SDK/gateway. */
   const exportEarlySpan = ({ span, events }: EarlySpanCapture, target: Tracer.Tracer) => {
@@ -487,7 +490,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
   const install = () => {
     if (uninstall !== undefined) return uninstall
-    uninstallInputPaint = otlpTracesUrl === undefined ? undefined : installInputPaint({ emit })
+    uninstallInputPaint = otlpTracesUrl === undefined ? undefined : installInputPaint({ emit, reactRoots })
     for (const type of interactionEvents)
       window.addEventListener(type, onInteraction, { capture: true })
 
@@ -625,5 +628,12 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
     return uninstall
   }
 
-  return { ring, layer, onCommit, install, get ux() { return getUx() } }
+  return {
+    ring, layer, onCommit, install, get ux() { return getUx() },
+    registerReactRoot: (root) => {
+      if (otlpTracesUrl === undefined) return () => {}
+      reactRoots.add(root)
+      return () => { reactRoots.delete(root) }
+    },
+  }
 }
