@@ -124,6 +124,8 @@ use presentation::{
 struct Cli {
     #[arg(long, global = true, hide = true)]
     read_contract_inventory_json: bool,
+    #[arg(long, global = true, hide = true)]
+    checkpoint_space_gate_capabilities: bool,
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate st on this machine: its own state, config, sockets, node
@@ -4284,6 +4286,15 @@ fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<b
     present.then(|| arguments.len() == 2 && arguments[1] == FLAG)
 }
 
+fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
+    const FLAG: &str = "--checkpoint-space-gate-capabilities";
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == FLAG)
+        .then(|| arguments.len() == 2 && arguments[1] == FLAG)
+}
+
 fn main() -> ExitCode {
     cli_output::finish(cli_main())
 }
@@ -4294,6 +4305,23 @@ fn cli_main() -> ExitCode {
         st3::recorder::run(program);
     }
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    match checkpoint_space_gate_capabilities_request(&arguments) {
+        Some(true) => {
+            println!(
+                "{}",
+                json!({
+                    "kind": "checkpoint-space-gate-capabilities",
+                    "version": st3::store::CHECKPOINT_SPACE_GATE_VERSION,
+                })
+            );
+            return ExitCode::SUCCESS;
+        }
+        Some(false) => {
+            eprintln!("st: --checkpoint-space-gate-capabilities must be used alone");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
     if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
         return fractal::web(&arguments);
     }
@@ -6070,6 +6098,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 }
             }));
             spawn_publication_evidence(store.clone());
+            tokio::spawn(build_transport_observation_index(store.clone()));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -17871,6 +17900,46 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
     }
 }
 
+/// This starts only after both APIs serve. Each 128-source-row page joins the
+/// managed background writer queue, releases its loan, then yields for 100 ms.
+async fn build_transport_observation_index(store: Arc<Store>) {
+    use smallclaims::store::transport_observation_index as index;
+    let started = Instant::now();
+    st3::otel::record_index_migration(index::NAME, false, None, None);
+    loop {
+        let page_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<index::Page>> {
+            if index::ready(&page_store.readers.get())? {
+                return Ok(None);
+            }
+            index::advance(&page_store.connection).map(Some)
+        }).await;
+        match result {
+            Ok(Ok(None)) => {
+                st3::otel::record_index_migration(index::NAME, true, None, None);
+                return;
+            }
+            Ok(Ok(Some(page))) => {
+                st3::otel::record_index_migration(
+                    index::NAME,
+                    page.ready,
+                    Some(page.write_hold),
+                    page.ready.then(|| started.elapsed()),
+                );
+                if page.ready {
+                    return;
+                }
+            }
+            Ok(Err(error)) if maintenance_contention(&error) => {}
+            error => {
+                eprintln!("st: transport observation index build stopped: {error:?}");
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// A finite bootstrap job: committed pages yield the background writer to live requests.
 /// Local corruption is persisted and visible through doctor/faults; it stops this job.
 /// Background inventory/judgment gets one quiet unit per unit of page wall time.
@@ -18282,17 +18351,17 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
 }
 
 /// Seal and verify checkpoints every ten minutes. The proof copies the store and replays it, so
-/// it runs on a blocking thread, and a copy left by a crash is removed first.
+/// it runs on a blocking thread, and an owned copy left by a crash is swept first.
 async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    // A proof copy is only ever useful to the proof that made it. A staged capture is kept: it
-    // resumes where it stopped while its store-index cut still holds (#2492).
-    if let Ok(entries) = std::fs::read_dir(&context.scratch) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("proof-") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+    // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
+    // proof or a cleanup error stays visible and prevents a later proof from consuming space.
+    let sweep_store = store.clone();
+    let sweep_dir = context.scratch.clone();
+    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("st3: checkpoint proof startup cleanup failed: {error:#}"),
+        Err(error) => eprintln!("st3: checkpoint proof startup cleanup stopped: {error}"),
     }
     loop {
         let store = store.clone();
