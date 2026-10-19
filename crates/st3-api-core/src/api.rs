@@ -2697,7 +2697,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
     let connection = store.readers.get();
     let (subjects, desired) = crate::otel::roster_phase("membership", || -> anyhow::Result<_> {
         let mut subjects = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd2b2337a153e owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbed160f928fc owner=st3_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
             .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
                 row.get::<_, String>(0)
             })?
@@ -5069,7 +5069,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
         let connection = store.readers.get();
         crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
             Ok(connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha0efb6efb83f owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4650ec45caf4 owner=st3_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
                 .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?)
         })

@@ -7,10 +7,10 @@ use super::*;
 use crate::api::published_attention::{
     published_assistant_attention_rows, published_view_not_ready,
 };
-use st3_api::api::client_v0::assistant::reads::paging::page;
-pub use st3_api::api::client_v0::assistant::reads::*;
-pub use st3_api::api::client_v0::assistant::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES, terminal};
-use st3_api::api::client_v0::assistant::reads::project_with_context as project_lower;
+use st3_api_core::api::client_v0::assistant::reads::paging::page;
+pub use st3_api_core::api::client_v0::assistant::reads::*;
+pub use st3_api_core::api::client_v0::assistant::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES, terminal};
+use st3_api_core::api::client_v0::assistant::reads::project_with_context as project_lower;
 
 #[path = "reads_conversation.rs"]
 pub mod conversation_reads;
@@ -71,6 +71,6 @@ pub async fn project(
 
 pub fn projector<'a>(state: &'a AppState, snapshot: &'a ClientSnapshot, projection: &'a str,
                      parameters: &'a BTreeMap<String, String>, max_bytes: usize, binding: &'a str,
-                     context: &'a response_body::Context) -> st3_api::api::client_v0::assistant::authorization::ProjectFuture<'a> {
+                     context: &'a response_body::Context) -> st3_api_core::api::client_v0::assistant::authorization::ProjectFuture<'a> {
     Box::pin(project_with_context(state, snapshot, projection, parameters, max_bytes, binding, context))
 }
