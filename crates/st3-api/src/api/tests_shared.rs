@@ -19,3 +19,15 @@ pub fn state(root: &Path) -> AppState {
         planner_default: PlannerSpec::default(),
     }
 }
+
+pub fn probe_claim(key: &str, state: &str) -> ClaimInput {
+    ClaimInput {
+        subject: "agent/probe".into(),
+        kind: "harness.observed".into(),
+        actor: Some("agent/probe".into()),
+        fields: BTreeMap::from([("state".into(), Value::String(state.into()))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(key.into()),
+    }
+}

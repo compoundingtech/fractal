@@ -23,6 +23,35 @@ test('push registration schema bounds secret input and exposes only safe device 
 });
 
 
+test('every wire version receiver accepts exactly the deployed and fractal names', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const contract = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
+    let receivers = 0;
+    for (const [name, definition] of Object.entries(contract.$defs)) {
+        for (const [field, specification] of Object.entries(definition.properties ?? {})) {
+            if (!specification.enum?.some(value => typeof value === 'string' && value.startsWith('st3.'))) continue;
+            receivers++;
+            const [oldName, newName] = specification.enum;
+            assert.deepEqual(specification.enum, [oldName, oldName.replace(/^st3\./, 'fractal.')]);
+            const receiver = Rich[name].fields[field];
+            for (const mode of ['strict', 'tolerant']) {
+                const decode = Rich.decodeUnknownSync(receiver, mode);
+                for (const value of [oldName, newName]) {
+                    assert.equal(Schema.encodeSync(receiver)(decode(value)), value, `${name}.${field}`);
+                }
+                for (const value of [oldName.replace(/^st3\./, 'smalltalk.'), `${newName}.unknown`,
+                    `${oldName},${newName}`, [oldName, newName]]) {
+                    assert.throws(() => decode(value), `${name}.${field} must reject ${JSON.stringify(value)}`);
+                }
+            }
+        }
+    }
+    assert.equal(receivers, 13);
+    assert.equal(Rich.API_VERSION, 'st3.client.v0');
+    assert.equal(contract['x-st-integers'], 'json-safe');
+    assert.equal(contract['x-fractal-integers'], undefined);
+});
+
 test('assistant senders decode timeline messages without becoming recipients or actors', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = {

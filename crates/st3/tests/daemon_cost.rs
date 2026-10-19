@@ -1716,6 +1716,9 @@ fn the_cost_check_covers_every_route() {
     declared.extend(family_routes(include_str!(
         "../../st3-api-mailbox/src/api/mailbox.rs"
     )));
+    declared.extend(family_routes(include_str!(
+        "../../st3-api-client-v0/src/api/client_v0.rs"
+    )));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
         .iter()
@@ -1916,6 +1919,22 @@ async fn invented_client_read_owner(
         .expect("the forward probe must use its invented fleet credentials");
     assert_eq!(sender.name, NODE);
     let request: ClientReadRequest = serde_json::from_slice(&body).unwrap();
+    // Other census probes can try this configured peer as a fallback relay.
+    // It owns only cost-owner; answer those attempts like a real unreachable relay.
+    if let Some(route) = &request.relay
+        && route.target != "host/cost-owner"
+    {
+        return signed_cost_owner_response(
+            &auth,
+            &body,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            PeerResponse::new("cost-owner", 1, json!({
+                "code": "remote-unavailable",
+                "message": "invented cost owner has no onward route",
+                "details": {"reason": "no-route", "owner_host_id": route.target},
+            })),
+        );
+    }
     assert_eq!(request.authority_actor, "person/bench-operator");
     assert!(
         request.relay.is_none(),
@@ -1942,21 +1961,65 @@ async fn invented_client_read_owner(
             "page": {"limit": 20, "has_more": false}
         }),
     );
+    signed_cost_owner_response(&auth, &body, axum::http::StatusCode::OK, envelope)
+}
+
+fn signed_cost_owner_response(
+    auth: &FleetAuth,
+    body: &[u8],
+    status: axum::http::StatusCode,
+    envelope: PeerResponse<Value>,
+) -> Response {
     let bytes = serde_json::to_vec(&envelope).unwrap();
     let signed = auth
         .response_headers_for(
             "/v1/peer/client-read",
             "cost-owner",
             &bytes,
-            &FleetAuth::body_digest(&body),
+            &FleetAuth::body_digest(body),
         )
         .unwrap();
-    let mut response = bytes.into_response();
+    let mut response = (status, bytes).into_response();
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
     response.headers_mut().extend(signed);
     response
+}
+
+#[tokio::test]
+async fn invented_cost_owner_refuses_foreign_relays_but_serves_its_direct_probe() {
+    let root = tempfile::tempdir().unwrap();
+    let secret = root.path().join("secret");
+    std::fs::write(&secret, [13_u8; 32]).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let auth = FleetAuth::load(FLEET, &secret).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/v1/peer/client-read", axum_post(invented_client_read_owner))
+        .with_state(auth);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let relay = ClientRelay::from_config(&Config {
+        node: NODE.into(),
+        fleet_id: Some(FLEET.into()),
+        shared_secret_file: Some(secret),
+        peers: vec![PeerConfig { name: "cost-owner".into(), url: format!("http://{address}") }],
+        ..Default::default()
+    }).unwrap().unwrap();
+    let request = |target: &str| serde_json::from_value::<ClientReadRequest>(json!({
+        "authority_actor": "person/bench-operator",
+        "request": {"operation": "messages", "actor": "agent/bench/cost/reader", "history": false, "limit": 20, "cursor": null},
+        "relay": {"target": target, "path": ["cost-source"], "hops_left": 3},
+    })).unwrap();
+    let error = relay.forward(&request("host/unreachable-owner")).await.unwrap_err();
+    let rejected = error.downcast_ref::<st3::peer::ClientReadRejected>().unwrap();
+    assert_eq!(rejected.code, "remote-unavailable");
+    assert_eq!(rejected.reason(), Some("no-route"));
+    let answer = relay.forward(&request("host/cost-owner")).await.unwrap();
+    assert_eq!(answer["items"][0]["id"], "message/cost-forward");
+    server.abort();
 }
 
 /// Work counted while `request` runs and until the daemon's own work for it settles.

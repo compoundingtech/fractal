@@ -22,7 +22,7 @@ pub(crate) fn register_metrics(store: &Arc<Store>) {
         .build();
 }
 
-pub(crate) fn fold(
+pub fn fold(
     store: &Store,
     base: Option<&Publication<RuntimeRows>>,
 ) -> anyhow::Result<Option<(Publication<RuntimeRows>, bool)>> {
@@ -65,7 +65,7 @@ fn not_ready() -> ApiError {
     }
 }
 
-pub(super) fn page(
+pub fn page(
     state: &AppState,
     snapshot: ClientSnapshot,
     session: &ClientSession,

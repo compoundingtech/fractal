@@ -142,6 +142,57 @@ final class St3ClientTests: XCTestCase {
         XCTAssertEqual(value.value.limits.maxPageItems, 200)
     }
 
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): readers accept both names; sunset 60 days after first release shipping the bridge.
+    func testEnvelopeVersionNamesDecodeWithoutChangingStringSemantics() throws {
+        for version in ["st3.client.v0", "fractal.client.v0", "future.client.v99"] {
+            let wire: [String: Any] = [
+                "api_version": version,
+                "request_id": "request/example",
+                "snapshot": [
+                    "id": "snapshot/example", "host_id": "host/example", "store_index": 1,
+                    "projection_version": "projection-v0", "created_at": "2026-10-19T00:00:00Z",
+                ],
+                "value": ["notes": []],
+            ]
+            let decoded = try JSONDecoder().decode(Envelope<DirectiveNotes>.self,
+                from: JSONSerialization.data(withJSONObject: wire))
+            XCTAssertEqual(decoded.apiVersion, version)
+            XCTAssertEqual(decoded.requestID, "request/example")
+            XCTAssertTrue(decoded.value.notes.isEmpty)
+        }
+    }
+
+    func testErrorEnvelopeVersionNamesDecodeIndependently() throws {
+        // These fields have always been strings, not a protocol-selection or version-validation gate.
+        // Mixed namespaces remain valid, as do previously accepted future version strings.
+        for apiVersion in ["st3.client.v0", "fractal.client.v0", "future.client.v99"] {
+            for errorVersion in ["st3.client.error.v0", "fractal.client.error.v0", "future.client.error.v99"] {
+                let wire: [String: Any] = [
+                    "api_version": apiVersion, "error_version": errorVersion,
+                    "request_id": "request/example", "code": "not-found",
+                    "message": "No such resource", "retryable": false, "details": [:],
+                ]
+                let decoded = try JSONDecoder().decode(ErrorEnvelope.self,
+                    from: JSONSerialization.data(withJSONObject: wire))
+                XCTAssertEqual(decoded.apiVersion, apiVersion)
+                XCTAssertEqual(decoded.errorVersion, errorVersion)
+                XCTAssertEqual(decoded.code, .notFound)
+                XCTAssertFalse(decoded.retryable)
+            }
+        }
+    }
+
+    func testWireBridgeKeepsActionSenderVersionBytes() throws {
+        XCTAssertEqual(st3ClientAPIVersion, "st3.client.v0")
+        XCTAssertEqual(st3ClientTerminalSubprotocol, "st3.client.terminal.v0")
+        let request = try ActionRequest.workRetry(id: "work/example",
+            idempotencyKey: "retry/example", fence: Fence(snapshotID: "snapshot/example"),
+            parameters: WorkRetryParameters(targetID: "work/example", reason: "Retry requested"))
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(wire["api_version"] as? String, "st3.client.v0")
+    }
+
     func testGeneratedActionCoverage() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

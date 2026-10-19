@@ -8,7 +8,7 @@ pub(super) const MAX_BODY_BYTES: usize = 4096;
 static CHANGES: std::sync::LazyLock<tokio::sync::broadcast::Sender<String>> =
     std::sync::LazyLock::new(|| tokio::sync::broadcast::channel(64).0);
 
-pub(super) fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
+pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
     CHANGES.subscribe()
 }
 
@@ -21,12 +21,12 @@ fn unavailable() -> ApiError {
 }
 
 /// Cleanup proof is deliberately not a session: retired credentials regain no read/write scopes.
-pub(super) enum Authentication {
+pub enum Authentication {
     Session(ClientSession),
     Cleanup(PushCleanupProof),
 }
 
-pub(super) fn authenticate(
+pub fn authenticate(
     state: &AppState,
     request: &Request<Body>,
     transport: &'static str,
@@ -118,7 +118,7 @@ fn validate(registration: &PushRegistration) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(super) async fn register(
+pub async fn register(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     headers: axum::http::HeaderMap,
@@ -157,7 +157,7 @@ pub(super) async fn register(
     update(state, session, Some(registration)).await
 }
 
-pub(super) async fn unregister(
+pub async fn unregister(
     State(state): State<AppState>,
     proof: Option<Extension<PushCleanupProof>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,

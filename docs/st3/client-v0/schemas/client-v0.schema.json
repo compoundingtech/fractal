@@ -3,6 +3,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://st3.local/schemas/client-v0.schema.json",
   "title": "st3 client v0",
+  "$comment": "LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: receivers accept st3.* and fractal.*; senders retain st3.*. Sunset 60 days after the first release shipping this bridge. x-st annotations are not wire vocabulary.",
   "oneOf": [
     { "$ref": "#/$defs/ObservationReport" },
     { "$ref": "#/$defs/ObservationResponse" },
@@ -52,7 +53,7 @@
     "ObservationSample": {"oneOf": [{"$ref": "#/$defs/ObservationLatency"}, {"$ref": "#/$defs/ObservationLiveShare"}]},
     "ObservationReport": {"type": "object", "additionalProperties": false, "required": ["report_id", "samples"], "properties": {"report_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "minLength": 36, "maxLength": 36}, "samples": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/ObservationSample"}}}},
     "ObservationAccepted": {"type": "object", "additionalProperties": false, "required": ["accepted"], "properties": {"accepted": {"const": true}}},
-    "ObservationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"const": "st3.client.v0"}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/ObservationAccepted"}}},
+    "ObservationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/ObservationAccepted"}}},
     "PushEnvironment": {"enum": ["development", "production"], "description": "APNs environment the phone's token was issued for: `development` (sandbox) or `production`."},
     "PushRegistration": {"type": "object", "additionalProperties": false, "required": ["token", "environment", "bundle_id", "app_version"], "description": "A paired phone's APNs device token. The person and device come only from the paired session; any other field, including a person or device identity, is refused. The token is a secret: it is stored only on the member that issued the pairing and never appears in claims, replication, resources, logs or error messages.", "properties": {"token": {"x-st-codec": "redacted", "type": "string", "pattern": "^(?:[0-9a-fA-F]{2}){1,256}$", "minLength": 2, "maxLength": 512, "description": "Hex-encoded APNs device token, 1–256 bytes."}, "environment": {"$ref": "#/$defs/PushEnvironment"}, "bundle_id": {"type": "string", "pattern": "^[A-Za-z0-9.-]{1,255}$", "minLength": 1, "maxLength": 255}, "app_version": {"type": "string", "pattern": "^[\\x20-\\x7E]{1,64}$", "minLength": 1, "maxLength": 64, "description": "Printable ASCII."}}},
     "PushRegistrationStatus": {"description": "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["registered"], "properties": {"registered": {"const": false}}}, {"type": "object", "additionalProperties": false, "required": ["registered", "environment"], "properties": {"registered": {"const": true}, "environment": {"$ref": "#/$defs/PushEnvironment"}}}]},
@@ -62,7 +63,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["api_version", "capabilities"],
       "properties": {
-        "api_version": {"const": "st3.client.v0"},
+        "api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]},
         "capabilities": {"type": "array", "minItems": 1, "maxItems": 1, "items": {
           "type": "object", "additionalProperties": false, "required": ["id", "version", "state"],
           "properties": {"id": {"const": "device-key-proofs"}, "version": {"const": 1}, "state": {"const": "granted"}}
@@ -285,7 +286,7 @@
       "additionalProperties": false,
       "required": ["api_version", "request_id", "snapshot", "value"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "request_id": { "$ref": "#/$defs/RequestId" },
         "snapshot": { "$ref": "#/$defs/Snapshot" },
         "value": {
@@ -669,7 +670,7 @@
       "additionalProperties": false,
       "required": ["version", "views", "nodes", "edges", "groups", "timeline", "swimlanes", "goals", "constraints", "gates", "resources", "decisions", "revision", "diffs", "risk", "live_progress"],
       "properties": {
-        "version": { "const": "st3.visualization.v0" },
+        "version": { "enum": ["st3.visualization.v0", "fractal.visualization.v0"] },
         "views": {
           "type": "array",
           "items": { "enum": ["graph", "timeline", "swimlane", "revision", "risk", "live-progress"] },
@@ -2416,7 +2417,7 @@
       "additionalProperties": false,
       "required": ["api_version", "id", "type", "idempotency_key", "fence", "parameters"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "id": { "$ref": "#/$defs/Id" },
         "type": {
           "enum": [
@@ -2904,7 +2905,7 @@
       "additionalProperties": false,
       "required": ["api_version", "scopes", "disclosure_consent", "consent_evidence", "minimal_read_mode"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
         "expires_in_seconds": { "type": "integer", "minimum": 1, "maximum": 2592000, "default": 3600 },
         "disclosure_consent": { "const": true },
@@ -2934,7 +2935,7 @@
       "description": "Owner-only trusted-local provisioning at the grant's authoritative origin; accepting it increments policy_revision. Omitted budgets pin 4096 and 16384; default_response_bytes <= max_response_bytes.",
       "required": ["api_version", "issuer", "key_id", "attestor_public_key", "shim_public_key"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "issuer": { "$ref": "#/$defs/PersonId" },
         "key_id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "attestor_public_key": { "$ref": "#/$defs/Ed25519PublicKey" },
@@ -3180,7 +3181,7 @@
       "additionalProperties": false,
       "required": ["api_version", "device_name", "assistant_id", "scopes", "disclosure_consent", "consent_evidence"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "assistant_id": { "$ref": "#/$defs/AssistantPrincipal" },
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
@@ -3198,7 +3199,7 @@
       "additionalProperties": false,
       "required": ["api_version", "device_name", "person_id"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "person_id": { "type": "string", "pattern": "^person/[^/]+$" },
         "full_control": { "type": "boolean" },
@@ -3238,7 +3239,7 @@
       "additionalProperties": false,
       "required": ["api_version", "code", "device_public_key"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "device_public_key": { "type": "string", "minLength": 32 },
         "key_storage": { "enum": ["secure-enclave", "software"] }
@@ -3250,7 +3251,7 @@
       "required": ["kind", "api_version", "principal", "sender_class", "device_id", "session_actor", "credential", "scopes", "expires_at", "grant"],
       "properties": {
         "kind": { "const": "assistant-paired-session" },
-        "api_version": { "const": "st3.client.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "principal": { "$ref": "#/$defs/AssistantPrincipal" },
         "sender_class": { "$ref": "#/$defs/AssistantSenderClass" },
         "device_id": { "$ref": "#/$defs/Id" },
@@ -3436,8 +3437,8 @@
       "additionalProperties": false,
       "required": ["api_version", "error_version", "request_id", "code", "message", "retryable", "details"],
       "properties": {
-        "api_version": { "const": "st3.client.v0" },
-        "error_version": { "const": "st3.client.error.v0" },
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
+        "error_version": { "enum": ["st3.client.error.v0", "fractal.client.error.v0"] },
         "request_id": { "$ref": "#/$defs/Id" },
         "code": {"$ref": "#/$defs/ErrorCode"},
         "message": { "type": "string" },
