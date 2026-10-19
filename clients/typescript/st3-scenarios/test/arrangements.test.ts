@@ -57,6 +57,38 @@ describe('read-only sidebar arrangements', () => {
     await expect(h.client.arrangementsGet(other.slice('person/'.length), sidebar.id.split('/').at(-1)!)).rejects.toMatchObject(forbidden)
   })
 
+  it('returns HTTP 422 for arrangement validation without changing generic limit errors', async () => {
+    const h = setup(fleet())
+    const owner = h.world.cast.people[0]!.id
+    const query = new URLSearchParams({ person: owner }).toString()
+    const paths = [
+      '/arrangements',
+      '/arrangements?person=invalid-owner',
+      `/arrangements/${owner.slice('person/'.length)}/not-a-uuid`,
+      `/arrangements?${query}&actor=invalid-actor`,
+      `/arrangements?${query}&history=true`,
+    ]
+    for (const path of paths) {
+      const response = await h.replay.fetch(`http://scenario.invalid/v1/client${path}`)
+      expect(response.status, path).toBe(422)
+      expect(await response.json()).toMatchObject({ code: 'validation-failed', retryable: false })
+    }
+    const invalidLimit = await h.replay.fetch(`http://scenario.invalid/v1/client/arrangements?${query}&limit=0`)
+    expect(invalidLimit.status).toBe(400)
+    const frames: CollectionFrame[] = []
+    const stream = await h.client.collectionStream({ socket: h.replay.socket, onFrame: (frame) => {
+      decodeUnknownSync(Frame, 'strict')(frame)
+      frames.push(frame)
+    } })
+    const other = h.world.cast.people[1]!.id
+    stream.subscribeArrangements('wrong-owner', owner, 1, `arrangement/${other}/00000000-0000-7000-8000-000000000000`)
+    h.clock.advance(0)
+    expect(frames.find((frame) => frame.id === 'wrong-owner')).toMatchObject({
+      kind: 'error', code: 'validation-failed', message: 'selected arrangement owner must match person', retryable: false,
+    })
+    stream.close()
+  })
+
   it('filters owner-wide and exact subscriptions and emits no folder changes', async () => {
     const h = setup(fleet())
     const owner = h.world.cast.people[0]!.id

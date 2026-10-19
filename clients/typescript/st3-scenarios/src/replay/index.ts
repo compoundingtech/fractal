@@ -127,8 +127,8 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     if (!capabilities?.some((capability) => capability.id === 'read.arrangements' && capability.state === 'granted')) {
       return { code: 'forbidden', message: 'the authenticated client session is not granted `read.arrangements`', status: 403 }
     }
-    if (person === undefined) return { code: 'validation-failed', message: 'arrangements require an explicit person/NAME owner', status: 400 }
-    if (!/^person\/[^/\s]+$/.test(person)) return { code: 'validation-failed', message: 'arrangement owner must be person/NAME', status: 400 }
+    if (person === undefined) return { code: 'validation-failed', message: 'arrangements require an explicit person/NAME owner', status: 422 }
+    if (!/^person\/[^/\s]+$/.test(person)) return { code: 'validation-failed', message: 'arrangement owner must be person/NAME', status: 422 }
     const sessionActor = state('sync').capabilities?.session_actor
     const authority = sessionActor?.split('/session/')[0]
     if (authority?.startsWith('person/') && authority !== person) {
@@ -136,9 +136,9 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     }
     if (subject !== undefined) {
       if (!/^arrangement\/person\/[^/\s]+\/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(subject)) {
-        return { code: 'validation-failed', message: 'invalid arrangement subject', status: 400 }
+        return { code: 'validation-failed', message: 'invalid arrangement subject', status: 422 }
       }
-      if (!subject.startsWith(`arrangement/${person}/`)) return { code: 'validation-failed', message: 'selected arrangement owner must match person', status: 400 }
+      if (!subject.startsWith(`arrangement/${person}/`)) return { code: 'validation-failed', message: 'selected arrangement owner must match person', status: 422 }
     }
     return undefined
   }
@@ -631,7 +631,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         return value === undefined ? json(errorEnvelope('not-found', 'the arrangement is absent or retired'), 404) : json(envelope(value))
       }
       if (url.searchParams.has('actor') || url.searchParams.get('history') === 'true') {
-        return json(errorEnvelope('validation-failed', 'arrangements select a person and current state only'), 400)
+        return json(errorEnvelope('validation-failed', 'arrangements select a person and current state only'), 422)
       }
       const items = (state('roster').arrangements ?? []).filter((item) => item.owner === person)
       const value: ArrangementPage = { kind: 'page', collection: 'arrangements', filters: person === undefined ? {} : { person },

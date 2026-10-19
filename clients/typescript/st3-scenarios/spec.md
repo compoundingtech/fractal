@@ -240,6 +240,7 @@ Healthy worlds advertise capability `arrangements` version 1 with `state: 'grant
 The inventory is read-only: no arrangement timeline events or simulated edits are introduced.
 List, detail and subscription requests for another person are forbidden for person-authority
 sessions, matching the daemon's delegated-authority boundary rather than returning empty data.
+Arrangement-specific HTTP validation failures use `validation-failed` with HTTP 422.
 
 All arrangements are synthetic, including those in worlds with recorded conversations and
 terminals. Their provenance stays with the synthetic roster, not the recording. Arrangement
