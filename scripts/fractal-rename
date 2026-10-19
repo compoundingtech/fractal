@@ -44,6 +44,18 @@ SKIP_CONTEXT = (
 COMPILED_SKIP = [(re.compile(p), cls, why) for p, cls, why in SKIP_CONTEXT]
 CAPITAL = re.compile(r"(?<![\w])(?:Smalltalk|SmallTalk)(?![\w])")
 
+# These descriptions are wire compatibility content, not presentation-only prose.
+DISPLAY_EXCEPTIONS = {
+    "crates/st3-schema/src/lib.rs": (
+        "A Small Talk message.",
+        "hashed into the claim registry digest; changing it changes compatibility_digest",
+    ),
+    "docs/st3/schema.md": (
+        "A Small Talk message.",
+        "hashed into the claim registry digest; changing it changes compatibility_digest",
+    ),
+}
+
 # Exact literals, not extension-wide substitutions. Keep paths, subjects, bundle
 # names/IDs, stored-state fixtures and source identifiers outside this allowlist.
 # Each entry is (review area, path, old literals); only the brand inside changes.
@@ -64,8 +76,6 @@ DISPLAY_RULES = (
     )),
     ("CLI", "docs/st3/onboarding-guide.md", ("accomplish in Smalltalk today?",)),
     ("CLI", "docs/st3/action-coverage.json", ("folded tools, Small Talk.",)),
-    ("CLI", "crates/st3-schema/src/lib.rs", ("A Small Talk message.",)),
-    ("Coupled docs", "docs/st3/schema.md", ("A Small Talk message.",)),
     ("TUI", "crates/stui/src/ui/checklist.rs", (
         "Smalltalk setup", "Smalltalk runs your AI agents", "Smalltalk Assistant",
     )),
@@ -131,6 +141,8 @@ def display_plan(root):
     changes = []
     totals = {}
     for area, path, literals in DISPLAY_RULES:
+        if path in DISPLAY_EXCEPTIONS:
+            raise ValueError(f'{path}: {DISPLAY_EXCEPTIONS[path][1]}')
         file = root / path
         if file.is_symlink():
             raise ValueError(f'{path}: allowlisted file is a symlink')

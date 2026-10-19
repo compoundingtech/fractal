@@ -17,13 +17,14 @@ class DisplayStringsTest(unittest.TestCase):
             self.assertNotRegex(rewritten, r'Smalltalk|Small Talk', path)
             self.assertEqual(RENAME['rewrite_display'](rewritten, literals), (rewritten, 0), path)
         self.assertEqual(len(paths), len(set(paths)))
-        rules = {path: literals for _, path, literals in RENAME['DISPLAY_RULES']}
-        self.assertEqual(rules['crates/st3-schema/src/lib.rs'], rules['docs/st3/schema.md'])
+        self.assertTrue(set(paths).isdisjoint(RENAME['DISPLAY_EXCEPTIONS']))
+        exceptions = RENAME['DISPLAY_EXCEPTIONS']
+        self.assertEqual(exceptions['crates/st3-schema/src/lib.rs'], exceptions['docs/st3/schema.md'])
 
     def test_durable_identities_and_stored_names_are_not_rules(self):
         preserved = '''smalltalk com.compoundingtech.smalltalk SmalltalkRuntime
 agent/st/assistant /Apps/SmallTalk.app Smalltalk Ci
-ST_SMALLTALK Smalltalk tag release Smalltalk daily release'''
+ST_SMALLTALK Smalltalk tag release Smalltalk daily release A Small Talk message.'''
         for _, path, literals in RENAME['DISPLAY_RULES']:
             self.assertEqual(RENAME['rewrite_display'](preserved, literals), (preserved, 0), path)
         paths = {path for _, path, _ in RENAME['DISPLAY_RULES']}
