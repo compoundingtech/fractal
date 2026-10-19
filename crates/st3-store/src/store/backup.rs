@@ -825,7 +825,7 @@ mod tests {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
             let archive_path = root.path().join("version-one.jsonl");
-            let header = archive(&source, &archive_path);
+            let mut header = archive(&source, &archive_path);
             assert_eq!(header.version, 1);
             backup::verify_file(&archive_path).unwrap();
             let mut envelopes: Vec<ReplicaEnvelope> = fs::read_to_string(&archive_path).unwrap()
@@ -856,6 +856,27 @@ mod tests {
             }
             envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
                 "test-fleet", &envelope.writer, envelope.sequence, &envelope.hash)));
+            // Keep transport identity/checksum consistent after each negative mutation.
+            // The original claim-source expectation deliberately remains: a rejected claim
+            // must not silently satisfy the archive's promised admitted source graph.
+            let mut log = Sha256::new();
+            log.update(INVENTORY_DIGEST_DOMAIN);
+            for envelope in &envelopes {
+                update_identity_digest(&mut log, &envelope.writer, envelope.sequence, &envelope.hash);
+            }
+            header.log_digest = hex::encode(log.finalize());
+            rewrite(&archive_path, |records| {
+                let mut replacements = envelopes.iter();
+                for record in records {
+                    match record {
+                        Record::Header(stored) => *stored = header.clone(),
+                        Record::Envelope(stored) => *stored = replacements.next().unwrap().clone(),
+                        Record::Signatures(signatures) => signatures.clear(),
+                        _ => {}
+                    }
+                }
+            });
+            backup::verify_file(&archive_path).unwrap();
             let path = root.path().join("interrupted-restore.db");
             let older = Store::open(&path, "restored").unwrap();
             let mut registry = st3_schema::registry().clone();
@@ -881,8 +902,21 @@ mod tests {
                 assert!(result.unwrap().projections_match);
                 assert_eq!(upgraded.latest_claim(&claim.subject, Some(&claim.kind))
                     .unwrap().unwrap().id, claim.id);
+            } else if case == "invalid-reference" {
+                // A decoded envelope is admitted even when its claim is rejected. The
+                // unchanged source-graph check, not the unadmitted-envelope guard, fails.
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("restored claim source digest/count differs from backup"),
+                    "{case}: {error}");
+                assert!(upgraded.latest_claim(&claim.subject, Some(&claim.kind)).unwrap().is_none());
+                let rejected = upgraded.replica_records(true).unwrap();
+                assert!(rejected.iter().any(|record|
+                    record.error_code.as_deref() == Some("invalid-replicated-claim")
+                    && record.error_message.as_deref().unwrap_or_default()
+                        .contains("violates invalid-subject-reference:")));
             } else {
-                assert!(result.unwrap_err().to_string().contains("unadmitted envelopes"), "{case}");
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("unadmitted envelopes"), "{case}: {error}");
             }
             drop(upgraded);
             let reopened = Store::open(&path, "restored").unwrap();
