@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, FULL_CASE_OVERRIDES } from './kit-play-commit-set.mjs'
+import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { aggregateShards, shardStories } from './kit-play-shards.mjs'
 
 const story = { type: 'story', id: 'kit--sample', importPath: './Sample.stories.tsx' }
@@ -112,9 +112,33 @@ test('the per-commit set rejects a listed story that is not critical, so a renam
 
 const benchmarkId = 'fractal-ui-sidebar-tree--filter-keystroke-to-paint'
 const functionalId = 'fractal-ui-sidebar-tree--filter-behavior'
-const aliasIds = [...FULL_CASE_OVERRIDES].filter(([, cases]) => cases.length === 0).map(([id]) => id)
+const aliasIds = [
+  'fractal-ui-transcript--no-green-all-states-light',
+  'fractal-ui-composer--footer-width-budget-light',
+]
+const baseIds = [
+  'fractal-ui-transcript--no-green-all-states',
+  'fractal-ui-composer--footer-width-budget',
+]
 test('the strict case set measures the filter once, keeps functional corners, and omits only the scheme aliases', () => {
+  assert.deepEqual([...FULL_CASE_OVERRIDES], [
+    ['fractal-ui-transcript--no-green-all-states-light', []],
+    ['fractal-ui-composer--footer-width-budget-light', []],
+    ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+  ])
+  const omittedBenchmarkCases = [
+    { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'dark', width: 440 },
+    { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'light', width: 440 },
+    { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'light', width: 1440 },
+  ]
   const ids = [benchmarkId, functionalId, ...aliasIds]
+  for (const omitted of omittedBenchmarkCases) assert.ok(!fullCases(ids).some(row => row.id === omitted.id && row.scheme === omitted.scheme && row.width === omitted.width))
+  for (const id of baseIds) {
+    assert.deepEqual(fullCases([id]), [
+      { id, scheme: 'dark', width: 440 }, { id, scheme: 'dark', width: 1440 },
+      { id, scheme: 'light', width: 440 }, { id, scheme: 'light', width: 1440 },
+    ])
+  }
   assert.deepEqual(fullCases([benchmarkId]), [{ id: benchmarkId, scheme: 'dark', width: 1440 }])
   assert.equal(fullCases([functionalId]).length, 4)
   assert.deepEqual(fullCases(aliasIds), [])
@@ -122,6 +146,43 @@ test('the strict case set measures the filter once, keeps functional corners, an
   const commit = commitSetCases([functionalId, ...aliasIds], { mergeOnlyIds: [], bothWidthsIds: [] })
   assert.deepEqual(commit.ids, [functionalId])
   assert.deepEqual(commit.omittedStories, aliasIds)
+})
+test('strict case policy rejects unknown stories and aliases without a kept same-source base', () => {
+  const ids = [benchmarkId, ...aliasIds, ...baseIds]
+  const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
+  assert.doesNotThrow(() => validateCaseOverrides(entries))
+  assert.throws(() => validateCaseOverrides(entries, new Map([['kit--unknown', []]])), /not a known story/)
+  assert.throws(() => validateCaseOverrides(entries, new Map([[benchmarkId, []]])), /not a scheme alias/)
+  const withoutBase = { ...entries }
+  delete withoutBase[baseIds[0]]
+  assert.throws(() => validateCaseOverrides(withoutBase), /not a scheme alias/)
+  const differentSource = { ...entries, [baseIds[0]]: { ...entries[baseIds[0]], importPath: './Other.stories.tsx' } }
+  assert.throws(() => validateCaseOverrides(differentSource), /not a scheme alias/)
+  assert.throws(() => validateCaseOverrides(entries, new Map([[aliasIds[0], []], [baseIds[0], []]])), /not a scheme alias/)
+})
+test('the actual gate rejects stale case policy before browser execution', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kit-play-policy-test-'))
+  try {
+    const build = join(directory, 'build'), output = join(directory, 'receipt')
+    await mkdir(build)
+    await writeFile(join(build, 'index.json'), JSON.stringify({ entries: { story } }))
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
+      env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-stale-policy' },
+      stdio: 'ignore',
+    })
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', resolve)
+    })
+    assert.equal(code, 1)
+    const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
+    assert.equal(receipt.pass, false)
+    assert.equal(receipt.cases, 0)
+    assert.match(receipt.fatalError, /strict case policy names .*not a known story/)
+    assert.doesNotMatch(receipt.fatalError, /must-not-import-browser/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 test('shard coverage requires the exact strict case set, including the benchmark corner', () => {
   const fullIds = [benchmarkId, functionalId, ...aliasIds].sort()
@@ -144,7 +205,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
-    const ids = [benchmarkId, functionalId, ...aliasIds]
+    const ids = [benchmarkId, functionalId, ...aliasIds, ...baseIds]
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: Object.fromEntries(ids.map(id => [id, { ...story, id }])) }))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
       env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-case-contract' },
@@ -156,7 +217,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     })
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
-    assert.equal(receipt.expectedCases, 5)
+    assert.equal(receipt.expectedCases, 13)
     assert.equal(receipt.omitted.cases, 11)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])

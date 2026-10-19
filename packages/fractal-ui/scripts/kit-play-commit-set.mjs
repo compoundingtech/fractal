@@ -42,6 +42,20 @@ export const FULL_CASE_OVERRIDES = new Map([
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
 ])
 
+// Validate against the complete index before selecting tags or shards, so stale policy cannot
+// silently remove coverage. An omitted scheme alias must share its kept base story's source.
+export function validateCaseOverrides(entries, overrides = FULL_CASE_OVERRIDES) {
+  const stories = new Map(Object.values(entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry]))
+  for (const [id, cases] of overrides) {
+    if (!stories.has(id)) throw new Error(`The strict case policy names ${id}, which is not a known story`)
+    if (cases.length !== 0) continue
+    const baseId = id.endsWith('-light') ? id.slice(0, -6) : undefined
+    if (!baseId || !stories.has(baseId) || overrides.get(baseId)?.length === 0 || stories.get(baseId).importPath !== stories.get(id).importPath) {
+      throw new Error(`The strict case policy omits ${id}, which is not a scheme alias of a kept story`)
+    }
+  }
+}
+
 // A stable pick of one corner pair, independent of the other stories in the set.
 export const diagonalCase = id => FULL[createHash('sha256').update(id).digest()[0] % 2 === 0 ? 0 : 3]
 

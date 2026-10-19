@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, fullCases, FULL_CASE_OVERRIDES } from './kit-play-commit-set.mjs'
+import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
 
@@ -112,7 +112,9 @@ try {
   if (!response.ok) throw new Error(`Storybook index: HTTP ${response.status}`)
   // Validate the complete index; fullIds is the selected set's inventory, which the union gate
   // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
-  fullIds = storyIdsFromIndex(await response.json(), set === 'all' ? {} : { tag: 'critical' }).toSorted()
+  const index = await response.json()
+  fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
+  validateCaseOverrides(index.entries)
   ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
   let cases
   if (set === 'commit') {
