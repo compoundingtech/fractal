@@ -21,9 +21,6 @@ const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
   parameters: {
     layout: 'fullscreen',
-    // The diff rows belong to the shared DiffPanel, whose light gutter and literal colours sit just under 4.5:1; that is a
-    // kit-wide token fix with its own review, so this story excludes only those rows and keeps every rule on everything it owns.
-    a11y: { context: { include: ['body'], exclude: ['[data-diff-kind]'] } },
     docs: { description: { component: `Workshop-only milestone. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. Nothing here is the accepted live design.` } },
   },
   args: { scheme: 'dark', state: 'slice' },

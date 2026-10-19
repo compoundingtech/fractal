@@ -75,6 +75,13 @@ export const statusVars = stylex.defineVars({
   scrollThumbHover: 'rgba(255, 255, 255, 0.12)',
 })
 
+/** DiffPanel-only inks; source previews elsewhere retain their syntax palette. */
+export const diffPanelVars = stylex.defineVars({
+  added: '#7295ed',
+  removed: '#f87171',
+  literal: '#fe9a00',
+})
+
 /** Type scale pairs and font stacks. UI 14/20, meta 12/16, dense 11, code 13, body 14/22.75. */
 export const typeVars = stylex.defineVars({
   fontSans: `-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif`,

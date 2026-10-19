@@ -1,4 +1,6 @@
 //! Scratch-only daemon API harness. Never starts a managed agent or reads ambient state.
+use st3::PersonWorkStore;
+use st3::SeatsStoreCore;
 use std::{path::PathBuf,sync::Arc};
 use serde_json::json;
 use sha2::{Digest,Sha256};

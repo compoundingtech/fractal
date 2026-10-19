@@ -541,10 +541,16 @@ export const fractalWebShellCache = {
 const embeddedPython = (script: string) =>
   `python3 - <<'PY'\n${readFileSync(new URL(`../../scripts/${script}`, import.meta.url), 'utf8')}\nPY`
 
+// SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
+// full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
+// per-commit set unsharded on shard 0.
+const kitShardCount = 2
+const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
+
 /**
- * The path-sensitive fractal-web gate. Detection and the gate always run on GitHub-hosted
- * capacity without a checkout; execution runs only for web-relevant changes, after generated
- * files are fresh. Workflow-level path filters would leave a required check pending forever.
+ * The path-sensitive fractal-web gate always runs on GitHub-hosted capacity. Detection
+ * needs no checkout; the gate checks out only to aggregate sharded kit receipts. Execution
+ * runs after generated files are fresh. Workflow path filters would leave checks pending.
  */
 export const fractalWebJobs = {
   'fractal-web-changes': {
@@ -572,6 +578,10 @@ export const fractalWebJobs = {
   },
   'fractal-web-execution': {
     name: 'fractal-web-execution',
+    strategy: {
+      'fail-fast': false,
+      matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
+    },
     needs: ['fractal-web-changes', 'genie-freshness'],
     if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
     'runs-on': 'ubuntu-latest',
@@ -592,6 +602,9 @@ export const fractalWebJobs = {
           ...pnpmStoreEnv,
           ...fractalWebShellEnv,
           KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
+          KIT_SHARD_INDEX: '${{ matrix.shard }}',
+          KIT_SHARD_COUNT: `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`,
+          KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
           // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
           // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
           // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
@@ -603,6 +616,16 @@ export const fractalWebJobs = {
           APP_TEST_SET: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
+        },
+      },
+      {
+        name: 'Preserve kit shard receipt',
+        if: 'always()',
+        uses: 'actions/upload-artifact@v4',
+        with: {
+          name: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}',
+          path: '${{ runner.temp }}/kit-play-receipts/receipt.json',
+          'if-no-files-found': 'ignore',
         },
       },
       // Only a pull request can read what it saves; merge groups wait for main upkeep's entry.
@@ -619,7 +642,7 @@ export const fractalWebJobs = {
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
-    permissions: {},
+    permissions: { contents: 'read' },
     steps: [
       {
         name: 'Require detection and, for web changes, execution',
@@ -629,6 +652,23 @@ export const fractalWebJobs = {
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),
+      },
+      // A successful matrix result alone cannot prove all expected shards ran.
+      {
+        uses: 'actions/checkout@v4',
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        with: { 'persist-credentials': false },
+      },
+      {
+        uses: 'actions/download-artifact@v4',
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        // Include older attempts only from this exact run/head, for rerun-failed-jobs.
+        with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
+      },
+      {
+        name: 'Require every kit shard and exact full-index coverage',
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        run: `node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" ${kitShardCount}`,
       },
     ],
   },

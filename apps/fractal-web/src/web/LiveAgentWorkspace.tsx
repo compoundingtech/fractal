@@ -3,9 +3,10 @@ import { sidebarRow } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
+import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
 import { retainPane, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
-import { MISSIONS_REF } from './workspaceView.ts'
+import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -17,11 +18,13 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
+// Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
+import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
@@ -29,8 +32,57 @@ import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 import { useGatewaySync } from '../data/react.tsx'
-import { matchesSidebarHost, parseSidebarQuery } from '../shell/sidebar/filter.ts'
+import { AgentFolders } from '../shell/AgentFolders.tsx'
+import { useSidebarFolders, type SidebarFoldersBinding } from '../folders/useSidebarFolders.ts'
+import { fixtureFolders } from '../folders/fixture.ts'
+import { defaultFilters, fixtureSidebarState, sidebarState } from '../shell/sidebar/state.ts'
+import { useMachineMemory, withRememberedMachines } from '../shell/sidebar/show.ts'
+import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
+import { SidebarToolbar, type SidebarToolbarProps } from '../shell/sidebar/Toolbar.tsx'
 import type { Agent } from '../data/source.ts'
+import { sidebarAttention } from './sidebarAttention.ts'
+import { FolderAttentionSignal } from './AttentionControls.tsx'
+import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
+import { SidebarEmptyState } from './SidebarEmptyState.tsx'
+
+const emptyAgents: readonly Agent[] = []
+const sidebarExtraSignals = [] as const
+
+/** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. */
+const LiveSidebarAgentRow = React.memo((props: {
+  readonly agentRef: string
+  readonly active: boolean
+  readonly select: (ref: string) => void
+  readonly actions: SidebarActions
+}) => {
+  const feed = useAgent(props.agentRef)
+  const connection = useConnection()
+  const agent = feed._tag === 'Observed' ? feed.value : undefined
+  const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
+  const item = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale }), [agent, stale])
+  const onOpen = React.useCallback(() => props.select(props.agentRef), [props.select, props.agentRef])
+  return item === undefined ? null : <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} actions={props.actions} onOpen={onOpen} />
+})
+LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
+
+const LiveSidebarTreeView = React.memo((props: {
+  readonly binding: SidebarFoldersBinding
+  readonly tree: SidebarFoldersBinding['tree']
+  readonly accessibleNames: ReadonlyMap<string, string>
+  readonly needsYou: ReadonlySet<string>
+  readonly current: string
+  readonly query: string
+  readonly revealKey: string
+  readonly select: (ref: string) => void
+  readonly actions: SidebarActions
+}) => {
+  const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
+    <LiveSidebarAgentRow agentRef={node.subject} active={props.current === node.subject} select={props.select} actions={props.actions} />, [props.current, props.select, props.actions])
+  const renderFolderSignal = React.useCallback((folder: Exclude<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
+    <FolderAttentionSignal folder={folder} refs={props.needsYou} />, [props.needsYou])
+  return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={props.accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
+})
+LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
 // A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
@@ -107,10 +159,14 @@ const palette = persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
 const viewportWidth = () => window.innerWidth
+/** Below 900px the thread is the only thing on screen: agents open as a sheet from the left, the agent's actions and Details from the right. Same width as the sidebar drawer breakpoint. */
+export const narrowLayoutQuery = '(max-width: 899px)'
 const subscribeViewport = (callback: () => void) => {
   window.addEventListener('resize', callback)
   return () => window.removeEventListener('resize', callback)
 }
+const narrowLayoutMatches = () => window.matchMedia(narrowLayoutQuery).matches
+const serverNarrow = () => false
 const locationState = () => `${window.location.pathname}${window.location.search}`
 const subscribeLocation = (callback: () => void) => {
   window.addEventListener('popstate', callback)
@@ -142,6 +198,19 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
+  // The agents sheet never outlives the narrow layout: widening the window docks the sidebar again.
+  const [agentsOpen, setAgentsOpen] = React.useState(false)
+  const agentsSheetId = React.useId()
+  const subscribeNarrow = React.useCallback((callback: () => void) => {
+    const query = window.matchMedia(narrowLayoutQuery)
+    const change = () => {
+      if (!query.matches) setAgentsOpen(false)
+      callback()
+    }
+    query.addEventListener('change', change)
+    return () => query.removeEventListener('change', change)
+  }, [])
+  const narrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
   React.useLayoutEffect(() => setTheme(scheme), [scheme])
   const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
   const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
@@ -155,7 +224,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     hoverOwner.current?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     hoverOwner.current = null
   }, [location])
-  const agents = fleet._tag === 'Observed' ? fleet.value.agents : []
+  const agents = fleet._tag === 'Observed' ? fleet.value.agents : emptyAgents
   const rosterObserved = fleet._tag === 'Observed'
   const shellCommit = React.useCallback((node: HTMLDivElement | null) => {
     if (node === null) return
@@ -165,7 +234,9 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     const cancelPrefetch = afterNextPaint(prefetchConversationPane)
     return () => { cancelCapture?.(); cancelPrefetch() }
   }, [ux])
+  const rosterRef = React.useRef<HTMLElement | null>(null)
   const rosterCommit = React.useCallback((node: HTMLElement | null) => {
+    rosterRef.current = node
     if (node === null || !rosterObserved) return
     const cancelTiming = measureEnd('sidebar_interactive')
     const cancelCapture = ux?.rosterCommitted()
@@ -183,13 +254,16 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const terminalRef = terminalDisabledReason === undefined ? agent?.terminal : undefined
   const [headerSlot, setHeaderSlot] = React.useState<HTMLDivElement | null>(null)
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
-  const [search, setSearch] = React.useState('')
   const [panes, setPanes] = useAtom(workspacePanes(current))
   const query = new URLSearchParams(location.split('?')[1])
   const selectedPane = query.get('open') ?? 'thread'
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
   const [diffOpen, setDiffOpen] = React.useState(false)
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
+  // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
+  const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
+  const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
+  const terminalReasonId = React.useId()
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -206,6 +280,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     }
     setDiffOpen(false)
     setOpenedTool(undefined)
+    setAgentsOpen(false)
     navigate(ref)
   }
   const open = (request: OpenRequest) => {
@@ -222,11 +297,65 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   openLatest.current = open
   const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
-  const parsedSearch = parseSidebarQuery(search)
-  const textSearch = parsedSearch.query.toLowerCase()
-  const filtered = agents.filter((row) =>
-    matchesSidebarHost(row.host, parsedSearch.machines) &&
-    `${row.name} ${row.ref} ${row.host}`.toLowerCase().includes(textSearch))
+  const folderSource = useDataSource()
+  const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
+  const [filters, setFilters] = useAtom(sidebarSettings.filters)
+  const machineMemory = useMachineMemory()
+  const asking = useAskingAgents()
+  // The query is the only Show state; live gateways start from this browser's remembered machines.
+  React.useLayoutEffect(() => {
+    const query = withRememberedMachines({ query: filters.query, remembered: machineMemory.remembered })
+    if (query !== filters.query) setFilters({ ...filters, query })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed once per gateway's filters, not on every edit.
+  }, [sidebarSettings.filters])
+  const hosts = React.useMemo(() => [...new Set(agents.map(row => row.host))].toSorted(), [agents])
+  const updateFilters = React.useCallback((value: typeof filters) => {
+    setFilters(value)
+    machineMemory.remember(value.query, hosts)
+  }, [setFilters, machineMemory, hosts])
+  // Typing stays urgent; filtering and the tree collection follow at transition priority.
+  const deferredFilters = React.useDeferredValue(filters)
+  const sidebarQuery = React.useMemo(() => parseSidebarQuery(deferredFilters.query), [deferredFilters.query])
+  // Activity frames change row presentation, not folder membership or its measured layout.
+  const previousRoster = React.useRef<Parameters<typeof useSidebarFolders>[0]['roster'] | undefined>(undefined)
+  const roster = React.useMemo(() => {
+    const previous = previousRoster.current
+    if (previous !== undefined && previous.length === agents.length && agents.every((agent, index) => {
+      const row = previous[index]!
+      return row.id === agent.ref && row.subject === agent.ref && row.label === agent.name && row.host === agent.host
+    })) return previous
+    const next = agents.map(row => ({ id: row.ref, subject: row.ref, label: row.name, host: row.host }))
+    previousRoster.current = next
+    return next
+  }, [agents])
+  const sidebarFolders = useSidebarFolders({
+    roster,
+    query: deferredFilters.query,
+    ...(folderSource.mode === 'fixtures' ? { source: fixtureFolders } : {}),
+    collapsedSource: sidebarSettings.collapsed,
+  })
+  const previousNeedsYou = React.useRef<ReadonlySet<string> | undefined>(undefined)
+  const needsYou = React.useMemo(() => {
+    const next = sidebarAttention({ agents, subjects })
+    const previous = previousNeedsYou.current
+    if (previous !== undefined && next.size === previous.size && [...next].every(ref => previous.has(ref))) return previous
+    previousNeedsYou.current = next
+    return next
+  }, [agents, subjects])
+  // Filtering uses observed status, not wall time; ticking cannot change membership.
+  const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
+  const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
+  const previousAccessibleNames = React.useRef<ReadonlyMap<string, string> | undefined>(undefined)
+  const accessibleNames = React.useMemo(() => {
+    const next = new Map(agents.map(agent => [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale }))] as const))
+    const previous = previousAccessibleNames.current
+    if (previous !== undefined && next.size === previous.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
+    previousAccessibleNames.current = next
+    return next
+  }, [agents, stale])
+  const selectLatest = React.useRef(select)
+  selectLatest.current = select
+  const selectAgent = React.useCallback((ref: string) => selectLatest.current(ref), [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const separator = selectedPane.lastIndexOf(':')
   const urlPresentation = selectedPane.slice(separator + 1)
@@ -242,6 +371,57 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
   const maxSidebar = Math.max(208, Math.min(440, viewport - 640))
   const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
+  const terminalOpen = selectedPane.includes('terminal/')
+  const toggleTerminal = () => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }
+  const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>
+  // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
+  const narrowDetailsOpen = narrow && current !== '' && (diffOpen || openedTool !== undefined)
+  const closeDetails = () => { setDiffOpen(false); setOpenedTool(undefined) }
+  const toolDetail = (call: WorkLogCall, width: number | undefined) => <aside aria-label="Tool detail" style={width === undefined ? undefined : { width }} {...stylex.props(styles.changesPanel, width === undefined && styles.sheetPanel)}>
+    <header {...stylex.props(styles.toolDetailHeader)}>
+      <strong {...stylex.props(styles.toolDetailTitle)}>{call.title}{call.argsSummary === undefined ? '' : ` ${call.argsSummary}`}</strong>
+      <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
+    </header>
+    <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
+  </aside>
+  // One roster for both presentations: docked beside the thread, or the agents sheet below the breakpoint.
+  const sidebarBody = <>
+    <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
+    {fleet._tag === 'Observed' && visibleSidebarTree.length === 0 ? <SidebarEmptyState query={deferredFilters.query} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} /> : null}
+    <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
+      {fleet._tag === 'Waiting' ? <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
+        {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
+          <span {...stylex.props(styles.skeletonGlyph)} />
+          <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
+          <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
+        </div>)}
+      </div> : null}
+      <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} accessibleNames={accessibleNames} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} actions={sidebarActions} />
+    </nav>
+    {fleet._tag !== 'Observed' ? (
+      <SystemNotice
+        scope="rail"
+        kind={fleet._tag === 'Waiting' ? 'loading' : 'error'}
+        connection={fleet._tag === 'Unavailable' && fleet.reason !== 'ungranted' && fleet.reason !== 'unsupported'}
+        title={fleet._tag === 'Waiting' ? 'Loading agents' : fleet.reason === 'ungranted' ? 'No access to the agent roster' : fleet.reason === 'unsupported' ? 'Agent roster not supported' : 'Agent roster could not load'}
+        {...(fleet._tag === 'Unavailable' && fleet.reason === 'unsupported' ? { detail: 'This connection does not offer it' } : fleet._tag === 'Unavailable' && fleet.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : {})}
+        data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined}
+      />
+    ) : stale ? (
+      <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" />
+    ) : null}
+    <footer {...stylex.props(styles.footer)}>
+      <Aria.Button onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} aria-label="Toggle color scheme" {...stylex.props(styles.iconButton)}>
+        {scheme === 'dark' ? '☀' : '☾'}
+      </Aria.Button>
+      <Aria.Button onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} {...stylex.props(styles.textButton)}>
+        Missions
+      </Aria.Button>
+      <Aria.Button onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} {...stylex.props(styles.textButton)}>
+        Usage
+      </Aria.Button>
+    </footer>
+  </>
   // The panes are portalled from outside the shell providers: those values change on every
   // switch, and React then scans every fiber below a memoized pane for consumers, which costs
   // O(retained turns) per click. No pane reads these shell contexts.
@@ -251,55 +431,22 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
           <ThreadHeaderSlotContext.Provider value={headerSlot}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-              <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
-                <header {...stylex.props(styles.brand)}>
-                  <Aria.Button aria-label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} {...stylex.props(styles.iconButton)}>
-                    {collapsed ? '»' : '«'}
-                  </Aria.Button>
-                  {collapsed ? null : <strong>Fractal</strong>}
-                </header>
-                {collapsed ? null : (
-                  <>
-                    <LiveSidebarSearch value={search} onChange={setSearch} />
-                    <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
-                      {fleet._tag === 'Waiting' ? <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
-                        {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
-                          <span {...stylex.props(styles.skeletonGlyph)} />
-                          <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
-                          <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
-                        </div>)}
-                      </div> : null}
-                      <LiveRoster agents={filtered} stale={stale} current={current} query={parsedSearch.query} onSelect={select} />
-                    </nav>
-                    {fleet._tag !== 'Observed' ? (
-                      <SystemNotice
-                        scope="rail"
-                        kind={fleet._tag === 'Waiting' ? 'loading' : 'error'}
-                        connection={fleet._tag === 'Unavailable' && fleet.reason !== 'ungranted' && fleet.reason !== 'unsupported'}
-                        title={fleet._tag === 'Waiting' ? 'Loading agents' : fleet.reason === 'ungranted' ? 'No access to the agent roster' : fleet.reason === 'unsupported' ? 'Agent roster not supported' : 'Agent roster could not load'}
-                        {...(fleet._tag === 'Unavailable' && fleet.reason === 'unsupported' ? { detail: 'This connection does not offer it' } : fleet._tag === 'Unavailable' && fleet.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : {})}
-                        data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined}
-                      />
-                    ) : stale ? (
-                      <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" />
-                    ) : null}
-                    <footer {...stylex.props(styles.footer)}>
-                      <Aria.Button onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} aria-label="Toggle color scheme" {...stylex.props(styles.iconButton)}>
-                        {scheme === 'dark' ? '☀' : '☾'}
-                      </Aria.Button>
-                      <Aria.Button onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} {...stylex.props(styles.textButton)}>
-                        Missions
-                      </Aria.Button>
-                      <Aria.Button onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} {...stylex.props(styles.textButton)}>
-                        Usage
-                      </Aria.Button>
-                    </footer>
-                  </>
-                )}
-              </aside>
-              <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
+              {narrow ? <NarrowSheet id={agentsSheetId} side="start" label="Agents" isOpen={agentsOpen} onOpenChange={setAgentsOpen} width={320}>
+                {sidebarBody}
+              </NarrowSheet> : <>
+                <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
+                  <header {...stylex.props(styles.brand)}>
+                    <Aria.Button aria-label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} {...stylex.props(styles.iconButton)}>
+                      {collapsed ? '»' : '«'}
+                    </Aria.Button>
+                    {collapsed ? null : <strong>Fractal</strong>}
+                  </header>
+                  {collapsed ? null : sidebarBody}
+                </aside>
+                <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
+              </>}
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
+                <ClockedThreadHeader agent={agent} stale={stale} narrow={narrow} sidebarCollapsed={narrow} onToggleSidebar={() => setAgentsOpen(true)} sidebarSheet={{ open: agentsOpen, id: agentsSheetId }} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={narrow ? undefined : agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrow ? narrowDetailsOpen : diffOpen} drawerOpen={terminalOpen} onTogglePanel={narrow ? () => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) } : () => setDiffOpen((value) => !value)} onToggleDrawer={toggleTerminal} />
                 <GatewayConnectionStatus />
                 {visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
@@ -310,7 +457,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                       const id = `${pane.ref}:${pane.presentation ?? 'detail'}`
                       return (
                         <Aria.Button key={id} aria-pressed={id === selectedPane} onPress={() => navigate(current, id)} {...stylex.props(styles.textButton)}>
-                          {byRef.get(pane.ref)?.title ?? pane.ref.split('/').at(-1)}
+                          {paneTabLabel(pane.ref, byRef.get(pane.ref)?.title)}
                         </Aria.Button>
                       )
                     })}
@@ -318,7 +465,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                 ) : null}
                 <div ref={setPaneHost} {...stylex.props(styles.body)} />
               </section>
-              {diffOpen && openedTool === undefined && current !== '' ? (
+              {!narrow && diffOpen && openedTool === undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-change-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Change panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setDiffOpen(false)} onReset={() => setPanelFraction(380 / viewport)} />
                   <React.Suspense fallback={<aside aria-label="Changes" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><SystemNotice kind="loading" title="Loading captured changes" /></aside>}>
@@ -326,18 +473,31 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                   </React.Suspense>
                 </>
               ) : null}
-              {openedTool !== undefined && current !== '' ? (
+              {!narrow && openedTool !== undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-tool-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Tool detail panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setOpenedTool(undefined)} onReset={() => setPanelFraction(380 / viewport)} />
-                  <aside aria-label="Tool detail" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}>
-                    <header {...stylex.props(styles.toolDetailHeader)}>
-                      <strong {...stylex.props(styles.toolDetailTitle)}>{openedTool.title}{openedTool.argsSummary === undefined ? '' : ` ${openedTool.argsSummary}`}</strong>
-                      <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
-                    </header>
-                    <pre {...stylex.props(styles.toolDetailOutput)}>{openedTool.detail ?? (openedTool.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
-                  </aside>
+                  {toolDetail(openedTool, panelSize)}
                 </>
               ) : null}
+              {/* Always mounted: the theme portal host must exist before the sheet opens; contents render only while open. */}
+              <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
+              {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400} actions={
+                <NarrowActionRow label="Agent actions">
+                  {agentHeaderActions}
+                  {terminalRef === undefined && terminalDisabledReason === undefined ? null : <>
+                    <Aria.Button aria-pressed={terminalOpen} isDisabled={!terminalOpen && terminalRef === undefined} aria-describedby={terminalRef === undefined ? terminalReasonId : undefined} onPress={() => { closeDetails(); toggleTerminal() }} {...stylex.props(styles.textButton, styles.narrowAction)}>
+                      <CompositionIcon name="drawer" />Terminal
+                    </Aria.Button>
+                    {terminalRef === undefined ? <span id={terminalReasonId} hidden>{terminalDisabledReason}</span> : null}
+                  </>}
+                </NarrowActionRow>
+              }>
+                {current === '' ? null : openedTool !== undefined ? toolDetail(openedTool, undefined) : (
+                  <React.Suspense fallback={<SystemNotice kind="loading" title="Loading captured changes" />}>
+                    <ChangesInspector key={current} agentRef={current} width="fill" />
+                  </React.Suspense>
+                )}
+              </NarrowSheet> : null}
               <div ref={overlayHost} {...stylex.props(styles.overlayHost)} />
             </div>
           </ThreadHeaderSlotContext.Provider>
@@ -354,10 +514,6 @@ function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentPro
   return <ThreadHeader {...props} status={row?.status} statusLabel={row?.statusLabel} statusSince={row?.statusSince} />
 }
 
-/** The list projects source observations; only SidebarTime leaves tick. */
-function LiveRoster({ agents, stale, current, query, onSelect }: { readonly agents: readonly Agent[]; readonly stale: boolean; readonly current: string; readonly query: string; readonly onSelect: (ref: string) => void }) {
-  return agents.map(agent => <SidebarAgentRow key={agent.ref} item={sidebarRow({ agent, stale })} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={query} active={current === agent.ref} onOpen={() => onSelect(agent.ref)} />)
-}
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
 /** Decoded gateway sync, never the socket's raw lifecycle tag, as the one connection band under the thread header. */
@@ -464,11 +620,9 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
   </ViewportStoreContext.Provider>
 }
 
-/** Roster filter in the live sidebar. */
-export function LiveSidebarSearch({ value, onChange }: { readonly value: string; readonly onChange: (value: string) => void }) {
-  return <Aria.SearchField aria-label="Search agents" value={value} onChange={onChange} {...stylex.props(styles.search)}>
-    <Aria.Input aria-description="Use machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match. Combine with search text." placeholder="Search agents" {...stylex.props(styles.searchInput)} />
-  </Aria.SearchField>
+/** The shared toolbar with the live sidebar's search surface, which must stand apart from the sidebar in both schemes. */
+export function LiveSidebarToolbar(props: Omit<SidebarToolbarProps, 'searchStyle'>) {
+  return <SidebarToolbar {...props} searchStyle={styles.searchField} />
 }
 
 const styles = stylex.create({
@@ -482,9 +636,9 @@ const styles = stylex.create({
   iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   textButton: { padding: '4px 8px', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer', fontSize: t.metaSize },
   // Message fill plus a hairline: raised equals the sidebar surface in light mode.
-  search: { marginInline: s.md, padding: `calc(${s.md} - ${g.hairline})`, borderRadius: 8, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, backgroundColor: c.message, flexShrink: 0 },
-  searchInput: { width: '100%', minWidth: 0, borderWidth: 0, outline: 'none', backgroundColor: 'transparent', color: c.fg, fontSize: t.metaSize },
-  roster: { display: 'flex', flexDirection: 'column', overflowY: 'auto', padding: s.md, minHeight: 0, flexGrow: 1, gap: 2 },
+  searchField: { backgroundColor: c.message, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border },
+  // AgentFolders' Tree owns scrolling; the roster only assigns the remaining flex space.
+  roster: { display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: s.md, minHeight: 0, flex: '1 1 0', gap: 2 },
   // Match SR-2's shared row/control/icon geometry and the roster's 2px inter-row gap.
   rosterSkeleton: { display: 'flex', flexDirection: 'column', gap: 2 },
   skeletonRow: { height: g.sidebarRow, flexShrink: 0, display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr)`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignContent: 'center', alignItems: 'center', columnGap: s.xs2, paddingInline: s.sm, boxSizing: 'border-box' },
@@ -508,6 +662,8 @@ const styles = stylex.create({
   paneNotice: { position: 'relative', zIndex: 2 },
   empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
+  sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },
+  narrowAction: { display: 'inline-flex', alignItems: 'center', gap: s.xs, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
   toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
   toolDetailTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize },
   toolDetailOutput: { margin: 0, padding: s.lg, minHeight: 0, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: c.fgMuted },
