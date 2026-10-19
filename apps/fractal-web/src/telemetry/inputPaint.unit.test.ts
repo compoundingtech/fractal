@@ -95,3 +95,17 @@ it('uses matched Event Timing presentation ends with a nonzero interaction id', 
   expect(run.samples[0]?.endMs).toBe(105)
   expect(run.samples[0]?.attributes.read_to_frame_ms).toBe(10)
 })
+
+it('ignores unchanged attribute and text assignments', async () => {
+  const run = setup()
+  const button = document.querySelector('button')!
+  button.setAttribute('title', 'same')
+  button.textContent = 'same'
+  await Promise.resolve()
+  run.input()
+  button.setAttribute('title', 'same')
+  button.firstChild!.nodeValue = 'same'
+  await Promise.resolve()
+  run.paint()
+  expect(run.samples).toEqual([])
+})

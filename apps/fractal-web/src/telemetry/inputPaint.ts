@@ -12,7 +12,6 @@ interface Input {
   readonly action: string
   readonly surface: InputSurface
   committed: number | undefined
-  timingEnd: number | undefined
   cancel: (() => void) | undefined
 }
 export interface InputPaintSample {
@@ -73,14 +72,18 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
   const commit = (records: ReadonlyArray<MutationRecord>) => {
     const input = candidate
     if (input === undefined || !pending.has(input)) return
-    if (!records.some((record) => record.type !== 'attributes' || record.oldValue !== (record.target instanceof Element ? record.target.getAttribute(record.attributeName ?? '') : undefined))) return
+    if (!records.some((record) => {
+      if (record.type === 'attributes') return record.target instanceof Element && record.oldValue !== record.target.getAttribute(record.attributeName ?? '')
+      if (record.type === 'characterData') return record.oldValue !== record.target.nodeValue
+      return record.addedNodes.length > 0 || record.removedNodes.length > 0
+    })) return
     for (const previous of pending) if (previous !== input && previous.committed !== undefined) finish(previous, 'coalesced')
     if (input.committed !== undefined) return
     input.committed = now()
     input.cancel?.()
-    input.cancel = paint(() => finish(input, 'painted', input.timingEnd ?? now()))
+    input.cancel = paint(() => finish(input, 'painted'))
   }
-  observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true })
+  observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true })
   const capture = (event: Event) => {
     if (disposed || !event.isTrusted || document.visibilityState === 'hidden') return
     // Drain the previous dispatch's records before changing attribution.
@@ -92,7 +95,7 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
       accepted, surface: surface(event.target),
       kind: event.type === 'keydown' ? 'key' : event.type === 'paste' ? 'paste' : event.type.startsWith('focus') ? 'focus' : event.type === 'resize' ? 'resize' : event.type === 'input' ? 'input' : 'mouse',
       action: event.type === 'keydown' ? 'key' : event.type.startsWith('focus') ? (event.type === 'focusin' ? 'gained' : 'lost') : event.type,
-      committed: undefined, timingEnd: undefined, cancel: undefined,
+      committed: undefined, cancel: undefined,
     }
     candidate = input
     pending.add(input)
@@ -105,7 +108,7 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
         if (!('interactionId' in entry) || typeof entry.interactionId !== 'number' || entry.interactionId === 0) continue
         for (const input of pending) {
           const end = entry.startTime + entry.duration
-          if (entry.name === input.type && Math.abs(entry.startTime - input.start) <= 1 && input.committed !== undefined && end >= input.committed && end <= now()) input.timingEnd = end
+          if (entry.name === input.type && Math.abs(entry.startTime - input.start) <= 1 && input.committed !== undefined && end >= input.committed && end <= now()) finish(input, 'painted', end)
         }
       }
     })
