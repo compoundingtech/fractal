@@ -95,6 +95,8 @@ export const typeVars = stylex.defineVars({
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
   trackingWide: '0.1em', trackingEyebrow: '0.2em',
   headingSize: '16px', headingLeading: '24px',
+  /** Text fields on a phone: below 16px, iOS Safari zooms the page when the field takes focus. */
+  touchInputSize: '16px',
 })
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
@@ -118,6 +120,8 @@ export const geometryVars = stylex.defineVars({
   sidebarMin: '208px', sidebarDefault: '256px',
   panelDefault: '540px', panelMin: '360px',
   controlSm: '24px', controlMd: '28px', controlLg: '32px',
+  /** Minimum hit target for every control in the narrow (phone) layout. */
+  touchTarget: '44px',
   toolRow: '24px',
   menuRow: '28px', checkbox: '14px',
   gutter: 'clamp(12px, 1.25vw, 20px)',
