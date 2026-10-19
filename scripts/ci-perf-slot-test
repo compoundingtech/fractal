@@ -131,6 +131,25 @@ with tempfile.TemporaryDirectory() as tmp:
         assert stopped.wait(10) == 128 + number
         assert not alive(pid) and not holder.exists()
 
+    # The watchdog is protected from TERM itself, but must not pass SIG_IGN
+    # through exec to its command. A shell cannot install a TERM cleanup trap
+    # when that signal was ignored at shell entry. Check the actual receipt,
+    # not just eventual death/KILL and slot release.
+    for mode, expected in (("timeout", 124), ("wrapper-term", 143)):
+        ready = root / (mode + ".ready")
+        cleanup = root / (mode + ".cleanup")
+        script = ('trap \'printf cleaned > "$2"; exit 0\' TERM; '
+                  'printf ready > "$1"; while :; do sleep 0.05; done')
+        options = ("--timeout", "1s") if mode == "timeout" else ()
+        stopped = start(env, *options,
+                        command=["bash", "-c", script, "fixture", str(ready), str(cleanup)])
+        until(ready.exists, mode + " command installed its TERM trap")
+        if mode == "wrapper-term":
+            stopped.send_signal(signal.SIGTERM)
+        assert stopped.wait(10) == expected, stopped.stderr.read()
+        assert cleanup.read_text() == "cleaned", mode + " must allow graceful TERM cleanup"
+        assert "perf slot free" in status() and not holder.exists()
+
     # A run past its timeout is stopped, even one that ignores SIGTERM, and the slot frees.
     started = time.time()
     hung = start(env, "--timeout", "1s", command=["bash", "-c", "trap '' TERM; while :; do sleep 0.1; done"])

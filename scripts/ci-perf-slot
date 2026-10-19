@@ -218,7 +218,9 @@ def watchdog(directory, gate, result, slot_fd, args, owner, since):
     from st3_test_process import set_child_subreaper, reap_descendants
     set_child_subreaper()
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(number, signal.SIG_IGN)
+        # Caught handlers reset to SIG_DFL on exec; SIG_IGN would survive
+        # into the command and disable shell TERM traps/graceful cleanup.
+        signal.signal(number, lambda *_: None)
     child = subprocess.Popen(args.command, start_new_session=True,
                              env={**os.environ, 'FRACTAL_PERF_SLOT_HELD': str(owner),
                                   'ST_PERF_SLOT_HELD': str(owner)})
