@@ -692,6 +692,7 @@ impl Client {
                 .header("content-type", "application/json")
                 .header("connection", "close");
                 request = st3_client::propagation::inject_http(request);
+                // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                 if let Some(person) = self.person.as_deref() {
                     request = request.header("x-st3-person", person);
                 }
@@ -1066,6 +1067,7 @@ impl std::error::Error for UnexpectedResponse {}
 fn terminal_request(url: &str) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut request = url.into_client_request()?;
     st3_client::propagation::inject_headers(request.headers_mut());
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
         "st3.terminal.v1"
@@ -1296,6 +1298,9 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
         || path.starts_with(CLIENT_READ_FORWARD_PATH)
     {
         // A forwarded client read is bounded by the relay's own per-hop timeouts.
+        deadlines.bulk
+    } else if path == "/v1/doctor" || path.starts_with("/v1/doctor?") {
+        // Mirror the server's bulk read budget in read_deadline.rs.
         deadlines.bulk
     } else if path.starts_with("/v1/checkpoint/plan") || path.starts_with("/v1/checkpoint/status")
     {
@@ -1867,7 +1872,7 @@ mod tests {
         let deadlines = ClientDeadlines::default();
         assert_eq!(
             request_deadline("/v1/status", deadlines),
-            Duration::from_secs(15)
+            deadlines.request
         );
         assert_eq!(
             request_deadline("/v1/events?wait=true&timeout_ms=30000", deadlines),
@@ -1877,6 +1882,16 @@ mod tests {
             request_deadline("/v1/internal/replication/export", deadlines),
             Duration::from_secs(120)
         );
+        for path in ["/v1/doctor", "/v1/doctor?verbose=true"] {
+            assert_eq!(request_deadline(path, deadlines), deadlines.bulk);
+        }
+        for path in [
+            "/v1/doctors",
+            "/v1/doctor/checks",
+            "/v1/doctor-extra?verbose=true",
+        ] {
+            assert_eq!(request_deadline(path, deadlines), deadlines.request);
+        }
     }
 
     #[tokio::test]

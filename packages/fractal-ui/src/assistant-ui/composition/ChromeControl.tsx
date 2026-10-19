@@ -22,6 +22,10 @@ export interface ChromeControlProps {
   /** Briefly unavailable, e.g. while its own action is in flight. */
   readonly isDisabled?: boolean
   readonly onPress?: () => void
+  /** The control opens a popup (a sheet on narrow hosts): its kind, open state and the opened element's id. */
+  readonly popup?: 'dialog' | 'menu'
+  readonly expanded?: boolean
+  readonly controls?: string
   readonly tooltipPlacement?: 'top' | 'bottom'
 }
 
@@ -29,7 +33,7 @@ export interface ChromeControlProps {
  * One quiet 28px icon button for the chrome: borderless, filled on hover, named by the kit tooltip.
  * Inside a React Aria trigger (MenuTrigger, DialogTrigger) it is the trigger's button.
  */
-export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, tooltipPlacement = 'bottom' }: ChromeControlProps) {
+export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltipPlacement = 'bottom' }: ChromeControlProps) {
   const reasonId = React.useId()
   if (disabledReason !== undefined) {
     // A natively disabled button leaves the tab order and receives no pointer events, so its reason would be
@@ -62,6 +66,9 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
     <Button
       aria-label={label}
       {...(pressed === undefined ? {} : { 'aria-pressed': pressed })}
+      {...(popup === undefined ? {} : { 'aria-haspopup': popup })}
+      {...(expanded === undefined ? {} : { 'aria-expanded': expanded })}
+      {...(controls === undefined ? {} : { 'aria-controls': controls })}
       isDisabled={isDisabled}
       {...(onPress === undefined ? {} : { onPress })}
       {...stylex.props(styles.control, (pressed === true || active) && styles.pressed)}

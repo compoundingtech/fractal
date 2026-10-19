@@ -121,6 +121,8 @@ export function ThreadHeader({
   onToggleDrawer,
   sidebarCollapsed = false,
   onToggleSidebar,
+  sidebarSheet,
+  narrow = false,
 }: {
   /** Reported folder for the breadcrumb; omitted entirely when the host knows none. */
   folder?: string
@@ -148,15 +150,19 @@ export function ThreadHeader({
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
+  /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
+  sidebarSheet?: { readonly open: boolean; readonly id: string }
+  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. */
+  narrow?: boolean
 }) {
   return (
     <header data-testid="thread-header" {...stylex.props(styles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
-        <ChromeControl icon="chevron-right" label="Expand sidebar" onPress={onToggleSidebar} />
+        <ChromeControl icon="chevron-right" label="Expand sidebar" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>
-          <span {...stylex.props(styles.crumbFolder)}>{folder}</span>
+          <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash)}>/</span>
         </> : null}
         <span {...stylex.props(styles.crumbTitle)}>{title}</span>
@@ -167,9 +173,11 @@ export function ThreadHeader({
         <div data-testid="native-action-slot" ref={actionPortalRef}>{nativeActions}</div>
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs)}>Open <Icon name="chevron-down" size={12} /></button>}
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs)}>Commit <Icon name="chevron-down" size={12} /></button>}
-        {terminalAvailable && <ChromeControl icon="drawer" label="Toggle terminal drawer" pressed={drawerOpen} onPress={onToggleDrawer} />}
-        {!terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="drawer" label="Toggle terminal drawer" disabledReason={terminalDisabledReason} />}
-        <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />
+        {!narrow && terminalAvailable && <ChromeControl icon="drawer" label="Toggle terminal drawer" pressed={drawerOpen} onPress={onToggleDrawer} />}
+        {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="drawer" label="Toggle terminal drawer" disabledReason={terminalDisabledReason} />}
+        {narrow
+          ? <ChromeControl icon="panel" label="Agent details" popup="dialog" expanded={panelOpen} active={panelOpen} onPress={onTogglePanel} />
+          : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
       </div>
     </header>
   )
@@ -192,6 +200,7 @@ const styles = stylex.create({
   splitHorizontal: { height: 1, width: '100%', backgroundColor: c.borderStrong, cursor: 'row-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   header: { height: g.band, display: 'flex', alignItems: 'center', gap: g.gutter, paddingInline: g.gutter, flexShrink: 0, minWidth: 0 },
   breadcrumb: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
   crumbSlash: { color: c.fgMuted },
   crumbTitle: { color: c.fg, fontWeight: t.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },

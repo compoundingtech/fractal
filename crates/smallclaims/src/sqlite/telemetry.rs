@@ -44,6 +44,7 @@ static TASK_ORIGINS: &[&str] = &[
     "maintenance.coordination_counts", "maintenance.stop_deferral_history",
     "maintenance.response_expiry", "maintenance.wal_checkpoint",
     "observations.trim", "observations.trim_usage_responses", "observations.database_size",
+    "observations.release_free_pages",
     "observations.export", "operations.repair_drift", "recorder.receipts",
     "mailbox.wake_dispatch", "mailbox.own_post", "mailbox.write", "mailbox.subscription",
     "message_body.reconcile", "seat.snapshot_transfer",
