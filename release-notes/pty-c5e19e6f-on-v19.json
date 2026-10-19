@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "summary": "Align the version-19 hotfix Cargo and flake PTY pins at c5e19e6f",
+  "replay": { "status": "none", "detail": "No Smalltalk replay change." },
+  "schema": { "status": "none", "detail": "Storage remains version 19; no database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": {
+    "status": "changed",
+    "detail": "PTY advances from f8388fe7 to c5e19e6f: event-log writes batch within 250 ms (#137), terminal subscribers disconnect on close (#159), explicit restart waits for predecessor exit (#160), and managed publication gains durable revocation (#158). No Smalltalk caller starts passing publication flags. Unenrolled roots retain JSONL and metadata format compatibility; downgrade requires per-host, per-root absence checks for .publication-revocations and .publication-revocations/v1/root.json. If publication state exists, use a forward fix only; never remove it to permit downgrade."
+  },
+  "downtime": { "status": "none", "detail": "No forced restarts; sessions use the selected binary on natural restart." },
+  "manual": { "status": "changed", "detail": "Do not enroll publication roots until rollout is verified on all target hosts. This dependency-only hotfix does not activate services or modify storage." },
+  "recovery": { "status": "none", "detail": "No Smalltalk recovery change. ST_SKIP_EVIDENCE=1 is used for this branch-only push; hosted CI remains the exact-commit release proof." }
+}

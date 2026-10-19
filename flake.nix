@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/f8388fe7a8617d973e720e29107e68ac5ea95987";
+    pty.url = "github:compoundingtech/pty/c5e19e6f6a866cd5cbe0431755e6db38d6f17646";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.

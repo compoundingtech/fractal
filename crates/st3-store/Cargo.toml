@@ -25,8 +25,8 @@ kdl = "6"
 libc = "0.2"
 opentelemetry = "0.30"
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
 serde = { version = "1", features = ["derive"] }

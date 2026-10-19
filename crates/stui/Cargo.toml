@@ -36,9 +36,9 @@ ratatui-image = { version = "11", default-features = false, features = ["crosste
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Agent terminals attached through their PTY session (the gateway's raw stream), drawn here.
 alacritty_terminal = { version = "0.26", default-features = false }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
 
 # Its own tests run with the crate's, so the timing log it writes stays valid JSON.
 [[example]]
