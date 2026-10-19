@@ -1,5 +1,6 @@
 mod roster_fresh;
 
+use crate::RolloutsStore;
 use super::*;
 use crate::model::SESSION_CLAIMS;
 use axum::body::to_bytes;

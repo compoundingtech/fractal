@@ -3,6 +3,10 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::LimitsStore;
+use st3::SeatsStore;
+use st3::StopDeferralStore;
+use st3::PublicationFactsStore;
 use st3::GitChangesStore;
 use st3::cli_output;
 use st3::{cli_print as print, cli_println as println};
@@ -5932,6 +5936,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    tokio::spawn(st3::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
@@ -17883,6 +17888,55 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
     }
 }
 
+/// A finite bootstrap job: committed pages yield the background writer to live requests.
+/// Local corruption is persisted and visible through doctor/faults; it stops this job.
+/// Background inventory/judgment gets one quiet unit per unit of page wall time.
+/// This bounds duty to 50%; it neither retries nor suppresses a local failure.
+const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
+
+async fn migrate_signature_candidates(store: Arc<Store>) {
+    let worker = store.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let initial = worker.signature_migration()?;
+        let mut phase = initial.phase.clone();
+        if !initial.done() { eprintln!("st3: signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description()); }
+        loop {
+            let page_started = std::time::Instant::now();
+            let report = worker.advance_signature_migration()?;
+            if report.phase != phase {
+                eprintln!("st3: signature bootstrap phase {}: {}",report.phase,report.progress_description());
+                phase = report.phase.clone();
+            }
+            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
+                anyhow::bail!("{reason}");
+            }
+            if report.phase == "judging" {
+                worker.advance_signature_judgment()?;
+            }
+            // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
+            // each page gets an equally long quiet interval (at most 50% worker duty).
+            let page_elapsed = page_started.elapsed();
+            std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+            if worker.signature_migration()?.done() {
+                let complete = worker.signature_migration()?;
+                if !initial.done() { eprintln!("st3: signature candidate authority activated: {}",complete.progress_description()); }
+                loop {
+                    let retired_started = std::time::Instant::now();
+                    if !worker.retire_legacy_signature_page()? { break; }
+                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                }
+                return Ok(());
+            }
+        }
+    }).await;
+    if !matches!(result, Ok(Ok(()))) {
+        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
+            eprintln!("st3: signature migration fault could not be persisted: {error:#}");
+        }
+        eprintln!("st3: signature candidate migration stopped: {result:?}");
+    }
+}
+
 /// Old payloads convert after startup; each page joins the normal writer queue and commits
 /// its own cursor. A failed page retries, including after a daemon restart.
 async fn convert_envelope_payloads(store: Arc<Store>) {
@@ -18210,6 +18264,28 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
             Ok(Ok(count)) => eprintln!("st3: trimmed {count} local observations"),
             Ok(Err(error)) => eprintln!("st3: local observation trim failed: {error:#}"),
             Err(error) => eprintln!("st3: local observation trim stopped: {error}"),
+        }
+        // What these trims, checkpoints and response expiry freed goes back to the filesystem,
+        // one short write at a time so other writes run between them.
+        let mut released = 0;
+        loop {
+            let vacuum_store = store.clone();
+            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(pages)) => released += pages,
+                Ok(Err(error)) => {
+                    eprintln!("st3: giving free pages back failed: {error:#}");
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("st3: giving free pages back stopped: {error}");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if released > 0 {
+            eprintln!("st3: gave {released} free pages back to the filesystem");
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();

@@ -1,4 +1,5 @@
 //! The actual stui binary on a daemon-less device, talking only to isolated members.
+use st3::SeatsStoreCore;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,

@@ -1,6 +1,9 @@
 //! Product actions over the real client/CLI Unix transport, with disk-backed daemon restarts.
 #![cfg(unix)]
 
+use st3::SeatsStore;
+use st3::EvidenceStore;
+use st3::OwnedSetsStore;
 use st3::GitChangesStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

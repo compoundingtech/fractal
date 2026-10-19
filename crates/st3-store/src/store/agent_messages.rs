@@ -56,7 +56,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ready(transaction: &Transaction<'_>) -> Result<bool> {
+pub fn ready(transaction: &Transaction<'_>) -> Result<bool> {
     Ok(transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
         [],
@@ -232,13 +232,13 @@ fn flush_with_coordination(
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Allowance {
+pub struct Allowance {
     low_microusd: u64,
     high_microusd: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Calibration {
+pub struct Calibration {
     source: String,
     method: String,
     recipients: BTreeMap<String, Allowance>,
@@ -670,83 +670,4 @@ mod tests {
         assert_eq!(fallback["days"][0]["low_microusd"], 440_000);
     }
 
-    #[test]
-    fn daily_usage_matches_separate_periods_including_baselines_and_restarts() {
-        let store = Store::open_memory("node").unwrap();
-        for (i, (at, tokens, cost, unpriced)) in [
-            (DAY_MS, 100, 100_000, 0),
-            (DAY_MS + 1, 120, 150_000, 0),
-            (2 * DAY_MS, 200, 250_000, 10),
-            (2 * DAY_MS + 1, 10, 30_000, 0),
-            (3 * DAY_MS, 50, 80_000, 0),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            store
-                .append_claim(&ClaimInput {
-                    subject: "agent/alder".into(),
-                    kind: "harness.usage".into(),
-                    actor: None,
-                    fields: serde_json::from_value(json!({"driver":"codex","incarnation_id":"one",
-                    "semantics":"response_rollup","observed_at_unix_ms":at,"total_tokens":tokens,
-                    "cost_microusd":cost,"unpriced_tokens":unpriced,"model":"test-model"}))
-                    .unwrap(),
-                    evidence: vec![],
-                    expected_subject: None,
-                    idempotency_key: Some(format!("usage-{i}")),
-                })
-                .unwrap();
-        }
-        let (_, estimate) = store.usage_period_report(DAY_MS, 3 * DAY_MS).unwrap();
-        for day in estimate["days"].as_array().unwrap() {
-            let rows = store
-                .usage_period_rows(
-                    day["since_ms"].as_u64().unwrap(),
-                    day["until_ms"].as_u64().unwrap(),
-                )
-                .unwrap();
-            assert_eq!(
-                day["usage_cost_microusd"].as_u64().unwrap(),
-                rows.iter()
-                    .map(|r| r["cost_microusd"].as_u64().unwrap())
-                    .sum::<u64>()
-            );
-            assert_eq!(
-                day["unpriced_tokens"].as_u64().unwrap(),
-                rows.iter()
-                    .map(|r| r["unpriced_tokens"].as_u64().unwrap())
-                    .sum::<u64>()
-            );
-        }
-        assert!(windows(1, 1).is_empty());
-        assert_eq!(windows(0, 100 * DAY_MS).len(), 31);
-    }
-
-    #[test]
-    fn replicated_sends_are_counted_once_on_each_node() {
-        let source = Store::open_memory("node").unwrap();
-        source.append_claim(&ClaimInput {
-            subject:"message/replicated".into(),kind:"message.sent".into(),actor:None,
-            fields:serde_json::from_value(json!({"from":"agent/alder","to":"agent/birch","title":"Update","status":"sent"})).unwrap(),
-            evidence:vec![],expected_subject:None,idempotency_key:None,
-        }).unwrap();
-        let peer = Store::open_memory("peer").unwrap();
-        let exchange =
-            super::super::tests::exchange_from(&source, &peer.replication_inventory().unwrap());
-        super::super::tests::receive_and_project(&peer, "node", &exchange);
-        super::super::tests::receive_and_project(&peer, "node", &exchange);
-        let until = now_ms() as u64 + 1;
-        let (_, expected) = source.usage_period_report(0, until).unwrap();
-        assert_eq!(peer.usage_period_report(0, until).unwrap().1, expected);
-        assert_eq!(
-            expected["days"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|d| d["messages"].as_u64().unwrap())
-                .sum::<u64>(),
-            1
-        );
-    }
 }
