@@ -403,6 +403,8 @@ pub fn admit_prepared_envelope_tx(
                 let inserted = if tombstoned {
                     0
                 } else {
+                    super::canonical::record_position_tx(transaction, &claim.id, position)
+                        .map_err(internal)?;
                     transaction
                     .prepare_cached(
                         /* sqlite-large-value: allow-for-now lv-h3dde60a662ef owner=smallclaims::store::prepared_envelope TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)

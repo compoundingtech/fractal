@@ -11,7 +11,7 @@ use crate::api::published_attention::{
 };
 
 #[path = "reads_paging.rs"]
-mod paging;
+pub mod paging;
 use paging::page;
 
 /// Default and ceiling of an assistant response, including its whole JSON envelope. The
@@ -23,11 +23,11 @@ const ATTENTION_KINDS: &[&str] = &[
     "human-gate", "launch-approval", "revision-approval", "unread-message", "person-step",
     "agent-request", "fault", "harness-login", "harness-prompt",
 ];
-const AGENT_STATES: &[&str] = &[
+pub const AGENT_STATES: &[&str] = &[
     "desired", "starting", "running", "waiting", "stopped", "failed", "suspended",
 ];
 const AGENT_LIFECYCLES: &[&str] = &["standing", "owner", "bounded"];
-const MISSION_PHASES: &[&str] = &[
+pub const MISSION_PHASES: &[&str] = &[
     "draft", "ready", "running", "standing", "blocked", "completed", "failed", "cancelled",
     "retired",
 ];
@@ -40,26 +40,6 @@ const CONVERSATION_FIELDS: &[&str] = &[
 const TERMINAL_FIELDS: &[&str] = &[
     "agent_id", "terminal_id", "incarnation_id", "screen_revision", "max_response_bytes",
 ];
-
-/// Project one assistant read with the snapshot its rows were read in. `parameters` are the
-/// exact decoded query parameters the read authorization names; the person is the
-/// configured owner, never a parameter. A cursor or content read keeps `snapshot`.
-#[cfg(test)]
-pub async fn project(
-    state: &AppState,
-    snapshot: &ClientSnapshot,
-    projection: &str,
-    parameters: &BTreeMap<String, String>,
-    max_bytes: usize,
-    binding: &str,
-) -> Result<(ClientSnapshot, Value), ApiError> {
-    let context = response_body::Context {
-        state: state.clone(), client_request: true, observation_report: false,
-        request_id: "request/00000000-0000-0000-0000-000000000000".into(),
-        client_snapshot: Some(snapshot.clone()), server: None, roster: false,
-    };
-    project_with_context(state, snapshot, projection, parameters, max_bytes, binding, &context).await
-}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn project_with_context(
@@ -99,7 +79,7 @@ pub async fn project_with_context(
 }
 
 /// Every parameter is named by the projection; a stated budget must be the one enforced.
-fn allow(
+pub fn allow(
     parameters: &BTreeMap<String, String>,
     fields: &[&str],
     max_bytes: usize,
@@ -137,25 +117,25 @@ fn budget_exceeded(message: impl Into<String>) -> ApiError {
 
 /// An identifier copied out of a source row, or nothing. Identifiers are short tokens; a value
 /// with spaces, controls or prose punctuation is source text, which never leaves.
-fn identifier_allowed(value: &str) -> bool {
+pub fn identifier_allowed(value: &str) -> bool {
     (1..=256).contains(&value.len())
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte)
         })
 }
 
-fn ident(value: Option<&str>) -> Option<String> {
+pub fn ident(value: Option<&str>) -> Option<String> {
     value.filter(|value| identifier_allowed(value)).map(str::to_owned)
 }
 
-fn closed(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
+pub fn closed(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
     value
         .and_then(|value| allowed.iter().find(|item| **item == value))
         .copied()
         .unwrap_or("unknown")
 }
 
-fn attention_kind(kind: &str) -> &'static str {
+pub fn attention_kind(kind: &str) -> &'static str {
     if kind.starts_with("custom.") {
         "custom"
     } else {
@@ -164,14 +144,14 @@ fn attention_kind(kind: &str) -> &'static str {
 }
 
 /// A timestamp the native reader rendered, kept only if it is one.
-fn timestamp(value: &Value) -> Value {
+pub fn timestamp(value: &Value) -> Value {
     value
         .as_str()
         .filter(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok())
         .map_or(Value::Null, |at| json!(at))
 }
 
-fn owner(state: &AppState) -> Result<String, ApiError> {
+pub fn owner(state: &AppState) -> Result<String, ApiError> {
     state
         .owning_person
         .clone()
@@ -265,7 +245,7 @@ fn attention_request(item: &Value) -> &Value {
 }
 
 /// Translate one published native attention row; metadata never copies source prose.
-fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
+pub fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
     let episode = ident(item["episode"].as_str()).unwrap_or_default();
     let agent = [item["conversation_id"].as_str(), item["requester_id"].as_str()]
         .into_iter().flatten().find(|agent| agent.starts_with("agent/"));
@@ -296,7 +276,7 @@ fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
 
 /// Current missions: phase, the open (else newest) run, its step and blocked counts and the
 /// agents it names. Goals, titles, step paths and status prose stay in the source.
-fn mission_rows(missions: &[Value], rich: bool) -> anyhow::Result<Vec<Value>> {
+pub fn mission_rows(missions: &[Value], rich: bool) -> anyhow::Result<Vec<Value>> {
     let mut rows = Vec::with_capacity(missions.len());
     for mission in missions {
         let Some(id) = ident(mission["id"].as_str()) else {
@@ -371,7 +351,7 @@ fn agent_rows(agents: &[Value], rich: bool) -> Vec<Value> {
 }
 
 /// Escaped JSON string bytes of `text`, so a budget holds for the encoded response.
-fn encoded_len(text: &str) -> usize {
+pub fn encoded_len(text: &str) -> usize {
     text.chars()
         .map(|character| match character {
             '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
@@ -381,7 +361,7 @@ fn encoded_len(text: &str) -> usize {
         .sum()
 }
 
-fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize, ApiError> {
+pub fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize, ApiError> {
     required(parameters, name)?
         .parse()
         .map_err(|_| validation(format!("`{name}` must be a byte offset")))
@@ -464,7 +444,7 @@ async fn conversation(
 /// The current screen of one exactly named terminal incarnation and screen revision, as
 /// text, cut on a character boundary to the budget. The shared screen is borrowed, never
 /// rendered whole: only the returned characters are copied. One screen, never a stream.
-async fn terminal(
+pub async fn terminal(
     state: &AppState,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
@@ -527,7 +507,3 @@ async fn terminal(
         "truncated": truncated,
     }))
 }
-
-#[cfg(test)]
-#[path = "reads_tests.rs"]
-pub mod tests;

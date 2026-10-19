@@ -10,7 +10,7 @@ pub struct ResourcesQuery {
 }
 
 #[derive(Deserialize, Serialize)]
-struct ResourcesCursor {
+pub struct ResourcesCursor {
     snapshot: ClientSnapshot,
     resources_version: String,
     opened_by: Option<String>,
