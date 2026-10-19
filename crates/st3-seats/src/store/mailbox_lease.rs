@@ -1,25 +1,26 @@
 //! The part of `store::mailbox_lease` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::DeliveryStore;
 use super::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
-pub use st3_store::store::mailbox_lease::*;
-pub use st3_store::store::mailbox_lease::{admit, check_argv_declaration, check_declaration, check_lease_fence, record, record_argv_binding, refuse_argv_native_adoption};
+pub use st3_missions::store::mailbox_lease::*;
+pub use st3_missions::store::mailbox_lease::{admit, check_argv_declaration, check_declaration, check_lease_fence, record, record_argv_binding, refuse_argv_native_adoption};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::mailbox_lease_shared_seats::*;
-    use st3_store::store::mailbox_lease_shared_seats::{AFTER_FAULT_ACQUISITION, AFTER_PROMOTION_PRECHECK, BEFORE_FAULT_READER, CARD_FAULT_DEADLINES, DURING_FAULT_READ};
-    use st3_store::store::mailbox_lease_tests_shared_seats::*;
-    use st3_store::store::mailbox_lease_tests_shared_seats::{authority, change_after_precheck, finished_without_the_writer, precheck_was_reached, promote_elsewhere, request};
+    use st3_missions::store::mailbox_lease_shared_seats::*;
+    use st3_missions::store::mailbox_lease_shared_seats::{AFTER_FAULT_ACQUISITION, AFTER_PROMOTION_PRECHECK, BEFORE_FAULT_READER, CARD_FAULT_DEADLINES, DURING_FAULT_READ};
+    use st3_missions::store::mailbox_lease_tests_shared_seats::*;
+    use st3_missions::store::mailbox_lease_tests_shared_seats::{authority, change_after_precheck, finished_without_the_writer, precheck_was_reached, promote_elsewhere, request};
 
-    fn declare(store: &Store) {
+    pub fn declare(store: &Store) {
         let intent = crate::graph::parse_intent("version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }", "node").unwrap();
         store.apply_internal(&intent, "lease-fixture").unwrap();
     }
 
-    fn fixture() -> Store {
+    pub fn fixture() -> Store {
         let store = Store::open_memory("node").unwrap();
         declare(&store);
         crate::store::mailbox_tests::ready(&store, "current");

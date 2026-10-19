@@ -1,5 +1,6 @@
 //! Placement handoff is a graph fence, independent of peer liveness or wall-clock time.
 //! A former owner acknowledges the selected placement only after its local runtime is gone.
+use crate::MissionsStore;
 use crate::SeatsStore;
 use crate::model::{ClaimInput, ClaimRecord, DesiredSubject, St3Error};
 use crate::store::Store;

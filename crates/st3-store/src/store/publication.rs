@@ -217,16 +217,3 @@ impl Store {
         }))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::publication_tests_shared::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::publication_tests_shared::{declaration, observe, publish};
-
-    
-
-}

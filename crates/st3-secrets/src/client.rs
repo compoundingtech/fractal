@@ -1299,6 +1299,9 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     {
         // A forwarded client read is bounded by the relay's own per-hop timeouts.
         deadlines.bulk
+    } else if path == "/v1/doctor" || path.starts_with("/v1/doctor?") {
+        // Mirror the server's bulk read budget in read_deadline.rs.
+        deadlines.bulk
     } else if path.starts_with("/v1/checkpoint/plan") || path.starts_with("/v1/checkpoint/status")
     {
         // A dry run copies the store and replays it twice; status reads what is sealed.
@@ -1869,7 +1872,7 @@ mod tests {
         let deadlines = ClientDeadlines::default();
         assert_eq!(
             request_deadline("/v1/status", deadlines),
-            Duration::from_secs(15)
+            deadlines.request
         );
         assert_eq!(
             request_deadline("/v1/events?wait=true&timeout_ms=30000", deadlines),
@@ -1879,6 +1882,16 @@ mod tests {
             request_deadline("/v1/internal/replication/export", deadlines),
             Duration::from_secs(120)
         );
+        for path in ["/v1/doctor", "/v1/doctor?verbose=true"] {
+            assert_eq!(request_deadline(path, deadlines), deadlines.bulk);
+        }
+        for path in [
+            "/v1/doctors",
+            "/v1/doctor/checks",
+            "/v1/doctor-extra?verbose=true",
+        ] {
+            assert_eq!(request_deadline(path, deadlines), deadlines.request);
+        }
     }
 
     #[tokio::test]

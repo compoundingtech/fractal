@@ -49,6 +49,11 @@
     "st3-github-base": {
       "clippy::type_complexity": 3
     },
+    "st3-missions": {
+      "clippy::cloned_ref_to_slice_refs": 1,
+      "clippy::collapsible_if": 3,
+      "clippy::needless_borrow": 1
+    },
     "st3-reconcile": {
       "clippy::collapsible_if": 3,
       "clippy::empty_line_after_doc_comments": 2,
@@ -62,10 +67,8 @@
       "clippy::type_complexity": 2
     },
     "st3-store": {
-      "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 13,
+      "clippy::collapsible_if": 10,
       "clippy::double_ended_iterator_last": 1,
-      "clippy::needless_borrow": 1,
       "clippy::redundant_closure": 1,
       "clippy::too_many_arguments": 1
     },

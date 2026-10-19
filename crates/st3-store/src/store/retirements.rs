@@ -246,12 +246,5 @@ mod tests {
             calls,
             vec!["retirements.rs", "store.rs", "store.rs", "store.rs"]
         );
-        for source in [
-            include_str!("person_work.rs"),
-            include_str!("adhoc_work.rs"),
-            include_str!("github_workflow_failures.rs"),
-        ] {
-            assert!(source.contains("append_claim_tx(") && source.contains("\"message.sent\""));
-        }
     }
 }

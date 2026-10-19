@@ -373,3 +373,9 @@ pub mod native_source_transaction_hooks_operator_error_shared_seats;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod native_source_transaction_hooks_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_transaction_hooks_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_transaction_hooks_tests_operator_errors_shared_delivery;
