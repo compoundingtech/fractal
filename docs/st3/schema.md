@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `ec50c24743da46807b7a41a95cf179371461f19b98fba3f9a60a69065251130c`
+Storage digest: `b0615c71ded03b34c11349eacf89e30b660ed25713207561b92eaa301abcf3ae`
 
 ## Subject families
 
@@ -213,7 +213,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `work.nudged` | `step-run` | `system-only` | `append` | `durable` | `agent:subject-reference`, `attempt:integer`, `idle_since_unix_ms:string`, `message:subject-reference`, `reason:string`, `waits:array` |  |
 | `work.person-asked` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `generation:subject-reference`, `key:string`, `legacy_request:string`, `mission_spec:object`, `origin_attempt:integer`, `origin_step:subject-reference`, `owner_generation:subject-reference`, `owner_run:subject-reference`, `person:subject-reference`, `reason:string`, `request:object`, `requester_declaration:string`, `run:subject-reference`, `status:string`, `title:string`, `waiting_since:string` |  |
 | `work.person-cancelled` | `step-run` | `authorized-participant` | `append` | `durable` | `answer:object`, `attempt:integer`, `episode:string`, `key:string`, `status:string`, `summary:string` |  |
-| `work.person-done` | `step-run` | `authorized-participant` | `append` | `durable` | `acted_for:subject-reference(person)`, `answer:object`, `attempt:integer`, `delegation:object`, `episode:string`, `key:string`, `status:string`, `summary:string` |  |
+| `work.person-done` | `step-run` | `authorized-participant` | `append` | `durable` | `acted_for:subject-reference(person)`, `answer:object`, `assistant_grant_id:string`, `assistant_owner:subject-reference(person)`, `assistant_session_actor:string`, `attempt:integer`, `delegation:object`, `episode:string`, `key:string`, `sender_class:string`, `status:string`, `summary:string` |  |
 | `work.progress` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.released` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.renewed` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
@@ -322,3 +322,19 @@ before deleting an earlier sibling, deleting a record or changing a record's cla
 could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
 never deleted. No history backfill runs at open; a claim without a row and without any removal
 since keeps the legacy value, which equals what would be stored.
+
+## Retired identity ledger
+
+`retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
+checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
+`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
+background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
+per background writer loan with its cursor in `meta`, resting outside the loan for
+max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
+identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
+stays retired and is also labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
+the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
+would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
+equates with a BLOB.
