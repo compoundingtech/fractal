@@ -326,10 +326,7 @@ pub async fn replication_peer_failure(
         let before_index = store.index()?;
         let previous = store.replication_peer_transport(&request.peer).1;
         let stale = store.record_peer_failure_via(
-            &request.peer,
-            &request.status,
-            &request.error,
-            request.carrier,
+            &request.peer, &request.status, &request.error, request.carrier, request.failure.as_ref(),
         )?;
         if stale && store.observes_transport_to(&request.peer)? {
             store.record_transport_observation(

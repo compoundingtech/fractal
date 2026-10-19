@@ -2419,9 +2419,9 @@ impl Backend for SlowExport {
         status: &str,
         error: &str,
         carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<()> {
-        self.local
-            .record_failure(peer, status, error, carrier)
+        self.local.record_failure(peer, status, error, carrier, failure)
             .await
     }
 }

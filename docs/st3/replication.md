@@ -1105,6 +1105,21 @@ Restart clears both records;
 absence means evidence is unavailable, even when durable last-seen status exists.
 Worker phase changes, connectivity events and separate probes do not rewrite them.
 
+The replication-status JSON failed record also carries optional `failure` metadata:
+`code`, `phase`, `elapsed_ms`, optional `http_status`, and a bounded sanitized `cause`.
+The phases are `dial`, `local-export`, `request-headers`, `response-body`, `verify`,
+`local-receive`, and `follow-up-export`; they describe the failing operation, not the
+carrier. Authenticated peer backend failures preserve allowlisted machine codes such
+as `replication-exchange-metadata-too-large` and the backend phase. The elapsed time
+is the local outbound attempt's duration, including any dial and polling time, not
+a remote clock measurement. Local daemon failures retain their typed API codes.
+
+Causes retain safe error categories and typed I/O kinds, not free-form error/source
+displays, URLs, credentials, claim content, request bodies, or unsigned peer prose.
+Success records omit `failure`. Older worker requests and older observations without
+details remain readable and do not invent a cause. Carrier-only client sync notices
+remain unchanged; use replication-status JSON for the diagnostic details.
+
 The worker captures a Fabric route before converting it to its loopback tunnel
 URL. Fabric currently supplies no direct/relay evidence for that exact dial or
 stream. Probe transport, connection presence snapshots and session lifetime

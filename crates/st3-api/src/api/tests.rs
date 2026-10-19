@@ -4222,7 +4222,12 @@ async fn replication_exchange_carrier_status_notifies_clients_without_replicatin
     let mut events = state.event_notify.subscribe();
     let app = router(state.clone());
     let (status, response) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
-        "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "fabric"
+        "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "fabric",
+        "failure": {
+            "code": "replication-exchange-metadata-too-large", "phase": "follow-up-export",
+            "elapsed_ms": 1234, "http_status": 500,
+            "cause": "authenticated peer rejected the exchange; body withheld"
+        }
     })).await;
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(response["changed"], false);
@@ -4237,6 +4242,10 @@ async fn replication_exchange_carrier_status_notifies_clients_without_replicatin
     assert_eq!(failed["carrier"], "fabric");
     assert_eq!(failed["fabric_route"], "unknown");
     assert!(failed["at_unix_ms"].as_u64().is_some());
+    assert_eq!(failed["failure"]["code"], "replication-exchange-metadata-too-large");
+    assert_eq!(failed["failure"]["phase"], "follow-up-export");
+    assert_eq!(failed["failure"]["elapsed_ms"], 1234);
+    assert_eq!(failed["failure"]["http_status"], 500);
     assert!(
         response["peers"][0]
             .get("last_successful_exchange")

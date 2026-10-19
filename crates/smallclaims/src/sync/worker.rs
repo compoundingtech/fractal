@@ -56,7 +56,22 @@ impl Default for ExchangeJobs {
     }
 }
 
-type ExchangeAnswer = Result<crate::replication::ReplicationExportResponse, String>;
+use crate::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+
+fn exchange_failure(
+    error: anyhow::Error,
+    phase: ReplicationFailurePhase,
+    started: std::time::Instant,
+    status: Option<StatusCode>,
+) -> anyhow::Error {
+    let failure = ReplicationExchangeFailure::from_error(
+        &error, phase, started.elapsed(), status.map(|status| status.as_u16()),
+    );
+    let display = error.to_string();
+    error.context(failure).context(display)
+}
+
+type ExchangeAnswer = Result<crate::replication::ReplicationExportResponse, ReplicationExchangeFailure>;
 
 struct ExchangeJob {
     digest: String,
@@ -521,8 +536,7 @@ pub async fn run<B: Backend>(
             loop {
                 tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
                 super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
-                let _ = backend
-                    .record_failure(&name, "down", "no recent inbound exchange", None)
+                let _ = backend.record_failure(&name, "down", "no recent inbound exchange", None, None)
                     .await;
             }
         }));
@@ -1224,6 +1238,9 @@ async fn dial_peer<B: Backend>(
                     Some(fabric) => match fabric.dial(node, protocol).await {
                         Ok(address) => Some(format!("http://{address}")),
                         Err(error) => {
+                            let failure = ReplicationExchangeFailure::from_error(
+                                &error, ReplicationFailurePhase::Dial, attempt_started.elapsed(), None,
+                            );
                             if error.is::<FabricGrantRefusal>() {
                                 refused.push((
                                     selected,
@@ -1232,13 +1249,7 @@ async fn dial_peer<B: Backend>(
                                 super::telemetry::record_error(
                                     &name, super::telemetry::ErrorReason::Refused,
                                 );
-                                let _ = backend
-                                    .record_failure(
-                                        &name,
-                                        "refused",
-                                        &error.to_string(),
-                                        Some(carrier),
-                                    )
+                                let _ = backend.record_failure(&name, "refused", &error.to_string(), Some(carrier), Some(&failure))
                                     .await;
                                 route = route.wrapping_add(1);
                                 continue;
@@ -1246,8 +1257,7 @@ async fn dial_peer<B: Backend>(
                             super::telemetry::record_error(
                                 &name, super::telemetry::ErrorReason::Down,
                             );
-                            let _ = backend
-                                .record_failure(&name, "down", &error.to_string(), Some(carrier))
+                            let _ = backend.record_failure(&name, "down", &error.to_string(), Some(carrier), Some(&failure))
                                 .await;
                             None
                         }
@@ -1365,13 +1375,10 @@ async fn dial_peer<B: Backend>(
                         fabric_route.clone(),
                         tokio::time::Instant::now() + fabric_refusal_delay(),
                     ));
-                    let _ = backend
-                        .record_failure(
-                            &peer.name,
-                            "refused",
-                            &refusal.to_string(),
-                            Some(carrier),
-                        )
+                    let failure = ReplicationExchangeFailure::from_error(
+                        &error, ReplicationFailurePhase::Dial, attempt_started.elapsed(), None,
+                    );
+                    let _ = backend.record_failure(&peer.name, "refused", &refusal.to_string(), Some(carrier), Some(&failure))
                         .await;
                     continue;
                 }
@@ -1385,8 +1392,13 @@ async fn dial_peer<B: Backend>(
                 } else {
                     "down"
                 };
-                let _ = backend
-                    .record_failure(&peer.name, status, &error.to_string(), Some(carrier))
+                let mut failure = ReplicationExchangeFailure::from_error(
+                    &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
+                );
+                if overloaded {
+                    failure.code = "replication-overloaded".into();
+                }
+                let _ = backend.record_failure(&peer.name, status, &error.to_string(), Some(carrier), Some(&failure))
                     .await;
                 let delay = retry_delay(backoff.next(), &fleet, &name);
                 record_worker(
@@ -1760,6 +1772,7 @@ async fn receive_exchange<B: Backend>(
             let relay = relay.clone();
             tokio::spawn(crate::task_cpu::account("replication.exchange", async move {
                 let _permit = permit;
+                let started = std::time::Instant::now();
                 let result = async {
                     let received = state
                         .backend
@@ -1770,7 +1783,7 @@ async fn receive_exchange<B: Backend>(
                             None,
                             Default::default(),
                         )
-                        .await?;
+                        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
                     if received.changed {
                         state.backend.changed().await;
                         refresh_fleet_view(&state.backend, &state.fleet).await;
@@ -1788,12 +1801,14 @@ async fn receive_exchange<B: Backend>(
                             false,
                             &request.signature_requests,
                         )
-                        .await?;
+                        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))?;
 
                     Ok::<_, anyhow::Error>(response)
                 }
                 .await
-                .map_err(|error| format!("replication request failed: {error:#}"));
+                .map_err(|error| ReplicationExchangeFailure::from_error(
+                    &error, ReplicationFailurePhase::LocalReceive, started.elapsed(), None,
+                ));
                 done.send_replace(Some(result));
             }));
         }
@@ -1840,17 +1855,17 @@ async fn receive_exchange<B: Backend>(
                 .await
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Ok(Some(Err(message))) => {
+        Ok(Some(Err(failure))) => {
             // Let the next request retry a failed job. Reporting failure must never delay headers.
             finish_exchange_job(&state.fleet, &relay, &answer);
-            signed_error_response(
-                &state,
-                &request_digest,
-                0,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &message,
-            )
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            let response = signed_response(&state, &request_digest, 0, serde_json::json!({
+                "code": failure.code,
+                "failure": failure,
+            }));
+            response.map(|mut response| {
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
+            }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(None) => {
             finish_exchange_job(&state.fleet, &relay, &answer);
@@ -2291,9 +2306,10 @@ async fn exchange_inner<B: Backend>(
     // sending its whole inventory (a million identities, 228 MB, on a busy fleet). Ranges that
     // differ only by payloadless checkpoint identities never settle this way; checkpoint-lineage
     // reconciliation, not more envelope requests, settles those.
+    let attempt = std::time::Instant::now();
     let first = backend
         .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
-        .await?
+        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalExport, attempt, None))?
         .exchange;
     let own_checkpoint = first.inventory.checkpoint.clone();
     let query = ReplicationExchange {
@@ -2313,7 +2329,7 @@ async fn exchange_inner<B: Backend>(
             Some(round_trip),
             carrier,
         )
-        .await?;
+        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
     // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
     // or keeps being sent, envelopes that are never stored must not keep the worker busy.
@@ -2333,7 +2349,7 @@ async fn exchange_inner<B: Backend>(
                 false,
                 &remote.signature_requests,
             )
-            .await?
+            .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, attempt, None))?
             .exchange;
         let started = std::time::Instant::now();
         // A peer that says it takes compressed requests gets a large push compressed.
@@ -2352,7 +2368,7 @@ async fn exchange_inner<B: Backend>(
                 Some(round_trip),
                 carrier,
             )
-            .await?;
+            .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
         telemetry.pull(received.receipt.received);
         pulled_follow_up = received.receipt.received != 0;
         if received.changed {
@@ -2612,25 +2628,13 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     let response = request
         .send()
         .await
-        .with_context(|| {
-            format!(
-                "replication request to peer {} failed before headers within {} seconds at `{endpoint}`",
-                peer.name,
-                REPLICATION_EXCHANGE_TIMEOUT.as_secs()
-            )
-        })?;
+        .map_err(|error| exchange_failure(error.into(), ReplicationFailurePhase::RequestHeaders, started, None))?;
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response
         .bytes()
         .await
-        .with_context(|| {
-            format!(
-                "replication response body from peer {} failed after {} ms",
-                peer.name,
-                started.elapsed().as_millis()
-            )
-        })?
+        .map_err(|error| exchange_failure(error.into(), ReplicationFailurePhase::ResponseBody, started, Some(status)))?
         .to_vec();
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
     // Both signature names require authentication, including refusals. Switch senders only
@@ -2640,16 +2644,17 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     // A build older than a path answers an unsigned 404.
     if status == StatusCode::NOT_FOUND && unsigned {
-        anyhow::bail!("peer {} runs a build without `{path}`", peer.name);
+        return Err(exchange_failure(anyhow::anyhow!("peer build lacks the requested endpoint"), ReplicationFailurePhase::Verify, started, Some(status)));
     }
     // Any other refusal without the fleet's signature is reported by its status, before the
     // signature check would report only a missing header and hide why the exchange failed. Its
     // body is never trusted as data; an unsigned success still fails the signature check below.
     if !status.is_success() && unsigned {
-        anyhow::bail!(unsigned_refusal(&peer.name, status, &bytes));
+        return Err(exchange_failure(anyhow::anyhow!(unsigned_refusal(&peer.name, status, &bytes)), ReplicationFailurePhase::Verify, started, Some(status)));
     }
     let bytes = if deflated(&headers) {
-        inflate(&bytes, &format!("the answer to `{path}` from peer {}", peer.name))?
+        inflate(&bytes, &format!("the answer to `{path}` from peer {}", peer.name))
+            .map_err(|error| exchange_failure(error, ReplicationFailurePhase::ResponseBody, started, Some(status)))?
     } else {
         bytes
     };
@@ -2660,7 +2665,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
         &bytes,
         Some(&peer.name),
         Some(&request_digest),
-    )?;
+    ).map_err(|error| exchange_failure(error, ReplicationFailurePhase::Verify, started, Some(status)))?;
     if let Err(refusal) = fleet.accept(&responder) {
         anyhow::bail!(
             "peer {} failed member authentication ({}): {}",
@@ -2712,18 +2717,31 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
             }
             .into());
         }
-        anyhow::bail!(
-            "peer {} returned {status}: {}",
-            peer.name,
-            String::from_utf8_lossy(&bytes)
-        );
+        // Only authenticated, allowlisted machine codes survive. Never retain peer prose.
+        let safe_code = match code {
+            "replication-exchange-metadata-too-large" => "replication-exchange-metadata-too-large",
+            "replication-request-failed" => "replication-request-failed",
+            _ => "replication-peer-rejected",
+        };
+        return Err(ReplicationExchangeFailure {
+            code: safe_code.into(),
+            phase: refusal.as_ref()
+                .and_then(|value| serde_json::from_value(value["failure"]["phase"].clone()).ok())
+                .unwrap_or(ReplicationFailurePhase::ResponseBody),
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            http_status: Some(status.as_u16()),
+            cause: "authenticated peer rejected the exchange; body withheld".into(),
+        }.into());
     }
     let response: PeerResponse<R> =
-        serde_json::from_slice(&bytes).context("decode the signed peer response")?;
-    anyhow::ensure!(
-        response.api_version == PEER_API_VERSION,
-        "the peer API version differs"
-    );
+        serde_json::from_slice(&bytes).context("decode the signed peer response")
+            .map_err(|error| exchange_failure(error, ReplicationFailurePhase::Verify, started, Some(status)))?;
+    if response.api_version != PEER_API_VERSION {
+        return Err(exchange_failure(
+            anyhow::anyhow!("the peer API version differs"),
+            ReplicationFailurePhase::Verify, started, Some(status),
+        ));
+    }
     fleet.note_activity(&peer.name);
     Ok((response.value, accepts_deflate(&headers)))
 }
