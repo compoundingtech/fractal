@@ -1,4 +1,6 @@
+#![allow(unused_imports)]
 use super::*;
+
 
 fn append_runtime(store: &Store, subject: &str, status: &str) {
     store.append_claim(&ClaimInput {

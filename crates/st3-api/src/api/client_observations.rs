@@ -27,10 +27,10 @@ pub struct Validated {
     pub minute: MinuteSummary,
 }
 
-fn invalid(message: &'static str) -> ApiError {
+pub fn invalid(message: &'static str) -> ApiError {
     ApiError::bad(St3Error::new("validation-failed", message))
 }
-fn unavailable() -> ApiError {
+pub fn unavailable() -> ApiError {
     ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "internal".into(),

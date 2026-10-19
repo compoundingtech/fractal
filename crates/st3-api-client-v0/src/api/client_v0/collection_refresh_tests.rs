@@ -1,14 +1,18 @@
-//! Which windows a collection socket reads again, and when: only those whose inputs changed.
+#![allow(unused_imports)]
 use crate::PublishedViewsAttentionStore;
 use super::*;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
+
 
 type Reads = Arc<Mutex<BTreeMap<String, usize>>>;
 
 /// [`Fixture::open_with`]'s gate: reads refuse as not ready, read rows, or refuse as revoked.
 const NOT_READY: u8 = 0;
+
 const READY: u8 = 1;
+
 const REVOKED: u8 = 2;
 
 struct Fixture {
@@ -468,7 +472,7 @@ async fn assert_parity(fixture: &Fixture, session: &ClientSession, held: &BTreeM
 }
 
 fn custom_review_kind(store: &Store) {
-    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc1de6a179888 owner=st3_api::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h4e2bce3276a9 owner=st3_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/custom-review.json"
     )).unwrap();
     store.register_custom_kind(&crate::store::custom::RegistrationRequest {
@@ -681,7 +685,7 @@ async fn inventory_reconnect(
 }
 
 fn inventory_schema(frame: &Value) {
-    let schema: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h816a227fe63a owner=st3_api::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
+    let schema: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h759ea581df94 owner=st3_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
     ))
     .unwrap();
