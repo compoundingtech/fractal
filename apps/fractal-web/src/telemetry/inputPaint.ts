@@ -25,7 +25,7 @@ export interface InputPaintSample {
 const events = ['pointerdown', 'click', 'keydown', 'paste', 'focusin', 'focusout', 'resize', 'input'] as const
 // A control owns only its DOM, not sibling content, its React root or the page.
 const inputOwner = (target: EventTarget | null): Element | null => target instanceof Element
-  ? target.closest('button,a[href],input,textarea,select,[contenteditable="true"],[role="button"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="checkbox"],[role="radio"],[role="switch"],[role="option"],[role="combobox"],[role="spinbutton"],[role="slider"],[role="textbox"],[role="searchbox"]')
+  ? target.closest('button,a[href],input,textarea,select,[contenteditable="true"],[role="row"][data-sidebar-tree-key],[role="button"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="checkbox"],[role="radio"],[role="switch"],[role="option"],[role="combobox"],[role="spinbutton"],[role="slider"],[role="textbox"],[role="searchbox"]')
   : null
 const surface = (target: EventTarget | null): InputSurface => {
   if (!(target instanceof Element)) return 'other'

@@ -108,6 +108,10 @@ SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint
 Trusted inputs count only when an owned commit occurs during dispatch
 or its discrete React microtasks. Capture observes the initiating control, its
 `aria-controls`/`aria-owns` targets, and explicitly registered surface regions.
+Interactive sidebar rows (`role=row` with `data-sidebar-tree-key`) own only their
+row subtree and attributes. ArrowLeft/ArrowRight expansion therefore counts the
+row's `aria-expanded` change even when child rows mount as siblings; neither the
+treegrid nor its root is observed.
 The composer registers its own field and **only the final rendered transcript
 turn**. An optional kit `Transcript.tailRef` reports a newly mounted tail into
 the app-owned input window, so Send can count a new turn without observing the

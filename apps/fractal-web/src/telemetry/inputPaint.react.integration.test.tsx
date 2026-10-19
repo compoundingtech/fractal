@@ -38,7 +38,7 @@ const OwnedComposer = () => {
     createElement('div', { ref: dock }, createElement('textarea', { defaultValue: 'Message' }), createElement('button', { id: 'send', onClick: () => setSent((value) => value + 1) }, 'Send')),
   )
 }
-const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer = '', portal = false, captureNoop = false, appShell = false, scenario = '' } = {}) => {
+const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer = '', portal = false, captureNoop = false, appShell = false, scenario = '', treeExpanded = false } = {}) => {
   const frames = new Map<number, FrameRequestCallback>()
   const paints = new Set<() => void>()
   const samples: InputPaintSample[] = []
@@ -87,8 +87,21 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
   document.body.append(container, portalContainer, stream)
   const ingest = makeFrameIngest<string, string>({ write: ({ value }) => { stream.textContent = value } })
   const App = () => {
-    const [count, setCount] = useState(0)
+    const [count, setCount] = useState(treeExpanded ? 1 : 0)
     if (scenario === 'send') return createElement(OwnedComposer)
+    // SidebarTree's capture handler toggles the focused row and stops native propagation.
+    // Children are siblings here, so only the row's aria-expanded can establish ownership.
+    if (scenario === 'tree') return createElement('div', { role: 'treegrid', id: 'tree', onKeyDownCapture: (event: React.KeyboardEvent) => {
+      if ((event.target as Element).getAttribute('role') !== 'row') return
+      if (event.key === 'ArrowRight') setCount(1)
+      else if (event.key === 'ArrowLeft') setCount(0)
+      else return
+      event.preventDefault()
+      event.stopPropagation()
+    } },
+      createElement('div', { role: 'row', id: 'tree-row', tabIndex: 0, 'data-sidebar-tree-key': 'folder', 'aria-expanded': count !== 0 }, 'Folder'),
+      count === 0 ? null : createElement('div', { role: 'row', 'data-sidebar-tree-key': 'child', id: 'tree-child' }, 'Child'),
+    )
     if (scenario === 'menu') return createElement('div', {},
       createElement('button', { id: 'menu', onClick: () => setCount((value) => value + 1) }, 'Open'),
       createElement(RegisteredPortal, { container: portalContainer, children: count === 0 ? null : createElement('div', { role: 'menu' }, 'Opened') }),
@@ -136,12 +149,17 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
     trusted.add(event)
     document.querySelector(id)!.dispatchEvent(event)
   }
+  const key = (id: string, value: string) => {
+    const event = new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true })
+    trusted.add(event)
+    document.querySelector(id)!.dispatchEvent(event)
+  }
   const frame = async () => {
     for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(performance.now())
     await Promise.resolve()
     for (const callback of [...paints]) callback()
   }
-  return { samples, click, frame, ingest, stream, reactRoots, portalContainer, registerPortal, unmount: () => flushSync(() => root.unmount()) }
+  return { samples, click, key, frame, ingest, stream, reactRoots, portalContainer, registerPortal, unmount: () => flushSync(() => root.unmount()) }
 }
 it('attributes React createRoot discrete commits flushed in a microtask', async () => {
   const run = setup()
@@ -278,4 +296,24 @@ it('records a menu trigger whose only commit opens a registered portal, using ch
   expect(run.portalContainer.textContent).toBe('Opened')
   expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
   expect(observed.mock.calls.find(([target]) => target === run.portalContainer)?.[1]).toEqual({ childList: true })
+})
+
+it.each([
+  { key: 'ArrowRight', expanded: false, after: 'true' },
+  { key: 'ArrowLeft', expanded: true, after: 'false' },
+])('records $key tree expansion via row attributes while observing only the interactive row', async ({ key, expanded, after }) => {
+  const observed = vi.spyOn(MutationObserver.prototype, 'observe')
+  const run = setup({ scenario: 'tree', treeExpanded: expanded })
+  const row = document.querySelector('#tree-row')!
+  run.key('#tree-row', key)
+  await Promise.resolve(); await Promise.resolve()
+  expect(row.getAttribute('aria-expanded')).toBe(after)
+  expect(row.textContent).toBe('Folder')
+  expect(document.querySelector('#tree-child') !== null).toBe(after === 'true')
+  expect(row.querySelector('#tree-child')).toBeNull()
+  await run.frame()
+  expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
+  expect(run.samples[0]?.attributes).toMatchObject({ 'input.kind': 'key', surface: 'agents' })
+  expect(observed.mock.calls.map(([target]) => target)).toEqual([row])
+  expect(observed.mock.calls[0]?.[1]).toMatchObject({ subtree: true, attributes: true, attributeOldValue: true })
 })
