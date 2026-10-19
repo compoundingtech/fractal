@@ -210,12 +210,15 @@ export const RowActions: Story = {
     await expect(menu).toHaveTextContent('Reported agent details')
     await userEvent.click(within(menu).getByRole('menuitem', { name: 'Open conversation' }))
     await waitFor(() => expect(host).toHaveAttribute('data-opened', parent.ref))
+    await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
     // Reported details open as a dialog from the menu.
     await userEvent.click(gear)
     const again = await waitFor(() => { const element = document.querySelector<HTMLElement>('[role="menu"]'); expect(element).not.toBeNull(); return element! })
     await userEvent.click(within(again).getByRole('menuitem', { name: 'Reported agent details' }))
     await waitFor(() => expect(document.querySelector(`[role="dialog"][aria-label="Reported details for ${parent.title}"]`)).not.toBeNull())
+    await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
     await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
     const child = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(row => row.textContent?.includes(noSessionChild.title) && row.closest('[inert]') === null)!
     for (const keyboard of [false, true]) {
       if (keyboard) {
@@ -223,7 +226,7 @@ export const RowActions: Story = {
         // A keyboard context-menu event targets the focused tree row, not its inner painted frame.
         child.closest<HTMLElement>('[role="row"]')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 0 }))
       } else await userEvent.click(child.querySelector<HTMLElement>('[data-agent-menu]')!)
-      const childMenu = await waitFor(() => { const element = document.querySelector<HTMLElement>('[role="menu"]'); expect(element).not.toBeNull(); return element! })
+      const childMenu = await waitFor(() => within(document.body).getByRole('menu', { name: `Actions for ${noSessionChild.title}`, exact: true }))
       await expect(within(childMenu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAttribute('aria-disabled', 'true')
       await expect(childMenu).toHaveTextContent('No session reported for this subagent')
       const reason = within(childMenu).getByText('No session reported for this subagent')
@@ -232,6 +235,7 @@ export const RowActions: Story = {
       await expect(within(childMenu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAccessibleDescription('No session reported for this subagent')
       await userEvent.click(within(childMenu).getByRole('menuitem', { name: 'Reported agent details' }))
       await waitFor(() => expect(document.querySelector(`[role="dialog"][aria-label="Reported details for ${noSessionChild.title}"]`)).not.toBeNull())
+      await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
       await userEvent.keyboard('{Escape}')
       await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
     }
