@@ -1298,6 +1298,7 @@ export type ErrorCode = (
   | "cursor-gap"
   | "page-cursor-expired"
   | "agent-roster-cut-not-ready"
+  | "message-selectors-not-ready"
   | "rate-limited"
   | "runtime-not-local"
   | "runtime-authority-indeterminate"

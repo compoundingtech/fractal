@@ -6,8 +6,8 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use ring::aead;
 use std::io::Read as _;
 use std::sync::LazyLock;
-pub use st3_api::api::client_v0::conversation_blocks::*;
-pub use st3_api::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, legacy, prepare, prepare_one, read, read_slice, source};
+pub use st3_api_core::api::client_v0::conversation_blocks::*;
+pub use st3_api_core::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, legacy, prepare, prepare_one, read, read_slice, source};
 #[cfg(test)]
 mod conformance_tests;
 
@@ -44,13 +44,8 @@ pub async fn chunk(
     Query(query): Query<ChunkQuery>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
-    let session_id = conversation_session_id(&state, &id)?;
-    if let Some(owner) = conversation_owner_host(
-        &state,
-        &session,
-        &session_id,
-        id.starts_with("agent/").then_some(id.as_str()),
-    )? {
+    let (session_id, resolved) = resolve_conversation(&state, &id)?;
+    if let Some(owner) = conversation_owner_host(&state, &session, resolved.managed.as_ref())? {
         let value = state
             .client_relay
             .as_ref()
@@ -101,7 +96,7 @@ pub async fn chunk_local(
             let source = if native {
                 locator.source.session(&request_session)
             } else {
-                source(&request_state, &request_session)?
+                source(&request_state, &request_session, super::super::managed_session_owner_at(&request_state.store, request_state.store.index().map_err(ApiError::internal)?, &request_session).map_err(ApiError::internal)?.as_ref())?
             };
             let value = located_value(&source, &locator)?;
             let result = if locator.image {
@@ -118,7 +113,7 @@ pub async fn chunk_local(
             let rebound = if native {
                 source
             } else {
-                self::source(&request_state, &request_session)?
+                self::source(&request_state, &request_session, super::super::managed_session_owner_at(&request_state.store, request_state.store.index().map_err(ApiError::internal)?, &request_session).map_err(ApiError::internal)?.as_ref())?
             };
             if basis(&rebound)? != locator.basis {
                 return Err(invalidated());
@@ -1828,7 +1823,7 @@ mod tests {
         // With discovery disabled, source() cannot find even this session. An issued ref
         // must still fetch the pinned record directly, independent of other sessions.
         assert!(state.native_session_home.is_none());
-        assert!(source(&state, &native.id).is_err());
+        assert!(source(&state, &native.id, None).is_err());
         let mut session = ClientSession::local(Some("person/example")).unwrap();
         session.conversation_blocks = true;
         let page = read(&native, &session, &native.id).unwrap();

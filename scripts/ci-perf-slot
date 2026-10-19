@@ -246,7 +246,8 @@ def run(args):
         signal.signal(number, lambda received, _frame: stopping.append(received))
     owner = os.getpid()
     child = subprocess.Popen(args.command, start_new_session=True,
-                             env={**os.environ, 'ST_PERF_SLOT_HELD': str(os.getpid())})
+                             env={**os.environ, 'FRACTAL_PERF_SLOT_HELD': str(owner),
+                                  'ST_PERF_SLOT_HELD': str(owner)})
     gate_read, gate_write = os.pipe()
     guard = os.fork()
     if guard == 0:

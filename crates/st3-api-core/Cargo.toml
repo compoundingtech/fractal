@@ -1,5 +1,5 @@
 [package]
-name = "st3-api"
+name = "st3-api-core"
 version = "0.1.0"
 edition = "2024"
 description = "the HTTP API: the daemon's routes, the client-v0 contract and the request-latency windows"
@@ -26,6 +26,7 @@ kdl = "6"
 libc = "0.2"
 libghostty-vt = "=0.2.1"
 notify = "8"
+parking_lot = "0.12"
 opentelemetry = "0.30"
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
@@ -53,7 +54,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
-st3_api_self = { package = "st3-api", path = ".", features = ["test-support"] }
+st3_api_core_self = { package = "st3-api-core", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
 jsonschema = { version = "0.33", default-features = false }
