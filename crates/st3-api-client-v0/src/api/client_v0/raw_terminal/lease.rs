@@ -6,8 +6,8 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use std::sync::{LazyLock, Mutex};
 use tokio::time::Instant;
 pub use crate::peer::{RAW_ORIGIN_HEADER as ORIGIN_HEADER, RawLeaseBinding as Binding};
-pub use st3_api::api::client_v0::raw_terminal::lease::*;
-pub use st3_api::api::client_v0::raw_terminal::lease::{ABSOLUTE, Clock, Control, IDLE, Lease, MembershipAuthority, WATCH, authorization_epoch};
+pub use st3_api_core::api::client_v0::raw_terminal::lease::*;
+pub use st3_api_core::api::client_v0::raw_terminal::lease::{ABSOLUTE, Clock, Control, IDLE, Lease, MembershipAuthority, WATCH, authorization_epoch};
 
 #[cfg(test)]
 mod tests {

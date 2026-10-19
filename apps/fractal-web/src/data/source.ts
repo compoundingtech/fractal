@@ -271,6 +271,8 @@ export interface DataSource {
   readonly agents: Atom.Atom<Feed<readonly DecodedAgent[]>>
   /** Rows the SDK could not decode for the agents feed; absent sources decode every row. */
   readonly rosterDecode?: Atom.Atom<RosterDecode>
+  /** Explicit recovery for a failed or ended roster follow; a healthy follow is untouched. */
+  readonly retryAgents?: () => void
   readonly missions: Atom.Atom<Feed<readonly Mission[]>>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>

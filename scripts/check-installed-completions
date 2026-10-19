@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
 # Usage: check-installed-completions ST3_PACKAGE
 #
 # Checks the completion stubs an installed st3 package ships (docs/st3/cli-completion/spec.md):
@@ -18,9 +20,10 @@ done
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 export HOME=$scratch XDG_CONFIG_HOME=$scratch/config XDG_STATE_HOME=$scratch/state
-export ST3_ENDPOINT=$scratch/absent.sock
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_ENDPOINT=$scratch/absent.sock ST3_ENDPOINT=$scratch/absent.sock
 export PATH="$package/bin:$PATH"
-unset ST_AGENT COMPLETE
+unset FRACTAL_AGENT ST_AGENT COMPLETE
 
 fish_out=$(fish --no-config -c "source '$fish_stub'; complete -C 'st terminals att'")
 grep -q '^attach' <<<"$fish_out" || {

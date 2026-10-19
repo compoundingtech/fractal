@@ -1128,6 +1128,7 @@ export const liveSource = ({
       },
       agents,
       rosterDecode,
+      retryAgents: () => agentsRetained.retry(),
       missions,
       attention,
       conversation,

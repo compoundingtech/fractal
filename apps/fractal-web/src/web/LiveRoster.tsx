@@ -2,7 +2,6 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import type { Undecodable } from '@st3/sdk/effect'
-import { SystemNotice } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { Feed, Fleet, RosterDecode } from '../data/source.ts'
 
@@ -66,34 +65,9 @@ export function RosterDecodeNotice({ decode, shown }: {
   )
 }
 
-/** The sidebar rail's one availability or freshness notice, then the decode notice for rows it could not show. */
-export function RosterStatus({ fleet, stale, decode }: {
-  readonly fleet: Feed<Fleet>
-  readonly stale: boolean
-  readonly decode: RosterDecode
-}) {
-  const shown = React.useMemo(
-    () => new Set(fleet._tag === 'Observed' ? fleet.value.agents.map((agent) => agent.ref) : []),
-    [fleet],
-  )
-  return (
-    <>
-      {fleet._tag !== 'Observed' ? (
-        <SystemNotice
-          scope="rail"
-          kind={fleet._tag === 'Waiting' ? 'loading' : 'error'}
-          connection={fleet._tag === 'Unavailable' && fleet.reason !== 'ungranted' && fleet.reason !== 'unsupported'}
-          title={fleet._tag === 'Waiting' ? 'Loading agents' : fleet.reason === 'ungranted' ? 'No access to the agent roster' : fleet.reason === 'unsupported' ? 'Agent roster not supported' : 'Agent roster could not load'}
-          {...(fleet._tag === 'Unavailable' && fleet.reason === 'unsupported' ? { detail: 'This connection does not offer it' } : fleet._tag === 'Unavailable' && fleet.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : {})}
-          data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined}
-        />
-      ) : stale ? (
-        <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" data-wf-roster-stale={decode.decodeStale ? 'decode' : 'sync'} />
-      ) : null}
-      {fleet._tag === 'Observed' ? <RosterDecodeNotice decode={decode} shown={shown} /> : null}
-    </>
-  )
-}
+/** The refs of the agents the roster shows, which decide which undecodable rows are still hidden. */
+export const shownRosterRefs = (fleet: Feed<Fleet>): ReadonlySet<string> =>
+  new Set(fleet._tag === 'Observed' ? fleet.value.agents.map((agent) => agent.ref) : [])
 
 const styles = stylex.create({
   notice: { padding: s.lg, fontSize: t.metaSize, color: c.fgMuted },

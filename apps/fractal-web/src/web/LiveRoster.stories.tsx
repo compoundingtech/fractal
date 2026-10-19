@@ -7,7 +7,8 @@ import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/s
 import { lightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { fleetFromAgents } from '../data/projections.ts'
 import { observed, type Feed, type Fleet, type RosterDecode } from '../data/source.ts'
-import { RosterStatus, rosterDecodeNotice } from './LiveRoster.tsx'
+import { RosterDecodeNotice, rosterDecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
+import { RosterStaleNotice } from './SidebarEmptyState.tsx'
 
 /** Synthetic old-literal snapshot; every other row is a single-field variant of it. */
 const wire = oldLiteral.items[0]!
@@ -56,7 +57,10 @@ const Roster = ({ scenario, scheme }: { readonly scenario: keyof typeof scenario
   const { fleet, decode, stale } = scenarios[scenario]
   return (
     <aside aria-label="Agents" data-scheme={scheme} {...stylex.props(styles.sidebar, ...(scheme === 'light' ? lightTheme : []))}>
-      <RosterStatus fleet={fleet} stale={stale} decode={decode} />
+      {fleet._tag === 'Observed' ? <>
+        {stale ? <RosterStaleNotice decodeStale={decode.decodeStale} observedAt={undefined} partial={fleet.coverage?._tag === 'Partial'} refreshFailed={false} onRetry={undefined} /> : null}
+        <RosterDecodeNotice decode={decode} shown={shownRosterRefs(fleet)} />
+      </> : null}
     </aside>
   )
 }
@@ -141,7 +145,7 @@ export const AllBadStale: Story = {
     expect(agentRefs('allBad')).toEqual([wire.id, futureUsageRef])
     const staleMarker = canvasElement.querySelector<HTMLElement>('[data-wf-roster-stale]')
     expect(staleMarker?.dataset.wfRosterStale).toBe('decode')
-    expect(staleMarker?.textContent).toBe('Last observed roster')
+    expect(staleMarker?.textContent).toBe('Last observed list')
 
     const notices = canvasElement.querySelectorAll<HTMLElement>('[data-wf-roster-decode]')
     expect(notices).toHaveLength(1)
