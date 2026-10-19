@@ -361,13 +361,34 @@ pub fn enrich_responses(
             continue;
         };
         if from_origin {
-            view.constraints.push(format!("Person response: {summary}"));
+            let mut constraint = format!("Person response: {summary}");
+            if let Some(sender_class) = fields["sender_class"].as_str() {
+                constraint.push_str(" [sender_class: ");
+                constraint.push_str(sender_class);
+                constraint.push(']');
+            }
+            if let Some(grant) = fields["assistant_grant_id"].as_str() {
+                constraint.push_str(" [assistant_grant_id: ");
+                constraint.push_str(grant);
+                constraint.push(']');
+            }
+            view.constraints.push(constraint);
         }
         view.person_answers.push(crate::model::PersonAnswerView {
             acted_for: fields
                 .get("acted_for")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            sender_class: fields
+                .get("sender_class")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            assistant_grant_id: fields
+                .get("assistant_grant_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            assistant_owner: fields.get("assistant_owner").and_then(Value::as_str).map(str::to_owned),
+            assistant_session_actor: fields.get("assistant_session_actor").and_then(Value::as_str).map(str::to_owned),
             ask,
             status: fields["status"].as_str().unwrap_or("completed").into(),
             summary: summary.into(),

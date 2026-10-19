@@ -959,6 +959,24 @@ What only exists or only means something with them:
 - Tests already behind `#[cfg(debug_assertions)]` (`ding/tests.rs`, `empty_authority_guard.rs`)
   run only in the assertions profile.
 
+### Daily long lanes
+
+`daily-long.yml` runs the long lanes once a day on `main` (05:07 UTC, and on dispatch): the
+lanes that need a VM, real sockets across daemon restarts, or an older st3. Today those are
+`isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat`, plus the shared test
+producer they consume. Each runs exactly as Workspace CI runs it, because both workflows build
+the jobs from the same steps (`testArchiveProducer`, `isolationVmSteps` and `linuxStageJob` in
+`.github/workflows/workspace-ci.ts`). The run uses Namespace at the lowest job priority. It has
+no `pick-runner`, because that job reads a secret, and it does no evidence signing. It writes no
+dependency cache that the warm-up jobs own. Its checks are named `daily-*`, so nothing on `main`
+looks like a required check.
+
+The `daily-report` job (`scripts/ci-daily-long-report`) writes each lane's result, time, longest
+step and failed steps to the run summary. On red, it opens or comments on the one open issue
+titled `Daily long-lane run failed`. The workflow is not a required check and changes no pull
+request or merge-group check. A lane leaves the required set only after this run is green and the
+contract test that replaces it per pull request exists; that is a ruleset change, made separately.
+
 ### Compiler-cache measurement
 
 `python3 scripts/sccache-evidence capture` reads an already-running Linux sccache
@@ -1296,6 +1314,7 @@ repo-settings changes have merged.
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
+| `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 
