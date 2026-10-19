@@ -30,7 +30,6 @@ use tracing::Instrument as _;
 pub mod published_runtimes;
 
 /// Socket ownership ends this root only after the first data frame reaches the client.
-
 pub async fn first_frame_work<F: Future>(span: Option<tracing::Span>, work: F) -> F::Output {
     match span {
         Some(span) => work.instrument(span).await,
