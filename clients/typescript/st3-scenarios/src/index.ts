@@ -40,6 +40,7 @@ export type WorldId =
   | 'failed-sync-subscription-error'
   | 'failed-sync-subscription-limit-legacy'
   | 'failed-sync-capability-absent'
+  | 'failed-sync-arrangements-absent'
   | 'failed-sync-rate-limited'
   | 'failed-sync-cursor-gap'
   | 'failed-sync-page-cursor-expired'
