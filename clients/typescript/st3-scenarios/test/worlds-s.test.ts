@@ -33,7 +33,11 @@ describe.each(definitions)('$id', (definition) => {
         const slice = world.slices[kind]
         expect(decodeSlice(world.id, slice)).toEqual([])
         for (const event of slice.timeline) expect(decodeSlice(world.id, foldSlice(slice, event.at_ms) as AnySlice)).toEqual([])
-        if (kind !== 'sync') expect(slice).toEqual(fleet.slices[kind])
+        if (kind === 'roster') {
+          const { arrangements, ...state } = fleet.slices.roster.state
+          expect(arrangements).toHaveLength(1)
+          expect(slice).toEqual({ ...fleet.slices.roster, state })
+        } else if (kind !== 'sync') expect(slice).toEqual(fleet.slices[kind])
       }
       expect(world.slices.sync.variant).toBe(definition.selected?.sync)
       expect(world.slices.sync.state.expected.length).toBeGreaterThan(0)

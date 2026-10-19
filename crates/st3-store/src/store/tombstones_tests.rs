@@ -783,6 +783,7 @@ fn a_trim_never_makes_a_write_wait_long() {
         let chunks = 3;
         assert!(plan.envelopes.len() > 2 * chunks * per_chunk, "{}", plan.envelopes.len());
         store.set_trim_row_cost(cost);
+        store.set_trim_pause(std::time::Duration::ZERO);
         store.set_trim_fault(Some(TrimFault::AfterChunk(chunks)));
         let mut actions = Vec::new();
         assert!(

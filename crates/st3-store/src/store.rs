@@ -156,7 +156,7 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{
-    CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
+    CHECKPOINT_SPACE_GATE_VERSION, CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT,
     CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction,
     CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest,
     CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage,
@@ -3616,11 +3616,11 @@ impl Store {
         input: &ClaimInput,
         desired_revision: &str,
         current: &(dyn Fn() -> bool + Sync),
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<(ClaimRecord, bool), St3Error> {
         append_claim_with_subject_fences(
             &self.graph, input, None, None, None,
             Some((&input.subject, desired_revision, current)),
-        ).map(|(claim, _)| claim)
+        )
     }
 
     pub fn append_claim_outcome(
@@ -9176,10 +9176,45 @@ pub fn append_claim_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    append_claim_tx_with_assistant_answer(transaction, origin, subject, kind, actor, body, predecessors, forced_batch, None)
+}
+
+/// A notification produced by an assistant answer stays in the answer's writer transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn append_claim_tx_with_assistant_answer(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    body: &Value,
+    predecessors: &[String],
+    forced_batch: Option<&str>,
+    authorization: Option<&assistant_write::AssistantWriteAuthorization>,
+) -> Result<ClaimRecord> {
+    let mut assistant_body;
+    let body = if let Some(authorization) = authorization {
+        if kind != "message.sent" || actor != Some("assistant/chatgpt")
+            || authorization.scope != "write.assistant.answers"
+        {
+            return Err(anyhow::anyhow!("assistant answer authorization does not bind this notification"));
+        }
+        let grant_id = assistant_write::authorize_grant(transaction, origin, authorization)
+            .map_err(anyhow::Error::new)?;
+        assistant_body = body.clone();
+        assistant_body["fields"]["from"] = json!("assistant/chatgpt");
+        assistant_body["fields"]["sender_class"] = json!("external-assistant");
+        assistant_body["fields"]["assistant_grant_id"] = json!(grant_id);
+        assistant_body["fields"]["assistant_owner"] = json!(authorization.owner);
+        assistant_body["fields"]["assistant_session_actor"] = json!(authorization.actor);
+        &assistant_body
+    } else { body };
     let fields = body.get("fields").unwrap_or(body);
-    assistant_write::refuse_unverified(kind, actor, fields.get("from").and_then(Value::as_str),
-        ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| fields.get(*key).is_some()))
-        .map_err(anyhow::Error::new)?;
+    if authorization.is_none() {
+        assistant_write::refuse_unverified(kind, actor, fields.get("from").and_then(Value::as_str),
+            ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| fields.get(*key).is_some()))
+            .map_err(anyhow::Error::new)?;
+    }
     // Daemon notifications already inside a larger transaction use the same admission seam
     // as API sends. Replication inserts authenticated history through its separate import path.
     if kind == retirements::KIND {

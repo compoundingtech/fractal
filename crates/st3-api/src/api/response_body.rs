@@ -244,13 +244,13 @@ fn error_value(code: &str, error: impl std::fmt::Display) -> Vec<u8> {
         .expect("an error code and message serialize")
 }
 
-struct Encoded {
+pub struct Encoded {
     body: Body,
     len: usize,
     rows: Option<usize>,
 }
 
-fn frame(metadata: Value, raw: Bytes, rows: Option<usize>) -> Encoded {
+pub fn frame(metadata: Value, raw: Bytes, rows: Option<usize>) -> Encoded {
     let mut prefix = serde_json::to_vec(&metadata).expect("envelope metadata serializes");
     assert_eq!(prefix.pop(), Some(b'}'));
     prefix.extend_from_slice(b",\"value\":");
@@ -268,7 +268,7 @@ fn frame(metadata: Value, raw: Bytes, rows: Option<usize>) -> Encoded {
 }
 
 // Exact byte length like Full, without joining the payload to the framing bytes.
-struct Frames {
+pub struct Frames {
     frames: std::array::IntoIter<Bytes, 3>,
     remaining: usize,
 }
