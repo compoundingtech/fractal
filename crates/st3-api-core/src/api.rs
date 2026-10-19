@@ -1757,7 +1757,7 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
     })
 }
 
-fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
+pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
     if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
@@ -3096,7 +3096,7 @@ pub fn client_agent_resources_uncached(
     client_agent_resources_from_status(store, history, snapshot_index, None, status)
 }
 
-fn client_agent_resources_selected(
+pub fn client_agent_resources_selected(
     store: &Store,
     history: bool,
     snapshot_index: u64,

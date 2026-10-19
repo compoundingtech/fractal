@@ -17,6 +17,13 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("agents-rich", "read.assistant.agents"),
     ("missions", "read.assistant.missions"), ("agents", "read.assistant.agents"),
     ("conversation-content", "read.assistant.conversation"),
+    ("conversations", "read.assistant.conversation"),
+    ("conversation-detail", "read.assistant.conversation"),
+    ("conversation-timeline", "read.assistant.conversation"),
+    ("conversation-search", "read.assistant.conversation"),
+    ("mission-detail", "read.assistant.missions"),
+    ("work", "read.assistant.work"), ("work-detail", "read.assistant.work"),
+    ("agent-detail", "read.assistant.agents"), ("agent-queue", "read.assistant.agents"),
     ("terminal-content", "read.assistant.terminal"),
 ];
 

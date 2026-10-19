@@ -41,6 +41,18 @@ const CONVERSATION_CHANGED: &str = "SELECT
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
+// Seek once per distinct agent rather than grouping or collecting the whole owner set.
+pub const ASSISTANT_OWNER_IDS_PAGE: &str = "WITH RECURSIVE names(subject) AS (
+    SELECT (SELECT subject FROM claims INDEXED BY claims_subject_index
+            WHERE subject>COALESCE(?2,'agent.') AND subject>='agent/' AND subject<'agent0'
+              AND store_index<=?1 ORDER BY subject LIMIT 1)
+    UNION ALL
+    SELECT (SELECT subject FROM claims INDEXED BY claims_subject_index
+            WHERE subject>names.subject AND subject<'agent0' AND store_index<=?1
+            ORDER BY subject LIMIT 1)
+    FROM names WHERE subject IS NOT NULL LIMIT ?3
+) SELECT subject FROM names WHERE subject IS NOT NULL";
+
 /// SQL text is fixed by the schema registry, not by the conversation or its history.
 static IDENTITY_FIELD_READS: std::sync::LazyLock<[String; 2]> = std::sync::LazyLock::new(|| {
     ["runtime_id", "incarnation_id"].map(|field| {
@@ -102,6 +114,14 @@ pub trait ConversationReadsStore {
     /// are folded on subsequent reads. No lock or SQLite transaction spans the whole build,
     /// native transcript I/O, display preparation, or a long-poll wait.
     fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>>;
+    /// Lexicographic agent discovery at a claim frontier, including one lookahead entry.
+    /// Only selected subjects are folded; no whole-map cache is built or copied.
+    fn assistant_conversation_owners_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<(String, Owner)>>;
     /// Preserve the existing newest-10,000 fleet-send window, but read payloads only for the
     /// selected endpoint and (for replay) after its cursor. Wrapped sends use existing endpoint
     /// indexes; partial indexes cover legacy root bodies.
@@ -273,6 +293,29 @@ impl ConversationReadsStore for Store {
             cache.pop_front();
         }
         Ok(owners)
+    }
+
+    fn assistant_conversation_owners_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<(String, Owner)>> {
+        selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
+        let connection = self.readers.get();
+        let ids = connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7df9756c9e8a owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ ASSISTANT_OWNER_IDS_PAGE)?
+            .query_map(params![through, after, limit.saturating_add(1)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .filter_map(|subject| {
+                conversation_owner_from_connection(&connection, &subject, through)
+                    .transpose()
+                    .map(|owner| owner.map(|owner| (owner.subject.clone(), owner)))
+            })
+            .collect()
     }
 
     fn conversation_messages_at(

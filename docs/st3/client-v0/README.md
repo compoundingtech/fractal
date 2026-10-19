@@ -1346,7 +1346,7 @@ and does not substitute ordinary person grants on older servers.
 
 The original slice-B proof-gated mode remains a legacy branch capability; the standalone
 adapter does not use it, does not send its proof header, and has no SCG dependency.
-In consent-at-grant mode, the same six scoped reads authorize against the current grant on
+In consent-at-grant mode, the same scoped assistant reads authorize against the current grant on
 every request and revalidate it immediately before returning the response. Envelope budgets
 default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
 `response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
@@ -1372,17 +1372,85 @@ binding. Revocation between handler preflight and the writer transaction denies 
 write. Agent recipient existence remains required; allowlist membership is not checked.
 
 `crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
-Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
+Both transports use the same seventeen closed tools and paired-only `st3-client.sock` gateway.
 The adapter holds only a scoped bearer, never an approval key. The current HTTP frontend is
 loopback/no-auth for the recorded personal-tunnel dogfood exception; OAuth is the next
 frontend-auth boundary and does not alter tool arguments or daemon grants. No generic command
 runner, daemon-control socket, or terminal scraping is exposed. `GET /mcp` is 405; unknown
 paths return an empty 404.
 
+### ChatGPT read tools
+
+All routes below are GETs under `/v1/client/assistant/`; none uses an ordinary person route.
+Every input schema is closed (`additionalProperties: false`). All reads accept optional
+`max_response_bytes` (integer 1–16384); the 4096-byte default and 16384-byte ceiling cover the
+entire response envelope, and deployment policy may lower them. Paginated reads accept optional
+`cursor` and positive integer `limit`, preserve `value.items` / `value.page.next_cursor`, and never auto-fetch.
+
+| MCP tool | Route | Required fields | Other optional fields | Scope |
+| --- | --- | --- | --- | --- |
+| `st_status_summary` | `summary` | — | — | `read.assistant.summary` |
+| `st_alerts_list` | `attention-rich` | — | `cursor`, `limit` | `read.assistant.attention` |
+| `st_alert_get` | `attention-content` | `alert_id` | — | `read.assistant.attention` |
+| `st_missions_list` | `missions-rich` | — | `cursor`, `limit` | `read.assistant.missions` |
+| `st_agents_list` | `agents-rich` | — | `cursor`, `limit` | `read.assistant.agents` |
+| `st_conversations_list` | `conversations` | — | `cursor`, `limit` | `read.assistant.conversation` |
+| `st_conversation_detail` | `conversation-detail` | `agent_id` | — | `read.assistant.conversation` |
+| `st_conversation_timeline` | `conversation-timeline` | `agent_id` | `session_id`, `cursor`, `limit` | `read.assistant.conversation` |
+| `st_conversation_search` | `conversation-search` | `text` | `agent_id`, `cursor`, `limit` | `read.assistant.conversation` |
+| `st_mission_detail` | `mission-detail` | `mission_id` | — | `read.assistant.missions` |
+| `st_work_list` | `work` | — | `cursor`, `limit` | `read.assistant.work` |
+| `st_work_detail` | `work-detail` | `work_id` | — | `read.assistant.work` |
+| `st_agent_detail` | `agent-detail` | `agent_id` | — | `read.assistant.agents` |
+| `st_agent_queue` | `agent-queue` | `agent_id` | `cursor`, `limit` | `read.assistant.agents` |
+| `st_conversation_read` | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end` | — | `read.assistant.conversation` |
+
+Conversation discovery is self-contained: `st_conversations_list` returns
+`value.items[].agent_id`, `session_id`, `current_session_id`, and `read`. Copy the
+same item's `agent_id` and `session_id` into `st_conversation_timeline` to select
+that discovered session, rather than guessing identifiers or implicitly following
+a newly current session. A non-null `read` object contains exactly the six required
+`st_conversation_read` arguments: `agent_id`, `session_id`, `reference`, `revision`,
+`start`, and `end`. Pass that object unchanged for a direct discovery-to-content
+read. `read: null` means the bounded current timeline page supplies no readable text handle;
+use the returned agent/session identifiers to page its timeline.
+
+Timeline pages also return `value.items[].read` handles; pass a non-null handle
+unchanged to `st_conversation_read`. The revision pins the source and `start` /
+`end` specify the bounded range. Pagination cursors are separate:
+`value.page.next_cursor` continues the tool that produced it and is never a content
+`reference`. Content handles require the conversation grant even though discovery
+contains no conversation text.
+Work and conversation discovery use source-level keyset pages: a default of 10,
+maximum of 50 candidates, plus one lookahead. They project only that selected slice,
+and stop before the complete response envelope would exceed `max_response_bytes`.
+The cursor resumes after the last consumed source key, not after the requested
+limit, so byte-limited pages neither skip nor repeat items. A single item that
+cannot fit produces an error naming the item. Work visibility is evaluated at each
+page's current store cut; conversation membership uses the cursor's pinned cut.
+Cursors retain the initial envelope snapshot and bind the projection, grant policy,
+page limit and expiry. Changing work visibility may yield a sparse or empty page
+with a continuation; callers must follow `value.page.next_cursor` until absent.
+
+The remaining two tools are the explicitly scoped writes `st_alert_answer` and `st_message_send`.
+Registering a tool never expands the sealed grant: baseline grants do not include
+`read.assistant.conversation` or `read.assistant.work`; the owning person must add them explicitly.
+New detail projections return only allowlisted operational fields, never environment, secrets,
+workspace paths, or terminal content. The existing exact-range `st_conversation_read` contract is
+unchanged, and approved conversation disclosure can contain sensitive material. Exclusions are
+structural: workspace/declaration/tool metadata and raw tool payloads are not disclosed, while
+authorized prose may itself mention paths. Search snippets use the matched entry's safe plain
+native text, not raw tool payloads; no path-string redaction is promised. Read-only MCP
+annotations are not additional authority and do not authorize writes. See
+[External assistants](../external-assistants.md) for disclosure and proof-mode requirements.
+
 The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
 Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
 `nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
+
+Targeted adapter tests (including discovery → timeline / content chaining):
+`nix develop -c cargo test -p st-chatgpt`.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 

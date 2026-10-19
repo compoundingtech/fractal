@@ -1594,6 +1594,20 @@ pub trait MissionsStore {
         ) -> Result<Vec<StepRunView>>;
     /// Native lease polling needs only current held claims, never list presentation or timing.
     fn work_for_renewal(&self, actor: &str) -> Result<Vec<StepRunView>>;
+    /// Source-bounded current-generation candidates in subject order, with one lookahead ID.
+    ///
+    /// Hydrate only selected IDs with `work_at_snapshot_selected` at the supplied time
+    /// to omit effectively cancelled asks and non-working revision-draining steps.
+    /// Advance the cursor over candidates even when projection omits them. Step tables
+    /// are current projections, not historical snapshots: each page supplies its current
+    /// store index, checked before and after selection inside the caller's read snapshot.
+    fn assistant_work_candidate_ids_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        _snapshot_unix_ms: u128,
+        snapshot_index: u64,
+    ) -> Result<Vec<String>>;
     /// The steps of the client work list, or with `history` of the work history, that a
     /// claimant holds at the snapshot, with the status and claimant those lists show. Only a
     /// step whose lease names an owner can have a claimant, so this reads the leased steps by
@@ -4750,6 +4764,38 @@ impl MissionsStore for Store {
             true,
             false,
         )
+    }
+
+    fn assistant_work_candidate_ids_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        _snapshot_unix_ms: u128,
+        snapshot_index: u64,
+    ) -> Result<Vec<String>> {
+        anyhow::ensure!(
+            self.index()? == snapshot_index,
+            "assistant work snapshot index is stale"
+        );
+        let connection = self.readers.get();
+        let ids = connection
+            .prepare_cached(
+                "SELECT subject FROM step_runs
+                 WHERE subject>COALESCE(?1,'')
+                   AND generation_id=(SELECT current_generation_id FROM mission_runs
+                                      WHERE id=step_runs.run_id)
+                   AND status NOT IN ('pending','completed','failed','cancelled')
+                 ORDER BY subject LIMIT ?2",
+            )?
+            .query_map(params![after, limit.saturating_add(1)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            self.index()? == snapshot_index,
+            "assistant work snapshot index is stale"
+        );
+        Ok(ids)
     }
 
     fn work_for_renewal(&self, actor: &str) -> Result<Vec<StepRunView>> {

@@ -7,6 +7,7 @@ pub use st3_missions::store::conversation_reads::{Owner, Owners};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use st3_missions::store::missions::MissionsStore;
     use st3_missions::store::conversation_reads_shared_seats::*;
     use st3_missions::store::conversation_reads_shared_seats::{BEFORE_MESSAGE_DECODE, BEFORE_OWNER_PUBLISH};
     use st3_missions::store::conversation_reads_tests_shared_seats::*;
@@ -201,6 +202,100 @@ mod tests {
         assert_eq!(*result, oracle(&store, frontier));
         assert_eq!(*store.conversation_owners_at(frontier).unwrap(), *result);
         assert_eq!(store.smalltalk.conversation_owners.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn assistant_owner_pages_match_historical_fold_without_building_whole_map() {
+        let store = Store::open_memory("node").unwrap();
+        for number in 0..32 {
+            append(&store, &format!("agent/{number:03}"), "runtime.observed",
+                json!({"runtime_id":"pty","incarnation_id":"original"}));
+        }
+        let through = store.index().unwrap();
+        append(&store, "agent/000", "runtime.observed",
+            json!({"runtime_id":null,"incarnation_id":"new"}));
+        append(&store, "agent/future", "runtime.observed", json!({"runtime_id":"future"}));
+        let expected = oracle(&store, through);
+        let mut actual = Owners::new();
+        let mut after = None;
+        loop {
+            let page = store.assistant_conversation_owners_page(after.as_deref(), 3, through).unwrap();
+            assert!(page.len() <= 4);
+            let more = page.len() > 3;
+            for (id, owner) in page.into_iter().take(3) {
+                assert!(after.as_ref().is_none_or(|after| after < &id));
+                after = Some(id.clone());
+                actual.insert(id, owner);
+            }
+            if !more { break; }
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(store.assistant_conversation_owners_page(None, 0, through).unwrap().len(), 1);
+        assert!(store.assistant_conversation_owners_page(Some("agent/zzz"), 3, through).unwrap().is_empty());
+        assert!(store.assistant_conversation_owners_page(None, 3, store.index().unwrap() + 1).is_err());
+        assert!(store.smalltalk.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    }
+
+    #[test]
+    fn assistant_owner_id_selection_is_bounded_before_identity_projection() {
+        let store = Store::open_memory("node").unwrap();
+        let mut costs = Vec::new();
+        store.connection.batched(|tx| -> Result<()> {
+            for number in 0..1000 {
+                append_claim_tx(tx, "node", &format!("agent/{number:05}"), "runtime.observed",
+                    None, &json!({"fields":{"runtime_id":"pty"}}), &[], None)?;
+                if number == 9 || number == 999 {
+                    let mut query = tx.prepare_cached(ASSISTANT_OWNER_IDS_PAGE)?;
+                    query.reset_status(rusqlite::StatementStatus::VmStep);
+                    let ids = query.query_map(params![i64::MAX, Option::<&str>::None, 4],
+                        |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    assert_eq!(ids.len(), 4);
+                    costs.push(query.get_status(rusqlite::StatementStatus::VmStep));
+                }
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        assert!(costs[0] > 0 && costs[1] <= costs[0] * 2,
+            "bounded seeks must not scan every owner: {costs:?}");
+    }
+
+    #[test]
+    fn assistant_work_candidates_are_keyset_limited_before_hydration() {
+        let store = Store::open_memory("node").unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute_batch(
+                "INSERT INTO mission_runs VALUES
+                 ('run','mission','revision','current','revision','run',NULL,'workspace',
+                  'person/test','{}','automatic','running','running','1','1');
+                 INSERT INTO run_generations VALUES
+                 ('current','run','revision',NULL,'running','person/test','test','1','1'),
+                 ('old','run','revision',NULL,'cancelled','person/test','test','1','1');")?;
+            for number in 0..1000 {
+                let status = match number {
+                    0 => "pending", 1 => "completed", 2 => "failed", 3 => "cancelled",
+                    _ => "ready",
+                };
+                tx.execute(
+                    "INSERT INTO step_runs
+                     (subject,run_id,generation_id,step_path,definition_hash,status,attempt,
+                      agentless,goals,created_at_unix_ms,updated_at_unix_ms)
+                     VALUES(?1,'run',?2,?1,'not-hydrated',?3,0,?4,'[]','1','1')",
+                    params![format!("step-run/{number:04}"),
+                        if number == 4 { "old" } else { "current" }, status, number % 2])?;
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        let snapshot = store.index().unwrap();
+        assert_eq!(store.assistant_work_candidate_ids_page(None, 2, 1, snapshot).unwrap(),
+            ["step-run/0005", "step-run/0006", "step-run/0007"]);
+        assert_eq!(store.assistant_work_candidate_ids_page(Some("step-run/0006"), 2, 1, snapshot).unwrap(),
+            ["step-run/0007", "step-run/0008", "step-run/0009"]);
+        assert_eq!(store.assistant_work_candidate_ids_page(None, 0, 1, snapshot).unwrap(),
+            ["step-run/0005"]);
+        assert!(store.assistant_work_candidate_ids_page(Some("step-run/0999"), 2, 1, snapshot).unwrap().is_empty());
+        append(&store, "agent/new", "runtime.observed", json!({"runtime_id":"pty"}));
+        assert!(store.assistant_work_candidate_ids_page(None, 2, 1, snapshot).is_err());
     }
 
     #[test]

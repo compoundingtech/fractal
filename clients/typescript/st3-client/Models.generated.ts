@@ -518,6 +518,11 @@ export type ArrangementTombstoneRegister = {
   value: true;
 };
 
+export type AssistantAgentDetailRequest = {
+  agent_id: AgentId;
+  max_response_bytes?: AssistantResponseBytes;
+};
+
 export type AssistantAgentItem = {
   current_mission_id: string | null;
   current_run_id: string | null;
@@ -545,6 +550,13 @@ export type AssistantAgentPage = {
   kind: "page";
   page: PageInfo;
   sync?: SyncNotice;
+};
+
+export type AssistantAgentQueueRequest = {
+  agent_id: AgentId;
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
 };
 
 export type AssistantAttentionItem = {
@@ -615,6 +627,22 @@ export type AssistantConversationContentRequest = {
   start: number;
 };
 
+export type AssistantConversationSearchRequest = {
+  agent_id?: AgentId;
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
+  text: string;
+};
+
+export type AssistantConversationTimelineRequest = {
+  agent_id: AgentId;
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
+  session_id?: Id;
+};
+
 export type AssistantGrant = {
   consent_evidence: string;
   device_id: Id;
@@ -646,6 +674,11 @@ export type AssistantGrantPolicy = {
 };
 
 export type AssistantMinimalReadMode = "approval-once" | "caller-bound-allow";
+
+export type AssistantMissionDetailRequest = {
+  max_response_bytes?: AssistantResponseBytes;
+  mission_id: MissionId;
+};
 
 export type AssistantMissionItem = {
   agent_ids: Array<string>;
@@ -715,7 +748,23 @@ export type AssistantPairingBegin = {
 
 export type AssistantPrincipal = "assistant/chatgpt";
 
-export type AssistantProjection = "summary" | "attention" | "missions" | "agents" | "conversation-content" | "terminal-content";
+export type AssistantProjection = 
+  "summary"
+  | "attention"
+  | "missions"
+  | "agents"
+  | "conversation-content"
+  | "terminal-content"
+  | "conversations"
+  | "conversation-detail"
+  | "conversation-timeline"
+  | "conversation-search"
+  | "mission-detail"
+  | "work"
+  | "work-detail"
+  | "agent-detail"
+  | "agent-queue"
+;
 
 export type AssistantReadTrust = {
   attestor_public_key: Ed25519PublicKey;
@@ -743,6 +792,7 @@ export type AssistantScope =
   | "read.assistant.attention"
   | "read.assistant.missions"
   | "read.assistant.agents"
+  | "read.assistant.work"
   | "read.assistant.conversation"
   | "read.assistant.terminal"
   | "write.assistant.messages"
@@ -787,6 +837,11 @@ export type AssistantTerminalContentRequest = {
   max_response_bytes?: AssistantResponseBytes;
   screen_revision: Revision;
   terminal_id: TerminalId;
+};
+
+export type AssistantWorkDetailRequest = {
+  max_response_bytes?: AssistantResponseBytes;
+  work_id: Id;
 };
 
 export type Attachment = {
@@ -3174,6 +3229,8 @@ export type UsageSummary = {
   output_tokens: number;
   total_tokens: number;
 };
+
+export type Value = unknown;
 
 export type Visualization = {
   constraints: Array<string>;

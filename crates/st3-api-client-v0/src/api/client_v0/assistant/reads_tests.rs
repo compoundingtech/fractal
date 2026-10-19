@@ -543,7 +543,7 @@ async fn reads_without_a_configured_owner_are_forbidden() {
 
 /// A managed Codex agent whose transcript holds one long assistant answer: secrets,
 /// injected text and multi-byte characters past the 8 KiB reference threshold.
-fn managed_conversation(root: &std::path::Path, text: &str) -> (AppState, String, String, String) {
+pub(super) fn managed_conversation(root: &std::path::Path, text: &str) -> (AppState, String, String, String) {
     managed_record(root, json!({
         "type":"message", "role":"assistant", "id":"answer",
         "content":[{"type":"output_text","text":text}],
@@ -592,11 +592,13 @@ fn managed_record(root: &std::path::Path, payload: Value) -> (AppState, String, 
     let session_id = super::super::super::managed_session_id(owner, incarnation);
     let mut session = ClientSession::local(Some(OWNER)).unwrap();
     session.conversation_blocks = true;
+    session.assistant_content_handles = true;
     let timeline = super::super::super::timeline_value(
         &state, &new_client_snapshot(&state), &session, &session_id, &ClientListQuery::default(),
     ).unwrap().0;
-    let (reference, revision) = timeline["items"].as_array().unwrap().iter().find_map(|item| {
-        if item["type"] == "message" { return None; }
+    let timeline_items = timeline["items"].as_array().unwrap();
+    let (reference, revision) = timeline_items.iter().filter(|item| item["type"] != "message")
+        .chain(timeline_items.iter().filter(|item| item["type"] == "message")).find_map(|item| {
         let reference = item["body"]["blocks"].as_array()?.iter()
             .find_map(|block| block["continuation"]["ref"].as_str())?;
         Some((reference.to_owned(), item["revision"].to_string()))

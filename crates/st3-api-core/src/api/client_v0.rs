@@ -342,6 +342,8 @@ pub struct ClientSession {
     pub local_peer: bool,
     pub custom_forms: bool,
     pub conversation_blocks: bool,
+    /// Internal assistant projection option; never negotiated by ordinary native clients.
+    pub assistant_content_handles: bool,
     pub messages_paging: bool,
     pub scopes: std::collections::BTreeSet<String>,
 }
@@ -359,6 +361,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: true,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
@@ -397,6 +400,7 @@ impl ClientSession {
                 local_peer: false,
                 custom_forms,
                 conversation_blocks: false,
+                assistant_content_handles: false,
                 messages_paging: false,
                 scopes: ["read.projections", "terminal.read"]
                     .into_iter()
@@ -416,6 +420,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
         })
@@ -432,6 +437,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
@@ -683,6 +689,7 @@ pub fn paired_client_session(
         local_peer: false,
         custom_forms,
         conversation_blocks: false,
+        assistant_content_handles: false,
         messages_paging: false,
         scopes,
     })
@@ -2960,8 +2967,10 @@ pub fn timeline_value(
         return Ok(Json(page_value));
     }
     crate::performance::task("conversation/first-page", || {
-        let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-            .map_err(ApiError::internal)?;
+        let managed = match query.owner.as_deref() {
+            Some(owner) => super::managed_session_owner_for_subject_at(&state.store, snapshot.store_index, &session_id, owner),
+            None => super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id),
+        }.map_err(ApiError::internal)?;
         timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
     })
 }

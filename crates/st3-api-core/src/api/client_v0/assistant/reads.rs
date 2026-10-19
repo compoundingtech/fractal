@@ -1,7 +1,7 @@
-//! Minimal assistant read projections. Each one reuses a native snapshot reader and copies
-//! only allowlisted identifiers, closed enums, counts and timestamps out of it, so titles,
-//! goals, previews, paths and other free text in source rows never reach an assistant.
-//! Content reads return one bounded text range of one exactly named resource.
+//! Bounded assistant projections backed by native readers. Metadata and operational
+//! reads copy only explicitly selected fields; conversation content uses bounded text
+//! and revision-pinned references. Declaration environments, workspace paths and terminal
+//! content never enter operational or conversation projections.
 use crate::MissionsStore;
 use crate::SeatsStore;
 use crate::EvidenceStore;
@@ -9,6 +9,21 @@ use super::*;
 use crate::api::published_attention::{
     published_assistant_attention_rows, published_view_not_ready,
 };
+
+/// Boxed result of a projection served by a crate above this one.
+pub type ProjectionFuture<'a> = std::pin::Pin<Box<
+    dyn std::future::Future<Output = Result<(ClientSnapshot, Value), ApiError>> + Send + 'a>>;
+/// Reader of the conversation and operational projections, which need client-v0 readers
+/// (search, mission resources) that live above this crate.
+pub type ProjectionExtension = for<'a> fn(
+    &'a AppState, &'a ClientSnapshot, &'a str, &'a BTreeMap<String, String>, usize, &'a str,
+    &'a response_body::Context,
+) -> ProjectionFuture<'a>;
+static PROJECTION_EXTENSION: std::sync::OnceLock<ProjectionExtension> = std::sync::OnceLock::new();
+/// Install the extension once; later installs of the same reader are no-ops.
+pub fn install_projection_extension(extension: ProjectionExtension) {
+    let _ = PROJECTION_EXTENSION.set(extension);
+}
 
 #[path = "reads_paging.rs"]
 pub mod paging;
@@ -26,13 +41,13 @@ const ATTENTION_KINDS: &[&str] = &[
 pub const AGENT_STATES: &[&str] = &[
     "desired", "starting", "running", "waiting", "stopped", "failed", "suspended",
 ];
-const AGENT_LIFECYCLES: &[&str] = &["standing", "owner", "bounded"];
+pub const AGENT_LIFECYCLES: &[&str] = &["standing", "owner", "bounded"];
 pub const MISSION_PHASES: &[&str] = &[
     "draft", "ready", "running", "standing", "blocked", "completed", "failed", "cancelled",
     "retired",
 ];
 
-const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
+pub const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
 const SUMMARY_FIELDS: &[&str] = &["max_response_bytes"];
 const CONVERSATION_FIELDS: &[&str] = &[
     "agent_id", "session_id", "reference", "revision", "start", "end", "max_response_bytes",
@@ -72,6 +87,12 @@ pub async fn project_with_context(
                 "title": item["title"], "detail": item["detail"], "request": attention_request(item),
             })))
         },
+        "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search"
+        | "mission-detail" | "work" | "work-detail" | "agent-detail" | "agent-queue" => {
+            let extension = PROJECTION_EXTENSION.get()
+                .ok_or_else(|| ApiError::not_found("unknown assistant projection"))?;
+            extension(state, snapshot, projection, parameters, max_bytes, binding, context).await
+        }
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
         _ => Err(ApiError::not_found("unknown assistant projection")),
@@ -98,7 +119,7 @@ pub fn allow(
     Ok(())
 }
 
-fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
+pub fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
     parameters
         .get(name)
         .map(String::as_str)
@@ -106,7 +127,7 @@ fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<
         .ok_or_else(|| validation(format!("query parameter `{name}` is required")))
 }
 
-fn budget_exceeded(message: impl Into<String>) -> ApiError {
+pub fn budget_exceeded(message: impl Into<String>) -> ApiError {
     ApiError {
         status: StatusCode::PAYLOAD_TOO_LARGE,
         code: "response-budget-exceeded".into(),
@@ -371,7 +392,7 @@ pub fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize
 /// is opened only if it fits the response budget, so no larger body is ever read. The
 /// range must lie on character boundaries inside the text and fit the budget; it is never
 /// widened, split or continued automatically. `next_range` names the next equal range.
-async fn conversation(
+pub async fn conversation(
     state: &AppState,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,

@@ -61,6 +61,7 @@ mod stream_start_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
+    assistant::reads::install();
     app
         .route("/v1/client/arrangements", get(arrangements::list))
         .route(
@@ -165,6 +166,15 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversations", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-timeline", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
+        .route("/v1/client/assistant/mission-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/work", get(assistant::read_projection))
+        .route("/v1/client/assistant/work-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/agent-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/agent-queue", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
@@ -21087,6 +21097,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
         };
