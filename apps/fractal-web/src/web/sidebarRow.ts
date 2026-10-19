@@ -3,14 +3,17 @@ import type { Agent } from '../data/source.ts'
 import { contextOccupancy } from '../data/contextOccupancy.ts'
 import type { SidebarSpendObservation } from '../extensions/contract.ts'
 
-/** Presentation of one actual roster observation. No per-row reads or inferred usage. */
+/**
+ * Presentation of one actual roster observation. No per-row reads or inferred usage. A stale roster keeps each
+ * row's last-observed status (working stays distinct from idle); freshness alone marks it frozen.
+ */
 export const sidebarRow = ({ agent, stale, now = Date.now(), spendObservation }: {
   readonly agent: Agent; readonly stale: boolean
   /** Only fences out future-dated occupancy; rows stay off the ticking clock, which reaches time leaves. */
   readonly now?: number
   readonly spendObservation?: SidebarSpendObservation
 }): SidebarAgentRowData => {
-  const status: SidebarAgentStatus = stale ? 'stale' : agent.state === 'retired' ? 'retired'
+  const status: SidebarAgentStatus = agent.state === 'retired' ? 'retired'
     : agent.state === 'suspended' ? 'suspended'
     : agent.state === 'stopped' || agent.state === 'ended' ? 'ended'
     : agent.state === 'desired' || agent.state === 'starting' ? 'pending'

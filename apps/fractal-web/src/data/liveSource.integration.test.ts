@@ -768,6 +768,32 @@ describe('live feed sync sidecars', () => {
       }),
     ),
   )
+  it.live('explicit roster Retry reacquires a failed follow and leaves a healthy follow alone', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.agents)
+        yield* settle
+        const first = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(first)
+        gateway.send({ kind: 'error', id: first, collection: 'agents', code: 'unavailable', message: 'Roster temporarily unavailable', retryable: false })
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' })
+        expect(live.source.retryAgents).toBeTypeOf('function')
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).not.toBe(first)
+        gateway.fleet([agent])
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Observed', freshness: 'live', value: [{ id: agent.id }] })
+        const recovered = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(recovered)
+      }),
+    ),
+  )
   it.live('reports a rejected socket credential as Failed on mounted and later-opened follows', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {

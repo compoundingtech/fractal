@@ -439,7 +439,7 @@ describe('ConversationPane conversation demand', () => {
     expect(container.innerHTML).not.toContain('Unknown')
     expect(container.querySelector('[data-testid="sync-line"]')).toBeNull()
     const recovery = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="transcript-unavailable"] button')]
-      .filter(button => button.textContent === 'Try again')
+      .filter(button => button.textContent === 'Retry')
     expect(recovery).toHaveLength(1)
     expect(recovery[0]!.disabled).toBe(false)
     flushSync(() => recovery[0]!.click())

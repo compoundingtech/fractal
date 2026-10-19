@@ -43,7 +43,8 @@ import type { Agent } from '../data/source.ts'
 import { sidebarAttention } from './sidebarAttention.ts'
 import { FolderAttentionSignal } from './AttentionControls.tsx'
 import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
-import { SidebarEmptyState } from './SidebarEmptyState.tsx'
+import { RosterLoading, RosterStaleNotice, RosterUnavailable, SidebarEmptyState } from './SidebarEmptyState.tsx'
+import { useAgentsLastObservedAt } from './lastObserved.tsx'
 import { ResponsiveAgentSidebar, sidebarDrawerBreakpoint, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
 import { useSidebarSpend } from '../extensions/build.ts'
 import type { SidebarSpendObservation } from '../extensions/contract.ts'
@@ -53,6 +54,9 @@ import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-v
 const emptyAgents: readonly Agent[] = []
 const sidebarExtraSignals = [] as const
 const noSpend: ReadonlyMap<string, SidebarSpendObservation> = new Map()
+
+/** A last-observed roster's observation instant: its row times stop there instead of ticking on as if live. */
+const RosterFrozenAt = React.createContext<number | undefined>(undefined)
 
 /** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. */
 const LiveSidebarAgentRow = React.memo((props: {
@@ -67,10 +71,11 @@ const LiveSidebarAgentRow = React.memo((props: {
   const connection = useConnection()
   const agent = feed._tag === 'Observed' ? feed.value : undefined
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
+  const frozenAt = React.useContext(RosterFrozenAt)
   const item = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale, ...(props.spend === undefined ? {} : { spendObservation: props.spend }) }), [agent, stale, props.spend])
   const onOpen = React.useCallback(() => props.select(props.agentRef), [props.select, props.agentRef])
   // Layout C: a narrow dock keeps one compact metric line; wider docks expand metrics onto line two.
-  return item === undefined ? null : <SidebarAgentRow inTree item={item} variant={props.compact ? 'SR-1' : 'SR-2'} layout="SR2-C" metricLayout={props.compact ? 'compact' : 'expanded'} glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} actions={props.actions} onOpen={onOpen} />
+  return item === undefined ? null : <SidebarAgentRow inTree item={item} variant={props.compact ? 'SR-1' : 'SR-2'} layout="SR2-C" metricLayout={props.compact ? 'compact' : 'expanded'} glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} actions={props.actions} onOpen={onOpen} {...(stale && frozenAt !== undefined ? { now: frozenAt } : {})} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -376,6 +381,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   openLatest.current = open
   const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
+  const rosterObservedAt = useAgentsLastObservedAt()
+  const frozenAt = stale ? rosterObservedAt : undefined
   const folderSource = useDataSource()
   const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
   const [filters, setFilters] = useAtom(sidebarSettings.filters)
@@ -477,29 +484,29 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={sidebarDrawerOpen} drawerId={agentsSheetId} onDrawerOpenChange={setSidebarDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>
                 <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
-                {fleet._tag === 'Observed' && visibleSidebarTree.length === 0 ? <SidebarEmptyState query={deferredFilters.query} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} /> : null}
+                {fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
+                  : fleet._tag !== 'Observed' ? null
+                  : <>
+                    {stale ? <RosterStaleNotice observedAt={rosterObservedAt} partial={fleet.coverage?._tag === 'Partial'} refreshFailed={fleet.error?.reason === 'failed'} onRetry={folderSource.retryAgents} /> : null}
+                    {agents.length === 0 ? <SidebarEmptyState kind="empty" />
+                      : visibleSidebarTree.length === 0 ? <SidebarEmptyState kind="no-match" query={deferredFilters.query} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} />
+                      : null}
+                  </>}
                 <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
-                  {fleet._tag === 'Waiting' ? <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
+                  {fleet._tag === 'Waiting' ? <>
+                    <RosterLoading />
+                    <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
                     {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
                       <span {...stylex.props(styles.skeletonGlyph)} />
                       <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
                       <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
                     </div>)}
-                  </div> : null}
-                  <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} accessibleNames={accessibleNames} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} compact={width < 300} spendByAgent={spendByAgent} select={selectAgent} actions={sidebarActions} />
+                    </div>
+                  </> : null}
+                  <RosterFrozenAt.Provider value={frozenAt}>
+                    <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} accessibleNames={accessibleNames} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} compact={width < 300} spendByAgent={spendByAgent} select={selectAgent} actions={sidebarActions} />
+                  </RosterFrozenAt.Provider>
                 </nav>
-                {fleet._tag !== 'Observed' ? (
-                  <SystemNotice
-                    scope="rail"
-                    kind={fleet._tag === 'Waiting' ? 'loading' : 'error'}
-                    connection={fleet._tag === 'Unavailable' && fleet.reason !== 'ungranted' && fleet.reason !== 'unsupported'}
-                    title={fleet._tag === 'Waiting' ? 'Loading agents' : fleet.reason === 'ungranted' ? 'No access to the agent roster' : fleet.reason === 'unsupported' ? 'Agent roster not supported' : 'Agent roster could not load'}
-                    {...(fleet._tag === 'Unavailable' && fleet.reason === 'unsupported' ? { detail: 'This connection does not offer it' } : fleet._tag === 'Unavailable' && fleet.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : {})}
-                    data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined}
-                  />
-                ) : stale ? (
-                  <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" />
-                ) : null}
                 <SidebarChromeFooter onToggleScheme={() => setScheme(scheme === 'dark' ? 'light' : 'dark')}>
                   <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} />
                   <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} />

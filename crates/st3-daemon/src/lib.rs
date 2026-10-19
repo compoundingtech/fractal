@@ -16,6 +16,7 @@ pub use st3_kernel::archive;
 pub mod attach_image;
 pub use st3_store::backup;
 pub use st3_store::blobs;
+pub use st3_store::owner_indexes;
 pub use st3_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
 pub use st3_github::changes;

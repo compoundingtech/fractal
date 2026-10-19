@@ -99,6 +99,24 @@ The **Expand sidebar** button keeps its accessible name and exposes the Cmd/Ctrl
 shortcut through the kit tooltip. `wf/Sidebar/Responsive navigation` covers light
 and dark surfaces at 440px and 1440px, with both themes included in `AllStates`.
 
+## Observation and unavailable states
+
+The roster and conversation retain trusted content across disconnects. Feed freshness
+and connection state determine whether that content is live; a stale observation never
+claims that a working agent is still working. Observation ages come from the source's
+retained `sync.*.last.observedAt`, not the moment a component renders or a connection
+fails. Sources without that evidence show no invented age. Relative-time leaves share
+the source clock; roster rows do not acquire timers or rerender on clock ticks.
+An in-progress run remains completion-unverified when frozen, even when some tool
+calls already completed. Its recorded calls stay expanded; disconnecting never
+turns unfinished work into a settled “Worked” summary.
+
+Waiting feeds show loading, observed empty feeds show empty content, and a filtered
+roster with no results offers Clear filters. A failed roster read exposes Retry through
+`source.retryAgents`; an unavailable conversation uses `source.retryConversation`.
+Those actions reacquire failed or ended follows without restarting healthy follows.
+Authorization and capability refusals retain their distinct explanations.
+
 ## Hosting the web app on a tailnet
 
 `apps/fractal-web/server/main.mts` runs the built app for one person. It listens on loopback

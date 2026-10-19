@@ -9899,12 +9899,12 @@ fn batched_usage_preserves_canonical_ties_and_snapshot_bound() {
 fn claim_id_order_fixture(connection: &Connection) {
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hc45e0ac27d05 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+            /* sqlite-large-value: allow-for-now lv-hfbcb4c9bf5f6 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
                  (subject, length(accepted_at_unix_ms), accepted_at_unix_ms);
-             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+             CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
              INSERT INTO batches VALUES ('x','writer-a',4),('y','writer-a',3),('z','writer-b',1);
              INSERT INTO claims VALUES
                ('early','agent/target','runtime.observed','x',1,'9'),
@@ -10110,12 +10110,12 @@ fn claim_ids_stream_keeps_real_store_status_claims_at_current_and_historical_cut
 /// canonical tie groups appear everywhere, including across the session-dating window.
 fn seeded_claim_summary_fixture(connection: &Connection, seed: u64, count: usize) {
     let mut create = String::from(
-        /* sqlite-large-value: allow-for-now lv-h80261e6af604 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-h2a565e032286 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
                  (subject, length(accepted_at_unix_ms), accepted_at_unix_ms);
-             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);",
+             CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;",
     );
     for writer in 0..3 {
         create.push_str(&format!(
@@ -10210,12 +10210,12 @@ fn claims_summary_resolves_the_real_session_window_inside_a_crossing_tie() {
     // The window edge lands inside a wide tie group: only canonical ordering decides the
     // boundary, exactly what the full vector resolves claim by claim.
     let mut fixture = String::from(
-        /* sqlite-large-value: allow-for-now lv-h9c91a827b749 owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-h3f5c237cdd0c owner=st3_store::store::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
              CREATE TABLE claims(id TEXT PRIMARY KEY, subject TEXT, kind TEXT, batch_id TEXT,
                                  store_index INTEGER, accepted_at_unix_ms TEXT);
              CREATE INDEX claims_subject_accepted_index ON claims
                  (subject, length(accepted_at_unix_ms), accepted_at_unix_ms);
-             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+             CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
              INSERT INTO batches VALUES ('a','writer-a',1),('b','writer-b',2);",
     );
     for index in 0..(SESSION_CLAIMS + 4) {
