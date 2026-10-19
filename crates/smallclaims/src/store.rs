@@ -445,6 +445,17 @@ mod projection_failure_diagnostic_tests {
     }
 }
 
+macro_rules! transport_pair_index {
+    () => {
+        /* sqlite-large-value: allow-for-now lv-h9722d4635b44 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_transport_pair_accepted_index
+ON claims(origin, subject, length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='transport.observed';"
+    };
+}
+
+/// Shared by startup and the offline owner-index preparation command.
+pub const TRANSPORT_PAIR_INDEX: &str = transport_pair_index!();
+
 macro_rules! core_schema {
     ($begin:literal, $end:literal) => {
         concat!(r#"
@@ -452,7 +463,7 @@ PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
-"#, $begin, /* sqlite-large-value: allow-for-now lv-hf252926ceab7 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
+"#, $begin, /* sqlite-large-value: allow-for-now lv-h93965131ebb0 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -488,6 +499,7 @@ CREATE INDEX IF NOT EXISTS claims_kind_index ON claims(kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
+"#, transport_pair_index!(), /* sqlite-large-value: allow-for-now lv-hb4ef462c895d owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
 -- Heals once compared claim identities through this index; nothing reads it any more.
 DROP INDEX IF EXISTS claims_batch_claim_id;
@@ -7781,13 +7793,27 @@ impl Store {
             })
         };
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h81f6c4c16269 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT origin, subject, json_extract(body, '$.fields.status'),
-                    accepted_at_unix_ms, json_extract(body, '$.fields.last_success_at') FROM (
-                SELECT origin, subject, body, accepted_at_unix_ms,
-                    ROW_NUMBER() OVER (PARTITION BY origin, subject ORDER BY CANONICAL_DESC(claims)) AS canonical_rank
-                FROM claims WHERE kind='transport.observed'
-             ) WHERE canonical_rank=1 ORDER BY origin, subject",
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5a3d29781577 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "WITH RECURSIVE pairs(id) AS (
+                SELECT (SELECT id FROM claims INDEXED BY claims_transport_pair_accepted_index
+                        WHERE kind='transport.observed' ORDER BY origin, subject LIMIT 1)
+                UNION ALL
+                SELECT (SELECT id FROM claims INDEXED BY claims_transport_pair_accepted_index
+                        WHERE kind='transport.observed'
+                          AND (origin,subject)>(previous.origin,previous.subject)
+                        ORDER BY origin, subject LIMIT 1)
+                FROM pairs JOIN claims previous ON previous.id=pairs.id
+                WHERE pairs.id IS NOT NULL
+             )
+             SELECT claims.origin, claims.subject, json_extract(claims.body, '$.fields.status'),
+                    claims.accepted_at_unix_ms, json_extract(claims.body, '$.fields.last_success_at')
+             FROM pairs JOIN claims pair ON pair.id=pairs.id
+             JOIN claims ON claims.id=(
+                 SELECT claims.id FROM claims INDEXED BY claims_transport_pair_accepted_index
+                 WHERE claims.kind='transport.observed'
+                   AND claims.origin=pair.origin AND claims.subject=pair.subject
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1
+             ) ORDER BY claims.origin, claims.subject",
         ))?;
         let rows = statement.query_map([], |row| {
             Ok((
