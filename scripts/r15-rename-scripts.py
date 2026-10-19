@@ -25,8 +25,35 @@ def package(name):
     return re.sub(r'^st(?:3|2)?-', 'fractal-', name)
 
 
+FIXTURE_DIRECTORIES = {
+    path.name for path in (ROOT / "scripts").iterdir()
+    if path.is_dir() and path.name.startswith("st3-")
+}
+
+
 def rewrite(relative, source):
     name = relative.name
+    if name == 'release_notes_test.py':
+        # Historical-source regressions intentionally contain old crate names.
+        # Repair earlier script output, then leave this hand-owned test intact.
+        source = source.replace(
+            "for legacy in (\n            'crates/fractal-store/",
+            "for legacy in (\n            'crates/st3-store/")
+        source = source.replace(
+            "            'crates/fractal-daemon/src/store/checkpoint_rules.rs',",
+            "            'crates/st3-daemon/src/store/checkpoint_rules.rs',")
+        marker = '    def test_storage_crate_rename_preserves_historical_version_discovery(self):'
+        if marker in source:
+            start = source.index(marker)
+            end = source.find('\n    def ', start + len(marker))
+            end = len(source) if end < 0 else end
+            fixture = source[start:end]
+            fixture = fixture.replace("self.write('crates/fractal-storage-version/",
+                                      "self.write('crates/st-storage-version/", 1)
+            fixture = fixture.replace("self.git('mv', 'crates/fractal-storage-version/",
+                                      "self.git('mv', 'crates/st-storage-version/", 1)
+            source = source[:start] + fixture + source[end:]
+        return source
     # Source paths, not executable names, state paths or serialized fixtures.
     if name not in HISTORICAL:
         source = re.sub(r'crates/(st3(?:-[a-z0-9-]+)?|stui|st-(?:drivers|runtime|chatgpt|storage-version|ui-model|terminal-direct)|st2-(?:resource-providers|resource-wasip2|[a-z0-9-]+-component))(?=[/"\' *])',
@@ -69,6 +96,10 @@ def rewrite(relative, source):
         source = source.replace('../st-drivers', '../fractal-drivers')
         source = source.replace('st-drivers={', 'fractal-drivers={')
         source = source.replace(' -> st-drivers', ' -> fractal-drivers')
+        # Script fixture identities are not crate/package names. Their directories
+        # do not move in R15; repair earlier broad substitutions as well.
+        for fixture in FIXTURE_DIRECTORIES:
+            source = source.replace(package(fixture), fixture)
     if name == 'st_boundary.py':
         source = source.replace('(?:r#)?st2', '(?:r#)?fractal_legacy_runner')
         source = source.replace('target == "st2"', 'target == "fractal-legacy-runner"')
@@ -99,10 +130,6 @@ def rewrite(relative, source):
         source = source.replace("name='st-drivers'", "name='fractal-drivers'")
     if name == 'ci-test-partitions-test':
         source = source.replace('"st2"', '"fractal-legacy-runner"')
-    if name == 'release_notes_test.py':
-        # Keep the old source tree inside the historical-reader regression.
-        source = source.replace("'crates/fractal/src/store", "'crates/st3/src/store")
-        source = source.replace('Library still in crates/fractal', 'Library still in crates/st3')
     return source
 
 

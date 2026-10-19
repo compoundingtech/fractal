@@ -70,7 +70,13 @@ SOURCE_PATH = re.compile(r"(?P<base>crates/|\.\./)(?P<name>" + "|".join(map(re.e
 
 
 def source_paths(text):
-    return SOURCE_PATH.sub(lambda m: m["base"] + DIRECTORIES[m["name"]], text)
+    text = SOURCE_PATH.sub(lambda m: m["base"] + DIRECTORIES[m["name"]], text)
+    for stem in ("client", "scenarios", "views"):
+        text = text.replace("clients/typescript/st3-" + stem,
+                            "clients/typescript/fractal-" + stem)
+    text = text.replace("clients/swift/St3Client", "clients/swift/FractalClient")
+    return text.replace("apps/fractal-web/packages/st3-sdk",
+                        "apps/fractal-web/packages/fractal-sdk")
 
 
 def manifest(p, data):
