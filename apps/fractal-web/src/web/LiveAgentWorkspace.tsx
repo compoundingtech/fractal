@@ -496,11 +496,11 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                   {fleet._tag === 'Waiting' ? <>
                     <RosterLoading />
                     <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
-                    {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
-                      <span {...stylex.props(styles.skeletonGlyph)} />
-                      <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
-                      <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
-                    </div>)}
+                      {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
+                        <span {...stylex.props(styles.skeletonGlyph)} />
+                        <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
+                        <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
+                      </div>)}
                     </div>
                   </> : null}
                   <RosterFrozenAt.Provider value={frozenAt}>
