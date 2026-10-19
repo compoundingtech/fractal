@@ -95,7 +95,7 @@ fn latest(state: &AppState, subject: &str, kind: &str) -> Result<Option<ClaimRec
     Ok(state.store.claims_for_subject_kind_at(subject, kind, None, true, 1)
         .map_err(ApiError::internal)?.claims.into_iter().next())
 }
-fn append(state: &AppState, subject: String, kind: &str, actor: &str,
+pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
           value: Value, previous: Option<&ClaimRecord>) -> Result<ClaimRecord, ApiError> {
     state.store.append_claim(&ClaimInput {
         subject, kind: kind.into(), actor: Some(actor.into()),
@@ -448,7 +448,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let grant = paired(&state).await;
-        let app = super::super::super::router_for_transport(state, ClientTransportBoundary::Unix);
+        let app = super::super::super::router_for_transport(state, ClientTransportBoundary::Unix, &[]);
         let inspection = format!("/v1/client/assistant/grants/{}", urlencoding::encode(grant["grant"]["id"].as_str().unwrap()));
         for path in [inspection.as_str(), "/v1/client/devices"] {
             for peer in 0..3 {
@@ -498,7 +498,7 @@ mod tests {
                 "scopes": ALL_SCOPES, "expires_at_unix_ms": u64::MAX,
             })).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
-        let app = super::super::super::router_for_transport(state, ClientTransportBoundary::Unix);
+        let app = super::super::super::router_for_transport(state, ClientTransportBoundary::Unix, &[]);
         let path = format!("/v1/client/assistant/grants/{}", urlencoding::encode(grant["grant"]["id"].as_str().unwrap()));
         for (method, suffix) in [("GET", ""), ("POST", "/revoke")] {
             let response = app.clone().oneshot(Request::builder().method(method).uri(format!("{path}{suffix}"))
@@ -538,7 +538,7 @@ mod tests {
         assert!(capabilities(&state,&session).iter()
             .filter(|capability| capability["id"].as_str().is_some_and(|id| id.starts_with("message.")))
             .all(|capability| capability["state"] != "granted"));
-        let response=super::super::super::router_for_transport(state.clone(),ClientTransportBoundary::Unix)
+        let response=super::super::super::router_for_transport(state.clone(), ClientTransportBoundary::Unix, &[])
             .oneshot(Request::builder().uri("/v1/client/capabilities")
                 .header(AUTHORIZATION,format!("Bearer {}",paired["credential"].as_str().unwrap()))
                 .body(Body::empty()).unwrap()).await.unwrap();
@@ -579,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn assistant_four_scope_grant_denies_generic_and_native_routes() {
         let root=tempfile::tempdir().unwrap(); let state=state(root.path()); let paired=paired(&state).await;
-        for app in [super::super::super::router_for_transport(state.clone(),ClientTransportBoundary::Unix),
+        for app in [super::super::super::router_for_transport(state.clone(), ClientTransportBoundary::Unix, &[]),
                     super::super::super::fabric_router(state.clone())] {
             for (method,path) in [("GET","/v1/client/agents"),("GET","/v1/client/messages"),
                 ("GET","/v1/client/events"),("GET","/v1/client/terminals/test/stream"),
