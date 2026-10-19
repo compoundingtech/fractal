@@ -198,12 +198,12 @@ impl WriterObserver for Actuals {
         // Fence speculative readers immediately, including between commits in one writer loan.
         // Publication can then compare final canonical metadata with the cached prefix safely.
         state.serial = state.serial.wrapping_add(1);
-        // Updates/deletions may have changed the old subject/claim identity; bulk work and
-        // missing rows are deliberately global. Rollback notifications over-invalidate only.
-        // Operations can invalidate another subject's authority through a shared idempotency
-        // key, without changing any of that subject's claim rows.
-        if matches!(table, "desired" | "operations")
-            || action != rusqlite::hooks::Action::SQLITE_INSERT
+        // Operation IDs are immutable; INSERT/UPDATE can be routed through all claims sharing
+        // the operation. Deletes and other source updates may have lost the old identity.
+        let routable_operation_update = table == "operations"
+            && action == rusqlite::hooks::Action::SQLITE_UPDATE;
+        if table == "desired"
+            || (action != rusqlite::hooks::Action::SQLITE_INSERT && !routable_operation_update)
             || state.pending.len() >= PENDING_LIMIT {
             state.global = true;
         } else if !state.global {
@@ -266,14 +266,22 @@ impl WriterObserver for Actuals {
                     }
                     state.frontier = rowid;
                 }
-                if table == "batches" {
+                if matches!(table, "batches" | "operations") {
+                    let sql = if table == "operations" {
+                        // Remove TEXT affinity so the JSON-expression index remains seekable.
+                        "SELECT DISTINCT subject FROM claims INDEXED BY claims_operation_index
+                         WHERE json_extract(body, '$._operation.id')=
+                            (SELECT +id FROM operations WHERE rowid=?1) LIMIT ?2"
+                    } else {
+                        "SELECT subject FROM claims WHERE batch_id=(SELECT id FROM batches WHERE rowid=?1) LIMIT ?2"
+                    };
                     let batch_subjects = (|| -> rusqlite::Result<Vec<String>> {
-                        connection.prepare_cached(
-                            "SELECT subject FROM claims WHERE batch_id=(SELECT id FROM batches WHERE rowid=?1) LIMIT ?2"
-                        )?.query_map(params![rowid, PENDING_LIMIT + 1], |row| row.get(0))?.collect()
+                        connection.prepare_cached(sql)?
+                            .query_map(params![rowid, PENDING_LIMIT + 1], |row| row.get(0))?.collect()
                     })();
                     match batch_subjects {
-                        Ok(batch_subjects) if batch_subjects.len() <= PENDING_LIMIT => {
+                        Ok(batch_subjects) if batch_subjects.len() <= PENDING_LIMIT
+                            && (table != "operations" || !batch_subjects.is_empty()) => {
                             subjects.extend(batch_subjects);
                             if subjects.len() > PENDING_LIMIT {
                                 state.global = true;
