@@ -210,7 +210,7 @@ const unavailableCopy: Readonly<Record<UnavailableClassification, { readonly rea
   ungranted: { reason: 'Conversation access not granted', detail: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
   unsupported: { reason: 'Conversation not supported', detail: 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.' },
   'not-found': { reason: 'Conversation not found', detail: 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
-  failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.' },
+  failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' },
 }
 
 /** Server codes are unrestricted strings: only a short lowercase slug may reach a data-wf attribute. */
@@ -294,6 +294,37 @@ export const transcriptSyncStatus = (
 
 export const transcriptObservedAt = (observation: FeedSyncObservation | undefined, now: number): number =>
   observation?.observedAt ?? now
+
+/** What the last observation showed in flight: working with its newest running call, or idle. */
+export interface LastSeenActivity {
+  readonly activity: 'working' | 'idle'
+  /** The in-flight call's readable command, when the last observation had one. */
+  readonly detail: string | undefined
+}
+
+/**
+ * A stale conversation is last-known, not live: in-flight work stops reading as running, and each call still running
+ * at the last observation leaves the work log for the "Last seen" tail. Settled history is untouched.
+ */
+export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly turns: readonly TranscriptTurn[]; readonly lastSeen: LastSeenActivity } => {
+  const lastRunning = turns.findLast(turn => turn.work.running)
+  const inFlight = lastRunning?.work.calls.findLast(call => call.status === 'running')
+  return {
+    turns: turns.map(turn => {
+      const running = new Set(turn.work.calls.filter(call => call.status === 'running').map(call => call.id))
+      if (!turn.work.running && running.size === 0) return turn
+      return {
+        ...turn,
+        items: turn.items.filter(item => !running.has(item.id)),
+        work: { ...turn.work, running: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
+      }
+    }),
+    lastSeen: {
+      activity: lastRunning === undefined ? 'idle' : 'working',
+      detail: inFlight === undefined ? undefined : inFlight.argsSummary ?? inFlight.title,
+    },
+  }
+}
 
 
 /** Agent text is untrusted: only plain web URLs may leave the app, never javascript:, data: or blob: targets. */

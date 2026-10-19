@@ -279,8 +279,8 @@ describe('conversation feed mapping', () => {
     ['ungranted', undefined, 'ungranted', 'Conversation access not granted', 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
     ['unsupported', undefined, 'unsupported', 'Conversation not supported', 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.'],
     ['failed', 'not-found', 'not-found', 'Conversation not found', 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
-    ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.'],
-    ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.'],
+    ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
+    ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
   ] as const)('classifies Unavailable(%s, code %s) as %s with one fixed reason', (reason, code, classification, title, detail) => {
     const sentinel = 'raw-read-diagnostic-sentinel: the requested resource was not found'
     const state = mapConversationFeed({ _tag: 'Unavailable', reason, detail: sentinel, ...(code === undefined ? {} : { code }) }, {})
@@ -296,7 +296,7 @@ describe('conversation feed mapping', () => {
   it.each(['not found', '<img src=x onerror=alert(1)>', 'Not-Found', '-leading', 'x'.repeat(41), ''])('omits a diagnostic code outside the allowlist (%s)', code => {
     const state = mapConversationFeed({ _tag: 'Unavailable', reason: 'failed', detail: 'diagnostic', code }, {})
     expect(state).toEqual({ _tag: 'Unavailable', classification: 'failed', code: undefined,
-      availability: { _tag: 'Unavailable', reason: 'Conversation unavailable', detail: 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.' } })
+      availability: { _tag: 'Unavailable', reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' } })
   })
 
   it('keeps an allowlisted diagnostic code at the length limit', () => {

@@ -45,9 +45,9 @@ const grid = () => host.querySelector(`[data-testid="terminal-pane"] [aria-label
 
 describe('agent roster notice', () => {
   it.each([
-    ['ungranted', 'No access to the agent roster. Read access has not been granted'],
-    ['unsupported', 'Agent roster not supported. This connection does not offer it'],
-    ['failed', 'Agent roster could not load'],
+    ['ungranted', 'No access to the agent rosterRead access has not been granted.'],
+    ['unsupported', 'Agent roster not supportedThis connection does not offer it.'],
+    ['failed', 'Couldn’t load agentsThe agent list did not load. Open conversations keep working.'],
   ] as const)('states %s with fixed copy and keeps the read detail out of the page', async (reason, copy) => {
     await mount(unavailable({ reason, detail: 'gateway said EACCES at /private/socket' }))
     const notice = host.querySelector(`[data-wf-roster-reason="${reason}"]`)
@@ -80,7 +80,7 @@ describe('terminal navigation toggle', () => {
   })
   it('enables the same named control only after the roster proves a runtime is present', async () => {
     await mount(waiting)
-    expect(host.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents')
+    expect(host.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents…')
     expect(toggle()?.disabled).toBe(true)
     expect(toggleDescription()).toBe(waitingReason)
     await mount(observed({ value: [agent] }))
