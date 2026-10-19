@@ -213,6 +213,53 @@ fn card_fold_matches_per_subject_reductions_in_any_replication_order() {
     }
 }
 
+fn card_statuses(store: &Store) -> Value {
+    let index = store.index().unwrap();
+    serde_json::to_value(&store.agent_card_status_at(None, index, true).unwrap().subjects).unwrap()
+}
+
+/// Both writers' envelopes, and the cards a store that received them in order reads.
+fn card_fold_fixture() -> &'static (Vec<ReplicaEnvelope>, Value) {
+    static FIXTURE: std::sync::OnceLock<(Vec<ReplicaEnvelope>, Value)> = std::sync::OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let mut envelopes = exchange_from(&alder(), &ReplicationInventory::default()).envelopes;
+        envelopes.extend(exchange_from(&birch(), &ReplicationInventory::default()).envelopes);
+        let reference = Store::open_memory("cedar").unwrap();
+        receive_and_project(&reference, "relay", &crate::store::tests_shared_seats::exchange_of("relay", envelopes.clone()));
+        (envelopes, card_statuses(&reference))
+    })
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn card_fold_is_pure_under_shuffled_split_duplicate_delivery_and_reopen(
+        ranks in proptest::collection::vec(proptest::prelude::any::<u64>(), 64),
+        width in 1usize..5,
+        copies in 1usize..3,
+    ) {
+        let (envelopes, expected) = card_fold_fixture();
+        proptest::prop_assert!(envelopes.len() <= ranks.len());
+        let mut order = (0..envelopes.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&index| (ranks[index], index));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cards.sqlite3");
+        let target = Store::open(&path, "dogwood").unwrap();
+        for chunk in order.chunks(width) {
+            let batch = chunk.iter().flat_map(|&index| std::iter::repeat_n(envelopes[index].clone(), copies)).collect();
+            receive_and_project(&target, "relay", &crate::store::tests_shared_seats::exchange_of("relay", batch));
+            // Each read warms the views the next delivery must change.
+            card_statuses(&target);
+        }
+        assert_card_fold_parity(&target, &[target.index().unwrap()]);
+        proptest::prop_assert_eq!(&card_statuses(&target), expected);
+        drop(target);
+        let target = Store::open(&path, "dogwood").unwrap();
+        proptest::prop_assert_eq!(&card_statuses(&target), expected);
+    }
+}
+
 #[test]
 fn card_fold_matches_after_a_rolled_back_write() {
     let store = alder();
