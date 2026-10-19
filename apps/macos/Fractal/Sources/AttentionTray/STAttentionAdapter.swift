@@ -64,9 +64,11 @@ actor STAttentionAdapter: AttentionAdapter {
       let page = try await client.attentionList(cursor: cursor, limit: 100).value
       for resource in page.items {
         guard case .attention(let item) = resource, Self.isWaitingForAnswer(item) else { continue }
-        let url = item.id.split(separator: "/").reduce(fractalURL) {
-          $0.appendingPathComponent(String($1))
-        }
+        let agentRef =
+          ([item.conversationID] + (item.conversationIDs ?? []).map(Optional.some)
+          + [item.requesterID, item.sourceID])
+          .compactMap { $0 }.first { $0.hasPrefix("agent/") }
+        let url = try FractalAskURL.make(base: fractalURL, askID: item.id, agentRef: agentRef)
         asks.append(Ask(id: item.id, title: item.title, detail: item.detail, url: url))
       }
       if page.page.hasMore {
