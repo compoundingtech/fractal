@@ -2494,6 +2494,29 @@ impl std::fmt::Display for PeerOverloaded {
 }
 impl std::error::Error for PeerOverloaded {}
 
+fn overloaded_error(
+    retry_after: Duration,
+    started: std::time::Instant,
+    http_status: Option<u16>,
+) -> anyhow::Error {
+    let failure = ReplicationExchangeFailure {
+        code: "replication-overloaded".into(),
+        phase: if http_status.is_some() {
+            ReplicationFailurePhase::ResponseBody
+        } else {
+            ReplicationFailurePhase::RequestHeaders
+        },
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        http_status,
+        cause: if http_status.is_some() {
+            "authenticated peer is overloaded"
+        } else {
+            "exchange polling budget elapsed before response headers"
+        }.into(),
+    };
+    anyhow::Error::new(PeerOverloaded { retry_after }).context(failure)
+}
+
 /// Send one signed exchange, compressed when `compress` is set and the body is large, and return
 /// the peer's verified answer and whether the peer takes compressed requests.
 #[allow(clippy::too_many_arguments)]
@@ -2509,6 +2532,8 @@ async fn post_signed<B: Backend>(
 ) -> Result<(ReplicationExchange, bool)> {
     let deadline = tokio::time::Instant::now() + EXCHANGE_POLL_BUDGET;
     let attempted = crate::store::now_ms();
+    let started = std::time::Instant::now();
+    let mut last_overload = None;
     for _ in 0..MAX_OVERLOAD_POLLS {
         record_worker(backend, &peer.name, "exchange", attempted, None, None).await;
         let result = match tokio::time::timeout_at(
@@ -2528,10 +2553,9 @@ async fn post_signed<B: Backend>(
         {
             Ok(result) => result,
             Err(_) => {
-                return Err(PeerOverloaded {
-                    retry_after: OVERLOAD_RETRY,
-                }
-                .into());
+                return Err(last_overload.unwrap_or_else(|| {
+                    overloaded_error(OVERLOAD_RETRY, started, None)
+                }));
             }
         };
         match result {
@@ -2550,19 +2574,14 @@ async fn post_signed<B: Backend>(
                     .await
                     .is_err()
                 {
-                    return Err(PeerOverloaded {
-                        retry_after: OVERLOAD_RETRY,
-                    }
-                    .into());
+                    return Err(error);
                 }
+                last_overload = Some(error);
             }
             result => return result,
         }
     }
-    Err(PeerOverloaded {
-        retry_after: OVERLOAD_RETRY,
-    }
-    .into())
+    Err(last_overload.unwrap_or_else(|| overloaded_error(OVERLOAD_RETRY, started, None)))
 }
 
 /// What an unsigned refusal from `peer` says: its status and, only for the bodies this protocol's
@@ -2697,10 +2716,9 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
                 .and_then(|value| value["retry_after_ms"].as_u64())
                 .unwrap_or(5000)
                 .clamp(5000, 30_000);
-            return Err(PeerOverloaded {
-                retry_after: Duration::from_millis(millis),
-            }
-            .into());
+            return Err(overloaded_error(
+                Duration::from_millis(millis), started, Some(status.as_u16()),
+            ));
         }
         let about_us = refusal
             .as_ref()

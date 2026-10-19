@@ -27,6 +27,77 @@ fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
     Store::open(path, origin, Arc::new(Plain))
 }
 
+#[tokio::test(start_paused = true)]
+async fn overload_poll_exhaustion_retains_authenticated_response_details() {
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[7; 32]);
+    let signing = auth.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route(EXCHANGE_PATH, post(move |request: Bytes| {
+        let auth = signing.clone();
+        async move {
+            let body = serde_json::to_vec(&PeerResponse::new(
+                "cedar", 0, serde_json::json!({
+                    "code": "replication-overloaded", "retry_after_ms": 5000,
+                    "message": "private backend prose is not diagnostic metadata"
+                }),
+            )).unwrap();
+            let headers = auth.response_headers_for(
+                EXCHANGE_PATH, "cedar", &body, &FleetAuth::body_digest(&request),
+            ).unwrap();
+            let mut response = (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+            response.headers_mut().extend(headers);
+            response
+        }
+    }));
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    // Keep paused time from advancing ahead of real socket work.
+    let awake = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let local = Arc::new(plain_memory("birch").unwrap());
+    local.bind_fleet(fleet_id).unwrap();
+    let backend = Local(local.clone());
+    let query = local.export_replication_summary(fleet_id).unwrap();
+    let poller = tokio::spawn(async move {
+        post_signed(
+            &replication_http_client(), &backend,
+            &PeerConfig { name: "cedar".into(), url: format!("http://{address}") },
+            "birch", &auth, &FleetContext::legacy(BTreeSet::from(["cedar".into()])),
+            &query, false,
+        ).await
+    });
+    let started = std::time::Instant::now();
+    loop {
+        let overloaded = local.replication_status(true, Some(fleet_id), &["cedar".into()])
+            .unwrap().peers[0].worker.as_ref()
+            .is_some_and(|worker| worker.phase == "overload");
+        if overloaded {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "signed overload was not observed");
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(EXCHANGE_POLL_BUDGET).await;
+    let error = poller.await.unwrap().unwrap_err();
+    server.abort();
+    awake.abort();
+    let _ = server.await;
+    let _ = awake.await;
+    assert!(error.is::<PeerOverloaded>());
+    let failure = ReplicationExchangeFailure::from_error(
+        &error, ReplicationFailurePhase::Verify, Duration::from_secs(300), None,
+    );
+    assert_eq!(failure.code, "replication-overloaded");
+    assert_eq!(failure.phase, ReplicationFailurePhase::ResponseBody);
+    assert_eq!(failure.http_status, Some(503));
+    assert_eq!(failure.elapsed_ms, 300_000);
+    assert!(!failure.cause.contains("private"));
+}
+
 /// Different checkpoint lineages leave payloadless ranges that can never settle through
 /// envelope transport. Both live writers already have a shared range, so a summary alone
 /// cannot prove either of their later gaps. The live ranges are listed ahead of the payloadless
