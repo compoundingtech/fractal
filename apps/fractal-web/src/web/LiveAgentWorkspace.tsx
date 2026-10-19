@@ -23,7 +23,7 @@ import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/ass
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
@@ -35,12 +35,13 @@ import { AgentFolders } from '../shell/AgentFolders.tsx'
 import { useSidebarFolders, type SidebarFoldersBinding } from '../folders/useSidebarFolders.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
 import { defaultFilters, fixtureSidebarState, sidebarState } from '../shell/sidebar/state.ts'
+import { useMachineMemory, withRememberedMachines } from '../shell/sidebar/show.ts'
 import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
 import { SidebarToolbar, type SidebarToolbarProps } from '../shell/sidebar/Toolbar.tsx'
 import type { Agent } from '../data/source.ts'
 import { sidebarAttention } from './sidebarAttention.ts'
 import { FolderAttentionSignal } from './AttentionControls.tsx'
-import { liveSidebarTree } from './liveSidebarTree.ts'
+import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
 import { SidebarEmptyState } from './SidebarEmptyState.tsx'
 
 const emptyAgents: readonly Agent[] = []
@@ -293,6 +294,19 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const folderSource = useDataSource()
   const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
   const [filters, setFilters] = useAtom(sidebarSettings.filters)
+  const machineMemory = useMachineMemory()
+  const asking = useAskingAgents()
+  // The query is the only Show state; live gateways start from this browser's remembered machines.
+  React.useLayoutEffect(() => {
+    const query = withRememberedMachines({ query: filters.query, remembered: machineMemory.remembered })
+    if (query !== filters.query) setFilters({ ...filters, query })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed once per gateway's filters, not on every edit.
+  }, [sidebarSettings.filters])
+  const hosts = React.useMemo(() => [...new Set(agents.map(row => row.host))].toSorted(), [agents])
+  const updateFilters = React.useCallback((value: typeof filters) => {
+    setFilters(value)
+    machineMemory.remember(value.query, hosts)
+  }, [setFilters, machineMemory, hosts])
   // Typing stays urgent; filtering and the tree collection follow at transition priority.
   const deferredFilters = React.useDeferredValue(filters)
   const sidebarQuery = React.useMemo(() => parseSidebarQuery(deferredFilters.query), [deferredFilters.query])
@@ -323,7 +337,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     return next
   }, [agents, subjects])
   // Filtering uses observed status, not wall time; ticking cannot change membership.
-  const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, deferredFilters, stale])
+  const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
+  const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
   const previousAccessibleNames = React.useRef<ReadonlyMap<string, string> | undefined>(undefined)
   const accessibleNames = React.useMemo(() => {
     const next = new Map(agents.map(agent => [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale }))] as const))
@@ -365,8 +380,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   </aside>
   // One roster for both presentations: docked beside the thread, or the agents sheet below the breakpoint.
   const sidebarBody = <>
-    <LiveSidebarToolbar filters={filters} update={setFilters} hosts={[...new Set(agents.map(row => row.host))].toSorted()} needsMeCount={needsYou.size} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
-    {fleet._tag === 'Observed' && visibleSidebarTree.length === 0 ? <SidebarEmptyState query={deferredFilters.query} needsMe={deferredFilters.needsMe} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} /> : null}
+    <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
+    {fleet._tag === 'Observed' && visibleSidebarTree.length === 0 ? <SidebarEmptyState query={deferredFilters.query} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} /> : null}
     <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
       {fleet._tag === 'Waiting' ? <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
         {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>

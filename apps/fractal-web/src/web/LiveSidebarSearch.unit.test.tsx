@@ -53,7 +53,7 @@ describe('live sidebar search field', () => {
     host = document.createElement('div')
     document.body.append(host)
     const root = createRoot(host)
-    await act(async () => root.render(<LiveSidebarToolbar filters={defaultFilters} update={() => {}} hosts={[]} />))
+    await act(async () => root.render(<LiveSidebarToolbar filters={defaultFilters} update={() => {}} hosts={[]} showRows={[]} />))
     const field = host.querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
     expect(field.getAttribute('aria-description')).toMatch(/machine:.*host:/)
     const style = JSON.parse(field.className) as Record<string, unknown>

@@ -182,6 +182,27 @@ fn signed_replication_permutations_and_duplicates_match_canonical_reader() {
             Some("complete")
         );
     }
+    // Split: reverse order in batches of one and two, each batch's predecessor delivered again
+    // with it, with parity against the canonical reader after every batch.
+    for width in [1, 2] {
+        let (target, views) = fixture();
+        let order = exchange.envelopes.iter().rev().cloned().collect::<Vec<_>>();
+        let mut previous = Vec::new();
+        for chunk in order.chunks(width) {
+            let mut batch = chunk.to_vec();
+            batch.extend(previous.iter().cloned());
+            receive_and_project(&target, "cedar", &st3_store::store::tests_shared_seats::exchange_of("cedar", batch));
+            parity(&target, &views, &run.steps, at);
+            previous = chunk.to_vec();
+        }
+        assert_eq!(
+            row(&target.readers.get(), &views, &run.steps[0].subject, 1, at)
+                .unwrap()
+                .completion_summary
+                .as_deref(),
+            Some("complete")
+        );
+    }
 }
 
 #[test]
