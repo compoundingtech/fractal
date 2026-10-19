@@ -88,7 +88,7 @@ pub struct ReplyRequest {
     pub idempotency_key: String,
 }
 
-fn typed(e: st3_schema::ValidationError) -> St3Error {
+pub fn typed(e: st3_schema::ValidationError) -> St3Error {
     St3Error::new(e.code, e.message)
 }
 fn fail(message: impl Into<String>) -> St3Error {

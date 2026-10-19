@@ -1,3 +1,4 @@
+use crate::CoordinationStore;
 use super::*;
 
 pub const THRESHOLD_MS: u64 = 3_600_000;

@@ -1,5 +1,8 @@
+
+
+
 // Exercise the publication entry point rather than the timestamp helper in isolation.
-fn fixture(reviewed: bool) -> (Store, MissionRunView, NormalizedIntent, MissionResponse, String) {
+pub fn fixture(reviewed: bool) -> (Store, MissionRunView, NormalizedIntent, MissionResponse, String) {
     let store = Store::open_memory("node").unwrap();
     // Only this in-memory writer's acceptance clock moves. The local planning clock stays real.
     store.set_write_clock_at(now_ms() + 60_000).unwrap();
@@ -43,7 +46,7 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
     ["mission_runs", "run_generations"].into_iter().map(|table| {
         let columns = projection_digest::columns(&reader, table, &[]).unwrap();
         let sql = format!("SELECT {} FROM {table} ORDER BY id", columns.join(","));
-        let mut statement = reader.prepare(/* sqlite-large-value: allow-for-now lv-ha93ab7699f7a owner=st3_store::store::declarative_revision_timestamp_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+        let mut statement = reader.prepare(/* sqlite-large-value: allow-for-now lv-h02dcf86c5e00 owner=st3_missions::store::declarative_revision_timestamp_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
         let rows = statement.query_map([], |row| {
             (0..columns.len()).map(|index| row.get(index)).collect::<rusqlite::Result<Vec<_>>>()
         }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
@@ -149,7 +152,7 @@ fn declarative_revision_late_failure_rolls_back_the_proposal_and_run_date() {
     let digests = checked_digests(&store);
     // Refuse the final publication receipt, after the actual proposal and date writes.
     store.connection.write().execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-h313999c523d4 owner=st3_store::store::declarative_revision_timestamp_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER refuse_timestamp_receipt BEFORE INSERT ON idempotency
+        /* sqlite-large-value: allow-for-now lv-h86ef8320ee36 owner=st3_missions::store::declarative_revision_timestamp_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER refuse_timestamp_receipt BEFORE INSERT ON idempotency
          WHEN NEW.operation_id='{}'
          BEGIN SELECT RAISE(ABORT,'injected late timestamp publication failure'); END;",
         opaque_cache_key("timestamp-revision"),

@@ -1,7 +1,9 @@
-use st3_store::store::tests_shared_seats::*;
-use st3_store::store::tests_shared_seats::{TAKEOVER_SOURCE, TREE_SHAPE_RUNS, TreeShapes, expire_work_lease_by_claim, failed_takeover_run, full_canonical_claim_id_oracle, graph_digest_of, insert_raw_claims, late_claim_matches_a_replay, local_observation_for_test};
-use st3_store::store::tests_shared_seats::{local_timeline_observation_for_test, observe_runtime, projection_replayed, publish_mission, publish_takeover, query_plan, replicate_fully, replicated_run_tree, roster_cache_store, simple};
-use st3_store::store::tests_shared_seats::{exchange_of, harness_state, takeover_step, timeline_observation};
+use crate::MissionsStore;
+use crate::PersonWorkStore;
+use st3_missions::store::tests_shared_seats::*;
+use st3_missions::store::tests_shared_seats::{TAKEOVER_SOURCE, TREE_SHAPE_RUNS, TreeShapes, failed_takeover_run, full_canonical_claim_id_oracle, graph_digest_of, insert_raw_claims, late_claim_matches_a_replay, local_observation_for_test};
+use st3_missions::store::tests_shared_seats::{local_timeline_observation_for_test, observe_runtime, projection_replayed, publish_mission, publish_takeover, query_plan, replicate_fully, replicated_run_tree, roster_cache_store, simple};
+use st3_missions::store::tests_shared_seats::{exchange_of, harness_state, takeover_step, timeline_observation};
 
 
 // Regression written before the canonical-projections implementation. Compare logical rows,

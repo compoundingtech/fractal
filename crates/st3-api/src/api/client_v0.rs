@@ -1,3 +1,10 @@
+use crate::ArrangementsStore;
+use crate::DeclarationsStore;
+use crate::LanesStore;
+use crate::MissionListStore;
+use crate::MissionsStore;
+use crate::PersonWorkStore;
+use crate::WorkListStore;
 use crate::AccountsStore;
 use crate::EvidenceSeatsStore;
 use crate::RetirementsStore;
@@ -16181,6 +16188,7 @@ mission "differential" state="ready" {
 
     #[tokio::test]
     async fn fleet_operational_commands_are_bounded_and_report_slow_queries() {
+        use crate::OperationsFixtureStore;
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.seed_operational_fleet();

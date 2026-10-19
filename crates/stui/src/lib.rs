@@ -14,6 +14,8 @@ pub use version::display_version;
 
 #[cfg(test)]
 use st3::EvidenceStore;
+#[cfg(test)]
+use st3::MissionsStore;
 use st3_feed as feed;
 #[cfg(test)]
 use st3_feed::terminal_screen_fence;

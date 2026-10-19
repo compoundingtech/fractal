@@ -4,6 +4,7 @@
 //! bind, and prints each phase's wall time and the statements that cost the most. It starts no
 //! runtime, seat or listener. Never supply a live store: this opens and writes CLONE.
 
+use st3::MissionsStore;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Instant;

@@ -1,3 +1,6 @@
+
+
+
 #[test]
 fn deadline_upgrade_preserves_budgets_admission_and_other_projection_digests() {
     let directory = tempfile::tempdir().unwrap();
@@ -82,7 +85,7 @@ mission "budget" state="ready" timeout="5m" {
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h0ed0423cc900 owner=st3_store::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject=?1 AND kind='step-run.state'
+            /* sqlite-large-value: allow-for-now lv-he4e68ed2afa1 owner=st3_missions::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject=?1 AND kind='step-run.state'
          AND json_extract(body, '$.fields.status')='completed'",
             [&missing_after.subject],
         )
@@ -124,7 +127,7 @@ mission "budget" state="ready" timeout="5m" {
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         connection
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h6b39cd4be182 owner=st3_store::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE mission_run_deadlines;
+                /* sqlite-large-value: allow-for-now lv-h875425d2020e owner=st3_missions::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE mission_run_deadlines;
              CREATE TABLE mission_run_deadlines (
                  run_id TEXT PRIMARY KEY REFERENCES mission_runs(id),
                  timeout_ms INTEGER NOT NULL,
@@ -135,11 +138,11 @@ mission "budget" state="ready" timeout="5m" {
             )
             .unwrap();
         for sql in triggers {
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h12294d8098f8 owner=st3_store::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd8d769051a55 owner=st3_missions::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
         }
         connection
             .execute(
-                /* sqlite-large-value: allow-for-now lv-hec41ddd5082d owner=st3_store::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_deadlines
+                /* sqlite-large-value: allow-for-now lv-hd52d53c42e15 owner=st3_missions::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_deadlines
              SELECT id, 300000, CAST(CAST(created_at_unix_ms AS INTEGER)+300000 AS TEXT)
              FROM mission_runs",
                 [],
@@ -302,7 +305,7 @@ mission "budget" state="ready" timeout="5m" {
     );
     // Restore the exact original retained record, rather than manufacture an admission.
     upgraded.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hb17cab5c26eb owner=st3_store::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h4d4586155d42 owner=st3_missions::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(store_index,id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![missing_claim.store_index, missing_claim.id, missing_claim.batch_id, missing_claim.subject,
             missing_claim.kind, missing_claim.origin, missing_claim.actor,
@@ -422,23 +425,23 @@ mission "corrupt-clock" state="ready" timeout="5m" {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha1f34d2f9e2c owner=st3_store::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE mission_run_deadlines;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h46ce24c2152a owner=st3_missions::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE mission_run_deadlines;
             CREATE TABLE mission_run_deadlines(run_id TEXT PRIMARY KEY REFERENCES mission_runs(id), timeout_ms INTEGER NOT NULL, deadline_at_unix_ms TEXT NOT NULL);
             UPDATE projection_digest_state SET row_count=0, accumulator=zeroblob(64) WHERE table_name='mission_run_deadlines';").unwrap();
         for sql in triggers {
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h6fded849c765 owner=st3_store::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3d47c88ec703 owner=st3_missions::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
         }
         for (run, timeout, deadline) in rows {
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h270e8e2bc967 owner=st3_store::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_deadlines VALUES(?1,?2,?3)",
+                    /* sqlite-large-value: allow-for-now lv-he949c016c976 owner=st3_missions::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_deadlines VALUES(?1,?2,?3)",
                     params![run, timeout, deadline],
                 )
                 .unwrap();
         }
         // Invalid acceptance data cannot be admitted through the typed claim API.
         // Model on-disk corruption, not a legitimate retained-history gap.
-        connection.execute(/* sqlite-large-value: allow-for-now lv-ha50d1d52635f owner=st3_store::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='broken-clock' WHERE subject=?1 AND kind='step-run.state' AND json_extract(body,'$.fields.status')='completed'", [&after.subject]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hb0c252b9f82e owner=st3_missions::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='broken-clock' WHERE subject=?1 AND kind='step-run.state' AND json_extract(body,'$.fields.status')='completed'", [&after.subject]).unwrap();
     }
     drop(store);
     let error = Store::open(&path, "node")
@@ -512,7 +515,7 @@ mission "budget" state="ready" timeout="5m" {
     let transaction = connection.transaction().unwrap();
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h7cd638c89f0e owner=st3_store::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_run_deadlines WHERE run_id='legacy-waiter'",
+            /* sqlite-large-value: allow-for-now lv-hc622084bcd28 owner=st3_missions::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_run_deadlines WHERE run_id='legacy-waiter'",
             [],
         )
         .unwrap();
@@ -529,7 +532,7 @@ mission "budget" state="ready" timeout="5m" {
         };
         transaction
             .execute(
-                &format!(/* sqlite-large-value: allow-for-now lv-hd74eb388e2ce owner=st3_store::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE {key}='legacy-waiter'"),
+                &format!(/* sqlite-large-value: allow-for-now lv-h4ae30dd38773 owner=st3_missions::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE {key}='legacy-waiter'"),
                 [],
             )
             .unwrap();
@@ -588,7 +591,7 @@ mission "scale" state="ready" timeout="5m" {
         let transaction = connection.transaction().unwrap();
         transaction
             .execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-h3631e72f6d57 owner=st3_store::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE fixture_numbers(n INTEGER PRIMARY KEY);
+                /* sqlite-large-value: allow-for-now lv-h73fe99d622cc owner=st3_missions::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE fixture_numbers(n INTEGER PRIMARY KEY);
             INSERT INTO fixture_numbers WITH RECURSIVE numbers(n) AS
             (VALUES(0) UNION ALL SELECT n+1 FROM numbers WHERE n<{}) SELECT n FROM numbers;",
                 total_runs - 2,
@@ -596,7 +599,7 @@ mission "scale" state="ready" timeout="5m" {
             .unwrap();
         let clone_table = |table: &str, overrides: &[(&str, &str)], predicate: &str| {
             let columns = transaction
-                .prepare(/* sqlite-large-value: allow-for-now lv-h62227c395fbd owner=st3_store::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({table})"))
+                .prepare(/* sqlite-large-value: allow-for-now lv-hfc4edc8b5ba9 owner=st3_missions::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({table})"))
                 .unwrap()
                 .query_map([], |row| row.get::<_, String>(1))
                 .unwrap()
@@ -616,7 +619,7 @@ mission "scale" state="ready" timeout="5m" {
             transaction
                 .execute(
                     &format!(
-                        /* sqlite-large-value: allow-for-now lv-h8981fd167cc6 owner=st3_store::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO {table}({}) SELECT {select}
+                        /* sqlite-large-value: allow-for-now lv-h5debedb3c7e6 owner=st3_missions::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO {table}({}) SELECT {select}
                 FROM {table} seed CROSS JOIN fixture_numbers WHERE {predicate}",
                         columns.join(",")
                     ),
@@ -654,7 +657,7 @@ mission "scale" state="ready" timeout="5m" {
         );
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h8940bc81575d owner=st3_store::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_after SELECT 'scale-'||n, ?1
+                /* sqlite-large-value: allow-for-now lv-hd64c121eabcb owner=st3_missions::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_after SELECT 'scale-'||n, ?1
             FROM fixture_numbers WHERE n<?2",
                 params![seed.subject, chained],
             )
@@ -664,7 +667,7 @@ mission "scale" state="ready" timeout="5m" {
         let batch: String = transaction
             .query_row("SELECT id FROM batches LIMIT 1", [], |row| row.get(0))
             .unwrap();
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h5872eff77d26 owner=st3_store::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-he8b1181afd17 owner=st3_missions::store::mission_deadline_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
             SELECT 'scale-claim-'||n,?1,'step-run/scale-after-'||n,'step-run.state','node',NULL,
             '{\"fields\":{\"status\":\"completed\"}}','[]','1800000600000'
             FROM fixture_numbers WHERE n<?2 AND n%2=0", params![batch, chained]).unwrap();
@@ -680,7 +683,7 @@ mission "scale" state="ready" timeout="5m" {
             .unwrap();
         transaction
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-hd2992c144180 owner=st3_store::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE mission_run_deadlines;
+                /* sqlite-large-value: allow-for-now lv-h01c8b9ce0428 owner=st3_missions::store::mission_deadline_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE mission_run_deadlines;
             CREATE TABLE mission_run_deadlines(run_id TEXT PRIMARY KEY REFERENCES mission_runs(id),
                 timeout_ms INTEGER NOT NULL, deadline_at_unix_ms TEXT NOT NULL);
             UPDATE projection_digest_state SET row_count=0, accumulator=zeroblob(64)
@@ -688,11 +691,11 @@ mission "scale" state="ready" timeout="5m" {
             )
             .unwrap();
         for trigger in triggers {
-            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf1784868d4e8 owner=st3_store::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &trigger).unwrap();
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4315316da450 owner=st3_missions::store::mission_deadline_tests TODO=trace-statement-and-value-representation */ &trigger).unwrap();
         }
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h94b2b762289d owner=st3_store::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_deadlines
+                /* sqlite-large-value: allow-for-now lv-hc15d25efc76b owner=st3_missions::store::mission_deadline_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_deadlines
             SELECT 'scale-'||n,300000,'1800000300000' FROM fixture_numbers WHERE n<?1",
                 [rows],
             )

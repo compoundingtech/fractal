@@ -46,7 +46,7 @@ fn live_claims(claims: Vec<ClaimRecord>) -> Vec<ClaimRecord> {
         .collect()
 }
 
-fn resource(claim: &ClaimRecord) -> Result<Value> {
+pub fn resource(claim: &ClaimRecord) -> Result<Value> {
     let body = st3_schema::glasses::body_for_read(&claim.body["fields"]["body"])?;
     Ok(
         json!({"id":claim.subject, "kind":"glass", "revision":claim.id,

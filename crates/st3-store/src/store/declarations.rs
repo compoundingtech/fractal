@@ -29,7 +29,7 @@ fn proposed(intent: &NormalizedIntent, subject: &str) -> Result<Option<Value>, S
 }
 
 /// Read the selected graph definition, including an owned set's exact member references.
-fn selected(
+pub fn selected(
     connection: &Connection,
     subject: &str,
     at: Option<u64>,
@@ -92,7 +92,7 @@ fn selected(
     )
 }
 
-fn changed_fields(
+pub fn changed_fields(
     before: Option<&Value>,
     after: Option<&Value>,
     path: &str,
@@ -142,12 +142,3 @@ pub fn diffs<'a>(
     Ok(diffs)
 }
 
-impl Store {
-    pub fn publication_definition(
-        &self,
-        subject: &str,
-        at: u64,
-    ) -> Result<Option<PublicationDefinition>, St3Error> {
-        selected(&self.readers.get(), subject, Some(at))
-    }
-}

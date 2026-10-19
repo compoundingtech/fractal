@@ -30,6 +30,8 @@
 //! It fails when a person-facing read's p99 passes the budget, and when a read's median grows by
 //! more than twice from one scale to the next, which means it does work that grows with the store.
 
+use st3::MissionsStore;
+use st3::PersonWorkStore;
 use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;

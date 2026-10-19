@@ -21,7 +21,7 @@ const OPTIONAL: &[&str] = &[
     "input_buffer",
     "exit",
 ];
-const STATES: &[&str] = &[
+pub const STATES: &[&str] = &[
     "",
     "starting",
     "ready",

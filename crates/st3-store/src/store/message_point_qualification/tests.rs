@@ -14,7 +14,7 @@ fn batch(db: &Connection, id: &str, sequence: u64) {
     .unwrap();
 }
 
-fn claim(
+pub fn claim(
     db: &Connection,
     batch: &str,
     id: &str,
@@ -34,7 +34,7 @@ fn sent(to: &str, content: &str, tags: &[&str]) -> Value {
     json!({"fields":{"from":"sender","to":to,"content":content,"status":"sent","tags":tags,"session_id":"fixture-session"}})
 }
 
-fn fixture() -> Store {
+pub fn fixture() -> Store {
     let store = Store::open_memory("host/fixture").unwrap();
     let db = store.connection.write();
     batch(&db, "selected", 1);

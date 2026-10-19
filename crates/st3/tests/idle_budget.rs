@@ -17,6 +17,7 @@
 //! Inside an st seat, run it with `env -u ST_AGENT` under `systemd-run --user --pipe` or another
 //! parent outside the seat: the API binds callers to the agent in their process ancestry.
 
+use st3::MissionsStore;
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};

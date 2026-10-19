@@ -1,4 +1,5 @@
 //! Isolated real router/store coverage; no daemon, subprocess, ambient profile, or managed agent.
+use st3::PersonWorkStore;
 use st3::SeatsStoreCore;
 use std::{path::PathBuf, sync::Arc};
 

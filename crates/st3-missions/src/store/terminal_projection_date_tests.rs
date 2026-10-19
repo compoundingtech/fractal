@@ -1,3 +1,6 @@
+
+
+
 // Bounded synthetic row/envelope controls. No fleet state or production oracle.
 fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
     let reader = store.readers.get();
@@ -6,7 +9,7 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
         .map(|table| {
             let columns = projection_digest::columns(&reader, table, &[]).unwrap();
             let sql = format!("SELECT {} FROM {table} ORDER BY id", columns.join(","));
-            let mut statement = reader.prepare(/* sqlite-large-value: allow-for-now lv-h6da9e11c6608 owner=st3_store::store::terminal_projection_date_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+            let mut statement = reader.prepare(/* sqlite-large-value: allow-for-now lv-h9801a3353a6a owner=st3_missions::store::terminal_projection_date_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
             let rows = statement
                 .query_map([], |row| {
                     (0..columns.len())
@@ -21,7 +24,7 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
         .collect()
 }
 
-    fn checked_digests(store: &Store) -> BTreeMap<String, String> {
+fn checked_digests(store: &Store) -> BTreeMap<String, String> {
     let reader = store.readers.get();
     let cached = projection_digest::tables(&reader).unwrap();
     // This oracle scans only the tiny isolated fixture, never a production store.
@@ -38,9 +41,9 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
         .collect()
 }
 
-    type TerminalDateTuple = (String, String, String, String, String, String, String);
+type TerminalDateTuple = (String, String, String, String, String, String, String);
 
-    fn terminal_date_tuple(store: &Store, run: &MissionRunView) -> TerminalDateTuple {
+fn terminal_date_tuple(store: &Store, run: &MissionRunView) -> TerminalDateTuple {
     store
         .readers
         .get()
@@ -65,7 +68,7 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
         .unwrap()
 }
 
-    fn terminal_date_claims(store: &Store, run: &MissionRunView) -> Vec<(String, String, String)> {
+fn terminal_date_claims(store: &Store, run: &MissionRunView) -> Vec<(String, String, String)> {
     let reader = store.readers.get();
     let mut statement = reader
         .prepare(
@@ -83,7 +86,7 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
         .unwrap()
 }
 
-    #[derive(Debug)]
+#[derive(Debug)]
 struct TerminalDateCapture {
     dates: TerminalDateTuple,
     claims: Vec<(String, String, String)>,
@@ -92,7 +95,7 @@ struct TerminalDateCapture {
     digests: BTreeMap<String, String>,
 }
 
-    fn terminal_date_capture(store: &Store, run: &MissionRunView) -> TerminalDateCapture {
+fn terminal_date_capture(store: &Store, run: &MissionRunView) -> TerminalDateCapture {
     let view = store.mission_run(&run.id).unwrap().unwrap();
     assert_eq!(
         view.generation, run.generation,
@@ -118,7 +121,7 @@ struct TerminalDateCapture {
     }
 }
 
-    fn same_envelopes(left: &Store, right: &Store) {
+fn same_envelopes(left: &Store, right: &Store) {
     let identities = |store: &Store| {
         let mut ids = store
             .replication_inventory()
@@ -143,7 +146,7 @@ struct TerminalDateCapture {
     }
 }
 
-    fn receive_dates(target: &Store, envelopes: Vec<ReplicaEnvelope>) {
+fn receive_dates(target: &Store, envelopes: Vec<ReplicaEnvelope>) {
     target.bind_fleet(TEST_FLEET).unwrap();
     let wire = exchange_of("node", envelopes);
     target
@@ -153,7 +156,7 @@ struct TerminalDateCapture {
     assert!(target.project_replication_backlog().unwrap());
 }
 
-    fn terminal_date_three_paths(source: &Store, run: &MissionRunView) -> [TerminalDateCapture; 3] {
+fn terminal_date_three_paths(source: &Store, run: &MissionRunView) -> [TerminalDateCapture; 3] {
     let replica = Store::open_memory("peer").unwrap();
     let wire = exchange_from(source, &replica.replication_inventory().unwrap());
     assert!(!wire.envelopes.is_empty());
@@ -223,7 +226,7 @@ struct TerminalDateCapture {
     [origin, copied, replay]
 }
 
-    fn assert_terminal_date_input_and_creation(
+fn assert_terminal_date_input_and_creation(
     captures: &[TerminalDateCapture; 3],
     created: &TerminalDateTuple,
 ) {
@@ -237,7 +240,7 @@ struct TerminalDateCapture {
     }
 }
 
-    fn assert_terminal_date_parity(captures: &[TerminalDateCapture; 3]) {
+fn assert_terminal_date_parity(captures: &[TerminalDateCapture; 3]) {
     for capture in &captures[1..] {
         assert_eq!(
             (&capture.dates.3, &capture.dates.6),
@@ -253,7 +256,7 @@ struct TerminalDateCapture {
     }
 }
 
-    fn terminal_date_request(mission: &str, key: &str) -> MissionRunRequest {
+fn terminal_date_request(mission: &str, key: &str) -> MissionRunRequest {
     MissionRunRequest {
         mission: mission.into(),
         revision: None,
@@ -265,7 +268,7 @@ struct TerminalDateCapture {
     }
 }
 
-    #[test]
+#[test]
 fn active_child_dates_match_after_later_parent_terminal_projection() {
     let source = Store::open_memory("node").unwrap();
     let initial_time = now_ms() + 60_000;
@@ -336,7 +339,7 @@ mission "active-date-child" state="ready" {
     assert_terminal_date_parity(&captures);
 }
 
-    #[test]
+#[test]
 fn already_terminal_root_preserves_its_creation_dates_on_replica_and_replay() {
     let source = Store::open_memory("node").unwrap();
     let initial_time = now_ms() + 60_000;
@@ -387,7 +390,7 @@ mission "terminal-date-root" state="ready" {
     assert_terminal_date_parity(&captures);
 }
 
-    #[test]
+#[test]
 fn completed_child_dates_survive_certified_trim_adoption_and_reopen() {
     use smallclaims::store::checkpoint::checkpoint_name;
     use smallclaims::store::checkpoint_agreement::SealTerms;

@@ -1,22 +1,23 @@
 //! The part of `store::mission_ivm` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 
+use crate::MissionsStore;
 use super::*;
 use smallclaims::ivm::{Definition, LocalChange, Readiness, View, Views, source_cut};
-pub use st3_store::store::mission_ivm::*;
-pub use st3_store::store::mission_ivm::{MissionSelection, SOURCE, VIEW, clean, clock_page, definitions, flush, next_deadline, row, rows, window};
+pub use st3_missions::store::mission_ivm::*;
+pub use st3_missions::store::mission_ivm::{MissionSelection, SOURCE, VIEW, clean, clock_page, definitions, flush, next_deadline, row, rows, window};
 
 #[cfg(test)]
 mod tests {
     use super::super::tests::{exchange_from, receive_and_project};
     use super::*;
     use smallclaims::ivm::{SourceCut, events};
-    use st3_store::store::directive_notes::tests_shared_seats::*;
-    use st3_store::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
-    use st3_store::store::mission_ivm_tests_shared_seats::*;
-    use st3_store::store::mission_ivm_tests_shared_seats::{checkpoint, fixture, parity, register, start};
-    use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::*;
-    use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::{Fixture, Saved, binding, observation};
+    use st3_missions::store::directive_notes::tests_shared_seats::*;
+    use st3_missions::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
+    use st3_missions::store::mission_ivm_tests_shared_seats::*;
+    use st3_missions::store::mission_ivm_tests_shared_seats::{checkpoint, fixture, parity, register, start};
+    use st3_missions::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::*;
+    use st3_missions::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::{Fixture, Saved, binding, observation};
 
     fn publish(store: &Store, id: &str, key: &str) {
         let source = format!(

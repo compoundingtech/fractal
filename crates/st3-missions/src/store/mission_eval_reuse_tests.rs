@@ -1,21 +1,24 @@
 use super::*;
+use st3_store::store::shared_missions::*;
+use st3_store::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 
-    struct Clock;
 
-    impl Clock {
+struct Clock;
+
+impl Clock {
     fn at(at: u128) -> Self {
         smallclaims::store::set_thread_clock(Some(at));
         Self
     }
 }
 
-    impl Drop for Clock {
+impl Drop for Clock {
     fn drop(&mut self) {
         smallclaims::store::set_thread_clock(None);
     }
 }
 
-    fn legacy_run(connection: &Connection, id: &str, snapshot: u128) -> rusqlite::Result<MissionRunView> {
+fn legacy_run(connection: &Connection, id: &str, snapshot: u128) -> rusqlite::Result<MissionRunView> {
     let mut view = mission_run_header_tx(connection, id)?;
     let mut statement = connection.prepare(
         "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -41,7 +44,7 @@ use super::*;
     Ok(view)
 }
 
-    fn assert_equivalent(store: &Store, id: &str, snapshot: u128) {
+fn assert_equivalent(store: &Store, id: &str, snapshot: u128) {
     let _clock = Clock::at(snapshot);
     let expected = {
         let connection = store.readers.get();
@@ -58,7 +61,7 @@ use super::*;
     }
 }
 
-    #[test]
+#[test]
 fn evaluation_definition_reuse_preserves_loops_and_descendant_views() {
     let snapshot = now_ms().saturating_add(10_000);
     let store = Store::open_memory("node").unwrap();
@@ -100,7 +103,7 @@ mission "reuse-child" state="ready" {
     }
     // Expired held work must get the same effective state before definition enrichment.
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hfa96b1bac290 owner=st3_store::store::mission_eval_reuse_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='claimed', lease_owner='person/test', lease_incarnation='worker-one', lease_expires_at_unix_ms='0' WHERE subject=?1",
+        /* sqlite-large-value: allow-for-now lv-haf1e4564323f owner=st3_missions::store::mission_eval_reuse_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='claimed', lease_owner='person/test', lease_incarnation='worker-one', lease_expires_at_unix_ms='0' WHERE subject=?1",
         [&child.steps[0].subject],
     ).unwrap();
     assert_equivalent(&store, &child.id, snapshot);
@@ -125,7 +128,7 @@ mission "untimed-history" state="ready" {
 // after newer claims. The projection's status/attempt is controlled separately by the test.
 fn timing_claim(store: &Store, subject: &str, id: usize, kind: &str, at: u128, fields: Value) {
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h606e820b36ea owner=st3_store::store::mission_eval_reuse_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h0ff6a435fc66 owner=st3_missions::store::mission_eval_reuse_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
          VALUES(?1,(SELECT id FROM batches LIMIT 1),?2,?3,'node',NULL,?4,'[]',?5)",
         params![format!("timing-fixture-{id}"), subject, kind,
             json!({"fields": fields}).to_string(), at.to_string()],

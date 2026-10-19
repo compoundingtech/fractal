@@ -1,10 +1,11 @@
 //! The part of `store::seats` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::MissionsStore;
 use crate::EvidenceSeatsStore;
 use crate::RosterAdmissionStore;
 use super::*;
-pub use st3_store::store::seats::*;
-pub use st3_store::store::seats::{EndedDeclaration};
+pub use st3_missions::store::seats::*;
+pub use st3_missions::store::seats::{EndedDeclaration};
 
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;

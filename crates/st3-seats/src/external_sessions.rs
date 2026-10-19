@@ -21,8 +21,8 @@ use sha2::{Digest as _, Sha256};
 use walkdir::WalkDir;
 #[cfg(test)]
 use crate::native_views::{MAX_OMP_EVENT_IDENTITY_BYTES, MAX_TIMELINE_VALUE_BYTES, bounded_value};
-pub use st3_store::external_sessions::*;
-pub use st3_store::external_sessions::{ExternalDriver, ExternalProcess, ExternalSession, LineTimelineFold, NativeLocator, TimelineKey, TimelineOrder, TimelineSlice, digest, timeline_key, timestamp};
+pub use st3_missions::external_sessions::*;
+pub use st3_missions::external_sessions::{ExternalDriver, ExternalProcess, ExternalSession, LineTimelineFold, NativeLocator, TimelineKey, TimelineOrder, TimelineSlice, digest, timeline_key, timestamp};
 
 const MAX_DISCOVERED_FILES: usize = 10_000;
 
@@ -2670,8 +2670,8 @@ pub fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::external_sessions::shared_tests_seats::*;
-    use st3_store::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, path_executable, texts, transcript_session, unfurled_timeline};
+    use st3_missions::external_sessions::shared_tests_seats::*;
+    use st3_missions::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, path_executable, texts, transcript_session, unfurled_timeline};
 
     #[test]
     fn timeline_send_identity_codex_includes_native_thread_at_timeline_boundary() {
