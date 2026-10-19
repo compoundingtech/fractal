@@ -35,6 +35,7 @@ try {
     const inspect = async (width, size) => {
       await page.setViewportSize({ width, height: 900 })
       await sidebar.focus(); await page.keyboard.press('Home')
+      if (width === 1440) for (let i = 0; i < 6; i++) await page.keyboard.press('ArrowRight')
       await dock.focus(); await page.keyboard.press('End')
       if (size === 440) { await page.keyboard.press('Home'); for (let i = 0; i < 3; i++) await page.keyboard.press('Shift+ArrowLeft'); for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowLeft') }
       await page.waitForFunction(() => {
@@ -69,6 +70,7 @@ try {
     await page.getByRole('menuitem', { name: 'View KDL', exact: true }).click()
     await page.getByRole('dialog').waitFor()
     await page.keyboard.press('Escape')
+    await page.getByRole('dialog').waitFor({ state: 'hidden' })
     if (out) await page.screenshot({ path: `${out}/app-${scheme}-900-main-lane.png` })
     await inspect(1440)
     assert.equal(Number(await dock.getAttribute('aria-valuenow')), 720)
