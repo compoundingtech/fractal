@@ -19,27 +19,6 @@ pub fn request() -> Fence {
         Fence::new("agent/eval.worker", "current", "delivery")
     }
 
-/// Call `promote_current_mailbox_ownership` on another thread, so a test can hold the writer
-    /// on this one. A call that needs the writer cannot finish while the test holds it.
-    pub fn promote_elsewhere(
-        store: &Arc<Store>,
-        fence: &Fence,
-        candidate: &Authority,
-    ) -> (
-        std::sync::mpsc::Receiver<Result<(), String>>,
-        std::thread::JoinHandle<()>,
-    ) {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let (store, fence, candidate) = (Arc::clone(store), fence.clone(), candidate.clone());
-        let worker = std::thread::spawn(move || {
-            let result = store
-                .promote_current_mailbox_ownership(&fence, &candidate)
-                .map_err(|error| format!("{error:?}"));
-            let _ = sender.send(result);
-        });
-        (receiver, worker)
-    }
-
 /// The result of a call that must finish while the test holds the writer. A timeout means it
     /// waited for the writer; a disconnected channel means the worker failed, and joining it
     /// reports why.

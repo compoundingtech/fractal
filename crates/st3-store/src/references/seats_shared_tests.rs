@@ -6,12 +6,6 @@ use crate::store::Store;
 
 pub const UNSTORED: &str = "5f0c3a9e1d2b4c6a8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d";
 
-pub fn refusals(store: &Store, source: &str) -> Vec<String> {
-        store
-            .unresolved_references(&parse_intent(source, "node").unwrap())
-            .unwrap()
-    }
-
 /// A mission whose runs declare `declarations`.
     pub fn watch(declarations: &str) -> String {
         format!(

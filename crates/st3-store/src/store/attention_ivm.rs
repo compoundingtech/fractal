@@ -355,7 +355,7 @@ fn run_dependencies(tx: &Transaction<'_>, source: &str, initial: &str) -> Result
     Ok(())
 }
 
-fn resource(item: &AttentionItemView) -> Result<Value> {
+pub fn resource(item: &AttentionItemView) -> Result<Value> {
     let id = crate::client_values::client_attention_id(&item.subject, &item.person, &item.episode)?;
     let mut row = json!({"id":id,"kind":"attention","attention_kind":item.kind,
       "source_id":item.subject,"source_kind":item.kind,"episode":item.episode,"person_id":item.person,

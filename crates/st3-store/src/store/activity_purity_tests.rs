@@ -105,7 +105,9 @@ proptest! {
             (0..exchange.envelopes.len()).rev().collect::<Vec<_>>(),
             order,
         ] {
-            let target = Store::open_memory("cedar").unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("claims.sqlite3");
+            let target = Store::open(&path, "cedar").unwrap();
             for chunk in schedule.chunks(width) {
                 let envelopes = chunk.iter().flat_map(|&index| {
                     std::iter::repeat_n(exchange.envelopes[index].clone(), copies)
@@ -124,6 +126,13 @@ proptest! {
             let cards = target.agent_card_reads(&[AGENT.into()], index, &HashMap::new()).unwrap();
             prop_assert_eq!(cards.last_activity_at(&target, AGENT, Some(INCARNATION)).unwrap(), expected);
             target.replay_replication_graph().unwrap();
+            let index = target.index().unwrap();
+            prop_assert_eq!(target.agent_last_activity_at(AGENT, Some(INCARNATION), index).unwrap(), expected);
+            let cards = target.agent_card_reads(&[AGENT.into()], index, &HashMap::new()).unwrap();
+            prop_assert_eq!(cards.last_activity_at(&target, AGENT, Some(INCARNATION)).unwrap(), expected);
+            // A reopened store reads the same.
+            drop(target);
+            let target = Store::open(&path, "cedar").unwrap();
             let index = target.index().unwrap();
             prop_assert_eq!(target.agent_last_activity_at(AGENT, Some(INCARNATION), index).unwrap(), expected);
             let cards = target.agent_card_reads(&[AGENT.into()], index, &HashMap::new()).unwrap();

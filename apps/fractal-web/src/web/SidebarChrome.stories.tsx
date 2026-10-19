@@ -22,7 +22,7 @@ const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'd
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   return <main data-sidebar-chrome-story="" style={{ width: viewport }} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
     <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}>
-      <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} />
+      <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} showRows={[{ host: 'local', asking: false, others: true }]} />
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>Builder session</nav>
       <SidebarChromeFooter onToggleScheme={() => setScheme(value => value === 'dark' ? 'light' : 'dark')} />
     </ResponsiveAgentSidebar>

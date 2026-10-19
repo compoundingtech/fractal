@@ -44,7 +44,7 @@ const ChromeFixture = ({ width, onCollapse, onTheme }: {
 }) => {
   const [filters, setFilters] = React.useState(defaultFilters)
   return <ResponsiveAgentSidebar viewport={1440} width={width} maxWidth={440} collapsed={false} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={onCollapse} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}>
-    <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} />
+    <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} showRows={[]} />
     <SidebarChromeFooter onToggleScheme={onTheme} />
   </ResponsiveAgentSidebar>
 }
@@ -80,7 +80,7 @@ describe.each([240, 256, 320, 440])('sidebar chrome at %ipx', width => {
     expect(field.style.width).toBe('100%')
     expect(field.style.boxSizing).toBe('border-box')
     expect(field.style.borderRadius).toBe('6px')
-    expect(within(host).getByRole('button', { name: 'Needs me only' })).not.toBeNull()
+    expect(within(host).getByRole('button', { name: 'Show' })).not.toBeNull()
     expect(within(host).getByRole('button', { name: /Filter agents/ })).not.toBeNull()
     expect(within(host).getByRole('button', { name: /Sort agents/ })).not.toBeNull()
     field.focus()
