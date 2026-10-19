@@ -46,6 +46,12 @@ PROTECTED = (
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
 )
 
+# Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
+# may be at most this many first-parent commits of main behind the tip GitHub merged into. Further behind, the run asks about the
+# merge tree, as before head trees existed. 24 is about 8 hours of main at 3 merges an hour and covered 99% of pull request runs
+# (2026-10-17 to 2026-10-19: median 2, 99th percentile 22).
+HEAD_TREE_MAX_BEHIND = 24
+
 NOTES = 'refs/notes/evidence'  # records live under refs/notes/evidence/<tree>/: one prefix per tree
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 VERIFIER = 'scripts/evidence-verify'
@@ -227,6 +233,7 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('attempts', result.get('attempts')), ('enforce', result.get('enforce')), ('match', result.get('match')),
         ('source_inputs', result.get('source_inputs')), ('tree', tree), ('tree_of', context.get('tree_of')),
         ('pr_head', context.get('pr_head')), ('merge_tree', context.get('merge_tree')), ('head_tree', context.get('head_tree')),
+        ('behind', context.get('behind')),
         ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
         ('head', context['head']),
         ('base', context['base']), ('event', context['event']), ('pr', context['pr']),
@@ -326,6 +333,12 @@ def choose_tree(context):
             raise Fallback(f'authors: {str(error)[:120]}')
         branch_point = git_out('merge-base', base, head)
         current = git_out('rev-parse', '--verify', '-q', 'HEAD^1', check=False) if checked_out != head else base
+        behind = git_out('rev-list', '--count', '--first-parent', f'{branch_point}..{current or base}')
+        if not behind.isdigit():
+            raise Fallback('could not count how far the branch is behind')
+        context['behind'] = int(behind)
+        if int(behind) > HEAD_TREE_MAX_BEHIND:
+            raise Fallback(f'the branch is {behind} commits behind main, more than {HEAD_TREE_MAX_BEHIND}')
         changed = []
         for first, second in ((branch_point, head), (branch_point, base), (branch_point, current or base)):
             diff = run('git', 'diff', '--no-renames', '--name-only', '-z', first, second)

@@ -936,6 +936,16 @@ dependence:** a skip now depends on state outside the pull request. The same hea
 agent has signed and pushed the note, or the reverse if a note is later superseded by a failing record; a skip is the decision at that run, not a property of the sha. A skip on a pull request therefore means "the head tree passed on a trusted host", not
 "the merge with today's main passes"; a break caused only by main moving is caught in the merge queue, which still tests the integrated tree.
 
+**How stale a head may be (the staleness policy).** A head-tree note says the head passed; it says nothing about the main the branch has
+not seen. The gate therefore uses the head tree only while the branch point is at most `HEAD_TREE_MAX_BEHIND` = 24 first-parent commits of
+main behind the tip GitHub merged into (the merge's first parent). Further behind, the run asks about the merge tree, as before head trees
+existed (`head_tree=fallback:the_branch_is_N_commits_behind_main...`), which in practice means the checks run; rebasing or merging main
+brings the branch back inside the bound. The decision line prints `behind=N` for every head-tree candidate. 24 is about 8 hours of main at
+today's 3 merges an hour; measured over 707 pull-request runs (2026-10-17 to 2026-10-19), the median branch was 2 commits behind, the 90th
+percentile 11 and the 99th 22, so the bound refuses only outliers. The merge queue still tests the combined tree for every change, so the bound
+limits how much a green pull request can differ from what lands, not what lands. The number lives in the gate (read from the accepted base,
+a protected path), so changing it is a reviewed change like any other.
+
 ### Host keys
 
 Our own machines are trusted to sign what they run. `scripts/evidence-keygen` makes a host's key, a scratch
@@ -1049,7 +1059,8 @@ values and `-` for none:
 ```
 evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
 reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false match=tree|inputs source_inputs=…
-tree=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
+tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… notes_fetch=ok|failed
+policy_sha256=… keys_sha256=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
 ```
 
 (one line; wrapped here). Each job also ends with exactly one of these steps running, which is how a
