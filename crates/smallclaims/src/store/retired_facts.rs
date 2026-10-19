@@ -221,8 +221,8 @@ mod tests {
     fn receipts_and_ancestry_answer_as_the_checkpoint_rows_did_after_adoption_withdraws_them() {
         let store = Store::open_memory("writer", std::sync::Arc::new(Plain)).unwrap();
         let first = tombstone(1, Some(("operation/one", "digest-b")), &[]);
-        let second = tombstone(2, Some(("operation/one", "digest-a")), &[first.id.clone()]);
-        let unrelated = tombstone(3, None, &[second.id.clone()]);
+        let second = tombstone(2, Some(("operation/one", "digest-a")), std::slice::from_ref(&first.id));
+        let unrelated = tombstone(3, None, std::slice::from_ref(&second.id));
         let claims = [first.clone(), second.clone(), unrelated.clone()];
         {
             let mut writer = store.connection.write();
