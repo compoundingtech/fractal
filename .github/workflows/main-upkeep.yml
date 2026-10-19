@@ -941,23 +941,16 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Probe the pnpm store
-        id: pnpm-store
-        uses: actions/cache/restore@v4
-        with:
-          path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
-          lookup-only: true
-      - name: Probe the web shell closure
-        id: web-shell
-        uses: actions/cache/restore@v4
-        with:
-          path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
-          lookup-only: true
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
         env:
@@ -970,7 +963,24 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
-        if: steps.pnpm-store.outputs.cache-hit != 'true' || steps.web-shell.outputs.cache-hit != 'true'
+      - name: Identify the web shell derivation
+        id: web-shell-key
+        shell: bash
+        run: bash scripts/ci-web-shell key
+      - name: Probe the pnpm store
+        id: pnpm-store
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/pnpm-store"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          lookup-only: true
+      - name: Probe the web shell closure
+        id: web-shell
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/web-shell"
+          key: ${{ steps.web-shell-key.outputs.key }}
+          lookup-only: true
       - name: Fetch the locked packages
         shell: bash
         run: "nix develop '.#web' -c pnpm fetch"
@@ -988,12 +998,13 @@ jobs:
         run: bash scripts/ci-web-shell fill
         env:
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
+          CI_WEB_SHELL_IDENTITY: ${{ steps.web-shell-key.outputs.identity }}
         if: steps.web-shell.outputs.cache-hit != 'true'
       - name: Save the web shell closure
         uses: actions/cache/save@v4
         with:
           path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
+          key: ${{ steps.web-shell-key.outputs.key }}
         if: steps.web-shell.outputs.cache-hit != 'true'
       - name: Report job cache coverage
         if: always()

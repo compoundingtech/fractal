@@ -658,7 +658,6 @@ export const fractalWebShellEnv = {
 export const fractalWebShellCache = {
   path: fractalWebShellEnv.CI_WEB_SHELL_DIR,
   key: '${{ steps.web-shell-key.outputs.key }}',
-  'restore-keys': '',
 } as const
 
 export const fractalWebShellKeyStep = {
