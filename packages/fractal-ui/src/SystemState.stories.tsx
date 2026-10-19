@@ -109,16 +109,14 @@ function useCountdown(ticking: boolean) {
 /** The geometry harness needs about 48 content rows, not the world's complete history. */
 const conversationTranscript = ({ loading, state }: WireSlice<'conversation'>) => {
   const turns: { id: string; version: string; who: string; text: string }[] = []
-  if (!loading) {
-    for (let threadIndex = state.threads.length - 1; threadIndex >= 0 && turns.length < 48; threadIndex--) {
-      const thread = state.threads[threadIndex]!
-      for (let index = thread.items.length - 1; index >= 0 && turns.length < 48; index--) {
-        const entry = thread.items[index]!
-        if (entry.type === 'content' && typeof entry.body.text === 'string') turns.push({ id: `${thread.agent}/${entry.id}`, version: `${entry.revision}`, who: entry.role === 'user' ? 'You' : thread.agent, text: entry.body.text })
-      }
+  const thread = loading ? undefined : state.threads[0]
+  if (thread !== undefined) {
+    for (let index = thread.items.length - 1; index >= 0 && turns.length < 48; index--) {
+      const entry = thread.items[index]!
+      if (entry.type === 'content' && typeof entry.body.text === 'string') turns.push({ id: `${thread.agent}/${entry.id}`, version: `${entry.revision}`, who: entry.role === 'user' ? 'You' : thread.agent, text: entry.body.text })
     }
   }
-  return { agent: loading ? undefined : state.threads[0]?.agent, turns: turns.reverse() }
+  return { agent: thread?.agent, turns: turns.reverse() }
 }
 /**
  * A populated conversation under the band, on the kit's transcript scroller. The band enters and leaves above the
@@ -245,7 +243,7 @@ const dropAndRestore = async (canvasElement: HTMLElement, between: () => Promise
 /** Geometry plays pin populated long history, bounded to 48 rows; they do not browse whole worlds. */
 const geometry = {
   args: { conversation: 'long' },
-  parameters: { scenario: { slices: ['conversation'], world: 'fleet-mid-refactor' } },
+  parameters: { scenario: { slices: ['conversation'], world: 'ci-failing-fix' } },
   argTypes: { conversation: { control: false }, roster: { table: { disable: true } } },
   render: ({ scheme }) => <ConnectionGeometryStory scheme={scheme} />,
 } satisfies Story

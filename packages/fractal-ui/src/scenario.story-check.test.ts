@@ -1,7 +1,10 @@
-import { scenarioStoryCheck } from '@smalltalk/st3-scenarios/storybook'
+import { scenarioStoryCheck, withScenario } from '@smalltalk/st3-scenarios/storybook'
 import { loadWorld } from '@smalltalk/st3-scenarios'
 import { scenarioSections } from './scenario-transcript.story-harness'
 import { expect, test } from 'vitest'
+import * as React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { composeStory } from '@storybook/react'
 import meta, { AllStates } from './Markdown.stories.tsx'
 import syncMeta, { Scenario, LocalFailure, UnknownFailure, ServerFailure } from './SyncLine.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
@@ -95,4 +98,15 @@ test('scenario transcript preserves tool operations and failed tool lifecycle', 
   expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.kind === 'edit' && call.changedPath === 'src/session.ts')).toBe(true)
   const failedTurns = scenarioSections(world.with({ conversation: 'failed-tools' }).slices.conversation).sections.flatMap(({ turns }) => turns)
   expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
+})
+
+test('connection geometry header and bounded history belong to the same thread', () => {
+  const Composed = composeStory({ ...systemStories.BandKeepsFollow, parameters: { scenario: { slices: ['conversation'], world: 'fleet-mid-refactor' } } }, systemMeta, { decorators: [withScenario] })
+  const markup = renderToStaticMarkup(React.createElement(Composed))
+  const world = loadWorld('fleet-mid-refactor').with({ conversation: 'long' })
+  const agent = world.slices.conversation.state.threads[0]!.agent
+  const rowIds = [...markup.matchAll(/data-item-id="([^"]+)"/g)].map(match => match[1]!)
+  expect(rowIds).toHaveLength(48)
+  expect(rowIds.every(id => id.startsWith(`${agent}/`))).toBe(true)
+  expect(markup).toContain(`>${agent}</`)
 })
