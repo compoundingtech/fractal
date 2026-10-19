@@ -8,7 +8,10 @@ Nix output attributes, derivation names, executables, environment and installed
 component paths deliberately retain their existing consumer contracts.
 """
 from pathlib import Path
+import json
 import re
+import subprocess
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 OLD = r"(?:st3(?:-[a-z0-9-]+)?|st2(?:-[a-z0-9-]+)?|st-[a-z0-9-]+|stui)"
@@ -35,6 +38,21 @@ def source_paths(text: str) -> str:
     return text
 
 
+def clippy_ancestry(text: str) -> str:
+    # Ratchet base commits keep their original Cargo names. A one-to-one rename
+    # is an ancestry edge, not a source alias or permission to add warnings.
+    base = "e9a9167884ea56ae22ed0605bdf284610b6fa9fb"
+    def historical(path):
+        return subprocess.check_output(["git", "show", f"{base}:{path}"],
+                                       cwd=ROOT, text=True)
+    ancestry = {**json.loads(text), **json.loads(historical(".github/clippy-splits.json"))}
+    for entry in tomllib.loads(historical("Cargo.lock"))["package"]:
+        old = entry["name"]
+        if package(old) != old:
+            ancestry[package(old)] = old
+    return json.dumps(ancestry, indent=2, sort_keys=True) + "\n"
+
+
 files = {ROOT / name for name in (
     "flake.nix", ".gitignore", ".gitattributes", "BUCK.genie.ts", ".buckconfig.genie.ts",
     ".config/nextest.toml",
@@ -58,8 +76,10 @@ for path in sorted(files):
                    lambda match: "package(" + match[1] + package(match[2]) + ")", after)
     after = re.sub(r'("package":\s*")(' + OLD + r')(")',
                    lambda match: match[1] + package(match[2]) + match[3], after)
-    if path.name in {"clippy-baseline.json", "clippy-splits.json"}:
+    if path.name == "clippy-baseline.json":
         after = re.sub(r'"(' + OLD + r')"', lambda match: '"' + package(match[1]) + '"', after)
+    if path.name == "clippy-splits.json":
+        after = clippy_ancestry(before)
     if path.name == ".gitattributes":
         after = after.replace("@smalltalk/st3-scenarios", "@fractal/scenarios")
     if after != before:
