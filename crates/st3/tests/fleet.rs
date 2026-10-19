@@ -4530,15 +4530,22 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         "The fixture member is removed.",
     ]);
     amber.restart().await;
-    wait_until(
-        "jade records its removal after the sponsor restarted",
-        60,
-        || async {
-            fs::read_to_string(jade.state_dir().join("fleet/fleet.toml"))
-                .is_ok_and(|file| file.contains("[removed]"))
-        },
-    )
-    .await;
+    // CI keeps only the panic message: on timeout, say what jade knew of amber and of itself.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !fs::read_to_string(jade.state_dir().join("fleet/fleet.toml"))
+        .is_ok_and(|file| file.contains("[removed]"))
+    {
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting until jade records its removal after the sponsor restarted\n\
+                 jade's view of amber: {}\njade fleet status: {}\namber fleet status: {}",
+                peer_status(&jade, "fixture-amber"),
+                String::from_utf8_lossy(&jade.st(&["--json", "fleet", "status"]).stdout),
+                String::from_utf8_lossy(&amber.st(&["--json", "fleet", "status"]).stdout),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     jade.restart().await;
     assert_eq!(
         jade.st_json(&["fleet", "status"])["removed"]["code"],

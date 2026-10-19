@@ -33,6 +33,7 @@ members = [
   "crates/st3-delivery",
   "crates/st3-missions",
   "crates/st3-seats",
+  "crates/st3-attention",
   "crates/st3-evidence",
   "crates/st3-github",
   "crates/st3-peer",

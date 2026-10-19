@@ -1,8 +1,10 @@
 //! Tests of `smallclaims::store::checkpoint_agreement` through smalltalk's store.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::checkpoint_agreement_tests_shared_attention_tests::{FLEET, claim_ids, context, kinds, observe, stable_cuts, step, sync};
 use super::*;
 use smallclaims::store::checkpoint_agreement::*;
 
-pub const FLEET: &str = "fleet/test";
 const CUT: u128 = 20 * DAY_MS;
 
 #[test]
@@ -271,91 +273,6 @@ fn both_sides_of_an_excused_partition_can_certify_and_a_node_adopts_both() {
 
 // Stores exchanging for real.
 
-fn sync(nodes: &[&Store]) {
-    for node in nodes {
-        node.bind_fleet(FLEET).unwrap();
-    }
-    for _ in 0..3 {
-        for source in nodes {
-            for target in nodes {
-                if source.origin == target.origin {
-                    continue;
-                }
-                let exchange = source
-                    .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
-                    .unwrap();
-                target
-                    .receive_replication_exchange(&source.origin, FLEET, &exchange)
-                    .unwrap();
-                target.validate_replication_backlog().unwrap();
-                target.project_replication_backlog().unwrap();
-                target.apply_replication_repairs().unwrap();
-            }
-        }
-    }
-}
-
-fn observe(store: &Store, n: usize) {
-    for index in 0..n {
-        store
-            .append_claim(&ClaimInput {
-                subject: format!("daemon/{}", store.origin),
-                kind: "daemon.diagnostic".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("severity".into(), json!("warning")),
-                    ("code".into(), json!("slow-request")),
-                    ("reason".into(), json!(format!("slow {index}"))),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!(
-                    "{}-slow-{index}-{}",
-                    store.origin,
-                    Uuid::now_v7().simple()
-                )),
-            })
-            .unwrap();
-    }
-}
-
-/// A context two days after tomorrow's cut, so everything written now is before the cut.
-fn context(scratch: &Path, days_later: u128) -> CheckpointContext {
-    CheckpointContext {
-        now_unix_ms: now_ms() + (3 + days_later) * DAY_MS,
-        configured_peers: Vec::new(),
-        scratch: scratch.to_path_buf(),
-        reviewer: "person/operator".into(),
-    }
-}
-
-fn step(store: &Store, context: &CheckpointContext) -> Vec<CheckpointAction> {
-    store.checkpoint_step(context).unwrap()
-}
-
-fn kinds(actions: &[CheckpointAction]) -> Vec<&'static str> {
-    actions
-        .iter()
-        .map(|action| match action {
-            CheckpointAction::Sealed { .. } => "sealed",
-            CheckpointAction::Verified { .. } => "verified",
-            CheckpointAction::ProofFailed { .. } => "proof-failed",
-            CheckpointAction::AttentionRequested { .. } => "attention",
-            CheckpointAction::AttentionWithdrawn { .. } => "withdrawn",
-            CheckpointAction::Trimmed { .. } => "trimmed",
-            CheckpointAction::ManifestNeeded { .. } => "manifest-needed",
-            CheckpointAction::TrimGraphChanged { .. } => "graph-changed",
-            CheckpointAction::SweptTrimmedClaimRows { .. } => "swept",
-        })
-        .collect()
-}
-
-fn stable_cuts(store: &Store) -> Vec<u128> {
-    stable_checkpoints(&store.checkpoint_claims().unwrap())
-        .into_keys()
-        .collect()
-}
-
 #[test]
 fn nodes_seal_then_verify_once_every_participant_sealed_the_same_set() {
     let scratch = tempfile::tempdir().unwrap();
@@ -496,116 +413,6 @@ fn a_seal_that_returns_to_earlier_terms_is_a_new_seal() {
         names(&["alder", "birch"])
     );
     assert!(!kinds(&step(&alder, &context)).contains(&"sealed"));
-}
-
-#[test]
-fn a_silent_participant_holds_everything_up_until_a_person_excuses_it() {
-    let scratch = tempfile::tempdir().unwrap();
-    let first = context(scratch.path(), 0);
-    let [alder, birch, cedar] =
-        ["alder", "birch", "cedar"].map(|name| Store::open_memory(name).unwrap());
-    observe(&alder, 2);
-    observe(&birch, 2);
-    // Cedar is an old build, or away: it wrote once and never seals.
-    observe(&cedar, 1);
-    sync(&[&alder, &birch, &cedar]);
-    step(&alder, &first);
-    step(&birch, &first);
-    sync(&[&alder, &birch]);
-    for _ in 0..3 {
-        assert!(!kinds(&step(&alder, &first)).contains(&"verified"));
-        assert!(!kinds(&step(&birch, &first)).contains(&"verified"));
-    }
-
-    // Three days after it became due, the first participant to have sealed asks a person.
-    let late = CheckpointContext {
-        now_unix_ms: first.now_unix_ms + CHECKPOINT_ATTENTION_AFTER_MS,
-        ..first.clone()
-    };
-    // The newest due checkpoint moved on; seal it first.
-    step(&alder, &late);
-    step(&birch, &late);
-    sync(&[&alder, &birch]);
-    step(&alder, &late);
-    let items = alder
-        .checkpoint_attention_items(Some("person/operator"), late.now_unix_ms)
-        .unwrap();
-    assert_eq!(items.len(), 1);
-    assert!(items[0].title.contains("cedar"));
-    assert_eq!(
-        serde_json::to_value(&items).unwrap(),
-        serde_json::to_value(
-            birch
-                .checkpoint_attention_items(Some("person/operator"), late.now_unix_ms)
-                .unwrap()
-        )
-        .unwrap()
-    );
-    assert!(alder.attention_requests(None, true).unwrap().is_empty());
-
-    // An agent cannot excuse it.
-    assert!(
-        alder
-            .excuse_checkpoint_writer(&CheckpointExcuseRequest {
-                writer: "cedar".into(),
-                reason: "away".into(),
-                actor: "agent/alder.worker".into(),
-            })
-            .is_err()
-    );
-    alder
-        .excuse_checkpoint_writer(&CheckpointExcuseRequest {
-            writer: "cedar".into(),
-            reason: "the laptop is in a drawer".into(),
-            actor: "person/operator".into(),
-        })
-        .unwrap();
-    sync(&[&alder, &birch]);
-    for node in [&alder, &birch] {
-        assert_eq!(kinds(&step(node, &late)), ["sealed"]);
-    }
-    sync(&[&alder, &birch]);
-    for node in [&alder, &birch] {
-        assert_eq!(kinds(&step(node, &late)), ["verified"]);
-    }
-    sync(&[&alder, &birch]);
-    let cut = newest_due_cut(late.now_unix_ms);
-    assert_eq!(stable_cuts(&alder), [cut]);
-    assert_eq!(kinds(&step(&alder, &late)), ["trimmed"]);
-    assert_eq!(kinds(&step(&birch, &late)), ["trimmed"]);
-
-    // Cedar comes back. What it wrote while away replicates. It adopts the checkpoint it
-    // missed, and its next seal ends its excusal, so the next checkpoint waits for it.
-    observe(&cedar, 1);
-    sync(&[&alder, &birch, &cedar]);
-    let next = CheckpointContext {
-        now_unix_ms: late.now_unix_ms + DAY_MS,
-        ..late.clone()
-    };
-    assert_eq!(kinds(&step(&cedar, &next)), ["manifest-needed"]);
-    let need = cedar.checkpoint_manifest_need().unwrap().unwrap();
-    let manifest = alder
-        .checkpoint_manifest(&need.checkpoint, need.cut_unix_ms)
-        .unwrap();
-    assert_eq!(
-        kinds(&cedar.adopt_checkpoint(&manifest).unwrap()),
-        ["trimmed"]
-    );
-    assert_eq!(claim_ids(&cedar), claim_ids(&alder));
-    assert_eq!(kinds(&step(&cedar, &next)), ["sealed"]);
-    sync(&[&alder, &birch, &cedar]);
-    assert!(
-        alder
-            .checkpoint_status(next.now_unix_ms, &[])
-            .unwrap()
-            .excused
-            .is_empty()
-    );
-    let actions = step(&alder, &next);
-    let CheckpointAction::Sealed { participants, .. } = &actions[0] else {
-        panic!("{actions:?}");
-    };
-    assert!(participants.contains("cedar"));
 }
 
 #[test]
@@ -756,16 +563,6 @@ fn a_trim_that_would_change_the_graph_waits_for_a_person() {
 fn authority(store: &Store) -> (String, String) {
     let status = store.replication_status(true, Some(FLEET), &[]).unwrap();
     (status.authority_digest, status.graph_digest)
-}
-
-fn claim_ids(store: &Store) -> BTreeSet<String> {
-    store
-        .claims_page(None, None, 0, None, false, 100_000)
-        .unwrap()
-        .claims
-        .into_iter()
-        .map(|claim| claim.id)
-        .collect()
 }
 
 /// Two nodes agree on a checkpoint until it is stable, without trimming it.
