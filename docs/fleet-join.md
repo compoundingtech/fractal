@@ -51,6 +51,7 @@ stop declared seats. See [Checkpoints](st3/checkpoints.md) before treating remov
 | `STATE/fleet/secret` | `0600` | Fleet secret |
 | `STATE/fleet/node.key` | `0600` | Private member key |
 | `STATE/fleet/join.json` | `0600` | Interrupted join progress, without secrets |
+| `STATE/fleet/pairing-recovery.json` | `0600` | Authenticated pending pairing answer, including fleet secret; bound to code digest, member key and name; erased after the durable join checkpoint |
 | `STATE/fleet/removal.json` | `0600` | Signed removal reporter, reason and time |
 
 Fleet commands maintain `fleet.toml`; change it through those commands. Config loading uses the
@@ -266,6 +267,31 @@ The worker exposes its loopback listener with
 `st fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
 the exposure. The adapter maintains trust and grants; st does not edit
 `peers.toml`.
+
+#### Adapter helper boundary
+
+The CLI discovers `st-fabric-adapter` beside its executable or on `PATH`;
+`ST_FABRIC_ADAPTER` selects an explicit helper for isolated tests.
+`pairing-invite` accepts one JSON line `{"code":"..."}` on standard input and
+returns a JSON line containing the augmented `code`. `pairing-join` is a
+private interactive JSON-line protocol: the code produces `node_id`, the signed
+join `request` produces a sealed `response`, and the authenticated sealed
+admission plus `sponsor_key` produces `confirmed: true` only after confirmation.
+Credentials travel through pipes, not helper arguments. The st side verifies
+the sealed response before sending the authenticated admission back to the
+helper; it does not write fleet settings before confirmation.
+
+For isolated development/live proofs, `nix build .#fabric-pairing` builds the
+published Fabric revision pinned with this adapter's control contract. Use
+`--st-socket`, `--fabric-socket`, and `--state-dir` to keep proof daemons and
+adapter journals separate from user services.
+
+After an interruption following authentication, rerun the same code with the
+same name and local member key. The private recovery journal retains the
+authenticated answer before irreversible confirmation; the helper queries the
+retained receipt without presenting the spent bearer token. Confirmed recovery
+does not reinstall Fabric policy. A restart-lost or expired unconfirmed exchange
+still requires a fresh invite.
 
 ### Loopback and plain HTTP
 

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::code::{CodeEndpoint, JoinCode, fingerprint};
 use super::file::{FleetFile, FleetMode};
-use super::handshake::{JoinResponse, Joiner, SealedJoin, WriterHead};
+use super::handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response};
 use super::keys::MemberKey;
 use super::transport::{
     Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_tool,
@@ -409,6 +409,58 @@ async fn sponsor_url(code: &JoinCode, options: &JoinOptions) -> Result<(String, 
         .context("no route to the sponsor: the code has no endpoint this machine can use")
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PairingResume {
+    request: JoinRequest,
+    response: JoinResponse,
+    authenticated: SealedJoin,
+    sponsor_key: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PairingRecovery {
+    code_digest: String,
+    name: String,
+    member_key: String,
+    resume: PairingResume,
+}
+
+fn pairing_recovery_path(state_dir: &Path) -> PathBuf {
+    fleet_dir(state_dir).join("pairing-recovery.json")
+}
+
+fn code_digest(code: &JoinCode) -> Result<String> {
+    use sha2::Digest as _;
+    Ok(hex::encode(sha2::Sha256::digest(code.encode()?.as_bytes())))
+}
+
+fn load_pairing_recovery(state_dir: &Path, code: &JoinCode, name: &str, key: &MemberKey) -> Result<Option<PairingRecovery>> {
+    let path = pairing_recovery_path(state_dir);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read authenticated pairing recovery"),
+    };
+    anyhow::ensure!(fs::metadata(&path)?.permissions().mode() & 0o077 == 0,
+        "authenticated pairing recovery must be private");
+    let recovery: PairingRecovery = serde_json::from_slice(&bytes).context("decode authenticated pairing recovery")?;
+    anyhow::ensure!(
+        recovery.code_digest == code_digest(code)?
+            && recovery.name == name && recovery.member_key == key.public()
+            && recovery.resume.request.member_key == key.public()
+            && recovery.resume.request.name == name
+            && recovery.resume.request.invite == code.invite_id()
+            && recovery.resume.sponsor_key == recovery.resume.response.sponsor_key,
+        "authenticated pairing recovery belongs to another code, name, or member key"
+    );
+    super::handshake::verify_request(&recovery.resume.request, &code.token)
+        .map_err(|_| anyhow::anyhow!("authenticated pairing recovery request is invalid"))?;
+    verify_response(code, &recovery.resume.request, &recovery.resume.response)?;
+    Ok(Some(recovery))
+}
+
 /// JSON-lines transport to the external adapter. st authenticates the sealed answer
 /// before allowing the adapter to install reciprocal trust or acknowledge confirmation.
 struct PairingHelper {
@@ -418,7 +470,7 @@ struct PairingHelper {
 }
 
 impl PairingHelper {
-    async fn start(code: &str, executable: Option<&Path>) -> Result<(Self, String)> {
+    async fn start(code: &str, executable: Option<&Path>, resume: Option<&PairingResume>) -> Result<(Self, String)> {
         use std::process::Stdio;
         use tokio::io::AsyncBufReadExt as _;
         let executable = executable.map(Path::to_path_buf)
@@ -441,7 +493,11 @@ impl PairingHelper {
         let input = child.stdin.take().context("open adapter input")?;
         let output = tokio::io::BufReader::new(child.stdout.take().context("open adapter output")?).lines();
         let mut helper = Self { child, input, output };
-        helper.send(&serde_json::json!({"code": code})).await?;
+        let mut initial = serde_json::json!({"code": code});
+        if let Some(resume) = resume {
+            initial["resume"] = serde_json::to_value(resume)?;
+        }
+        helper.send(&initial).await?;
         let ready = helper.receive().await?;
         let node_id = ready["node_id"].as_str().context("adapter omitted its Fabric node identity")?.to_owned();
         anyhow::ensure!(
@@ -502,6 +558,10 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
         if let Some(checkpoint) = checkpoint
             && !code.migrate
         {
+            if code.pairing.is_some() && pairing_recovery_path(state_dir).exists() {
+                fs::remove_file(pairing_recovery_path(state_dir))?;
+                fs::File::open(fleet_dir(state_dir))?.sync_all()?;
+            }
             return Ok(Joined {
                 fleet_id: checkpoint.fleet_id,
                 name: checkpoint.name,
@@ -512,7 +572,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
             });
         }
         anyhow::ensure!(
-            code.migrate,
+            code.migrate || (code.pairing.is_some() && pairing_recovery_path(state_dir).exists()),
             "this machine is already a member of this fleet"
         );
     }
@@ -544,17 +604,27 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
             .map(|(sequence, hash)| WriterHead { sequence, hash })
     };
     let mode = options.settings.mode.as_str();
+    let recovery = load_pairing_recovery(state_dir, &code, &name, &key)?;
+    anyhow::ensure!(recovery.is_none() || code.pairing.is_some(), "pairing recovery requires a pairing code");
     let (session, mut helper, sponsor_route, url) = if let Some(pairing) = &code.pairing {
         anyhow::ensure!(options.via.is_none(), "--via cannot override a pairing code");
-        let (helper, node_id) = PairingHelper::start(&options.code, adapter).await?;
-        let session = Joiner::start_bound(&code, &key, &name, mode, writer_head, &options.version, Some(node_id))?;
+        let (helper, node_id) = PairingHelper::start(&options.code, adapter, recovery.as_ref().map(|saved| &saved.resume)).await?;
+        let session = if let Some(saved) = &recovery {
+            anyhow::ensure!(saved.resume.request.node_id.as_deref() == Some(node_id.as_str()),
+                "the Fabric identity changed since authenticated pairing");
+            None
+        } else {
+            Some(Joiner::start_bound(&code, &key, &name, mode, writer_head, &options.version, Some(node_id))?)
+        };
         (session, Some(helper), format!("fabric://{}/st3/fleet/{}", pairing.gateway, code.fleet_id), None)
     } else {
         let (url, route) = sponsor_url(&code, options).await?;
-        (Joiner::start(&code, &key, &name, mode, writer_head, &options.version)?, None, route, Some(url))
+        (Some(Joiner::start(&code, &key, &name, mode, writer_head, &options.version)?), None, route, Some(url))
     };
     let answer: JoinResponse = if let Some(helper) = &mut helper {
-        helper.send(&serde_json::json!({"request": session.request()})).await?;
+        if let Some(session) = &session {
+            helper.send(&serde_json::json!({"request": session.request()})).await?;
+        }
         serde_json::from_value(helper.receive().await?["response"].clone()).context("decode adapter join answer")?
     } else {
         let url = url.context("HTTP join route is missing")?;
@@ -564,7 +634,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
             .build()?;
         let response = http
         .post(format!("{url}/v1/fleet/join"))
-        .json(session.request())
+        .json(session.as_ref().context("HTTP join session is missing")?.request())
         .send()
         .await
         .with_context(|| format!("reach the sponsor at {url}"))?;
@@ -581,8 +651,17 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
     }
         response.json().await.context("decode the sponsor's answer")?
     };
+    let request = session.as_ref().map(|session| session.request().clone())
+        .or_else(|| recovery.as_ref().map(|saved| saved.resume.request.clone()))
+        .context("join request is missing")?;
     let sponsor_key = answer.sponsor_key.clone();
-    let sealed: SealedJoin = session.open(&answer)?;
+    let sealed = if let Some(saved) = &recovery {
+        anyhow::ensure!(answer == saved.resume.response, "the adapter changed the authenticated recovery answer");
+        verify_response(&code, &request, &answer)?;
+        saved.resume.authenticated.clone()
+    } else {
+        session.context("join session is missing")?.open(&answer)?
+    };
     anyhow::ensure!(
         sealed.fleet_id == code.fleet_id.to_string(),
         "the sponsor answered for another fleet"
@@ -596,6 +675,15 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
                         && endpoint["protocol"] == format!("st3/fleet/{}", code.fleet_id)),
             "the authenticated sponsor answer does not bind the pairing gateway"
         );
+        let saved = PairingRecovery {
+            code_digest: code_digest(&code)?,
+            name: name.clone(),
+            member_key: key.public().into(),
+            resume: PairingResume {
+                request, response: answer, authenticated: sealed.clone(), sponsor_key: sponsor_key.clone(),
+            },
+        };
+        write_private(&pairing_recovery_path(state_dir), &serde_json::to_vec(&saved)?)?;
         helper.context("pairing helper is missing")?.confirm(&sealed, &sponsor_key).await?;
     }
     let secret_file = match (&sealed.secret, &options.legacy_secret_file) {
@@ -644,13 +732,17 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
             sponsor: sealed.sponsor.clone(),
         })?,
     )?;
+    if code.pairing.is_some() {
+        fs::remove_file(pairing_recovery_path(state_dir))?;
+        fs::File::open(&directory)?.sync_all()?;
+    }
     Ok(Joined {
         fleet_id: sealed.fleet_id,
         name,
         sponsor: sealed.sponsor,
         writer_floor: sealed.writer_floor,
         migrate: code.migrate,
-        resumed: false,
+        resumed: recovery.is_some(),
     })
 }
 
@@ -811,6 +903,37 @@ mod tests {
                 assert!(FleetFile::load(&joining_dir).unwrap().is_none());
                 assert!(!joining_dir.join("fleet/secret").exists());
                 assert!(!checkpoint_path(&joining_dir).exists());
+                let member = MemberKey::load(&joining_dir.join("fleet/node.key")).unwrap();
+                let recovery = load_pairing_recovery(&joining_dir, &code, name, &member).unwrap().unwrap();
+                assert_eq!(fs::metadata(pairing_recovery_path(&joining_dir)).unwrap().permissions().mode() & 0o777, 0o600);
+                let mut wrong_code = code.clone();
+                wrong_code.token[0] ^= 1;
+                assert!(load_pairing_recovery(&joining_dir, &wrong_code, name, &member).is_err());
+                assert!(load_pairing_recovery(&joining_dir, &code, "wrong-name", &member).is_err());
+                let wrong_member = MemberKey::generate().unwrap().0;
+                assert!(load_pairing_recovery(&joining_dir, &code, name, &wrong_member).is_err());
+                for lose_confirmation in [true, false] {
+                    let answer = serde_json::to_string(&serde_json::json!({"response": recovery.resume.response})).unwrap();
+                    let finish = if lose_confirmation { "exit 1" } else { "printf '%s\\n' '{\"confirmed\":true}'" };
+                    let script = format!(
+                        "#!{}\nread -r initial\ncase \"$initial\" in *\\\"resume\\\":*) ;; *) exit 2;; esac\nprintf '%s\\n' '{{\"node_id\":\"{node_id}\"}}'\nprintf '%s\\n' '{answer}'\nread -r frame\ncase \"$frame\" in *\\\"authenticated\\\":*) ;; *) exit 3;; esac\n{finish}\n",
+                        shell.display(),
+                    );
+                    write_private(&helper, script.as_bytes()).unwrap();
+                    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+                    let retried = join_inner(&options, Some(&helper)).await;
+                    if lose_confirmation {
+                        assert!(retried.is_err());
+                        assert!(FleetFile::load(&joining_dir).unwrap().is_none());
+                        assert!(pairing_recovery_path(&joining_dir).exists());
+                    } else {
+                        let joined = retried.unwrap();
+                        assert!(joined.resumed);
+                        assert_eq!(joined.fleet_id, founded.fleet_id);
+                        assert!(FleetFile::load(&joining_dir).unwrap().is_some());
+                        assert!(!pairing_recovery_path(&joining_dir).exists());
+                    }
+                }
             }
             store.verify_fleet_pairing_admission(name,
                 MemberKey::load(&joining_dir.join("fleet/node.key")).unwrap().public(), &node_id).unwrap();

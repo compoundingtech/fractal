@@ -97,9 +97,9 @@ pub struct SealedJoin {
     pub fabric_protocol: Option<String>,
     #[serde(default)]
     pub admitted_claim: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sponsor_node_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sponsor_endpoints: Vec<serde_json::Value>,
 }
 
@@ -131,6 +131,28 @@ impl JoinResponse {
         }
         bytes
     }
+}
+
+/// Recheck a retained answer without the already-consumed ephemeral key.
+pub fn verify_response(code: &JoinCode, request: &JoinRequest, response: &JoinResponse) -> Result<()> {
+    verify_response_signature(&code.fingerprint, request, response)
+}
+
+fn verify_response_signature(
+    expected_fingerprint: &[u8; 16],
+    request: &JoinRequest,
+    response: &JoinResponse,
+) -> Result<()> {
+    anyhow::ensure!(response.protocol == PROTOCOL, "the sponsor speaks another join protocol");
+    anyhow::ensure!(
+        fingerprint(&response.sponsor_key) == *expected_fingerprint,
+        "the sponsor's key does not match the join code; this is not the machine that made it"
+    );
+    anyhow::ensure!(
+        verify_signature(&response.sponsor_key, &response.signed_bytes(request), &response.signature),
+        "the sponsor's answer is not signed by its key"
+    );
+    Ok(())
 }
 
 fn proof(token: &[u8], transcript: &[u8]) -> HmacSha256 {
@@ -235,22 +257,7 @@ impl Joiner {
 
     /// Check the sponsor and open what it sealed.
     pub fn open(self, response: &JoinResponse) -> Result<SealedJoin> {
-        anyhow::ensure!(
-            response.protocol == PROTOCOL,
-            "the sponsor speaks another join protocol"
-        );
-        anyhow::ensure!(
-            fingerprint(&response.sponsor_key) == self.fingerprint,
-            "the sponsor's key does not match the join code; this is not the machine that made it"
-        );
-        anyhow::ensure!(
-            verify_signature(
-                &response.sponsor_key,
-                &response.signed_bytes(&self.request),
-                &response.signature
-            ),
-            "the sponsor's answer is not signed by its key"
-        );
+        verify_response_signature(&self.fingerprint, &self.request, response)?;
         let sponsor_ephemeral = decode(&response.ephemeral)?;
         let transcript = self.request.transcript();
         let aad = aad(&transcript, &response.sponsor_key, &sponsor_ephemeral);
@@ -378,6 +385,24 @@ mod tests {
             sponsor_endpoints: Vec::new(),
         };
         (code, sponsor, joiner, payload)
+    }
+
+    #[test]
+    fn unpaired_sealed_answers_preserve_the_legacy_payload_shape() {
+        let (_, _, _, payload) = fixture();
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "fleet_id": payload.fleet_id,
+            "secret": payload.secret,
+            "anchor_key": payload.anchor_key,
+            "sponsor": payload.sponsor,
+            "writer_floor": payload.writer_floor,
+            "fabric_protocol": payload.fabric_protocol,
+            "admitted_claim": payload.admitted_claim,
+        }));
+        assert!(json.get("sponsor_node_id").is_none());
+        assert!(json.get("sponsor_endpoints").is_none());
+        assert_eq!(serde_json::from_value::<SealedJoin>(json).unwrap(), payload);
     }
 
     #[test]

@@ -11,6 +11,7 @@ fn member(name: &str, key: &str, node: &str, state: &str) -> MemberView {
         node_id: Some(node.into()),
         state: state.into(),
         mode: "listening".into(),
+        endpoints_published: true,
         endpoints: vec![
             json!({"transport":"fabric", "node":node, "protocol":"st3/fleet/test-fleet"}),
         ],

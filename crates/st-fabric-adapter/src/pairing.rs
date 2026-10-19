@@ -1,5 +1,3 @@
-/home/schickling/.megarepo/github.com/compoundingtech/smalltalk/refs/heads/fleet-invite-pairing/crates/st-fabric-adapter/src/pairing.rs:
-
 //! Local JSON-line helper. No Fabric policy is owned by the st daemon.
 //!
 //! pairing-invite: {code} -> {code}; pairing-join: {code} -> {node_id},
@@ -511,11 +509,45 @@ async fn finish_confirmation(
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct Resume {
+    request: JoinRequest,
+    response: JoinResponse,
+    authenticated: SealedJoin,
+    sponsor_key: String,
+}
+
+async fn resume_status(socket: &Path, gateway: &str, attempt: &str, node: &str) -> Result<bool> {
+    // A terminal receipt outlives the invitation. Observe it without presenting
+    // the erased bearer secret or renewing the expired exchange deadline.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let reply = remote(
+        socket,
+        gateway,
+        deadline,
+        json!({"operation":"status","attempt_id":attempt}),
+    )
+    .await?;
+    ensure!(
+        reply["status"]["bound_node_id"] == node,
+        "recovery receipt bound another Fabric identity"
+    );
+    match reply["status"]["state"].as_str() {
+        Some("confirmed") => Ok(true),
+        Some("pending") => Ok(false),
+        _ => bail!(
+            "pairing recovery found no confirmed or pending receipt; create a fresh invitation"
+        ),
+    }
+}
+
 pub async fn join(socket: &Path, state: &Path) -> Result<()> {
     let _lock = pairing_lock(state, false)?;
     #[derive(Deserialize)]
     struct Start {
         code: String,
+        #[serde(default)]
+        resume: Option<Resume>,
     }
     #[derive(Deserialize)]
     struct Request {
@@ -543,55 +575,75 @@ pub async fn join(socket: &Path, state: &Path) -> Result<()> {
         );
     let node = identity(socket).await?;
     output(json!({"node_id":node}))?;
-    let request: Request = input(&mut reader)?;
-    ensure!(
-        request.request.node_id.as_deref() == Some(node.as_str())
-            && request.request.invite == code.invite_id(),
-        "join request identity or invite mismatch"
-    );
-    let status = remote(
-        socket,
-        &pairing.gateway,
-        deadline,
-        json!({"operation":"present","attempt_id":pairing.attempt,"secret":pairing.secret}),
-    )
-    .await?;
-    ensure!(
-        status["status"]["bound_node_id"] == node,
-        "Fabric presentation bound another identity"
-    );
-    let payload = serde_json::to_vec(&request.request)?;
-    remote(socket, &pairing.gateway, deadline, json!({"operation":"send","attempt_id":pairing.attempt,"sequence":1,"digest":digest(&payload),"payload":payload})).await?;
-    let (response, response_bytes) = loop {
+    let (response, response_bytes, recovered_confirmed) = if let Some(resume) = &start.resume {
         ensure!(
-            tokio::time::Instant::now() < deadline,
-            "pairing answer deadline exceeded"
+            resume.request.node_id.as_deref() == Some(node.as_str())
+                && resume.request.invite == code.invite_id(),
+            "retained join request identity or invite mismatch"
         );
-        let reply = remote(
+        smallclaims::fleet::handshake::verify_response(&code, &resume.request, &resume.response)?;
+        let confirmed = resume_status(socket, &pairing.gateway, &pairing.attempt, &node).await?;
+        (
+            resume.response.clone(),
+            serde_json::to_vec(&resume.response)?,
+            confirmed,
+        )
+    } else {
+        let request: Request = input(&mut reader)?;
+        ensure!(
+            request.request.node_id.as_deref() == Some(node.as_str())
+                && request.request.invite == code.invite_id(),
+            "join request identity or invite mismatch"
+        );
+        let status = remote(
             socket,
             &pairing.gateway,
             deadline,
-            json!({"operation":"receive","attempt_id":pairing.attempt}),
+            json!({"operation":"present","attempt_id":pairing.attempt,"secret":pairing.secret}),
         )
         .await?;
         ensure!(
-            reply["status"]["state"] == "pending",
-            "pairing terminated before authenticated answer"
+            status["status"]["bound_node_id"] == node,
+            "Fabric presentation bound another identity"
         );
-        let message = &reply["exchange"]["message"];
-        if message.is_null() {
-            continue;
-        }
-        ensure!(
-            message["sequence"] == 1,
-            "unexpected sponsor answer sequence"
-        );
-        let payload: Vec<u8> = serde_json::from_value(message["payload"].clone())?;
-        ensure!(
-            message["digest"] == digest(&payload),
-            "sponsor answer digest mismatch"
-        );
-        break (serde_json::from_slice::<JoinResponse>(&payload)?, payload);
+        let payload = serde_json::to_vec(&request.request)?;
+        remote(socket, &pairing.gateway, deadline, json!({"operation":"send","attempt_id":pairing.attempt,"sequence":1,"digest":digest(&payload),"payload":payload})).await?;
+        let (response, response_bytes, confirmed) = loop {
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "pairing answer deadline exceeded"
+            );
+            let reply = remote(
+                socket,
+                &pairing.gateway,
+                deadline,
+                json!({"operation":"receive","attempt_id":pairing.attempt}),
+            )
+            .await?;
+            ensure!(
+                reply["status"]["state"] == "pending",
+                "pairing terminated before authenticated answer"
+            );
+            let message = &reply["exchange"]["message"];
+            if message.is_null() {
+                continue;
+            }
+            ensure!(
+                message["sequence"] == 1,
+                "unexpected sponsor answer sequence"
+            );
+            let payload: Vec<u8> = serde_json::from_value(message["payload"].clone())?;
+            ensure!(
+                message["digest"] == digest(&payload),
+                "sponsor answer digest mismatch"
+            );
+            break (
+                serde_json::from_slice::<JoinResponse>(&payload)?,
+                payload,
+                false,
+            );
+        };
+        (response, response_bytes, confirmed)
     };
     output(json!({"response":response}))?;
     let authenticated: Authenticated = input(&mut reader)?;
@@ -615,6 +667,16 @@ pub async fn join(socket: &Path, state: &Path) -> Result<()> {
                 && endpoint["protocol"] == format!("st3/fleet/{}", sealed.fleet_id)),
         "authenticated sponsor lacks signed exact Fabric endpoint"
     );
+    if let Some(resume) = &start.resume {
+        ensure!(
+            authenticated.authenticated == resume.authenticated
+                && authenticated.sponsor_key == resume.sponsor_key,
+            "recovery authentication differs from retained authenticated answer"
+        );
+    }
+    if recovered_confirmed {
+        return output(json!({"confirmed":true}));
+    }
     // Persist exact reciprocal mutation before sending. No plaintext admission
     // material or invitation secret is retained, even if policy outcome is uncertain.
     let path = state.join(format!("join-{}.json", digest(pairing.attempt.as_bytes())));

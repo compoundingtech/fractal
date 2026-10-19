@@ -904,6 +904,7 @@ fn the_dial_set_comes_from_membership_and_skips_dial_out_members() {
             state: state.into(),
             mode: mode.into(),
             endpoints,
+            endpoints_published: true,
             start: 1,
             end: None,
             ended: None,
@@ -1106,6 +1107,7 @@ async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
     assert_eq!(admitted[0].member_key, member.public());
     assert_eq!(admitted[0].node_id.as_deref(), Some(node_id.as_str()));
     assert!(admitted[0].endpoints.is_empty(), "admission must not wait for joiner endpoint publication");
+    assert!(!admitted[0].endpoints_published);
     let encoded = serde_json::to_value(&view).unwrap();
     assert_eq!(serde_json::from_value::<FleetView>(encoded).unwrap(), view);
     assert!(store.verify_fleet_pairing_admission("b", member.public(), &"b".repeat(64)).is_err());
@@ -3835,6 +3837,7 @@ mod retry_tests {
             mode: "listening".into(),
             member_key: "member-key".into(),
             node_id: None,
+            endpoints_published: true,
             start: 0,
             end: None,
             ended: None,

@@ -71,6 +71,10 @@ pub struct Incarnation {
 }
 
 impl Incarnation {
+    pub fn endpoints_published(&self) -> bool {
+        self.endpoints_sequence.is_some()
+    }
+
     fn holds(&self, sequence: u64) -> bool {
         sequence >= self.start && self.end.is_none_or(|end| sequence <= end)
     }
@@ -383,6 +387,23 @@ fn claim_counts(anchor: &str, claim: &FleetClaim, membership: &Membership) -> bo
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_explicit_empty_endpoint_publication_ends_bootstrap_synthesis() {
+        let anchor = claim("anchor", MEMBER_ADMITTED, "host/a",
+            json!({"member_key":"anchor-key","via":"anchor"}), "a", 1, &["anchor-key"]);
+        let initial = Membership::fold(Some("anchor-key"), std::slice::from_ref(&anchor));
+        let MemberState::Current(before) = initial.state("a") else { panic!("anchor is current") };
+        assert!(!before.endpoints_published());
+        let empty = claim("empty", MEMBER_ENDPOINTS, "host/a",
+            json!({"member_key":"anchor-key","endpoints":[]}), "a", 2, &["anchor-key"]);
+        let published = Membership::fold(Some("anchor-key"), &[anchor, empty]);
+        let MemberState::Current(after) = published.state("a") else { panic!("anchor is current") };
+        assert!(after.endpoints.is_empty());
+        assert!(after.endpoints_published());
+        let view = super::super::view::FleetView::from_membership(&published);
+        assert!(view.members[0].endpoints_published);
+    }
 
     fn claim(
         id: &str,

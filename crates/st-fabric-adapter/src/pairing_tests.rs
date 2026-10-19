@@ -1,5 +1,3 @@
-/home/schickling/.megarepo/github.com/compoundingtech/smalltalk/refs/heads/fleet-invite-pairing/crates/st-fabric-adapter/src/pairing_tests.rs:
-
 use super::*;
 use tokio::net::UnixListener;
 
@@ -359,4 +357,102 @@ async fn concurrent_invite_lock_fences_reconciliation() {
         .await
         .is_err()
     );
+}
+
+#[test]
+fn fresh_confirmed_invite_recovers_same_node_without_unfencing_other_admissions() {
+    let snapshot = || {
+        serde_json::from_value::<super::super::LeaveSnapshot>(json!({
+            "fleet_id":"fleet","own_member_key":"sponsor-key","persistence_error":null,"members":[],
+            "membership":{"anchor":"anchor","legacy_removed":[],"members":[{
+                "name":"joining","member_key":"member-key","node_id":"node",
+                "state":"current","mode":"listening",
+                "endpoints":[{"transport":"fabric","node":"node","protocol":"st3/fleet/fleet"}],
+                "start":1
+            }]}
+        }))
+        .unwrap()
+    };
+    let mut pairing = PairingState {
+        blocked: BTreeSet::from(["node".into()]),
+        confirmed: BTreeSet::new(),
+    };
+    let mut expired = snapshot();
+    super::super::fence_pairing(&mut expired, &pairing);
+    assert!(expired.membership.members[0].endpoints.is_empty());
+
+    pairing
+        .confirmed
+        .insert(("fleet".into(), "member-key".into(), "node".into()));
+    let mut recovered = snapshot();
+    recovered.membership.members[0].endpoints.clear();
+    super::super::fence_pairing(&mut recovered, &pairing);
+    assert_eq!(recovered.membership.members[0].endpoints.len(), 1);
+
+    for (fleet, key, node) in [
+        ("other-fleet", "member-key", "node"),
+        ("fleet", "other-key", "node"),
+        ("fleet", "member-key", "other-node"),
+    ] {
+        pairing.confirmed = BTreeSet::from([(fleet.into(), key.into(), node.into())]);
+        let mut different = snapshot();
+        super::super::fence_pairing(&mut different, &pairing);
+        assert!(different.membership.members[0].endpoints.is_empty());
+    }
+}
+
+#[test]
+fn confirmed_bootstrap_never_overrides_a_published_endpoint_rekey_or_removal() {
+    let snapshot = || {
+        serde_json::from_value::<super::super::LeaveSnapshot>(json!({
+            "fleet_id":"fleet","own_member_key":"sponsor-key","persistence_error":null,"members":[],
+            "membership":{"anchor":"anchor","legacy_removed":[],"members":[{
+                "name":"joining","member_key":"member-key","node_id":"old-node",
+                "state":"current","mode":"listening","endpoints_published":true,
+                "endpoints":[],"start":1
+            }]}
+        }))
+        .unwrap()
+    };
+    let pairing = PairingState {
+        blocked: BTreeSet::new(),
+        confirmed: BTreeSet::from([("fleet".into(), "member-key".into(), "old-node".into())]),
+    };
+    let mut removed = snapshot();
+    super::super::fence_pairing(&mut removed, &pairing);
+    assert!(removed.membership.members[0].endpoints.is_empty());
+
+    let mut rekeyed = snapshot();
+    rekeyed.membership.members[0].endpoints.push(json!({
+        "transport":"fabric","node":"new-node","protocol":"st3/fleet/fleet"
+    }));
+    super::super::fence_pairing(&mut rekeyed, &pairing);
+    assert_eq!(rekeyed.membership.members[0].endpoints.len(), 1);
+    assert_eq!(
+        rekeyed.membership.members[0].endpoints[0]["node"],
+        "new-node"
+    );
+}
+
+#[tokio::test]
+async fn crash_recovery_observes_confirmed_receipt_after_original_deadline_without_presenting() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("fabric.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let query = json!({
+        "type":"pairing_remote","gateway":"sponsor-node",
+        "request":{"operation":"status","attempt_id":"attempt"}
+    });
+    let reply = json!({
+        "type":"pairing","reply":{"error":null,"status":{
+            "state":"confirmed","bound_node_id":"joining-node","deadline":1
+        }}
+    });
+    let server = tokio::spawn(fabric(listener, vec![(query, reply)]));
+    assert!(
+        resume_status(&socket, "sponsor-node", "attempt", "joining-node")
+            .await
+            .unwrap()
+    );
+    server.await.unwrap();
 }

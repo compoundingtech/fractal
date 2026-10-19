@@ -130,6 +130,36 @@ fn retained(snapshot: &LeaveSnapshot, now: u128) -> BTreeSet<String> {
         .collect()
 }
 
+fn fence_pairing(snapshot: &mut LeaveSnapshot, pending: &pairing::PairingState) {
+    for member in &mut snapshot.membership.members {
+        // A fresh confirmed receipt supersedes an older failed attempt only for
+        // this exact current signed member and Fabric identity, never node-wide.
+        let confirmed_node = member.node_id.as_deref().filter(|node| {
+            member.state == "current"
+                && snapshot.fleet_id.as_ref().is_some_and(|fleet| {
+                    pending.confirmed.contains(&(
+                        fleet.clone(), member.member_key.clone(), (*node).to_owned(),
+                    ))
+                })
+        });
+        if let (Some(fleet), Some(node)) = (
+            &snapshot.fleet_id,
+            confirmed_node.filter(|_| !member.endpoints_published),
+        ) {
+            member.endpoints.push(serde_json::json!({
+                "transport":"fabric", "node":node,
+                "protocol":format!("st3/fleet/{fleet}")
+            }));
+        }
+        member.endpoints.retain(|endpoint| {
+            endpoint["transport"] != "fabric"
+                || endpoint["node"].as_str().is_none_or(|node| {
+                    !pending.blocked.contains(node) || confirmed_node == Some(node)
+                })
+        });
+    }
+}
+
 async fn poll(
     client: &reqwest::Client,
     socket: &Path,
@@ -160,23 +190,7 @@ async fn poll(
     // Admission publishes signed membership before Fabric confirmation. Fence
     // every pending bound identity so normal reconciliation cannot grant it early.
     let pending = pairing::tick(client, socket, state).await?;
-    for member in &mut snapshot.membership.members {
-        // Only the sponsor's confirmed Fabric receipt bridges the period before
-        // the joining daemon can publish endpoints. Propagated admission alone
-        // must never grant access on another fleet member.
-        if let (Some(fleet), Some(node)) = (&snapshot.fleet_id, &member.node_id) {
-            if pending.confirmed.contains(&(fleet.clone(), member.member_key.clone(), node.clone())) {
-                member.endpoints.push(serde_json::json!({
-                    "transport":"fabric", "node":node,
-                    "protocol":format!("st3/fleet/{fleet}")
-                }));
-            }
-        }
-        member.endpoints.retain(|endpoint| {
-            endpoint["transport"] != "fabric"
-                || endpoint["node"].as_str().is_none_or(|node| !pending.blocked.contains(node))
-        });
-    }
+    fence_pairing(&mut snapshot, &pending);
     let owners_path = state.join("owners.json");
     let mut known = owners(&owners_path)?;
     if let Some(fleet) = &snapshot.fleet_id {

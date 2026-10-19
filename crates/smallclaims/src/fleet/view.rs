@@ -27,6 +27,9 @@ pub struct MemberView {
     pub mode: String,
     #[serde(default)]
     pub endpoints: Vec<Value>,
+    /// True once this incarnation has explicitly published endpoints, even an empty set.
+    #[serde(default)]
+    pub endpoints_published: bool,
     pub start: u64,
     #[serde(default)]
     pub end: Option<u64>,
@@ -72,6 +75,7 @@ impl FleetView {
                     state: label.into(),
                     mode: incarnation.mode.clone(),
                     endpoints: incarnation.endpoints.clone(),
+                    endpoints_published: incarnation.endpoints_published(),
                     start: incarnation.start,
                     end: incarnation.end,
                     ended: incarnation.ended.clone(),
@@ -244,6 +248,7 @@ mod tests {
             ended: ended.map(str::to_owned),
             removed_by: None,
             removal_reason: None,
+            endpoints_published: false,
         }
     }
 

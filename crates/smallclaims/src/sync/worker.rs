@@ -2613,8 +2613,12 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
         writer_floor: answer["writer_floor"].as_u64(),
         fabric_protocol: text("fabric_protocol"),
         admitted_claim: text("admitted_claim"),
-        sponsor_node_id: text("sponsor_node_id"),
-        sponsor_endpoints: answer["sponsor_endpoints"].as_array().cloned().unwrap_or_default(),
+        sponsor_node_id: request.node_id.as_ref().and_then(|_| text("sponsor_node_id")),
+        sponsor_endpoints: if request.node_id.is_some() {
+            answer["sponsor_endpoints"].as_array().cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
     };
     match crate::fleet::handshake::seal_response(&request, &token, &state.node, &member, &payload) {
         Ok(response) => {
