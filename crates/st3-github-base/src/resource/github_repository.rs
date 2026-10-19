@@ -1906,6 +1906,9 @@ mod tests {
     use crate::resource::{github_usage_report, spend_as};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    /// Pulls served by the fake listing, with the largest page it accepts.
+    type PullPages = Option<(Vec<Value>, usize)>;
+
     /// A GitHub that answers each path from a table, revalidates with ETags, answers GraphQL
     /// with a fixed body or queued pages, and keeps every request it received.
     #[derive(Clone, Default)]
@@ -1916,7 +1919,7 @@ mod tests {
         graphql: Arc<Mutex<String>>,
         graphql_pages: Arc<Mutex<HashMap<String, String>>>,
         graphql_queue: Arc<Mutex<std::collections::VecDeque<Value>>>,
-        graphql_pulls: Arc<Mutex<Option<(Vec<Value>, usize)>>>,
+        graphql_pulls: Arc<Mutex<PullPages>>,
         reject_combined_details: Arc<Mutex<bool>>,
         graphql_requests: Arc<Mutex<Vec<Value>>>,
         requests: Arc<Mutex<Vec<String>>>,
@@ -2246,20 +2249,21 @@ mod tests {
     #[tokio::test]
     async fn successful_pages_never_reprobe_a_refused_page_size() {
         let (github, base) = FakeGithub::start().await;
-        let mut pages = github.graphql_queue.lock();
-        for _ in 0..4 {
-            pages.push_back(json!({"errors": [{
-                "message": "Something went wrong while executing your query",
-            }]}));
+        {
+            let mut pages = github.graphql_queue.lock();
+            for _ in 0..4 {
+                pages.push_back(json!({"errors": [{
+                    "message": "Something went wrong while executing your query",
+                }]}));
+            }
+            for number in 1..=6 {
+                let cursor = format!("page-{number}");
+                pages.push_back(pull_page(
+                    json!([open_pull(number, "head", "SUCCESS")]),
+                    (number < 6).then_some(cursor.as_str()), json!([]),
+                ));
+            }
         }
-        for number in 1..=6 {
-            let cursor = format!("page-{number}");
-            pages.push_back(pull_page(
-                json!([open_pull(number, "head", "SUCCESS")]),
-                (number < 6).then_some(cursor.as_str()), json!([]),
-            ));
-        }
-        drop(pages);
         let details = read_pull_pages(&base, &[]).await.unwrap();
         assert_eq!(details.open.len(), 6);
         let requests = github.graphql_requests.lock();
