@@ -71,8 +71,9 @@ impl Manager for FakeManager {
 
     fn protection(&mut self, unit: &Unit) -> Result<Protection> {
         self.events.push(format!("protection:{}", unit.name));
-        if self.services.target.iter().any(|target| target.name == unit.name) {
-            if let Some(protection) = &self.target_protection { return Ok(protection.clone()); }
+        if self.services.target.iter().any(|target| target.name == unit.name)
+            && let Some(protection) = &self.target_protection {
+            return Ok(protection.clone());
         }
         Ok(memory_protection())
     }

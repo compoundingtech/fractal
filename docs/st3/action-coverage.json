@@ -1413,7 +1413,7 @@
       "command": "st migrate host",
       "description": "Migrate the default host after its Fractal services have been staged disabled",
       "tests": [
-        "crates/st3/src/main.rs::host_migration_cli_tests::parses_host_cutover_modes_and_rejects_conflicting_modes",
+        "crates/st3/src/main.rs::parses_host_cutover_modes_and_rejects_conflicting_modes",
         "crates/st3/src/migrate_cli/tests.rs::swaps_authority_by_rename_preserving_all_dropins_and_receipting_memory",
         "crates/st3/src/migrate_cli/tests.rs::dry_run_has_no_filesystem_or_service_mutations"
       ],

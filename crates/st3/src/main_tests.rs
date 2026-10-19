@@ -2440,6 +2440,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("driver", /* sqlite-large-value: allow-for-now lv-h6901be108db9 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13e13e1dcef owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
         ("launch", /* sqlite-large-value: allow-for-now lv-h65740c83118e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
+        ("migrate", include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-ha35371b1cf0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
         ("terminals", /* sqlite-large-value: allow-for-now lv-hc9c07b4d9f7f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-haa99fd7b7bb0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),

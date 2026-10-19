@@ -217,7 +217,7 @@ impl Manager for Native {
                 .context("read effective daemon memory.swap.max (cgroup v2 required)")?;
             let low = fs::read_to_string(cgroup.join("memory.low"))
                 .context("read effective daemon MemoryLow from cgroup memory.low")?;
-            return Ok(Protection { memory_swap_max: Some(swap.trim().into()), memory_low: Some(low.trim().into()) });
+            Ok(Protection { memory_swap_max: Some(swap.trim().into()), memory_low: Some(low.trim().into()) })
         }
         #[cfg(target_os = "macos")]
         { let _ = unit; Ok(Protection::default()) }
