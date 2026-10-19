@@ -98,8 +98,9 @@ with tempfile.TemporaryDirectory() as directory:
     print('passed: a lane with a trusted signed note on the remote is ok; a failing note, a refused signer and an unsigned lane are would-reject by name')
 
     # The verification reads the remote, not this job's own refs: a record deleted there is not_on_remote.
-    record = next(a['record'] for a in published['accepted'] if a['check'] == 'linux-tests')
-    git(remote, 'update-ref', '-d', f'refs/notes/evidence/{record}')
+    entry = next(a for a in published['accepted'] if a['check'] == 'linux-tests')
+    record = entry['record']
+    git(remote, 'update-ref', '-d', entry.get('ref') or f'refs/notes/evidence/{record}')
     done = shadow()
     assert 'check=linux-tests result=would-reject reason=not_on_remote' in done.stdout, done.stdout
     print('passed: a record absent from the remote is would-reject even when this job still holds the ref')
@@ -112,7 +113,7 @@ with tempfile.TemporaryDirectory() as directory:
         if a['record'] == record:
             a['ref'] = moved
     result_file.write_text(json.dumps(published))
-    # The verifier of this checkout does not read the new layout yet, so a stand-in verifier shows what the scratch repository holds.
+    # A stand-in verifier shows exactly which refs the scratch repository holds.
     stub = tmp / 'stub-verifier'
     stub.write_text('#!/usr/bin/env python3\nimport subprocess, sys\n'
                     'repo = sys.argv[sys.argv.index("--repo") + 1]\n'
