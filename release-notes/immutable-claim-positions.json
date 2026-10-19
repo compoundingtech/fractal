@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Store each claim's batch position at admission so removing inputs never renumbers a survivor",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or history backfill. Existing claims keep the canonical position the legacy expression gives today; it is stored lazily, by trigger, only immediately before a deletion or record change could alter it."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds the WITHOUT ROWID table claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER) and five triggers: AFTER INSERT and BEFORE/AFTER UPDATE OF claim_id, position and BEFORE DELETE on replica_records, and BEFORE DELETE on claims. Admission writes one row per admitted claim (and per claim-bearing record); rows are never deleted. Measured with crates/smallclaims/examples/claim_positions_bench.rs (release build, file-backed store, 4 claims per batch with one wire record each): 80.5 B of claim_positions pages per claim. Storage version stays 20; earlier binaries open the store and the triggers keep maintaining positions for records they write, while their claim inserts take the legacy value. Created with IF NOT EXISTS at open; no index build or table scan."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Rule versions are unchanged. In the live store the canonical position reads claim_positions first, then the previous MIN(record position), then the previous surviving-sibling count. Answers are identical until a deletion: an old build renumbers a survivor without a wire record after an earlier sibling is deleted, and raises a claim's position when its lowest-position record is deleted; this build keeps the earlier value. A checkpoint proof copy drops the position triggers and clears claim_positions before keeping only the sealed set, so it orders that set by the legacy expression over the set alone, exactly as before this change: proof digests stay a function of the sealed set on old and new builds, whatever duplicate envelopes a member also holds. The local member census on 2026-10-18 found every admitted claim has a wire record (largest batch 430 claims)."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Claim and wire formats, IDs, signatures and replication digests are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal restart; the schema statements create an empty table and triggers. Measured on the same bench, loaded build host, nice 19 (synthetic, not production bounds): admission 642 to 682 us per claim at 50,000 claims (658 to 714 at 200,000), dominated by the store's existing claim triggers. Trim deletion with cached statements: 42.6 us per claim without the position triggers, 45.6 with positions stored, 48.8 on a legacy store whose 50,000 positions the triggers freeze. Each uncached DELETE recompiles every trigger program; delete_dropped_rows_tx now caches its statements, which made the same deletion 153 us per claim uncached versus 43 cached before any position trigger."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back to an earlier binary is supported: the table and triggers remain and are harmless, and the stored values equal the legacy values except where a deletion would have renumbered."
+  }
+}

@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use smallclaims::store::{SCHEMA, Store, canonical_sql, runtime::Plain};
+use smallclaims::store::{SCHEMA, Store, canonical::POSITION_SCHEMA, canonical_sql, runtime::Plain};
 use smallclaims::store::transport_observation_index as index;
 use smallclaims::sqlite::WriterConnection;
 
@@ -47,6 +47,8 @@ fn transport_observation_latest_switches_from_original_to_bounded_seek_without_c
     let path = directory.path().join("claims.sqlite3");
     let mut connection = Connection::open(&path).unwrap();
     connection.execute_batch(SCHEMA).unwrap();
+    // The store installs claim positions with its core schema; canonical order reads them.
+    connection.execute_batch(POSITION_SCHEMA).unwrap();
     let writer = managed_writer(&path);
     let transaction = connection.transaction().unwrap();
     for sequence in 0..3000 {
@@ -105,6 +107,8 @@ fn transport_observation_capture_precedes_backfill_and_readers_and_writers_work_
     let path = directory.path().join("claims.sqlite3");
     let mut foreground = Connection::open(&path).unwrap();
     foreground.execute_batch(SCHEMA).unwrap();
+    // The store installs claim positions with its core schema; canonical order reads them.
+    foreground.execute_batch(POSITION_SCHEMA).unwrap();
     let transaction = foreground.transaction().unwrap();
     for sequence in 0..400 {
         observation(&transaction, &format!("old-{sequence}"), "local", sequence, &sequence.to_string());
@@ -182,6 +186,8 @@ fn transport_observation_bootstrap_waits_for_managed_deferred_read_then_write_tr
     let path = directory.path().join("claims.sqlite3");
     let mut connection = Connection::open(&path).unwrap();
     connection.execute_batch(SCHEMA).unwrap();
+    // The store installs claim positions with its core schema; canonical order reads them.
+    connection.execute_batch(POSITION_SCHEMA).unwrap();
     let transaction = connection.transaction().unwrap();
     for sequence in 0..400 {
         observation(&transaction, &format!("queued-{sequence}"), "local", sequence, &sequence.to_string());

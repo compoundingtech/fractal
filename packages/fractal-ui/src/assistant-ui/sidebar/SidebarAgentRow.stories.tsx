@@ -221,6 +221,24 @@ export const TimeCohort: Story = { tags: ['critical'], name: 'Time cohort · kno
   const titleLeft = rows[0]!.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left
   for (const row of rows) await expect(Math.abs(row.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left - titleLeft)).toBeLessThanOrEqual(1)
 } }
+/** Synthetic last-observed pair: same facts, one working and one idle, both from a stale observation. */
+const frozenRows: readonly Row[] = [
+  { ...unreportedRow, ref: 'agent/frozen-working', id: 'frozen-working', title: 'Frozen working session', status: 'working', statusLabel: 'Last verified · working', freshness: 'stale', needsMe: false, unread: 0 },
+  { ...unreportedRow, ref: 'agent/frozen-idle', id: 'frozen-idle', title: 'Frozen idle session', status: 'idle', statusLabel: 'Last verified · idle', freshness: 'stale', needsMe: false, unread: 0 },
+  { ...unreportedRow, ref: 'agent/frozen-stale', id: 'frozen-stale', title: 'Frozen stale session', status: 'stale', statusLabel: 'Stale observation', freshness: 'stale', needsMe: false, unread: 0 },
+]
+export const FrozenWorkingVersusIdle: Story = { tags: ['critical'], name: 'Frozen observation · working vs idle', render: () => <main {...stylex.props(styles.root)}><div {...stylex.props(styles.list)}>{frozenRows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} />)}</div></main>, play: async ({ canvasElement }) => {
+  const glyphs = [...canvasElement.querySelectorAll<HTMLElement>('[data-row-column="status"] [data-status]')]
+  await expect(glyphs.map(glyph => glyph.dataset.status)).toEqual(['working', 'idle', 'stale'])
+  for (const glyph of glyphs) await expect(glyph).toHaveAttribute('data-frozen', 'true')
+  // One muted tone: a frozen observation never reads as live and stale is never the danger red.
+  await expect(new Set(glyphs.map(glyph => getComputedStyle(glyph).color)).size).toBe(1)
+  // Nothing spins.
+  for (const svg of canvasElement.querySelectorAll('[data-row-column="status"] svg')) await expect(getComputedStyle(svg).animationName).toBe('none')
+  // Without color, shape tells working from idle: working keeps its static ring, idle is the plain disc.
+  const [working, idle] = glyphs.map(glyph => glyph.querySelector('svg')!)
+  await expect(working!.querySelectorAll('circle, path').length).toBeGreaterThan(idle!.querySelectorAll('circle, path').length)
+} }
 export const QuickOpenAction: Story = { tags: ['critical'], name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const rows = canvas.getAllByTestId('taste-agent-row')

@@ -10,8 +10,8 @@ use crate::SeatsStoreCore;
 use super::*;
 use crate::WatchesStore;
 use crate::mailbox::{Fence, Frame, Receipt};
-pub use st3_api::api::mailbox::*;
-pub use st3_api::api::mailbox::{hold_pre_boot_mail};
+pub use st3_api_core::api::mailbox::*;
+pub use st3_api_core::api::mailbox::{hold_pre_boot_mail};
 pub mod authority;
 #[cfg(test)]
 #[path = "mailbox_profile.rs"]
@@ -1134,7 +1134,7 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
-    use st3_api::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
+    use st3_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
 
     #[cfg(all(feature = "test-support", target_os = "linux"))]
     mod replay_native_tests {
