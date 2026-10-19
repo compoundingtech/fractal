@@ -22,7 +22,11 @@ it('keeps the startup-installed replay folder source when its module is re-evalu
   expect(defaultSource).toHaveBeenCalledOnce()
 })
 
-it('constructs the default live folder source without a hot context', () => {
+it.each([undefined, false, { accept: () => {} }])('constructs and installs a folder source without persistent hot data (%s)', (hot) => {
   const live = { transport: 'live' }
-  expect(evaluate(undefined, () => live).folders).toBe(live)
+  const page = evaluate(hot, () => live)
+  expect(page.folders).toBe(live)
+  const replay = { transport: 'replay' }
+  page.installPageFolders(replay)
+  expect(page.folders).toBe(replay)
 })

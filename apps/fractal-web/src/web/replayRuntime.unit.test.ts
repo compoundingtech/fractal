@@ -27,7 +27,7 @@ describe('dev replay selection', () => {
   })
 })
 
-it('routes folder discovery through replay, surfacing its missing arrangement capability without network', async () => {
+it('syncs folder discovery through the shared replay arrangement transport without network', async () => {
   vi.stubGlobal('location', { origin: 'http://localhost' })
   const network = vi.fn(() => { throw new Error('Unexpected real request') })
   vi.stubGlobal('fetch', network)
@@ -35,8 +35,8 @@ it('routes folder discovery through replay, surfacing its missing arrangement ca
   const registry = AtomRegistry.make()
   const release = registry.mount(folders)
   try {
-    await vi.waitFor(() => expect(registry.get(folders).phase).toBe('unavailable'))
-    expect(registry.get(folders).detail).toContain('Granted arrangements capability version 1 is required')
+    await vi.waitFor(() => expect(registry.get(folders).phase).toBe('synced'))
+    expect(replay.served().has('roster')).toBe(true)
     expect(network).not.toHaveBeenCalled()
   } finally {
     release()
