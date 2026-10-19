@@ -26,11 +26,12 @@ kdl = "6"
 libc = "0.2"
 libghostty-vt = "=0.2.1"
 notify = "8"
+parking_lot = "0.12"
 opentelemetry = "0.30"
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }

@@ -1,4 +1,6 @@
 //! HTTP mission pages share the same complete cards as the background-published windows.
+use crate::MissionListStore;
+use crate::PublishedViewsStore;
 use super::*;
 use crate::store::mission_list::MissionRows;
 use crate::store::published_list::{ListRead, Publication, PublicationId};
@@ -6,7 +8,7 @@ use crate::store::published_list::{ListRead, Publication, PublicationId};
 pub const NOT_READY: &str = "mission-list-not-ready";
 pub const ENDED: &str = "mission-list-ended";
 
-type MissionPublication = (Arc<Publication<MissionRows>>, PublicationId);
+pub type MissionPublication = (Arc<Publication<MissionRows>>, PublicationId);
 
 pub fn not_ready() -> ApiError {
     ApiError {
@@ -35,7 +37,7 @@ pub fn current(store: &Store) -> Result<Option<MissionPublication>, ApiError> {
     }
 }
 
-struct KeptPage {
+pub struct KeptPage {
     id: PublicationId,
     contract: String,
     digest: String,

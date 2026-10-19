@@ -13,6 +13,8 @@ import {
   buildEnv,
   commonSetupSteps,
   fractalWebJobs,
+  isolationVmSteps,
+  testArchiveProducer,
   genieSetupSteps,
   nixCacheStep,
   linuxRunner,
@@ -40,24 +42,6 @@ import {
   workspacePreparationSteps,
   testArchiveConsumerSetup,
 } from './workspace-ci.ts'
-
-// Namespace offers nested virtualization on linux/amd64. Prove /dev/kvm can create a VM before
-// anything else; QEMU is also forbidden to fall back to emulation (nix/transport-isolation-vm.nix).
-const kvmProbe = `if [ ! -e /dev/kvm ]; then
-  echo "::error::/dev/kvm is missing: this runner profile offers no nested virtualization"
-  exit 1
-fi
-if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then sudo chmod 0666 /dev/kvm; fi
-python3 - <<'EOF'
-import fcntl, os
-fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
-version = fcntl.ioctl(fd, 0xAE00)  # KVM_GET_API_VERSION
-vm = fcntl.ioctl(fd, 0xAE01, 0)  # KVM_CREATE_VM
-assert version == 12, f"unexpected KVM API version {version}"
-os.close(vm)
-print(f"KVM API {version}: created a VM")
-EOF
-printf 'KVM: \\x60%s\\x60, CPU virtualization flag %s, VM creation succeeded\\n\\n| Phase | Elapsed |\\n| --- | --- |\\n' "$(ls -l /dev/kvm)" "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo none)" >> "$GITHUB_STEP_SUMMARY"`
 
 // One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
 // setup, then scripts/ci-linux.
@@ -447,41 +431,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       ...afterPickRunner,
       'runs-on': testBuildRunsOn,
       'timeout-minutes': 120,
-      env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
-      outputs: {
-        'artifact-id': '${{ steps.upload.outputs.artifact-id }}',
-        'manifest-sha256': '${{ steps.archive.outputs.manifest-sha256 }}',
-        'producer-attempt': '${{ steps.archive.outputs.producer-attempt }}',
-      },
-      steps: [
-        ...workspacePreparationSteps.slice(0, -2).map((step: any) =>
-          step.id === 'cargo-cache' || step.id === 'nix-cache'
-            ? { ...step, with: { ...step.with, key: step.with.key.replace('${{ github.job }}', 'linux-tests'),
-                'restore-keys': step.with['restore-keys'].replaceAll('${{ github.job }}', 'linux-tests') } }
-            : step),
-        { ...nixDevelopStep({ name: 'Compile and archive each selected target group once',
-          command: ['bash', '-c', 'python3 scripts/ci-build-memory before || echo "::warning::build memory baseline unavailable"; exec python3 scripts/ci-test-archive build'] }), id: 'archive' },
-        { name: 'Report test-build memory after success',
-          env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
-          run: 'python3 scripts/ci-build-memory after',
-          if: "${{ success() && steps.archive.outcome == 'success' }}", 'continue-on-error': true },
-        {
-          name: 'Publish this run attempt’s exact-source test archives', id: 'upload',
-          uses: 'actions/upload-artifact@v4',
-          with: { name: 'linux-test-archives-${{ github.run_attempt }}',
-            path: '${{ runner.temp }}/ci-test-archives', 'if-no-files-found': 'error',
-            'compression-level': 0, 'retention-days': 3 },
-        },
-        ...buildSnapshotSave,
-        { name: 'Report test-build memory after failure',
-          env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
-          run: 'mkdir -p "$RUNNER_TEMP/ci-build-memory"; (free -m || echo "::warning::free unavailable") | tee "$RUNNER_TEMP/ci-build-memory/free.txt"; python3 scripts/ci-build-memory failure',
-          if: "${{ failure() && steps.archive.outcome == 'failure' }}", 'continue-on-error': true },
-        { name: 'Retain test-build memory evidence',
-          if: "${{ always() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}", 'continue-on-error': true,
-          uses: 'actions/upload-artifact@v4', with: { name: 'test-build-memory-${{ github.run_attempt }}',
-            path: '${{ runner.temp }}/ci-build-memory', 'if-no-files-found': 'warn', 'retention-days': 3 } },
-      ],
+      ...testArchiveProducer,
     },
     // Four merge partitions (two for other events) reuse the one producer archive.
     // `linux-gate` below is the single required check that collects them.
@@ -710,50 +660,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
       defaults: { run: { shell: 'bash' } },
       env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
       steps: [
-        // The VM's own warm cache also contains its driver; keep that primary entry.
-        ...testArchiveConsumerSetup.map((step: any) => step.id === 'nix-cache' ? nixCacheStep : step),
-        { name: 'Probe KVM', id: 'kvm', run: kvmProbe },
-        {
-          name: 'Build the NixOS VM test driver',
-          id: 'driver',
-          run: `start=$SECONDS
-nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
-printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
-        },
-        {
-          name: 'Run all three systemd-scope tests in the VM',
-          id: 'vmtest',
-          env: {
-            ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
-            ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
-            ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
-            ST_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
-          },
-          run: `start=$SECONDS
-mkdir -p "$RUNNER_TEMP/vm-out"
-"$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
-jq -r '"| VM boot | \\(.boot_seconds)s |\\n| systemd-scope tests in VM (extract and run) | \\(.test_seconds)s |"' "$ST_ISOLATION_TIMINGS" >> "$GITHUB_STEP_SUMMARY"
-printf '| VM test driver total | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
-        },
-        // The sekrets gateway needs real Unix users, a login session and a user manager: a second
-        // VM runs it with this st binary (nix/sekrets-vm.nix).
-        {
-          name: 'Build the sekrets VM test driver',
-          id: 'sekrets-driver',
-          run: `start=$SECONDS
-nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
-printf '| sekrets VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
-        },
-        {
-          name: 'Run the sekrets gateway test in the VM',
-          id: 'sekrets-test',
-          env: { ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
-          run: `start=$SECONDS
-mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
-"$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"
-printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
-        },
-        { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+        ...isolationVmSteps,
         ...evidenceStepSteps('isolation-vm', ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'], ['kvm', 'driver', 'vmtest', 'sekrets-driver', 'sekrets-test']),
       ],
     },

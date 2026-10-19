@@ -36,10 +36,10 @@ fn single_key_sort(connection: &Connection, messages: &mut [MessageView]) -> Res
 fn schema(connection: &mut Connection) {
     smallclaims::sqlite::observe(connection);
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hba775661f3b0 owner=st3_store::store::message_canonical_sort_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+        /* sqlite-large-value: allow-for-now lv-hf7172e90ac47 owner=st3_store::store::message_canonical_sort_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
          CREATE TABLE claims(store_index INTEGER PRIMARY KEY, id TEXT UNIQUE,
             batch_id TEXT, subject TEXT, kind TEXT, accepted_at_unix_ms TEXT);
-         CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+         CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
          CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
          CREATE INDEX claims_subject_accepted_index
             ON claims(subject,length(accepted_at_unix_ms),accepted_at_unix_ms);
@@ -52,7 +52,7 @@ fn batch(connection: &Connection, id: &str, writer: &str, sequence: u64) {
     connection.execute(/* sqlite-large-value: allow-for-now lv-haac17a670a75 owner=st3_store::store::message_canonical_sort_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES(?1,?2,?3)", params![id, writer, sequence]).unwrap();
 }
 
-fn claim(connection: &Connection, index: u64, id: &str, batch: &str, subject: &str, kind: &str, time: &str) {
+pub fn claim(connection: &Connection, index: u64, id: &str, batch: &str, subject: &str, kind: &str, time: &str) {
     connection.execute(/* sqlite-large-value: allow-for-now lv-h0acc9a4b57c3 owner=st3_store::store::message_canonical_sort_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES(?1,?2,?3,?4,?5,?6)",
         params![index, id, batch, subject, kind, time]).unwrap();
 }
@@ -78,7 +78,7 @@ fn message(subject: &str, index: usize) -> MessageView {
     }
 }
 
-fn fixture(connection: &Connection) -> Vec<MessageView> {
+pub fn fixture(connection: &Connection) -> Vec<MessageView> {
     batch(connection, "alpha", "writer-a", 2);
     batch(connection, "beta", "writer-b", 1);
     batch(connection, "older-sequence", "writer-a", 1);

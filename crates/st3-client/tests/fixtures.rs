@@ -15,6 +15,46 @@ fn fixture(name: &str) -> Vec<u8> {
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
 }
+
+#[test]
+fn assistant_sender_timeline_round_trip_preserves_sender_only_wire_contract() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+    ))
+    .unwrap();
+    let definitions = &schema["$defs"];
+    let properties = &definitions["TimelineMessageBody"]["properties"];
+    assert_eq!(properties["from"]["$ref"], "#/$defs/SenderRef");
+    assert_eq!(properties["to"]["$ref"], "#/$defs/ParticipantRef");
+    assert_eq!(
+        definitions["SenderRef"]["x-st-ref"],
+        serde_json::json!(["agent", "assistant", "person", "step"])
+    );
+    for narrow in ["ParticipantRef", "ActorRef"] {
+        assert!(!definitions[narrow]["x-st-ref"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("assistant")));
+    }
+    let wire = serde_json::json!({
+        "id": "timeline-entry/assistant-message", "sequence": 1, "revision": 1,
+        "timestamp": "2026-10-17T10:00:00Z", "role": "user", "type": "message",
+        "final": true,
+        "body": {
+            "message_id": "message/assistant", "from": "assistant/chatgpt",
+            "to": "agent/example", "sender_class": "external-assistant",
+            "assistant_grant_id": "assistant-grant/example"
+        }
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let encoded = serde_json::to_value(&entry).unwrap();
+    for field in ["message_id", "from", "to", "sender_class", "assistant_grant_id"] {
+        assert_eq!(encoded["body"][field], wire["body"][field]);
+    }
+    let decoded: TimelineEntry = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, entry);
+}
+
 #[test]
 fn directive_notes_preserve_author_time_expiry_and_clear_as_empty() {
     let wire: Envelope<DirectiveNotes> = decode("directive-notes.json");
@@ -356,6 +396,54 @@ fn generated_resource_union_decodes_all_kinds() {
 }
 
 #[test]
+fn usage_aggregation_schema_literals_keep_agent_rows() {
+    let schema: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/st3/client-v0/schemas/client-v0.schema.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let literals = schema["$defs"]["UsageSummary"]["properties"]["aggregation"]["enum"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        literals,
+        serde_json::json!([
+            "cumulative-per-incarnation-else-response-deltas",
+            "rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas"
+        ])
+        .as_array()
+        .unwrap()
+    );
+    for aggregation in literals {
+        let page: Page = serde_json::from_value(serde_json::json!({
+            "kind": "page", "collection": "agents", "filters": {},
+            "items": [{
+                "kind": "agent", "id": "agent/example", "revision": "r1",
+                "updated_at": "2026-10-04T08:00:00Z", "name": "Example",
+                "state": "running", "reachability": "local", "runtime_ids": [],
+                "usage": {
+                    "total_tokens": 1200, "input_tokens": 900, "output_tokens": 300,
+                    "cached_tokens": 100, "incarnation_count": 2,
+                    "aggregation": aggregation
+                }
+            }],
+            "page": {"limit": 50, "has_more": false}
+        }))
+        .unwrap();
+        let [Resource::Agent(agent)] = page.items.as_slice() else {
+            panic!("usage aggregation must not discard the agent row: {:?}", page.items);
+        };
+        assert_eq!(
+            agent.usage.as_ref().unwrap().aggregation,
+            aggregation.as_str().unwrap()
+        );
+    }
+}
+
+#[test]
 fn session_usage_context_decodes_through_flattened_resource() {
     let resource: Resource = serde_json::from_value(serde_json::json!({
         "id": "session/compatibility-test",
@@ -375,7 +463,7 @@ fn session_usage_context_decodes_through_flattened_resource() {
             "cost": null,
             "currency": null,
             "incarnation_count": 2,
-            "aggregation": "response-deltas",
+            "aggregation": "rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas",
             "context": {
                 "used_tokens": 800,
                 "window_tokens": 200000,
@@ -577,6 +665,49 @@ fn authority_error_codes_are_typed_and_round_trip() {
             serde_json::to_string(&decoded).unwrap(),
             format!("\"{raw}\"")
         );
+    }
+}
+
+#[test]
+fn message_selector_readiness_is_typed_and_preserves_its_plain_message() {
+    let code: ErrorCode = serde_json::from_str("\"message-selectors-not-ready\"").unwrap();
+    assert_eq!(code, ErrorCode::MessageSelectorsNotReady);
+    assert_eq!(
+        serde_json::to_string(&code).unwrap(),
+        "\"message-selectors-not-ready\""
+    );
+    let message = "message selector initialization is still in progress";
+    assert_eq!(plain_message(Some(&code), message), message);
+}
+
+#[test]
+fn runtime_publication_errors_are_typed_and_round_trip() {
+    for (raw, expected) in [
+        ("runtime-list-not-ready", ErrorCode::RuntimeListNotReady),
+        ("runtime-list-ended", ErrorCode::RuntimeListEnded),
+    ] {
+        let decoded: ErrorCode = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), format!("\"{raw}\""));
+    }
+}
+
+#[test]
+fn runtime_publication_error_messages_preserve_retryability() {
+    for (code, retryable, expected) in [
+        (ErrorCode::RuntimeListNotReady, true,
+            "st is still preparing the runtime list; try again shortly"),
+        (ErrorCode::RuntimeListEnded, false,
+            "the runtime list stopped updating; restart st"),
+    ] {
+        let envelope = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+            "request_id": "request/runtime-publication", "code": code,
+            "message": "raw server message", "retryable": retryable, "details": {},
+        })).unwrap();
+        let error = ClientError::Api(code, "raw server message".into(), Box::new(envelope));
+        assert_eq!(error.plain(), expected);
+        assert_eq!(error.is_transient(), retryable);
     }
 }
 

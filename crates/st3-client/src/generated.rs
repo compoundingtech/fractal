@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
 pub const API_VERSION: &str = "st3.client.v0";
 pub const ERROR_VERSION: &str = "st3.client.error.v0";
 pub const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
@@ -64,9 +65,6 @@ pub enum ErrorCode {
     RecipientRetired,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
-    NotFound,
-    Forbidden,
-    UnsupportedCapability,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,
@@ -83,6 +81,9 @@ pub enum ErrorCode {
     InvalidArrangementName,
     InvalidArrangementKey,
     InvalidSubjectReference,
+    NotFound,
+    Forbidden,
+    UnsupportedCapability,
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
@@ -91,15 +92,18 @@ pub enum ErrorCode {
     CursorGap,
     PageCursorExpired,
     AgentRosterCutNotReady,
-    ProjectionDetailTooLarge,
-    ProjectionDetailInvalidSource,
+    MessageSelectorsNotReady,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,
+    RuntimeListNotReady,
+    RuntimeListEnded,
     RemoteUnavailable,
     TerminalUnavailable,
     TerminalEnded,
     TimelineHistoryIncomplete,
+    ProjectionDetailTooLarge,
+    ProjectionDetailInvalidSource,
     ConversationContentInvalidated,
     TranscriptUnavailable,
     BlobTooLarge,
@@ -2265,6 +2269,9 @@ pub struct TimelineMessageBody {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MessageProvenance {
     pub verdict: String,
+    /// The complete local authorization model supplying this judgment; absent on older producers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3535,9 +3542,20 @@ pub struct PersonAnswerRecord {
     pub ask: String,
     pub status: String,
     pub summary: String,
+    /// The answering principal, including `assistant/chatgpt` for assistant responses.
     pub respondent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_for: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_grant_id: Option<String>,
+    /// Server-owned grant owner provenance, not person-delegation authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_owner: Option<String>,
+    /// Grant-bound assistant session audit actor, separate from the respondent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_session_actor: Option<String>,
     pub answered_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<PersonAnswer>,
@@ -3962,6 +3980,8 @@ pub enum AssistantScope {
     Messages,
     #[serde(rename = "write.assistant.custom-reply")]
     CustomReply,
+    #[serde(rename = "write.assistant.answers")]
+    Answers,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

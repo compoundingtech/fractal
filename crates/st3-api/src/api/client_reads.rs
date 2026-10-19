@@ -1,3 +1,10 @@
+use crate::MissionsStore;
+use crate::WorkListStore;
+use crate::RosterAdmissionStore;
+use crate::RuntimeStartsStore;
+use crate::SeatsStore;
+use crate::EvidenceStore;
+use crate::PublishedViewsStore;
 use super::*;
 
 fn client_launch_approval_resources(
@@ -850,12 +857,13 @@ pub async fn client_messages(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<client_v0::ClientSession>,
+    Extension(ClientMessageRequestId(request_id)): Extension<ClientMessageRequestId>,
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
-    let (history, actor) = (query.history, query.actor.clone());
+    let actor = query.actor.clone();
     // An agent another host owns is listed by that host: its messages can reach this node late,
     // and a list that shows only what has arrived reads as empty while the replica lags.
     let owner = match actor.as_deref() {
@@ -873,6 +881,9 @@ pub async fn client_messages(
                     state: "current".into(),
                     reason: None,
                 });
+                if session.messages_paging {
+                    client_message_page_size(&snapshot, &page, &request_id)?;
+                }
                 return Ok((Extension(snapshot), Json(page)));
             }
             Err(error) if error.code == "remote-unavailable" => {
@@ -893,6 +904,12 @@ pub async fn client_messages(
             Err(error) => return Err(error),
         }
     }
+    if session.messages_paging {
+        return client_messages_sql_page_with_envelope(
+            &state, snapshot, &effective_query, client_now_ms(), &request_id, replicated,
+        ).await;
+    }
+    let history = query.history;
     let (snapshot, Json(mut page)) = client_snapshot_page(
         &state,
         snapshot,
@@ -906,6 +923,236 @@ pub async fn client_messages(
     .map(|(Extension(snapshot), page)| (snapshot, page))?;
     page.replicated = replicated;
     Ok((Extension(snapshot), Json(page)))
+}
+
+/// SQL pages retain only issued cut metadata, not a materialized JSON collection.
+/// Appends preserve the cut; deletion invalidates it. Delivery age stays at issuance
+/// while recipient delivery presence is assessed afresh on each page.
+#[cfg(test)]
+pub(super) async fn client_messages_sql_page(
+    state: &AppState,
+    snapshot: ClientSnapshot,
+    query: &ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    client_messages_sql_page_at(state, snapshot, query, client_now_ms()).await
+}
+
+#[cfg(test)]
+pub(super) async fn client_messages_sql_page_at(
+    state: &AppState,
+    snapshot: ClientSnapshot,
+    query: &ClientListQuery,
+    request_time: u128,
+) -> Result<ClientPageResponse, ApiError> {
+    client_messages_sql_page_with_envelope(
+        state, snapshot, query, request_time, &format!("request/{}", new_request_id()), None,
+    ).await
+}
+
+pub(super) async fn client_messages_sql_page_with_envelope(
+    state: &AppState,
+    snapshot: ClientSnapshot,
+    query: &ClientListQuery,
+    request_time: u128,
+    request_id: &str,
+    replicated: Option<ClientReplicated>,
+) -> Result<ClientPageResponse, ApiError> {
+    let cursor = query.cursor.as_deref().map(decode_client_cursor).transpose()?;
+    let cut = if let Some(cursor) = &cursor {
+        if cursor.collection != "messages"
+            || cursor.snapshot != snapshot
+            || cursor.history != query.history
+            || cursor.person != query.person
+            || cursor.actor != query.actor
+            || cursor.owner_run != query.owner_run
+            || cursor.status != query.status
+            || cursor.owner != query.owner
+            || cursor.state != query.state
+            || cursor.native_only != query.native_only
+            || query.limit.is_some_and(|limit| limit.clamp(1, CLIENT_MAX_PAGE_ITEMS) != cursor.limit)
+        {
+            return Err(client_page_expired("the page cursor does not match this collection, snapshot, or filter"));
+        }
+        let cuts = CLIENT_MESSAGE_CUTS.lock();
+        let store = Arc::downgrade(&state.store);
+        let cut = cuts.iter().find(|cut| {
+            cut.store.ptr_eq(&store) && cut.cursor == *cursor
+        }).cloned().ok_or_else(|| {
+            client_page_expired("the message page cut is no longer available; restart pagination")
+        })?;
+        if request_time >= cut.cursor.expires_at_unix_ms {
+            return Err(client_page_expired("the page cursor expired"));
+        }
+        Some(cut)
+    } else {
+        None
+    };
+    let (limit, expires_at, through, after, offset, now, expected_epoch) = if let Some(cut) = &cut {
+        (
+            cut.cursor.limit, cut.cursor.expires_at_unix_ms, cut.cursor.before_index,
+            cut.cursor.after_key.clone(), cut.cursor.offset, cut.request_time, Some(cut.cut_epoch),
+        )
+    } else {
+        (
+            query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS).clamp(1, CLIENT_MAX_PAGE_ITEMS),
+            request_time.saturating_add(CLIENT_PAGE_TTL_MS), None, None, 0, request_time, None,
+        )
+    };
+    let reader = state.clone();
+    let person = query.person.clone();
+    let actor = query.actor.clone();
+    let history = query.history;
+    let continuing = cut.is_some();
+    let (cut_epoch, read) = blocking_store(move || {
+        reader.store.clone().read_snapshot(|index| {
+            // Check the deletion fence in the same SQLite snapshot as selection/folding.
+            let cut_epoch = reader.store.client_messages_cut_epoch()?;
+            if expected_epoch.is_some_and(|expected| expected != cut_epoch) {
+                return Ok((cut_epoch, None));
+            }
+            let through = through.unwrap_or(reader.store.client_messages_page_cut(index)?);
+            let snapshot = if continuing { snapshot } else { client_snapshot_at(&reader, through) };
+            let mut rows = reader.store.client_messages_page(
+                person.as_deref(), actor.as_deref(), history, through, after.as_ref(), limit,
+            )?;
+            let selected_more = rows.len() > limit;
+            rows.truncate(limit);
+            // Delivery enrichment reads the store too: keep it on the blocking
+            // worker and inside the same read snapshot as selector/body folding.
+            let resources = rows.into_iter().map(|(message, metadata, current)| {
+                let key = (
+                    metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?,
+                    message.subject.clone(),
+                );
+                let resource = client_message_resource(&reader.store, message, &metadata, current, now)?;
+                Ok((key, resource))
+            }).collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((cut_epoch, Some((snapshot, through, selected_more, resources))))
+        })
+    }).await?;
+    // Retire every affected receipt for this store, not just the cursor that
+    // noticed deletion. Keep newer concurrent reads' receipts intact.
+    {
+        let store = Arc::downgrade(&state.store);
+        CLIENT_MESSAGE_CUTS.lock().retain(|cut| {
+            !cut.store.ptr_eq(&store) || cut.cut_epoch >= cut_epoch
+        });
+    }
+    let Some((snapshot, through, selected_more, resources)) = read else {
+        return Err(client_page_expired("the message page cut was invalidated; restart pagination"));
+    };
+    let mut keys = Vec::with_capacity(resources.len());
+    let mut item_sizes = Vec::with_capacity(resources.len());
+    let mut items = Vec::with_capacity(resources.len());
+    for (key, resource) in resources {
+        keys.push(key);
+        item_sizes.push(client_encoded_size(&resource)?);
+        items.push(resource);
+    }
+    let mut items_bytes: usize = item_sizes.iter().sum();
+    let mut page = ClientResourcePage {
+        kind: "page".into(), collection: "messages".into(),
+        filters: client_page_filters("messages", query), items,
+        page: ClientPageInfo {
+            limit, has_more: selected_more, next_cursor: None, cursor_expires_at: None,
+        },
+        sync: client_sync_notice(state), replicated,
+    };
+    // Reuse the receipt identity while finding the largest fitting prefix. Only
+    // the last returned key is ever issued; an excluded candidate stays ahead.
+    let receipt = format!("message-cut/{}", uuid::Uuid::now_v7());
+    loop {
+        let has_more = selected_more || page.items.len() < keys.len();
+        let cursor = if has_more && !page.items.is_empty() {
+            Some(ClientPageCursor {
+                snapshot: snapshot.clone(), collection: "messages".into(),
+                offset: offset.saturating_add(page.items.len()), limit, history,
+                person: query.person.clone(), actor: query.actor.clone(),
+                owner_run: query.owner_run.clone(), status: query.status.clone(),
+                owner: query.owner.clone(), state: query.state.clone(), native_only: query.native_only,
+                items_digest: receipt.clone(), before_index: Some(through),
+                after_key: Some(keys[page.items.len() - 1].clone()), expires_at_unix_ms: expires_at,
+            })
+        } else { None };
+        page.page.has_more = has_more;
+        page.page.next_cursor = cursor.as_ref().map(encode_client_cursor).transpose()?;
+        page.page.cursor_expires_at = has_more.then(|| client_timestamp(expires_at));
+        // Count each resource once; only the small envelope/cursor is recounted.
+        let items = std::mem::take(&mut page.items);
+        let framing_bytes = client_message_envelope_size(&snapshot, &page, request_id)?;
+        page.items = items;
+        let encoded_bytes = framing_bytes.saturating_add(items_bytes)
+            .saturating_add(page.items.len().saturating_sub(1));
+        if encoded_bytes <= CLIENT_MAX_RESPONSE_BYTES {
+            if has_more && page.items.is_empty() {
+                return Err(client_message_page_too_large());
+            }
+            if let Some(cursor) = cursor {
+                let mut cuts = CLIENT_MESSAGE_CUTS.lock();
+                let current_time = client_now_ms();
+                cuts.retain(|cut| cut.cursor.expires_at_unix_ms > current_time && cut.store.strong_count() != 0);
+                while cuts.len() >= CLIENT_MESSAGE_CUT_CAPACITY {
+                    cuts.pop_front();
+                }
+                cuts.push_back(Arc::new(IssuedClientMessageCut {
+                    store: Arc::downgrade(&state.store), cursor, cut_epoch, request_time: now,
+                }));
+            }
+            return Ok((Extension(snapshot), Json(page)));
+        }
+        if page.items.len() <= 1 {
+            return Err(client_message_page_too_large());
+        }
+        page.items.pop();
+        items_bytes -= item_sizes[page.items.len()];
+    }
+}
+
+fn client_message_page_too_large() -> ApiError {
+    ApiError::bad(St3Error::new(
+        "response-too-large",
+        "a message and its page envelope cannot fit the advertised response byte limit; pagination cannot omit it",
+    ))
+}
+
+fn client_encoded_size(value: &impl Serialize) -> Result<usize, ApiError> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(ApiError::internal)?;
+    Ok(counter.0)
+}
+
+pub(super) fn client_message_envelope_size(
+    snapshot: &ClientSnapshot,
+    page: &ClientResourcePage,
+    request_id: &str,
+) -> Result<usize, ApiError> {
+    #[derive(Serialize)]
+    struct Envelope<'a> {
+        api_version: &'a str,
+        request_id: &'a str,
+        snapshot: &'a ClientSnapshot,
+        value: &'a ClientResourcePage,
+    }
+    client_encoded_size(&Envelope { api_version: CLIENT_API_VERSION, request_id, snapshot, value: page })
+}
+
+fn client_message_page_size(
+    snapshot: &ClientSnapshot,
+    page: &ClientResourcePage,
+    request_id: &str,
+) -> Result<(), ApiError> {
+    if client_message_envelope_size(snapshot, page, request_id)? > CLIENT_MAX_RESPONSE_BYTES {
+        return Err(client_message_page_too_large());
+    }
+    Ok(())
 }
 
 /// The host that owns `actor`'s runtime, when that is another host.
@@ -958,6 +1205,7 @@ async fn relayed_messages_page(
                     history: query.history,
                     limit: query.limit.map(|limit| limit.clamp(1, 200)),
                     cursor: query.cursor.clone(),
+                    messages_paging: session.messages_paging,
                 },
             },
         )

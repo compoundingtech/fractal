@@ -37,13 +37,13 @@ fn synthetic_same_batch_nonmessage_deletion_changes_legacy_rank_with_fixed_candi
     // supply the real canonical::claim_key expression's columns, not a complete Store schema.
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h65f381e873ae owner=st3_store::store::message_thread_legacy_rank_dependency_tests TODO=chunk-or-reference-variable-columns */ r#"
+            /* sqlite-large-value: allow-for-now lv-hd09c7a5a182b owner=st3_store::store::message_thread_legacy_rank_dependency_tests TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
 CREATE TABLE claims(
     id TEXT PRIMARY KEY, batch_id TEXT, accepted_at_unix_ms TEXT,
     store_index INTEGER UNIQUE, subject TEXT, kind TEXT, body TEXT
 );
-CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+CREATE TABLE replica_records(claim_id TEXT, position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE raw_parent_candidates(source_id TEXT PRIMARY KEY, subject TEXT, parent TEXT);
 INSERT INTO batches VALUES ('shared', 'writer', 1), ('distinct', 'writer', 2);
 INSERT INTO claims VALUES

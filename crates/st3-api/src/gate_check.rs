@@ -38,7 +38,7 @@ pub struct CheckHost<'a> {
     pub pty_root: &'a Path,
 }
 
-struct Check {
+pub struct Check {
     started_at: u128,
     /// Holds each gate's output and report files; removed with the check.
     directory: PathBuf,
@@ -49,7 +49,7 @@ struct Check {
     items: Vec<Item>,
 }
 
-struct Item {
+pub struct Item {
     view: GateCheckItemView,
     environment: BTreeMap<String, String>,
     time_limit_ms: u64,
@@ -134,7 +134,7 @@ pub fn poll(id: &str) -> Option<GateCheckView> {
     Some(view(id, check))
 }
 
-fn view(id: &str, check: &Check) -> GateCheckView {
+pub fn view(id: &str, check: &Check) -> GateCheckView {
     GateCheckView {
         id: id.to_owned(),
         host: check.host.clone(),
@@ -298,8 +298,8 @@ fn spawn(
         }
     }
     // A gate acts as no agent, as the reconciler starts it.
-    declared.remove("ST_AGENT");
-    declared.remove(crate::suspension::RESUME_ENV);
+    crate::environment::remove_aliases(&mut declared, "ST_AGENT");
+    crate::environment::remove_aliases(&mut declared, crate::suspension::RESUME_ENV);
     declared.insert(
         crate::gate_report::ENV.into(),
         report.to_string_lossy().into_owned(),
@@ -382,13 +382,13 @@ fn stand_in_variables(
         ("ST_STEP_RUN".to_owned(), String::new()),
         ("PATH".to_owned(), "${PATH}".to_owned()),
     ]);
-    variables.remove("ST_AGENT");
-    variables.remove("ST_GATE");
+    crate::environment::remove_aliases(&mut variables, "ST_AGENT");
+    crate::environment::remove_aliases(&mut variables, "ST_GATE");
     variables
 }
 
 /// What a check's gates expand with: run variables, the inputs nobody gave, and the workspace.
-struct Scope<'a> {
+pub struct Scope<'a> {
     variables: &'a BTreeMap<String, String>,
     missing_inputs: &'a std::collections::BTreeSet<String>,
     workspace: &'a str,
@@ -516,7 +516,7 @@ fn push(
     });
 }
 
-fn now_ms() -> u128 {
+pub fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

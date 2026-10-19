@@ -12,6 +12,10 @@ pub use ui::screens::{HOME_IDLE_TEXT, HOME_UNKNOWN_TEXT};
 pub use ui::checklist;
 pub use version::display_version;
 
+#[cfg(test)]
+use st3::EvidenceStore;
+#[cfg(test)]
+use st3::MissionsStore;
 use st3_feed as feed;
 #[cfg(test)]
 use st3_feed::terminal_screen_fence;
@@ -113,7 +117,12 @@ fn configured_person() -> Result<Option<String>> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    base.map(|base| person_from_config(&base.join("st3/config.toml")))
+    base.map(|base| {
+        person_from_config(
+            &st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
+                .join("config.toml"),
+        )
+    })
         .transpose()
         .map(Option::flatten)
 }

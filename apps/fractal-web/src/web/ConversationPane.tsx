@@ -194,7 +194,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
-      <EmbraceComposer variant="C1" readingColumn disabledReason={binding.disabledReason} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
+      <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={binding.disabledReason} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>
   </EmbraceRuntimeProvider>
 })

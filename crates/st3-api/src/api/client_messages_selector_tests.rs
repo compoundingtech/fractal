@@ -1,0 +1,1167 @@
+//! Isolated selector evidence. All writes are to fresh temporary stores or a
+//! temporary copy of an explicitly supplied, checkpointed offline database.
+use super::*;
+use smallclaims::hash::claim_id_is_content_hash;
+use smallclaims::store::append_claim_record_tx;
+use std::hint::black_box;
+
+const LIMIT: usize = 20;
+const SAMPLES: usize = 5;
+const BASE_TIME: u128 = 1_800_000_000_000;
+const PERSON: &str = "person/alex";
+const ACTOR: &str = "agent/selector-narrow";
+const METADATA: usize = 32;
+
+#[derive(Clone, Copy)]
+struct Case {
+    name: &'static str,
+    person: Option<&'static str>,
+    actor: Option<&'static str>,
+    history: bool,
+}
+
+const CASES: [Case; 5] = [
+    Case { name: "actor_history", person: None, actor: Some(ACTOR), history: true },
+    Case { name: "broad_history", person: None, actor: None, history: true },
+    Case { name: "person_history", person: Some(PERSON), actor: None, history: true },
+    Case { name: "broad_open", person: None, actor: None, history: false },
+    Case { name: "person_open", person: Some(PERSON), actor: None, history: false },
+];
+
+fn subject(index: usize) -> String {
+    format!("message/selector-{index:05}")
+}
+
+fn parties(index: usize) -> (&'static str, &'static str) {
+    (if index.is_multiple_of(3) { ACTOR } else { "agent/selector-sender" },
+     if index.is_multiple_of(2) { PERSON } else { "agent/selector-recipient" })
+}
+
+fn sent_fields(index: usize) -> BTreeMap<String, Value> {
+    let (from, to) = parties(index);
+    BTreeMap::from([
+        ("from".into(), json!(from)), ("to".into(), json!(to)),
+        ("content".into(), json!(format!("selector fixture {index}: λ\nsecond line"))),
+        ("status".into(), json!("sent")),
+        ("title".into(), json!(format!("selector title {index}"))),
+        ("session_id".into(), json!(format!("session/selector-{index}"))),
+    ])
+}
+
+fn storage(path: &Path) -> Value {
+    let bytes = |suffix: &str| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        match fs::metadata(Path::new(&name)) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("storage measurement: {error}"),
+        }
+    };
+    json!({"database_bytes": bytes(""), "wal_bytes": bytes("-wal"), "shm_bytes": bytes("-shm")})
+}
+
+fn distribution(samples: &mut [Duration]) -> Value {
+    assert!(!samples.is_empty());
+    samples.sort_unstable();
+    let percentile = |p: usize| samples[(samples.len() * p).div_ceil(100) - 1].as_secs_f64() * 1_000.0;
+    json!({"samples": samples.len(), "p50_ms": percentile(50), "p95_ms": percentile(95),
+        "max_ms": samples.last().unwrap().as_secs_f64() * 1_000.0,
+        "samples_at_or_over_100ms": samples.iter().filter(|sample| **sample >= Duration::from_millis(100)).count()})
+}
+
+fn measured_checkpoint(store: &Store, path: &Path, scope: &str) -> Value {
+    let before = storage(path);
+    let start = Instant::now();
+    let (busy, log_frames, checkpointed_frames): (u64, i64, i64) = store.connection.write()
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    let elapsed = start.elapsed();
+    let after = storage(path);
+    let result = json!({"scope": scope, "mode": "TRUNCATE",
+        "writer_admission_and_checkpoint_wall_ms": elapsed.as_secs_f64() * 1_000.0,
+        "busy": busy, "log_frames": log_frames, "checkpointed_frames": checkpointed_frames,
+        "before_storage": before, "after_storage": after});
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_checkpoint", "checkpoint": result}));
+    assert_eq!(busy, 0, "isolated checkpoint must complete: {result}");
+    assert_eq!(after["wal_bytes"].as_u64().unwrap(), 0, "WAL segment must start at zero: {result}");
+    result
+}
+
+
+fn seed_bulk(store: &Store, count: usize, closed: usize, metadata_per_message: usize) -> Value {
+    assert!(closed <= count);
+    store.client_messages_selector_benchmark_set_enabled(false).unwrap();
+    store.set_write_clock_at(BASE_TIME).unwrap();
+    let start = Instant::now();
+    let mut final_claim = None;
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        // One canonical batch per message/phase bounds the legacy wire-position
+        // fallback to at most 32 records, just like ordinary bounded batches.
+        // Equal accepted timestamps deliberately exercise the subject tie seek.
+        for phase in 0..3 {
+            let n = if phase == 2 { closed } else { count };
+            for index in 0..n {
+                let mut batch = None;
+                let repeats = if phase == 1 { metadata_per_message } else { 1 };
+                for metadata in 0..repeats {
+                    let (kind, actor, fields) = match phase {
+                        0 => ("message.sent", parties(index).0, sent_fields(index)),
+                        1 => ("publication.operation", "agent/selector-sender", BTreeMap::from([
+                            ("operation".into(), json!(format!("selector/{index}/{metadata}"))),
+                            ("action".into(), json!("fixture-history")),
+                            ("status".into(), json!("accepted")),
+                        ])),
+                        _ => ("message.closed", parties(index).1,
+                              BTreeMap::from([("status".into(), json!("closed"))])),
+                    };
+                    let last_phase = if metadata_per_message>0 { 1 } else { 0 };
+                    if phase==last_phase && index+1==n && metadata+1==repeats {
+                        final_claim = Some(ClaimInput {
+                            subject: subject(index), kind: kind.into(), actor: Some(actor.into()),
+                            fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        });
+                        continue;
+                    }
+                    let claim = append_claim_record_tx(&tx, "selector-benchmark", &subject(index), kind,
+                        Some(actor), &json!({"fields": fields}), &[], batch.as_deref()).unwrap();
+                    if batch.is_none() {
+                        assert!(claim_id_is_content_hash(&claim).unwrap());
+                        batch = Some(claim.batch_id.clone());
+                    }
+                    if index + 1 == n && metadata + 1 == repeats {
+                        assert!(claim_id_is_content_hash(&claim).unwrap());
+                    }
+                }
+            }
+            eprintln!("{}",json!({"benchmark":"client_messages_selector_fixture_phase","phase":phase,
+                "messages":count,"elapsed_ms":start.elapsed().as_secs_f64()*1000.0}));
+        }
+        tx.commit().unwrap();
+    }
+    let append = start.elapsed();
+    let start = Instant::now();
+    // Native message_index is maintained by authoritative claim insert triggers;
+    // these read fixtures have no desired declarations or other graph aggregates.
+    // A final real append publishes the committed index without an unrelated
+    // full graph replay. Writer throughput is measured separately, never here.
+    store.append_claim(&final_claim.unwrap()).unwrap();
+    let projection = start.elapsed();
+    store.client_messages_selector_benchmark_set_enabled(true).unwrap();
+    let start = Instant::now();
+    let backfill = store.client_messages_selector_benchmark_rebuild().unwrap();
+    let selectors = start.elapsed();
+    {
+        let reader = store.readers.get();
+        let claims: usize = reader.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0)).unwrap();
+        let indexed: usize = reader.query_row("SELECT COUNT(*) FROM message_index WHERE created_index>0", [], |row| row.get(0)).unwrap();
+        let closed_indexed: usize = reader.query_row("SELECT COUNT(*) FROM message_index WHERE closed=1", [], |row| row.get(0)).unwrap();
+        let headers: usize = reader.query_row(
+            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(claims, count * (metadata_per_message + 1) + closed);
+        assert_eq!(indexed, count, "fixture must have complete message_index");
+        assert_eq!(closed_indexed, closed);
+        assert_eq!(headers, count, "fixture must have one complete current selector header per indexed message");
+    }
+    // Fixtures must actually contain canonical bodies, not just synthetic selector
+    // rows that accidentally make a timing pass. Sample both ends of each phase.
+    for index in [0, count / 2, count - 1] {
+        let message = store.message(&subject(index)).unwrap().unwrap();
+        assert_eq!(message.from, parties(index).0);
+        assert_eq!(message.to, parties(index).1);
+        assert_eq!(message.content, sent_fields(index)["content"].as_str().unwrap());
+        let claims = store.claims_for(&subject(index), None).unwrap();
+        assert_eq!(claims.len(), metadata_per_message + 1 + usize::from(index < closed));
+        assert!(claims.iter().all(|claim| claim_id_is_content_hash(claim).unwrap()));
+    }
+    let measurement = backfill.benchmark_measurement();
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_maintenance",
+        "messages": count, "closed_messages": closed,
+        "metadata_claims_per_message": metadata_per_message,
+        "selector_backfill_transactions": measurement,
+        "scope": "every explicit rebuild chunk, BEGIN through durable COMMIT; checkpoint outside transactions",
+        "transaction_target_ms": 100, "target_kind": "max", "target_met": backfill.longest_transaction < Duration::from_millis(100),
+        "scheduler_and_fsync_included": true}));
+    assert!(backfill.transactions > 0 && backfill.subjects > 0, "fixture must perform real maintenance: {backfill:?}");
+    assert!(backfill.longest_transaction < Duration::from_millis(100),
+        "selector maintenance transaction exceeded 100ms (not page p95): {backfill:?}");
+    json!({"bulk_append_single_transaction_ms": append.as_secs_f64() * 1_000.0,
+        "final_real_append_index_publication_ms": projection.as_secs_f64() * 1_000.0,
+        "explicit_selector_header_backfill_ms": selectors.as_secs_f64() * 1_000.0,
+        "selector_backfill_transactions": backfill.benchmark_measurement(),
+        "claims": count * (metadata_per_message + 1) + closed, "messages": count,
+        "metadata_claims_per_message": metadata_per_message, "closed_messages": closed})
+}
+
+struct Page {
+    items: Vec<Value>,
+    subjects: Vec<String>,
+    key: Option<(u128, String)>,
+    more: bool,
+}
+
+fn page(store: &Store, case: Case, cut: u64, after: Option<&(u128, String)>) -> Page {
+    let mut rows = store.read_snapshot(|_| {
+        store.client_messages_page(case.person, case.actor, case.history, cut, after, LIMIT)
+    }).unwrap();
+    let more = rows.len() > LIMIT;
+    rows.truncate(LIMIT);
+    let key = rows.last().map(|(message, metadata, _)|
+        (metadata["sent_at"].as_str().unwrap().parse().unwrap(), message.subject.clone()));
+    let subjects = rows.iter().map(|(message, _, _)| message.subject.clone()).collect();
+    let items = rows.into_iter().map(|(message, metadata, current)| {
+        client_message_resource(store, message, &metadata, current, BASE_TIME + 100_000).unwrap()
+    }).collect::<Vec<_>>();
+    black_box(serde_json::to_vec(&items).unwrap());
+    Page { items, subjects, key, more }
+}
+
+fn expected_subjects(count: usize, closed: usize, case: Case) -> Vec<String> {
+    (0..count).filter(|index| {
+        let (from, to) = parties(*index);
+        case.person.is_none_or(|person| to == person)
+            && case.actor.is_none_or(|actor| from == actor || to == actor)
+            && (case.history || *index >= closed)
+    }).map(subject).collect()
+}
+
+fn eligible_indexes(store: &Store, case: Case) -> Vec<String> {
+    let reader = store.readers.get();
+    let mut statement = reader.prepare(
+        "SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='local_client_message_selectors_v1' AND sql IS NOT NULL",
+    ).unwrap();
+    let flag = if case.person.is_some() { "recipient_current=1" } else { "global_current=1" };
+    statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap().into_iter().filter_map(|(name, sql)| {
+            let normalized = sql.to_ascii_lowercase().chars().filter(|c| !c.is_ascii_whitespace()).collect::<String>();
+            normalized.split_once("where").is_some_and(|(_, predicate)| predicate.contains(flag)).then_some(name)
+        }).collect()
+}
+
+fn measure_case(store: &Store, count: usize, closed: usize, case: Case) -> bool {
+    let cut = store.index().unwrap();
+    let expected = expected_subjects(count, closed, case);
+    assert!(expected.len() > LIMIT * 2, "fixture needs first and next pages plus sentinel");
+    let start = Instant::now();
+    let first = page(store, case, cut, None);
+    let first_observed = start.elapsed();
+    assert!(first.more);
+    assert_eq!(first.subjects, expected[..LIMIT]);
+    let key = first.key.unwrap();
+    let oracle = (count == 128 && closed == 0).then(||
+        client_message_resources_at(store, case.person, case.history, case.actor, BASE_TIME + 100_000).unwrap());
+    let mut within_target = true;
+    let eligible = if closed > 0 { eligible_indexes(store, case) } else { Vec::new() };
+    assert!(closed == 0 || !eligible.is_empty(), "closed-heavy {} needs a partial eligibility index", case.name);
+    for (phase, offset, after) in [("first", 0, None), ("next", LIMIT, Some(&key))] {
+        let observed = page(store, case, cut, after);
+        assert!(observed.more);
+        assert_eq!(observed.subjects, expected[offset..offset + LIMIT]);
+        if let Some(oracle) = &oracle {
+            assert_eq!(observed.items, oracle[offset..offset + LIMIT], "full canonical oracle/{}/{phase}", case.name);
+        }
+        for _ in 0..3 { black_box(page(store, case, cut, after)); }
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let start = Instant::now();
+            black_box(page(store, case, cut, after));
+            samples.push(start.elapsed());
+        }
+        let timing = distribution(&mut samples);
+        let plan = store.client_messages_selector_benchmark_plan(case.person, case.actor, case.history, after.is_some()).unwrap();
+        if closed > 0 {
+            assert!(plan.iter().any(|line| eligible.iter().any(|index| line.contains(index))
+                && (after.is_none() || line.contains("SEARCH"))),
+                "closed-heavy {}/{phase} must use the ordered current eligible partial index (and seek continuations): {plan:?}", case.name);
+        }
+        eprintln!("{}", json!({"benchmark": "client_messages_selector_page", "messages": count,
+            "scale": count / 128, "closed_messages": closed,
+            "case": case.name, "phase": phase, "limit": LIMIT, "cut": cut,
+            "snapshot_page_resource_json_wall": timing, "query_plan": plan,
+            "first_observed_case_page_ms": first_observed.as_secs_f64() * 1_000.0,
+            "os_cache_evicted": false}));
+        within_target &= timing["p95_ms"].as_f64().unwrap() < 100.0;
+    }
+    within_target
+}
+
+#[test]
+#[ignore = "isolated selector 1x/10x/100x read evidence; no live databases"]
+fn benchmark_client_messages_selector_scaling() {
+    let mut largest_within_target = true;
+    for count in [128, 1_280, 12_800] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("selector-scaling.sqlite");
+        let store = Store::open(&path, "selector-benchmark").unwrap();
+        store.client_messages_benchmark_prepare_io().unwrap();
+        let fixture = seed_bulk(&store, count, 0, METADATA);
+        store.client_messages_benchmark_checkpoint().unwrap();
+        eprintln!("{}", json!({"benchmark": "client_messages_selector_fixture", "fixture": fixture,
+            "storage": storage(&path)}));
+        for case in CASES {
+            let within_target = measure_case(&store, count, 0, case);
+            if count == 12_800 { largest_within_target &= within_target; }
+        }
+    }
+    assert!(largest_within_target, "all 100x first/next page p95 values must be <100ms; see emitted distributions");
+}
+
+#[test]
+#[ignore = "isolated closed-heavy eligible range-seek evidence"]
+fn benchmark_client_messages_selector_closed_heavy() {
+    let count = 12_800;
+    let closed = count - 128;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("selector-closed-heavy.sqlite");
+    let store = Store::open(&path, "selector-benchmark").unwrap();
+    store.client_messages_benchmark_prepare_io().unwrap();
+    let fixture = seed_bulk(&store, count, closed, 0);
+    store.client_messages_benchmark_checkpoint().unwrap();
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_closed_fixture", "fixture": fixture,
+        "storage": storage(&path), "closed_rows_before_first_eligible": closed}));
+    let mut within_target = true;
+    for case in CASES.into_iter().filter(|case| !case.history) {
+        within_target &= measure_case(&store, count, closed, case);
+    }
+    assert!(within_target, "all closed-heavy first/next page p95 values must be <100ms");
+}
+
+fn commit_claim(store: &Store, index: usize, kind: &str, clock: usize) -> Duration {
+    store.set_write_clock_at(BASE_TIME + u128::try_from(clock).unwrap()).unwrap();
+    let input = ClaimInput {
+        subject: subject(index), kind: kind.into(),
+        actor: Some(if kind == "message.sent" { parties(index).0 } else { parties(index).1 }.into()),
+        fields: if kind == "message.sent" { sent_fields(index) }
+                else { BTreeMap::from([("status".into(), json!(kind.strip_prefix("message.").unwrap()))]) },
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    };
+    let start = Instant::now();
+    store.append_claim(&input).unwrap();
+    start.elapsed()
+}
+
+#[test]
+#[ignore = "isolated real send/close commit and WAL comparison against source-only baseline"]
+fn benchmark_client_messages_selector_write_bursts() {
+    const BURST: usize = 128;
+    let mut within_target = true;
+    // Reverse the order on round two to expose warm-machine/order bias. Each
+    // design has a fresh store; selector disabling is per Store, never global.
+    for (round, designs) in [[false, true], [true, false]].into_iter().enumerate() {
+        let mut results = BTreeMap::new();
+        for enabled in designs {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("selector-write.sqlite");
+            let store = Store::open(&path, "selector-benchmark").unwrap();
+            store.client_messages_selector_benchmark_set_enabled(enabled).unwrap();
+            store.client_messages_benchmark_prepare_io().unwrap();
+            let before = storage(&path);
+            let io_policy = {
+                let writer = store.connection.write();
+                let synchronous: u32 = writer.pragma_query_value(None, "synchronous", |row| row.get(0)).unwrap();
+                let automatic: u32 = writer.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0)).unwrap();
+                let page_size: u64 = writer.pragma_query_value(None, "page_size", |row| row.get(0)).unwrap();
+                assert_eq!(synchronous, 2, "cost proof must retain FULL durability");
+                assert_eq!(automatic, 0, "isolated WAL comparison must not checkpoint inside commits");
+                json!({"synchronous": synchronous, "wal_autocheckpoint": automatic, "page_size": page_size})
+            };
+            let mut classes = serde_json::Map::new();
+            let mut final_views = Vec::new();
+            for (kind, phase) in [("message.sent", 0), ("message.closed", 1)] {
+                if phase==1 {
+                    // Close is legal only after delivered/read. Setup commits are
+                    // real but outside the close distribution and its WAL segment.
+                    for index in 0..BURST {
+                        commit_claim(&store,index,"message.delivered",BURST+index*2);
+                        commit_claim(&store,index,"message.read",BURST+index*2+1);
+                    }
+                }
+                let segment_start = measured_checkpoint(&store, &path, kind);
+                let mut samples = Vec::with_capacity(BURST);
+                let mut commits = Vec::with_capacity(BURST);
+                let burst_started = Instant::now();
+                for index in 0..BURST {
+                    let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+                    let elapsed = commit_claim(&store, index, kind, if phase==0 {index} else {3*BURST+index});
+                    let finished_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+                    samples.push(elapsed);
+                    commits.push(json!({"commit": index, "append_claim_wall_ms": elapsed.as_secs_f64() * 1_000.0,
+                        "started_at_unix_us": started_at, "finished_at_unix_us": finished_at}));
+                }
+                let burst_wall = burst_started.elapsed();
+                let total = samples.iter().copied().sum::<Duration>();
+                let after = storage(&path);
+                let wal = after["wal_bytes"].as_u64().unwrap();
+                within_target &= samples.iter().all(|sample| *sample < Duration::from_millis(100));
+                let timing = distribution(&mut samples);
+                let checkpoint = measured_checkpoint(&store, &path, kind);
+                classes.insert(kind.into(), json!({"commit_inclusive": timing,
+                    "duration_scope": "append_claim call including writer admission, native append/projection, selector finalizer and durable COMMIT; not isolated SQL transaction timing",
+                    "commit_samples": commits, "burst_loop_wall_ms": burst_wall.as_secs_f64() * 1_000.0,
+                    "burst_commits_wall_ms": total.as_secs_f64() * 1_000.0,
+                    "segment_start_checkpoint": segment_start, "post_burst_live_storage": after,
+                    "post_burst_checkpoint": checkpoint,
+                    "wal_bytes": wal, "wal_bytes_per_commit": wal as f64 / BURST as f64}));
+                for index in 0..BURST {
+                    let view = store.message(&subject(index)).unwrap().unwrap();
+                    assert_eq!(view.content, sent_fields(index)["content"].as_str().unwrap());
+                    assert_eq!(view.status, if phase == 0 { "sent" } else { "closed" });
+                    final_views.push(serde_json::to_value(view).unwrap());
+                }
+            }
+            let claims: usize = store.readers.get().query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0)).unwrap();
+            assert_eq!(claims, BURST * 4);
+            let final_checkpoint = measured_checkpoint(&store, &path, "complete workload");
+            let result = json!({"benchmark": "client_messages_selector_write", "round": round,
+                "selector_maintenance": enabled, "commits_per_burst": BURST, "classes": classes,
+                "before_storage": before, "checkpointed_storage": storage(&path),
+                "delivered_read_setup_commits_excluded_from_class_distributions": BURST*2,
+                "final_checkpoint": final_checkpoint, "io_policy": io_policy,
+                "automatic_checkpoint_disabled": true, "synchronous": "FULL",
+                "transaction_target_ms": 100, "target_kind": "max",
+                "wal_scope": "physical WAL bytes after identical 128-commit bursts from verified TRUNCATE; includes WAL header, not daily database growth"});
+            eprintln!("{result}");
+            results.insert(enabled, (result, final_views));
+        }
+        assert_eq!(results[&false].1, results[&true].1, "selector maintenance must not change authoritative message views");
+        for kind in ["message.sent", "message.closed"] {
+            let baseline = &results[&false].0["classes"][kind];
+            let selectors = &results[&true].0["classes"][kind];
+            let baseline_wal = baseline["wal_bytes"].as_u64().unwrap();
+            let selector_wal = selectors["wal_bytes"].as_u64().unwrap();
+            assert!(baseline_wal > 0, "real source-only workload must write a WAL");
+            eprintln!("{}", json!({"benchmark": "client_messages_selector_write_delta", "round": round,
+                "kind": kind,
+                "p95_ms_delta": selectors["commit_inclusive"]["p95_ms"].as_f64().unwrap() - baseline["commit_inclusive"]["p95_ms"].as_f64().unwrap(),
+                "max_ms_delta": selectors["commit_inclusive"]["max_ms"].as_f64().unwrap() - baseline["commit_inclusive"]["max_ms"].as_f64().unwrap(),
+                "wal_growth_percent": 100.0 * (selector_wal as f64 / baseline_wal as f64 - 1.0),
+                "baseline_wal_bytes": baseline_wal, "selector_wal_bytes": selector_wal,
+                "burst_wall_ms_delta": selectors["burst_commits_wall_ms"].as_f64().unwrap() - baseline["burst_commits_wall_ms"].as_f64().unwrap(),
+                "wal_bytes_delta": i128::from(selectors["wal_bytes"].as_u64().unwrap()) - i128::from(baseline["wal_bytes"].as_u64().unwrap())}));
+        }
+    }
+    assert!(within_target, "real append call exceeded 100ms; preserve every baseline/selector sample and investigate COMMIT, admission and scheduler/fsync tail");
+}
+
+#[test]
+#[ignore = "isolated real deferred selector maintenance loans, including durable COMMIT"]
+fn benchmark_client_messages_selector_deferred_maintenance() {
+    const COUNT: usize = 128;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("selector-maintenance.sqlite");
+    let store = Store::open(&path, "selector-benchmark").unwrap();
+    store.client_messages_benchmark_prepare_io().unwrap();
+    let fixture = seed_bulk(&store, COUNT, 0, METADATA);
+    measured_checkpoint(&store, &path, "deferred maintenance fixture");
+    store.set_write_clock_at(BASE_TIME + 1).unwrap();
+    let start = Instant::now();
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for index in 0..COUNT {
+            let claim = append_claim_record_tx(&tx, "selector-benchmark", &subject(index),
+                "message.delivered", Some(parties(index).1),
+                &json!({"fields": {"status": "delivered"}}), &[], None).unwrap();
+            assert!(claim_id_is_content_hash(&claim).unwrap());
+        }
+        tx.commit().unwrap();
+    }
+    let source_append = start.elapsed();
+    assert!(store.client_message_selectors_pending().unwrap(),
+        "source batch must leave real deferred selector work after its bounded finalizer");
+    let before = storage(&path);
+    let mut samples = Vec::new();
+    let mut loans = Vec::new();
+    loop {
+        let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        let start = Instant::now();
+        let more = store.maintain_client_message_selectors().unwrap();
+        let elapsed = start.elapsed();
+        let finished_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        samples.push(elapsed);
+        loans.push(json!({"loan": loans.len(), "wall_ms": elapsed.as_secs_f64() * 1_000.0,
+            "started_at_unix_us": started_at, "finished_at_unix_us": finished_at, "more": more}));
+        if !more { break; }
+    }
+    let within_target = samples.iter().all(|sample| *sample < Duration::from_millis(100));
+    let live = storage(&path);
+    let checkpoint = measured_checkpoint(&store, &path, "deferred maintenance drained");
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_deferred_maintenance",
+        "fixture": fixture, "source_batch_append_including_commit_ms": source_append.as_secs_f64() * 1_000.0,
+        "maintenance_call_wall": distribution(&mut samples), "loans": loans,
+        "duration_scope": "maintain_client_message_selectors call: preflight read, writer admission, BEGIN, finalizer, durable COMMIT and remaining-work check; conservative transaction envelope, not isolated step/COMMIT timing",
+        "automatic_checkpoint_disabled": true, "transaction_target_ms": 100, "target_kind": "max",
+        "before_maintenance_storage": before, "after_maintenance_live_storage": live,
+        "checkpoint": checkpoint, "target_met": within_target}));
+    assert!(!store.client_message_selectors_pending().unwrap(), "maintenance must drain native work");
+    let reader = store.readers.get();
+    let headers: usize = reader.query_row(
+        "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND global_current=1",
+        [], |row| row.get(0)).unwrap();
+    assert_eq!(headers, COUNT, "every real delivered message must have a complete current header");
+    for index in [0, COUNT / 2, COUNT - 1] {
+        assert_eq!(store.message(&subject(index)).unwrap().unwrap().status, "delivered");
+    }
+    drop(reader);
+    assert_complete_selector_pages_match_oracle(&store);
+    assert!(within_target, "deferred maintenance call exceeded 100ms including COMMIT: retain loan receipts and investigate");
+}
+
+fn offline_source_counts(path: &Path) -> (u64, u64) {
+    assert_eq!(storage(path)["wal_bytes"].as_u64().unwrap(), 0,
+        "migration input must be a checkpointed OFFLINE COPY, never a live/WAL database");
+    let connection = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    connection.query_row("SELECT (SELECT COUNT(*) FROM claims), (SELECT COUNT(*) FROM message_index)", [],
+        |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+}
+
+#[test]
+#[ignore = "requires ST3_CLIENT_MESSAGES_SELECTOR_MIGRATION_COPY pointing to checkpointed offline 118k-claim copy"]
+fn benchmark_client_messages_selector_migration_copy() {
+    let source = std::env::var_os("ST3_CLIENT_MESSAGES_SELECTOR_MIGRATION_COPY")
+        .map(std::path::PathBuf::from).expect("set explicit offline copy path; this benchmark never discovers or opens a daemon database");
+    let source = source.canonicalize().unwrap();
+    let source_counts = offline_source_counts(&source);
+    assert!((118_000..119_000).contains(&source_counts.0), "expected the supplied 118k-claim copy, got {source_counts:?}");
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("selector-migration-copy.sqlite");
+    fs::copy(&source, &path).unwrap();
+    assert_eq!(offline_source_counts(&path), source_counts);
+    let before = storage(&path);
+    let start = Instant::now();
+    let store = Store::open(&path, "selector-migration-benchmark").unwrap();
+    let migration = start.elapsed();
+    let startup_backfill = store.client_messages_selector_benchmark_drain().unwrap();
+    let live = storage(&path);
+    let counts: (u64, u64) = store.readers.get().query_row(
+        "SELECT (SELECT COUNT(*) FROM claims), (SELECT COUNT(*) FROM message_index)", [],
+        |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(counts, source_counts, "migration cannot alter claim authority or message coverage");
+    // Explicit rebuild separately isolates selector/header work from other Store
+    // startup migrations. Both costs and their WAL are reported, not conflated.
+    let pre_rebuild_checkpoint = measured_checkpoint(&store, &path, "offline before explicit rebuild");
+    let start = Instant::now();
+    let rebuild_backfill = store.client_messages_selector_benchmark_rebuild().unwrap();
+    let rebuild = start.elapsed();
+    let rebuilt_live = storage(&path);
+    let post_rebuild_checkpoint = measured_checkpoint(&store, &path, "offline after explicit rebuild");
+    let checkpointed = storage(&path);
+    let cut = store.index().unwrap();
+    let case = CASES[1];
+    let first = page(&store, case, cut, None);
+    assert!(!first.items.is_empty(), "backfilled copy must serve real canonical message headers");
+    drop(store);
+    let start = Instant::now();
+    let reopened = Store::open(&path, "selector-migration-benchmark").unwrap();
+    let reopen = start.elapsed();
+    assert_eq!(page(&reopened, case, cut, None).items, first.items, "backfill must remain complete across reopen");
+    let reopen_backfill = reopened.client_messages_selector_benchmark_drain().unwrap();
+    assert_eq!(reopen_backfill.transactions, 0, "populated reopen must not reset or rehydrate");
+    assert_eq!(offline_source_counts(&source), source_counts, "source copy remains read-only and unchanged");
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_migration", "source_copy": source,
+        "claims": source_counts.0, "messages": source_counts.1,
+        "open_excluding_online_backfill_ms": migration.as_secs_f64() * 1_000.0,
+        "explicit_selector_header_rebuild_ms": rebuild.as_secs_f64() * 1_000.0,
+        "online_selector_backfill": startup_backfill.benchmark_measurement(),
+        "explicit_selector_rebuild": rebuild_backfill.benchmark_measurement(),
+        "populated_reopen_selector_backfill": reopen_backfill.benchmark_measurement(),
+        "populated_reopen_ms": reopen.as_secs_f64() * 1_000.0,
+        "before_storage": before, "after_open_live_storage": live,
+        "after_explicit_rebuild_live_storage": rebuilt_live, "checkpointed_storage": checkpointed,
+        "pre_rebuild_checkpoint": pre_rebuild_checkpoint, "post_rebuild_checkpoint": post_rebuild_checkpoint,
+        "transaction_target_ms": 100, "target_kind": "max",
+        "transaction_scope": "every online/rebuild chunk BEGIN through durable COMMIT, checkpoint separately; not total Store open or writer admission",
+        "wal_scope": "physical file sizes; this explicit benchmark drain performs PASSIVE checkpoint before returning; production uses the daemon recycler; WAL is not cumulative bytes written",
+        "source_open_flags": "READ_ONLY", "mutated_database": "fresh temporary copy only"}));
+    assert!(startup_backfill.subjects > 0,
+        "offline migration input must need selector backfill, not already contain a completed selector projection");
+    assert!(startup_backfill.longest_transaction < Duration::from_millis(100),
+        "startup selector transaction exceeded 100ms: {startup_backfill:?}");
+    assert!(rebuild_backfill.longest_transaction < Duration::from_millis(100),
+        "explicit selector rebuild transaction exceeded 100ms: {rebuild_backfill:?}");
+}
+
+#[test]
+fn client_messages_selector_non_lifecycle_status_does_not_churn_headers() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("claims.sqlite"), "selector-field-regression").unwrap();
+    for (kind, fields) in [
+        ("message.sent", sent_fields(0)),
+        ("publication.operation", BTreeMap::from([
+            ("operation".into(), json!("selector-status-regression")),
+            ("action".into(), json!("fixture-history")),
+            ("status".into(), json!("accepted")),
+        ])),
+    ] {
+        store.append_claim(&ClaimInput {
+            subject: subject(0), kind: kind.into(), actor: Some(ACTOR.into()), fields,
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let versions: u64 = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0",
+            [], |row|row.get(0)).unwrap();
+        assert_eq!(versions,1,"non-selection metadata must not version selector headers");
+        for case in CASES {
+            let actual = page(&store, case, store.index().unwrap(), None).items;
+            let expected = client_message_resources_at(&store, case.person, case.history, case.actor,
+                BASE_TIME + 100_000).unwrap();
+            assert_eq!(actual, expected, "{}", case.name);
+        }
+    }
+}
+
+fn all_selector_page_items(store: &Store, case: Case) -> Vec<Value> {
+    let cut = store.index().unwrap();
+    let mut after = None;
+    let mut items = Vec::new();
+    loop {
+        let next = page(store, case, cut, after.as_ref());
+        items.extend(next.items);
+        if !next.more { return items; }
+        assert!(next.key.is_some());
+        after = next.key;
+    }
+}
+
+fn assert_complete_selector_pages_match_oracle(store: &Store) {
+    for case in CASES.into_iter().chain([
+        Case { name: "edited_person_history", person: Some("person/blair"), actor: None, history: true },
+        Case { name: "edited_person_open", person: Some("person/blair"), actor: Some("agent/edited"), history: false },
+    ]) {
+        let expected = client_message_resources_at(store, case.person, case.history, case.actor,
+            BASE_TIME + 100_000).unwrap();
+        let actual = all_selector_page_items(store, case);
+        assert_eq!(actual, expected, "complete first/continuation page parity: {}", case.name);
+    }
+}
+
+#[test]
+fn client_messages_selector_claim_edits_and_deletes_match_fresh_canonical_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("selector-mutations.sqlite");
+    let store = Store::open(&path, "selector-mutations").unwrap();
+    seed_bulk(&store, 48, 0, 0);
+    assert_complete_selector_pages_match_oracle(&store);
+    {
+        // Deliberate offline authority mutations exercise the real UPDATE/DELETE
+        // triggers, not append-only approximations of repairs or selector-row mocks.
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-ha31b4cbda808 owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.from','agent/edited','$.fields.to','person/blair','$.fields.content','edited canonical content','$.fields.tags',json('[\"reminder:mutation\",\"version:18446744073709551615\"]')) WHERE subject=?1",
+            [subject(0)],
+        ).unwrap();
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h51c6915775b1 owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.to',?2,'$.fields.tags',json('[\"reminder:mutation\",\"version:1\"]')) WHERE subject=?1",
+            rusqlite::params![subject(3), PERSON],
+        ).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h962c6d0d950e owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1",
+            rusqlite::params![subject(7), (BASE_TIME + 999).to_string()]).unwrap();
+        tx.commit().unwrap();
+    }
+    drop(store);
+    let edited = Store::open(&path, "selector-mutations").unwrap();
+    assert_complete_selector_pages_match_oracle(&edited);
+    let header: (String, String, String, String, bool, bool) = edited.readers.get().query_row(
+        "SELECT sender,recipient,reminder,version,global_current,recipient_current FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL",
+        [subject(0)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    ).unwrap();
+    assert_eq!(header, ("agent/edited".into(), "person/blair".into(), "mutation".into(),
+        "18446744073709551615".into(), true, true));
+    assert_eq!(page(&edited, CASES[1], edited.index().unwrap(), None).subjects[0], subject(7),
+        "accepted-time edit must move the header before tied arrivals");
+    {
+        let writer = edited.connection.write();
+        writer.execute(/* sqlite-large-value: allow-for-now lv-haccf95923239 owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject=?1", [subject(0)]).unwrap();
+    }
+    drop(edited);
+    let deleted = Store::open(&path, "selector-mutations").unwrap();
+    assert_complete_selector_pages_match_oracle(&deleted);
+    assert_eq!(deleted.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL",
+        [subject(0)], |row| row.get::<_, usize>(0),
+    ).unwrap(), 0, "deleted authority must not leave a current selector header");
+    let promoted: (bool, bool) = deleted.readers.get().query_row(
+        "SELECT global_current,recipient_current FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL",
+        [subject(3)], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(promoted, (true, true), "deleting a winner must promote the surviving reminder");
+}
+
+fn declared_selector_subject(index: usize) -> String {
+    format!("message/selector-declared-{index:05}")
+}
+
+fn apply_declared_selector_fixture(store: &Store, count: usize) {
+    let mut source = String::from(
+        "version 2\nagent \"selector-declared\" { workspace \"/tmp\"; command \"true\" }\n",
+    );
+    for index in 0..count {
+        let tags = match index {
+            0 | 1 => format!("tag \"reminder:declared-group\"; tag \"version:{index}\";"),
+            2 => String::from("tag \"reminder:unrelated-group\"; tag \"version:1\";"),
+            _ => String::new(),
+        };
+        source.push_str(&format!(
+            "message \"selector-declared-{index:05}\" {{ from \"requester\"; to \"selector-declared\"; content \"declared body {index}\"; {tags} }}\n",
+        ));
+    }
+    let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+    let mission = store.mission(&intent, crate::model::IntentInput {
+        kdl: source, source_name: None,
+    }).unwrap();
+    store.apply(&intent, &mission.subject_tokens, "selector-declared-fixture").unwrap();
+    while store.maintain_client_message_selectors().unwrap() {}
+}
+
+#[test]
+fn client_messages_selector_desired_delete_seeks_only_subject_and_affected_reminder_group() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("deletion-plan.sqlite"), "node").unwrap();
+    seed_bulk(&store, 64, 0, 0);
+    apply_declared_selector_fixture(&store, 4);
+    let writer = store.connection.write();
+    // Plan the actual trigger's affected-row predicate, substituting its OLD
+    // subject binding. Regressing to an unindexed OR must fail this evidence.
+    let trigger: String = writer.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='client_selector_desired_delete'",
+        [], |row| row.get(0),
+    ).unwrap();
+    let predicate = trigger.split_once(" WHERE born_index>=0 AND retired_index IS NULL AND")
+        .expect("desired-deletion trigger has a final affected-header predicate").1;
+    let predicate = predicate.trim().strip_suffix("END").unwrap().trim().trim_end_matches(';')
+        .replace("OLD.subject", "?1");
+    let sql = format!(
+        "SELECT subject FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL AND {predicate}",
+    );
+    for (index, expected) in [
+        (1, vec![declared_selector_subject(0), declared_selector_subject(1)]),
+        (3, vec![declared_selector_subject(3)]),
+    ] {
+        let subject = declared_selector_subject(index);
+        assert_eq!(writer.execute(/* sqlite-large-value: allow-for-now lv-h45177bd8da33 owner=st3_api::api::client_messages_selector_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&subject]).unwrap(), 1);
+        let plan = writer.prepare(/* sqlite-large-value: allow-for-now lv-hc75d16d7bfac owner=st3_api::api::client_messages_selector_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+            .query_map([&subject], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(plan.iter().any(|step| step.contains("SEARCH local_client_message_selectors_v1 USING PRIMARY KEY")),
+            "deletion must seek affected subject headers: {plan:?}");
+        assert!(plan.iter().any(|step| step.contains("SEARCH") && step.contains("client_selector_reminder_candidates")),
+            "deletion must seek the affected reminder group: {plan:?}");
+        assert!(!plan.iter().any(|step| step.contains("SCAN local_client_message_selectors_v1")),
+            "deletion must not scan unrelated retained headers: {plan:?}");
+        let mut affected = writer.prepare(/* sqlite-large-value: allow-for-now lv-ha241fca48db7 owner=st3_api::api::client_messages_selector_tests TODO=trace-statement-and-value-representation */ &sql).unwrap().query_map([&subject], |row| row.get::<_, String>(0))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        affected.sort();
+        assert_eq!(affected, expected);
+    }
+}
+
+#[test]
+fn client_messages_selector_canonical_settlement_replay_commits_usable_declared_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("settlement-replay.sqlite"), "node").unwrap();
+    store.set_write_clock_at(BASE_TIME).unwrap();
+    apply_declared_selector_fixture(&store, LIMIT + 3);
+    let cases = [
+        CASES[1], CASES[3],
+        Case { name: "declared_recipient_history", person: Some("agent/selector-declared"), actor: None, history: true },
+        Case { name: "declared_recipient_open", person: Some("agent/selector-declared"), actor: None, history: false },
+        Case { name: "declared_requester_history", person: Some("agent/selector-declared"), actor: Some("requester"), history: true },
+        Case { name: "declared_requester_open", person: Some("agent/selector-declared"), actor: Some("requester"), history: false },
+    ];
+    let expected = cases.map(|case| all_selector_page_items(&store, case));
+    assert_eq!(expected[0].len(), LIMIT + 3, "declared fixture must span continuation pages");
+    assert!(!expected[3].is_empty(), "declared fixture must route to its mailbox");
+    let epoch = store.client_messages_cut_epoch().unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2390bb2bfc74 owner=st3_api::api::client_messages_selector_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='canonical_replay_settled'", []).unwrap();
+    assert!(store.settle_runs_for_canonical_replay().unwrap().is_empty());
+    assert!(store.client_messages_cut_epoch().unwrap() > epoch, "settlement must actually replay declarations");
+    // Settlement itself is bounded; the committed old frontier remains usable
+    // while its remaining declarations are folded in later transactions.
+    assert_eq!(all_selector_page_items(&store, CASES[1]).len(), LIMIT + 3,
+        "fresh pages remain usable during the epoch-fenced desired-deletion replay exception");
+    while store.maintain_client_message_selectors().unwrap() {}
+    assert!(!store.client_message_selectors_pending().unwrap());
+    for (case, expected) in cases.into_iter().zip(expected) {
+        let actual = all_selector_page_items(&store, case);
+        assert_eq!(actual, expected, "settlement changed canonical pages: {}", case.name);
+        assert_eq!(actual, client_message_resources_at(&store, case.person, case.history, case.actor,
+            BASE_TIME + 100_000).unwrap(), "settlement page/oracle parity: {}", case.name);
+    }
+    assert!(store.settle_runs_for_canonical_replay().unwrap().is_empty());
+    assert_complete_selector_pages_match_oracle(&store);
+}
+
+#[tokio::test]
+async fn client_message_cursor_issued_during_projection_lag_pins_published_frontier_after_drain() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    state.store.set_write_clock_at(BASE_TIME).unwrap();
+    for index in 0..(LIMIT+3) {
+        state.store.append_claim(&ClaimInput {
+            subject:subject(index),kind:"message.sent".into(),actor:Some(ACTOR.into()),fields:sent_fields(index),
+            evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+        }).unwrap();
+    }
+    let published = state.store.index().unwrap();
+    let now = BASE_TIME + 100_000;
+    let expected = client_message_resources_at(&state.store,None,true,None,now).unwrap();
+    {
+        let mut connection = state.store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        append_claim_record_tx(&transaction,"node",&subject(0),"message.sent",Some(ACTOR),
+            &json!({"fields":{"from":ACTOR,"to":"person/robin","content":"new content waits for projection","status":"sent","tags":[]}}),&[],None).unwrap();
+        append_claim_record_tx(&transaction,"node","message/selector-unpublished","message.sent",Some(ACTOR),
+            &json!({"fields":{"from":ACTOR,"to":PERSON,"content":"new subject waits for projection","status":"sent","tags":[]}}),&[],None).unwrap();
+        // More subjects than one COMMIT allowance leave a real durable backlog.
+        for index in 0..32 {
+            append_claim_record_tx(&transaction,"node",&format!("message/selector-unpublished-{index:02}"),"message.sent",Some(ACTOR),
+                &json!({"fields":{"from":ACTOR,"to":PERSON,"content":"queued subject","status":"sent","tags":[]}}),&[],None).unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    assert!(state.store.client_message_selectors_pending().unwrap());
+    let query = ClientListQuery { history:true,limit:Some(1),..Default::default() };
+    let (Extension(snapshot),Json(first)) = client_messages_sql_page_at(
+        &state,new_client_snapshot(&state),&query,now,
+    ).await.unwrap();
+    assert_eq!(first.items,expected[..1]);
+    let cursor = first.page.next_cursor.unwrap();
+    assert_eq!(decode_client_cursor(&cursor).unwrap().before_index,Some(published),
+        "a pending-era receipt must identify the projection actually served");
+    while state.store.maintain_client_message_selectors().unwrap() {}
+    assert!(!state.store.client_message_selectors_pending().unwrap());
+    let continuation = ClientListQuery { cursor:Some(cursor),..query };
+    let (_,Json(next)) = client_messages_sql_page_at(&state,snapshot,&continuation,now).await.unwrap();
+    assert_eq!(next.items,expected[1..2],
+        "later projection publication must not change an issued continuation");
+    assert!(client_message_resources_at(&state.store,None,true,None,now).unwrap()
+        .iter().any(|item|item["id"]=="message/selector-unpublished"));
+}
+
+// Kept separate from the historical 118k-copy control: this receipt exercises
+// independent production background loans and real, competing foreground writes.
+mod production_copy {
+    use super::*;
+    use std::sync::{Barrier, mpsc};
+
+    fn unix_us() -> u128 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()
+    }
+
+    fn summary(samples: &[Value], field: &str) -> Value {
+        let mut times: Vec<f64> = samples.iter().filter_map(|sample| sample[field].as_f64()).collect();
+        times.sort_by(f64::total_cmp);
+        let percentile = |p: usize| {
+            if times.is_empty() { None } else { Some(times[(times.len() * p).div_ceil(100) - 1]) }
+        };
+        json!({"samples": times.len(), "p50_ms": percentile(50), "p95_ms": percentile(95),
+            "max_ms": times.last(), "samples_at_or_over_100ms": times.iter().filter(|time| **time >= 100.0).count()})
+    }
+
+    fn counts(path: &Path) -> anyhow::Result<(u64, u64)> {
+        anyhow::ensure!(storage(path)["wal_bytes"] == 0,
+            "input must be an explicitly supplied checkpointed offline copy with no WAL");
+        let connection = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(connection.query_row("SELECT (SELECT COUNT(*) FROM claims), (SELECT COUNT(*) FROM message_index)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)))?)
+    }
+
+    fn append(store: &Store, namespace: &str, index: usize, kind: &str) -> Value {
+        let input = ClaimInput {
+            subject: format!("message/production-copy-{namespace}-{index}"), kind: kind.into(),
+            actor: Some(if kind == "message.sent" { ACTOR } else { PERSON }.into()),
+            fields: if kind == "message.sent" {
+                sent_fields(index)
+            } else {
+                BTreeMap::from([("status".into(), json!(kind.strip_prefix("message.").unwrap()))])
+            },
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        };
+        let started_at = unix_us();
+        let start = Instant::now();
+        let result = store.append_claim(&input);
+        let elapsed = start.elapsed();
+        json!({"kind": kind, "message": index, "started_at_unix_us": started_at,
+            "finished_at_unix_us": unix_us(), "wall_ms": elapsed.as_secs_f64() * 1_000.0,
+            "error": result.err().map(|error| error.to_string())})
+    }
+
+    fn checkpoint(store: &Store, path: &Path) -> anyhow::Result<Value> {
+        let before = storage(path);
+        let start = Instant::now();
+        let (busy, log, checkpointed): (u64, i64, i64) = store.connection.write()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let after = storage(path);
+        let receipt = json!({"before_storage": before, "after_storage": after,
+            "wall_ms": start.elapsed().as_secs_f64() * 1_000.0,
+            "busy": busy, "log_frames": log, "checkpointed_frames": checkpointed});
+        anyhow::ensure!(busy == 0 && after["wal_bytes"] == 0, "segment checkpoint did not truncate: {receipt}");
+        Ok(receipt)
+    }
+
+    // This segment has no competing maintenance/writer, so WAL attribution is
+    // honest. Per-operation deltas and burst totals include the physical header.
+    fn isolated_segment(store: &Store, path: &Path, namespace: &str, burst: usize) -> Value {
+        let mut receipt = json!({"burst": burst, "classes": {}, "setup_samples": []});
+        let result: anyhow::Result<()> = (|| {
+            for kind in ["message.sent", "message.closed"] {
+                if kind == "message.closed" {
+                    for index in 0..burst {
+                        for setup in ["message.delivered", "message.read"] {
+                            let sample = append(store, namespace, index, setup);
+                            let failed = !sample["error"].is_null();
+                            receipt["setup_samples"].as_array_mut().unwrap().push(sample);
+                            anyhow::ensure!(!failed, "isolated lifecycle setup failed");
+                        }
+                    }
+                }
+                let start_checkpoint = checkpoint(store, path)?;
+                let mut samples = Vec::with_capacity(burst);
+                let mut previous_wal = 0;
+                for index in 0..burst {
+                    let mut sample = append(store, namespace, index, kind);
+                    let wal = storage(path)["wal_bytes"].as_u64().unwrap();
+                    sample["wal_bytes_after_commit"] = json!(wal);
+                    sample["wal_bytes_delta"] = json!(wal.saturating_sub(previous_wal));
+                    previous_wal = wal;
+                    let failed = !sample["error"].is_null();
+                    samples.push(sample);
+                    if failed { break; }
+                }
+                let failed = samples.iter().any(|sample| !sample["error"].is_null());
+                receipt["classes"][kind] = json!({"commit_inclusive": summary(&samples, "wall_ms"),
+                    "samples": samples, "wal_bytes": previous_wal,
+                    "wal_bytes_per_commit": previous_wal as f64 / burst as f64,
+                    "start_checkpoint": start_checkpoint, "post_burst_storage": storage(path)});
+                anyhow::ensure!(!failed, "isolated append failed");
+                receipt["classes"][kind]["end_checkpoint"] = checkpoint(store, path)?;
+            }
+            Ok(())
+        })();
+        receipt["error"] = json!(result.err().map(|error| error.to_string()));
+        receipt
+    }
+
+    fn run(source: &Path, burst: usize, smoke: bool) -> Value {
+        let mut receipt = json!({
+            "benchmark": "client_messages_selector_production_copy", "smoke": smoke,
+            "receipt_version": 1, "transaction_target_ms": 100, "wal_growth_bar_percent": 20,
+            "source_open_flags": "READ_ONLY", "mutated_database": "fresh temporary copies only",
+            "duration_scope": "background chunk BEGIN through durable COMMIT; foreground append_claim includes writer admission",
+            "wal_scope": "physical WAL file growth, including concurrent writes; not cumulative bytes written; isolated segments have no competing writer",
+            "errors": []
+        });
+        let result: anyhow::Result<()> = (|| {
+            let source = source.canonicalize()?;
+            let input_metadata = fs::metadata(&source)?;
+            let source_counts = counts(&source)?;
+            let bytes = input_metadata.len();
+            receipt["source_copy"] = json!(source);
+            receipt["claims"] = json!(source_counts.0);
+            receipt["messages"] = json!(source_counts.1);
+            receipt["input_bytes"] = json!(bytes);
+            receipt["head_sha"] = json!(std::process::Command::new("git").args(["rev-parse", "HEAD"])
+                .output().ok().filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned()));
+            let root = tempfile::tempdir()?;
+            let path = root.path().join("production-selectors.sqlite");
+            let baseline_path = root.path().join("production-source-only.sqlite");
+            let copy_started = Instant::now();
+            fs::copy(&source, &path)?;
+            receipt["copy_ms"] = json!(copy_started.elapsed().as_secs_f64() * 1_000.0);
+            anyhow::ensure!(counts(&path)? == source_counts, "fresh copy count mismatch");
+            let open_started = Instant::now();
+            let store = Arc::new(Store::open(&path, "selector-production-benchmark")?);
+            receipt["store_open_ms"] = json!(open_started.elapsed().as_secs_f64() * 1_000.0);
+            // Use the real guard across separate background loans and competing
+            // foreground writes. Never call the monolithic benchmark drain.
+            let guard = store.client_message_backfill_checkpoint_guard()?;
+            receipt["initial_backfill_pending"] = json!(guard.is_some());
+            anyhow::ensure!(guard.is_some(), "source has no initial selector backfill; not online migration evidence");
+            let start_storage = storage(&path);
+            let io_policy = {
+                let writer = store.connection.write();
+                json!({"synchronous": writer.pragma_query_value(None, "synchronous", |row| row.get::<_, u32>(0))?,
+                    "wal_autocheckpoint": writer.pragma_query_value(None, "wal_autocheckpoint", |row| row.get::<_, u32>(0))?})
+            };
+            receipt["io_policy"] = io_policy.clone();
+            anyhow::ensure!(io_policy["synchronous"] == 2 && io_policy["wal_autocheckpoint"] == 0,
+                "measurement requires FULL durability and no automatic build checkpoint");
+            store.client_messages_benchmark_start_chunk_receipts()?;
+            let start = Arc::new(Barrier::new(2));
+            // Capacity-one offers bound foreground load without holding or
+            // serializing either writer's real admission/transaction boundary.
+            let (offer, requests) = mpsc::sync_channel(1);
+            let namespace = format!("{}-online", unix_us());
+            let foreground_namespace = namespace.clone();
+            let build_started_at = unix_us();
+            let (foreground, build_result, build_finished_at, end_storage) = std::thread::scope(|scope| {
+                let foreground_store = Arc::clone(&store);
+                let foreground_start = Arc::clone(&start);
+                let foreground = scope.spawn(move || {
+                    let mut samples = Vec::new();
+                    foreground_start.wait();
+                    let mut index = 0;
+                    while requests.recv().is_ok() {
+                        for kind in ["message.sent", "message.delivered", "message.read", "message.closed"] {
+                            let sample = append(&foreground_store, &foreground_namespace, index, kind);
+                            let failed = !sample["error"].is_null();
+                            samples.push(sample);
+                            if failed { return samples; }
+                        }
+                        index += 1;
+                        std::thread::yield_now();
+                    }
+                    samples
+                });
+                start.wait();
+                let build_result: anyhow::Result<()> = (|| {
+                    loop {
+                        // Coalesce offers while a lifecycle is still in flight.
+                        // A failed receiver is recorded in foreground samples.
+                        let _ = offer.try_send(());
+                        let more = store.maintain_client_message_selectors()?;
+                        if !more {
+                            anyhow::ensure!(!store.client_message_selectors_pending()?,
+                                "online build is blocked on canonical projection; no progress fabricated");
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                    Ok(())
+                })();
+                let build_finished_at = unix_us();
+                let end_storage = storage(&path);
+                drop(offer);
+                (foreground.join(), build_result, build_finished_at, end_storage)
+            });
+            let chunks = store.client_messages_benchmark_take_chunk_receipts();
+            let mut foreground = match foreground {
+                Ok(samples) => samples,
+                Err(_) => {
+                    receipt["errors"].as_array_mut().unwrap().push(json!("foreground writer panicked"));
+                    Vec::new()
+                }
+            };
+            for sample in &mut foreground {
+                sample["overlaps_build"] = json!(sample["started_at_unix_us"].as_u64().unwrap() < build_finished_at as u64
+                    && sample["finished_at_unix_us"].as_u64().unwrap() > build_started_at as u64);
+                sample["overlapping_chunk_transactions"] = json!(chunks.iter().filter(|chunk|
+                    sample["started_at_unix_us"].as_u64().unwrap() < chunk["finished_at_unix_us"].as_u64().unwrap()
+                    && sample["finished_at_unix_us"].as_u64().unwrap() > chunk["started_at_unix_us"].as_u64().unwrap()).count());
+            }
+            let wal_start = start_storage["wal_bytes"].as_u64().unwrap();
+            let wal_peak = chunks.iter().filter_map(|chunk| chunk["wal_bytes"].as_u64())
+                .chain([wal_start, end_storage["wal_bytes"].as_u64().unwrap()]).max().unwrap();
+            let growth = wal_peak.saturating_sub(wal_start);
+            let growth_percent = 100.0 * growth as f64 / bytes as f64;
+            receipt["online_build"] = json!({"started_at_unix_us": build_started_at,
+                "finished_at_unix_us": build_finished_at, "transactions": chunks,
+                "transaction_distribution": summary(&chunks, "wall_ms"), "start_storage": start_storage,
+                "end_storage_before_checkpoint": end_storage, "wal_start_bytes": wal_start,
+                "wal_peak_bytes": wal_peak, "wal_peak_minus_start_bytes": growth,
+                "wal_denominator_original_database_bytes": bytes, "wal_growth_percent": growth_percent,
+                "wal_growth_bar_met": growth_percent <= 20.0,
+                "wal_peak_sampling": "after every build chunk and at build boundaries; checkpoints disabled",
+                "error": build_result.as_ref().err().map(ToString::to_string)});
+            receipt["foreground"] = json!({"samples": foreground, "classes": {},
+                "workload": "real send/delivered/read/close lifecycle offered per background loan, capacity-one coalescing; queued/in-flight lifecycle completes after build",
+                "setup_included_in_raw_samples": true});
+            for kind in ["message.sent", "message.closed"] {
+                let class: Vec<Value> = foreground.iter().filter(|sample| sample["kind"] == kind).cloned().collect();
+                let overlap: Vec<Value> = class.iter().filter(|sample| sample["overlaps_build"] == true).cloned().collect();
+                receipt["foreground"]["classes"][kind] = json!({"all": summary(&class, "wall_ms"),
+                    "overlapping_build": summary(&overlap, "wall_ms"),
+                    "all_calls_under_100ms": class.iter().all(|sample| sample["wall_ms"].as_f64().unwrap() < 100.0)});
+            }
+            drop(guard);
+            build_result?;
+            anyhow::ensure!(!foreground.iter().any(|sample| !sample["error"].is_null()), "foreground append failed");
+            // The drain can finish before the last foreground lifecycle. Drain
+            // any residual finalizer work before the isolated write segments.
+            while store.maintain_client_message_selectors()? {}
+            store.client_messages_benchmark_prepare_io()?;
+            let isolated_namespace = format!("{}-isolated", unix_us());
+            let selectors = isolated_segment(&store, &path, &isolated_namespace, burst);
+            receipt["isolated_selector_enabled"] = selectors;
+            drop(store);
+            fs::copy(&source, &baseline_path)?;
+            anyhow::ensure!(counts(&baseline_path)? == source_counts, "baseline copy count mismatch");
+            let baseline = Store::open(&baseline_path, "selector-production-benchmark")?;
+            baseline.client_messages_selector_benchmark_set_enabled(false)?;
+            // Mirror the online workload before comparing isolated segments:
+            // both designs must have the same authoritative claim/message load.
+            let mut mirrored = 0;
+            for sample in &foreground {
+                let sample = append(&baseline, &namespace,
+                    usize::try_from(sample["message"].as_u64().unwrap())?, sample["kind"].as_str().unwrap());
+                anyhow::ensure!(sample["error"].is_null(), "source-only workload alignment failed: {sample}");
+                mirrored += 1;
+            }
+            receipt["source_only_alignment_appends"] = json!(mirrored);
+            baseline.client_messages_benchmark_prepare_io()?;
+            receipt["isolated_source_only"] = isolated_segment(&baseline, &baseline_path,
+                &isolated_namespace, burst);
+            for kind in ["message.sent", "message.closed"] {
+                let selectors = &receipt["isolated_selector_enabled"]["classes"][kind];
+                let source_only = &receipt["isolated_source_only"]["classes"][kind];
+                if let (Some(with), Some(without)) = (selectors["wal_bytes"].as_u64(), source_only["wal_bytes"].as_u64()) {
+                    receipt["isolated_delta"][kind] = json!({"wal_bytes_delta": i128::from(with) - i128::from(without),
+                        "wal_growth_percent": if without == 0 { None } else { Some(100.0 * (with as f64 / without as f64 - 1.0)) },
+                        "selector_p95_ms": selectors["commit_inclusive"]["p95_ms"],
+                        "baseline_p95_ms": source_only["commit_inclusive"]["p95_ms"],
+                        "selector_max_ms": selectors["commit_inclusive"]["max_ms"],
+                        "baseline_max_ms": source_only["commit_inclusive"]["max_ms"]});
+                }
+            }
+            receipt["source_unchanged"] = json!(counts(&source)? == source_counts
+                && fs::metadata(&source)?.len() == input_metadata.len()
+                && fs::metadata(&source)?.modified()? == input_metadata.modified()?);
+            Ok(())
+        })();
+        receipt["error"] = json!(result.err().map(|error| error.to_string()));
+        receipt
+    }
+
+    #[test]
+    #[ignore = "explicit offline production-copy receipt; never discovers daemon storage"]
+    fn benchmark_client_messages_selector_production_copy() {
+        let receipt = match std::env::var_os("ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY") {
+            Some(source) => run(Path::new(&source), 128, false),
+            None => json!({"benchmark": "client_messages_selector_production_copy",
+                "error": "set ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY to a checkpointed offline input"}),
+        };
+        // Bars and operational failures are data, not assertions that erase the
+        // only adverse receipt. Consumers must inspect error fields and bars.
+        eprintln!("{receipt}");
+    }
+
+    #[test]
+    #[ignore = "small fresh offline-copy smoke for the production receipt"]
+    fn benchmark_client_messages_selector_production_copy_smoke() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("small-offline.sqlite");
+        let store = Store::open(&source, "production-copy-smoke").unwrap();
+        for index in 0..64 {
+            let sample = append(&store, "smoke-source", index, "message.sent");
+            assert!(sample["error"].is_null(), "{sample}");
+        }
+        store.client_messages_selector_benchmark_set_enabled(false).unwrap();
+        store.client_messages_selector_benchmark_set_enabled(true).unwrap();
+        store.client_messages_benchmark_checkpoint().unwrap();
+        drop(store);
+        let receipt = run(&source, 4, true);
+        eprintln!("{receipt}");
+        assert!(receipt["error"].is_null(), "{receipt}");
+        assert_eq!(receipt["claims"], 64);
+        assert!(receipt["online_build"]["transaction_distribution"]["samples"].as_u64().unwrap() > 0);
+        assert!(receipt["foreground"]["classes"]["message.sent"]["overlapping_build"]["samples"].as_u64().unwrap() > 0);
+        assert!(receipt["isolated_selector_enabled"]["error"].is_null(), "{receipt}");
+        assert!(receipt["isolated_source_only"]["error"].is_null(), "{receipt}");
+        assert_eq!(receipt["source_unchanged"], true);
+    }
+}
