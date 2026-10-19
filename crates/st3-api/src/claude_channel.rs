@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt as _;
 
 #[derive(Default, Deserialize, Serialize)]
-struct State {
+pub struct State {
     initialized: bool,
     fence: Fence,
     attempted: BTreeSet<String>,
