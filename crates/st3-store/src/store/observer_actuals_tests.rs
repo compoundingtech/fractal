@@ -28,6 +28,44 @@ fn read(store: &Store) -> (Option<Value>, u64) {
 }
 
 #[test]
+fn terminal_authority_idle_subscription_skips_reads_and_delivers_changes() {
+    let store = Store::open_memory("owner").unwrap();
+    store.set_write_clock_at(10).unwrap();
+    let subject = "agent/terminal-idle";
+    let observe = |incarnation: &str| {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({
+                "status": "running", "runtime_id": "terminal-idle",
+                "incarnation_id": incarnation, "terminal": true,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    observe("one");
+    let mut changes = store.subscribe_runtime_authority(subject);
+    let mut second_viewer = store.subscribe_runtime_authority(subject);
+    assert_eq!(store.runtime_authority(subject).unwrap().unwrap().actual.unwrap()["incarnation_id"], "one");
+    changes.borrow_and_update();
+    second_viewer.borrow_and_update();
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+    for _ in 0..100 {
+        assert!(!changes.has_changed().unwrap(), "idle streams must not recheck authority");
+    }
+    assert_eq!(work.finish().statements, 0);
+    append(&store, "resource/other", 20, json!({"state": "open"}));
+    assert!(!changes.has_changed().unwrap(), "unrelated subjects must not wake a terminal");
+    observe("two");
+    assert!(changes.has_changed().unwrap());
+    assert!(second_viewer.has_changed().unwrap());
+    changes.borrow_and_update();
+    assert_eq!(store.runtime_authority(subject).unwrap().unwrap().actual.unwrap()["incarnation_id"], "two");
+    assert!(!changes.has_changed().unwrap());
+}
+
+#[test]
 fn observer_actuals_reuse_survives_other_subject_writes_without_history_reads() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(&directory.path().join("store.db"), "alder").unwrap();

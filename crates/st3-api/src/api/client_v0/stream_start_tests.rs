@@ -2,6 +2,58 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+#[tokio::test]
+async fn terminal_authority_idle_stream_delivers_incarnation_change_without_global_wake() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use pty_core::protocol::{encode_geometry, encode_packet, MessageType};
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "owner");
+    let subject = "agent/terminal-idle";
+    let observe = |incarnation: &str| {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({
+                "status": "running", "runtime_id": "terminal-idle",
+                "incarnation_id": incarnation, "terminal": true,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    observe("one");
+    std::fs::create_dir_all(&state.pty_root).unwrap();
+    let listener = tokio::net::UnixListener::bind(
+        pty_core::registry::socket_path_in(&state.pty_root, "terminal-idle"),
+    ).unwrap();
+    let pty = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 6];
+        socket.read_exact(&mut request).await.unwrap();
+        socket.write_all(&encode_geometry(2, 20)).await.unwrap();
+        socket.write_all(&encode_packet(MessageType::Screen, b"idle")).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let (sender, mut frames) = watch::channel(TerminalFrame::Waiting);
+    let stream = tokio::spawn(terminal_stream_socket(
+        TerminalSink::Subscription(sender), state.clone(), subject.into(), "one".into(), None, None,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), frames.changed()).await.unwrap().unwrap();
+    assert!(matches!(&*frames.borrow_and_update(), TerminalFrame::Screen(_)));
+    for _ in 0..10 {
+        state.event_notify.send_modify(|generation| *generation += 1);
+    }
+    assert!(tokio::time::timeout(Duration::from_millis(600), frames.changed()).await.is_err());
+    // No API wake: the native committed authority mutation alone must close the old stream.
+    observe("two");
+    tokio::time::timeout(Duration::from_secs(5), frames.changed()).await.unwrap().unwrap();
+    match &*frames.borrow_and_update() {
+        TerminalFrame::Ended(error) => assert_eq!(error["code"], "stale-fence"),
+        _ => panic!("changed incarnation must end the stream"),
+    }
+    stream.await.unwrap();
+    pty.abort();
+}
+
 /// Run alone with ST3_PROFILE_DIR and ST3_PROFILE_SLOW_MS=0 so the real profile
 /// sink can prove completion before the follower's intentional long-poll idle.
 #[tokio::test]
