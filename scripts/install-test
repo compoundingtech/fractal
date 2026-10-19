@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Prove scripts/install leaves `st` as a symlink to the installed `st3` in every starting state.
 set -Eeuo pipefail
 
@@ -108,13 +109,15 @@ check "$work/fresh" 1
 # A named instance installs below its own directory and leaves the default bin directory alone.
 mkdir -p "$work/home/.local/bin"
 printf 'default\n' > "$work/home/.local/bin/st3"
-HOME="$work/home" bash "$install" --from "$work/one" --instance try > /dev/null
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — CLI selection replaces both inherited aliases.
+HOME="$work/home" FRACTAL_INSTANCE=stale ST_INSTANCE=stale bash "$install" --from "$work/one" --instance try > /dev/null
 check "$work/home/.st-instance/try/bin" 1
 [[ $(cat "$work/home/.local/bin/st3") == default ]] || fail "an instance install replaced the default st3"
 [[ $(ls "$work/home/.local/bin") == st3 ]] || fail "an instance install added files to the default bin directory"
 # The environment variable names the instance too, and an explicit --bin-dir still wins.
 build "$work/three" 3
-HOME="$work/home" ST_INSTANCE=other bash "$install" --from "$work/three" > /dev/null
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — the preferred name wins over a legacy value.
+HOME="$work/home" FRACTAL_INSTANCE=other ST_INSTANCE=legacy bash "$install" --from "$work/three" > /dev/null
 check "$work/home/.st-instance/other/bin" 3
 HOME="$work/home" bash "$install" --from "$work/one" --instance third --bin-dir "$work/chosen" > /dev/null
 check "$work/chosen" 1

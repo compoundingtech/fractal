@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::EvidenceStore;
 use super::*;
-pub use st3_store::store::runtime::*;
-pub use st3_store::store::runtime::{AgentResourcesEntry, AgentRosterFaultRetries, Extensions, SmalltalkRuntime, compatibility_digest};
+pub use st3_attention::store::runtime::*;
+pub use st3_attention::store::runtime::{AgentResourcesEntry, AgentRosterFaultRetries, Extensions, SmalltalkRuntime, compatibility_digest};
 
 #[cfg(test)]
 mod ivm_attachment_tests {
@@ -11,8 +11,8 @@ mod ivm_attachment_tests {
     use smallclaims::ivm::{Contribution, Definition, Readiness, View, Views, events};
     use smallclaims::store::canonical;
     use std::sync::Barrier;
-    use st3_store::store::runtime_ivm_attachment_tests_shared::*;
-    use st3_store::store::runtime_ivm_attachment_tests_shared::{Shadow, boundary, registry};
+    use st3_attention::store::runtime_ivm_attachment_tests_shared::*;
+    use st3_attention::store::runtime_ivm_attachment_tests_shared::{Shadow, boundary, registry};
 
     #[test]
     fn ordinary_store_does_not_install_or_attach_shadow_views() {

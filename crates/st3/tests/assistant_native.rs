@@ -1,11 +1,15 @@
 //! Isolated real router/store coverage; no daemon, subprocess, ambient profile, or managed agent.
+use st3::AttentionListStore;
+use st3::PersonWorkStore;
+use st3::MissionsStore as _;
+use st3::{SeatsStore as _, SeatsStoreCore};
 use std::{path::PathBuf, sync::Arc};
 
 use axum::{Router, body::Body, http::{Request, StatusCode}};
 use http_body_util::BodyExt as _;
 use serde::Serialize;
 use serde_json::{Value, json};
-use st3::{api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
+use st3::{EvidenceStore as _, api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
 use st3_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantMinimalReadMode,
     AssistantPairedSession, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
     Fence, MessageKind, MessageSendParameters, PairingComplete, PersonAnswerInput,
@@ -31,6 +35,10 @@ impl Harness {
         store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
         let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
         store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
+        // There is no daemon task in this harness. Register its production publication
+        // surfaces; pair() explicitly refreshes them before reading the summary.
+        store.start_attention_list_refresher().unwrap();
+        store.start_agent_roster_refresher().unwrap();
         let state = AppState {
             owning_person: Some(OWNER.into()), store,
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -73,6 +81,22 @@ impl Harness {
         assert_eq!(paired.grant.issuer, OWNER);
         assert_eq!(paired.principal, AssistantPrincipal::Chatgpt);
         assert_eq!(paired.grant.minimal_read_mode, AssistantMinimalReadMode::CallerBoundAllow);
+        if self.state.store.published_attention_list().is_none() {
+            let (status, unavailable) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{unavailable}");
+            assert_eq!(unavailable["message"], "the attention view is still being prepared; retry shortly");
+        }
+        // Complete the same publications the daemon performs at startup, including
+        // an empty owner view. Pairing alone does not make these views ready.
+        st3::api::refresh_agent_roster_for_test(&self.state.store).unwrap();
+        st3::api::refresh_attention_list(&self.state.store).unwrap();
+        let publication = self.state.store.published_attention_list()
+            .expect("the fixture must publish attention before assistant reads");
+        assert_eq!(publication.cut, self.state.store.index().unwrap());
+        let (cut, _, _) = self.state.store.published_agent_roster(
+            self.state.store.index().unwrap(), false,
+        ).expect("the fixture must publish agents before assistant reads");
+        assert_eq!(cut, publication.cut);
         let (status, summary) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
         assert_eq!(status, StatusCode::OK, "fresh pairing must read without a policy call: {summary}");
         for id in [paired.grant.id.as_str(), paired.grant.id.trim_start_matches("assistant-grant/")] {
@@ -92,7 +116,7 @@ impl Harness {
             api_version: st3_client::API_VERSION.into(), scopes, expires_in_seconds: Some(3600),
             disclosure_consent: true, consent_evidence: "Native owner explicit policy".into(),
             minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
-            recipient_allowlist: Some(vec![AGENT.into()]),
+            recipient_allowlist: Some(vec![]),
         };
         let value = self.owner("POST", &grant_path(paired, "/policy"), &policy).await;
         serde_json::from_value(value["value"].clone()).unwrap()
@@ -149,13 +173,26 @@ async fn request(app: &Router, method: &str, path: &str, bearer: Option<&str>, p
 
 fn scopes() -> Vec<AssistantScope> {
     vec![AssistantScope::Summary, AssistantScope::Attention, AssistantScope::Missions,
-        AssistantScope::Agents, AssistantScope::Conversation, AssistantScope::Messages]
+        AssistantScope::Agents, AssistantScope::Conversation, AssistantScope::Messages, AssistantScope::Answers]
 }
 fn grant_path(paired: &AssistantPairedSession, suffix: &str) -> String {
     format!("/v1/client/assistant/grants/{}{suffix}", paired.grant.id.trim_start_matches("assistant-grant/"))
 }
 fn grant_subject(paired: &AssistantPairedSession) -> String {
     format!("custom/client/assistant-v1-{}", paired.grant.id.trim_start_matches("assistant-grant/"))
+}
+
+#[tokio::test]
+async fn fresh_pairing_reads_an_explicitly_published_empty_attention_view() {
+    let h = Harness::new();
+    assert!(h.state.store.attention_list_refresher_running());
+    assert!(h.state.store.published_attention_list().is_none());
+    let paired = h.pair().await;
+    let publication = h.state.store.published_attention_list().unwrap();
+    assert!(publication.owners.get(OWNER).is_none_or(|rows| rows.is_empty()));
+    let (status, attention) = h.assistant(&paired, "GET", "/v1/client/assistant/attention", &()).await;
+    assert_eq!(status, StatusCode::OK, "{attention}");
+    assert!(attention["value"]["items"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -182,32 +219,71 @@ async fn pairing_caller_bound_rich_reads_and_budget_do_not_silently_truncate() {
 }
 
 #[tokio::test]
-async fn typed_owner_approval_executes_a_durable_answer_and_stale_episode_is_rejected() {
+async fn direct_answer_executes_without_approval_with_provenance_and_rejects_stale_episode() {
     let h = Harness::new();
-    let ask = h.ask("answer-ask", "Answer through approval");
+    let ask = h.ask("answer-ask", "Answer directly");
     let paired = h.pair().await;
+    h.policy(&paired, scopes().into_iter().filter(|scope| *scope != AssistantScope::Messages && *scope != AssistantScope::Conversation).collect()).await;
     let answer = h.answer(&ask, "yes", "assistant-answer").await;
-    let (status, pending) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
-    assert_eq!(status, StatusCode::OK, "{pending}");
-    assert_eq!(pending["value"]["status"], "approval-required");
-    assert!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.is_empty());
-    let approval = pending["value"]["approval_id"].as_str().unwrap();
-    let approve = h.answer(approval, "approve", "owner-approve").await;
-    h.owner("POST", "/v1/client/actions", &approve).await;
     let (status, result) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
     assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(result["value"]["affected_ids"].as_array().unwrap().iter().any(|id| id.as_str() == Some(ask.as_str())));
+    assert!(result["value"].get("approval_id").is_none(), "{result}");
     let durable = h.state.store.step_run(&ask).unwrap().unwrap();
     assert_eq!(durable.person_answers.len(), 1);
     assert_eq!(durable.person_answers[0].answer.as_ref().unwrap()["id"], "yes");
+    assert_eq!(durable.person_answers[0].respondent, "assistant/chatgpt");
+    assert_eq!(durable.person_answers[0].assistant_owner.as_deref(), Some(OWNER));
+    assert_eq!(durable.person_answers[0].assistant_session_actor.as_deref(), Some(paired.session_actor.as_str()));
+    assert_eq!(durable.person_answers[0].sender_class.as_deref(), Some("external-assistant"));
+    assert_eq!(durable.person_answers[0].assistant_grant_id.as_deref(), Some(paired.grant.id.as_str()));
+    let shown = h.owner("GET", &format!("/v1/client/work/{ask}"), &()).await;
+    let projected = &shown["value"]["person_answers"][0];
+    assert_eq!(projected["respondent"], "assistant/chatgpt");
+    assert_eq!(projected["assistant_owner"], OWNER);
+    assert_eq!(projected["assistant_session_actor"], paired.session_actor);
+    assert_eq!(projected["sender_class"], "external-assistant");
+    assert_eq!(projected["assistant_grant_id"], paired.grant.id);
+    let decoded: st3_client::Work = serde_json::from_value(shown["value"].clone()).unwrap();
+    assert_eq!(decoded.person_answers[0].respondent, "assistant/chatgpt");
+    assert_eq!(decoded.person_answers[0].assistant_owner.as_deref(), Some(OWNER));
+    assert_eq!(decoded.person_answers[0].assistant_session_actor.as_deref(), Some(paired.session_actor.as_str()));
+    assert_eq!(decoded.person_answers[0].sender_class.as_deref(), Some("external-assistant"));
+    assert_eq!(decoded.person_answers[0].assistant_grant_id.as_deref(), Some(paired.grant.id.as_str()));
+    let claim = h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("assistant/chatgpt"));
+    assert_eq!(claim.body["fields"]["assistant_owner"], OWNER);
+    assert_eq!(claim.body["fields"]["assistant_session_actor"], paired.session_actor);
+    assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
+    assert_eq!(claim.body["fields"]["assistant_grant_id"], paired.grant.id);
+    let notification = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
+    let notification_claim = h.state.store.latest_claim(&notification.subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(notification_claim.actor.as_deref(), Some("assistant/chatgpt"));
+    assert_eq!(notification_claim.body["fields"]["from"], "assistant/chatgpt");
+    assert_eq!(notification_claim.body["fields"]["assistant_owner"], OWNER);
+    assert_eq!(notification_claim.body["fields"]["assistant_session_actor"], paired.session_actor);
+    let metadata = notification.assistant_metadata().unwrap();
+    let ding = st_drivers::ding::st3_notification_with_metadata(
+        &notification.subject, &notification.from, &notification.to, notification.title.as_deref(),
+        &notification.content, "test-body-digest",
+        st_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+    );
+    assert!(ding.contains(st_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
+    assert!(ding.contains(&format!("assistant_grant_id=\"{}\"", paired.grant.id)));
+    let notification = serde_json::to_value(notification).unwrap();
+    assert_eq!(notification["sender_class"], "external-assistant");
+    assert_eq!(notification["assistant_grant_id"], paired.grant.id);
+    assert!(h.state.store.attention_items(Some(OWNER)).unwrap().is_empty(), "Answering must not create an approval ask");
+    let (status, replay) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(result["value"]["affected_ids"], replay["value"]["affected_ids"]);
+    assert_eq!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.len(), 1);
+    assert_eq!(h.state.store.messages(Some(AGENT), true).unwrap().len(), 1);
 
     let stale_ask = h.ask("stale-ask", "Stale answer");
     let mut stale = serde_json::to_value(h.answer(&stale_ask, "yes", "stale-answer").await).unwrap();
     stale["parameters"]["episode"] = json!("not-the-current-episode");
     let stale: ActionRequest = serde_json::from_value(stale).unwrap();
-    let (status, pending) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &stale).await;
-    assert_eq!(status, StatusCode::OK, "{pending}");
-    let approve = h.answer(pending["value"]["approval_id"].as_str().unwrap(), "approve", "approve-stale").await;
-    h.owner("POST", "/v1/client/actions", &approve).await;
     let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &stale).await;
     assert!(!status.is_success(), "{denied}");
     assert_eq!(denied["code"], "stale-fence");
@@ -215,10 +291,35 @@ async fn typed_owner_approval_executes_a_durable_answer_and_stale_episode_is_rej
 }
 
 #[tokio::test]
-async fn allowlisted_message_is_idempotent_and_scope_recipient_revocation_expiry_fail_closed() {
+async fn direct_answers_require_write_scope_and_current_unexpired_unrevoked_grant() {
+    let h = Harness::new();
+    for refusal in ["missing-scope", "revoked", "expired"] {
+        let ask = h.ask(&format!("answer-{refusal}"), "Answer must be refused");
+        let paired = h.pair().await;
+        let answer = h.answer(&ask, "yes", &format!("answer-{refusal}")).await;
+        match refusal {
+            "missing-scope" => {
+                h.policy(&paired, scopes().into_iter().filter(|scope| *scope != AssistantScope::Answers).collect()).await;
+            }
+            "revoked" => {
+                h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
+            }
+            "expired" => h.expire(&paired),
+            _ => unreachable!(),
+        }
+        let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}: {denied}");
+        assert!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.is_empty());
+        assert!(h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().is_none());
+    }
+    assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_revocation_expiry_fail_closed() {
     let h = Harness::new();
     let paired = h.pair().await;
-    let message = h.message(AGENT, "allowlisted-message").await;
+    let message = h.message(AGENT, "broad-agent-message").await;
     let (status, first) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     let (status, replay) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
@@ -259,10 +360,10 @@ async fn allowlisted_message_is_idempotent_and_scope_recipient_revocation_expiry
     assert_eq!(projected["from"], "assistant/chatgpt");
     assert_eq!(projected["sender_class"], "external-assistant");
     assert_eq!(projected["assistant_grant_id"], paired.grant.id);
-    let forbidden = h.message("agent/not-allowlisted", "recipient-denied").await;
+    let forbidden = h.message(OWNER, "person-recipient-denied").await;
     let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &forbidden).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(h.state.store.messages(Some("agent/not-allowlisted"), true).unwrap().is_empty());
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(h.state.store.messages(Some(OWNER), true).unwrap().is_empty());
     h.policy(&paired, scopes().into_iter().filter(|scope| *scope != AssistantScope::Messages).collect()).await;
     let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "Even a cached write must require the current scope");
@@ -278,7 +379,7 @@ async fn allowlisted_message_is_idempotent_and_scope_recipient_revocation_expiry
 }
 
 #[tokio::test]
-async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() {
+async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation() {
     use st3::store::assistant_write::{AssistantWriteAuthorization, authorize};
     let h = Harness::new();
     let paired = h.pair().await;
@@ -286,21 +387,22 @@ async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() 
     let authorization = AssistantWriteAuthorization {
         grant_subject: grant_subject(&paired), actor: paired.session_actor.clone(), owner: OWNER.into(),
         policy_revision: grant.policy_revision, scope: "write.assistant.messages".into(),
-        recipient: Some(AGENT.into()), approval_subject: None,
+        recipient: Some(AGENT.into()),
     };
     let mut connection = rusqlite::Connection::open(h.root.path().join("store.sqlite")).unwrap();
     let transaction = connection.transaction().unwrap();
     authorize(&transaction, "assistant-native", &authorization).unwrap();
-    let mut wrong_recipient = authorization.clone();
-    wrong_recipient.recipient = Some("agent/not-allowlisted".into());
-    assert!(authorize(&transaction, "assistant-native", &wrong_recipient).is_err());
     let mut wrong_actor = authorization.clone();
     wrong_actor.actor = "assistant/chatgpt/session/another-key".into();
     assert!(authorize(&transaction, "assistant-native", &wrong_actor).is_err());
     assert!(authorize(&transaction, "another-member", &authorization).is_err());
-    let mut missing_approval = authorization.clone();
-    missing_approval.approval_subject = Some("step-run/nonexistent/ask".into());
-    assert!(authorize(&transaction, "assistant-native", &missing_approval).is_err());
+    let mut missing_scope = authorization.clone();
+    missing_scope.scope = "write.assistant.unknown".into();
+    assert!(authorize(&transaction, "assistant-native", &missing_scope).is_err());
+    for recipient in ["agent/does-not-exist", "daemon/runtime", OWNER] {
+        let invalid_recipient = AssistantWriteAuthorization { recipient: Some(recipient.into()), ..authorization.clone() };
+        assert!(authorize(&transaction, "assistant-native", &invalid_recipient).is_err(), "{recipient}");
+    }
     transaction.rollback().unwrap();
     h.policy(&paired, scopes()).await;
     let transaction = connection.transaction().unwrap();
@@ -317,7 +419,7 @@ async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() 
     let expired_authorization = AssistantWriteAuthorization {
         grant_subject: grant_subject(&expired), actor: expired.session_actor.clone(), owner: OWNER.into(),
         policy_revision: grant.policy_revision, scope: "write.assistant.messages".into(),
-        recipient: Some(AGENT.into()), approval_subject: None,
+        recipient: Some(AGENT.into()),
     };
     h.expire(&expired);
     let transaction = connection.transaction().unwrap();
@@ -325,7 +427,7 @@ async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commit() {
+async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() {
     let h = Arc::new(Harness::new());
     let paired = h.pair().await;
     let gate = h.root.path().join("mutation-gate");
@@ -337,7 +439,7 @@ async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commi
     for revoke in [false, true] {
         h.policy(&paired, scopes()).await;
         let before = count_messages();
-        let request = h.message(AGENT, if revoke { "held-revoke" } else { "held-recipient" }).await;
+        let request = h.message(AGENT, if revoke { "held-revoke" } else { "held-scope" }).await;
         for name in ["hold", "entered", "release", "done"] {
             let path = gate.join(name);
             if path.exists() { std::fs::remove_file(path).unwrap(); }
@@ -358,9 +460,10 @@ async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commi
             h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
         } else {
             h.owner("POST", &grant_path(&paired, "/policy"), &AssistantGrantPolicy {
-                api_version: st3_client::API_VERSION.into(), scopes: scopes(),
+                api_version: st3_client::API_VERSION.into(),
+                scopes: scopes().into_iter().filter(|scope| *scope != AssistantScope::Messages).collect(),
                 expires_in_seconds: Some(3600), disclosure_consent: true,
-                consent_evidence: "Owner removes recipient during held send".into(),
+                consent_evidence: "Owner removes message scope during held send".into(),
                 minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
                 recipient_allowlist: Some(vec![]),
             }).await;
@@ -403,4 +506,40 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
     assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
+    let h = Harness::new();
+    let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"authored-review\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to \"person/ada\"; goal \"Review release\"; }} }}", h.root.path());
+    h.state.store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "authored-review").unwrap();
+    let run = h.state.store.create_mission_run(&st3::model::MissionRunRequest {
+        mission: "authored-review".into(), revision: None, workspace: h.root.path().to_string_lossy().into_owned(),
+        requester: Some(OWNER.into()), mode: Some("run".into()), inputs: Default::default(), idempotency_key: "authored-review".into(),
+    }).unwrap();
+    h.state.store.set_step_state(&run.steps[0].subject, "ready", Some("test activation")).unwrap();
+    let step = h.state.store.step_run(&run.steps[0].subject).unwrap().unwrap();
+    assert_eq!(step.status, "ready");
+    let paired = h.pair().await;
+    let action = ActionRequest::work_done("action/authored", "native-test-authored-answer", h.fence().await,
+        PersonStepParameters { target_id: step.subject.clone(), summary: "Reviewed".into(),
+            episode: format!("{}:{}:{}", step.generation, step.attempt, step.readiness_epoch),
+            ..Default::default() }).unwrap();
+    let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &action).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert!(h.state.store.step_run(&step.subject).unwrap().unwrap().person_answers.is_empty());
+    h.owner("POST", "/v1/client/actions", &action).await;
+    assert_eq!(h.state.store.step_run(&step.subject).unwrap().unwrap().status, "completed");
+}
+
+#[tokio::test]
+async fn assistant_message_recipient_must_be_a_currently_declared_agent() {
+    let h = Harness::new();
+    let paired = h.pair().await;
+    for (index, recipient) in ["agent/does-not-exist", "daemon/runtime", "person/ada"].iter().enumerate() {
+        let message = h.message(recipient, &format!("invalid-recipient-{index}")).await;
+        let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+        assert!(!status.is_success(), "{recipient}: {denied}");
+        assert!(h.state.store.messages(Some(recipient), true).unwrap().is_empty());
+    }
 }

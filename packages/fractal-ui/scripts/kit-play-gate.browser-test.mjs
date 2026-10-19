@@ -16,7 +16,7 @@ const iframe = report => `<!doctype html><meta charset="utf-8"><title>Gate fixtu
     on(name, listener) {
       listeners.set(name, listener)
       if (name === 'storyErrored') queueMicrotask(() => listeners.get('storyFinished')({
-        storyId: new URLSearchParams(location.search).get('id'), status: 'success',
+        storyId: new URLSearchParams(location.search).get('id'), status: ${JSON.stringify(report?.some(({ status }) => status === 'failed') ? 'error' : 'success')},
         reporters: ${report === undefined ? "manual ? [] : [{ type: 'a11y', status: 'passed' }]" : JSON.stringify(report)},
       }))
     },
@@ -36,7 +36,8 @@ const runGate = async ({ env = {}, report } = {}) => {
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
-      env: { ...inherited, ...env },
+      // The one-story fixture index has none of the kit's strict-policy stories.
+      env: { ...inherited, KIT_PLAY_CASE_OVERRIDES: '[]', ...env },
       stdio: 'ignore',
     })
     const code = await new Promise((resolve, reject) => {
@@ -63,6 +64,20 @@ test('a11y on rejects a case whose axe report is missing', { timeout: 60000 }, a
   assert.equal(code, 1)
   assert.equal(receipt.pass, false)
   assert.ok(receipt.rows.every(row => /expected one passed a11y report/.test(row.error)))
+})
+
+test('a failed axe report names its rule and the node that broke it', { timeout: 60000 }, async () => {
+  const violation = { id: 'label-content-name-mismatch', impact: 'serious', nodes: [{ target: ['button[aria-label="Needs me only"]'], html: '<button aria-label="Needs me only">Needs me · 2</button>', failureSummary: 'Text inside the element is not included in the accessible name' }] }
+  const { code, receipt } = await runGate({ report: [{ type: 'a11y', status: 'failed', result: { violations: [violation] } }] })
+  assert.equal(code, 1)
+  assert.equal(receipt.pass, false)
+  for (const row of receipt.rows) {
+    assert.match(row.error, /label-content-name-mismatch/)
+    assert.match(row.error, /Needs me only/)
+    assert.match(row.error, /not included in the accessible name/)
+  }
+  const crashed = await runGate({ report: [{ type: 'a11y', status: 'failed', result: { error: { message: 'axe could not run' } } }] })
+  assert.ok(crashed.receipt.rows.every(row => /axe could not run/.test(row.error)))
 })
 
 test('critical set without a11y selects tagged stories and asks addon-a11y not to run', { timeout: 60000 }, async () => {
@@ -97,7 +112,9 @@ test('a run over its wall-time budget fails after running every case', { timeout
 })
 
 test('invalid options fail before any case runs', { timeout: 60000 }, async () => {
-  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_MAX_SECONDS: '-1' }, { KIT_PLAY_MAX_SECONDS: 'soon' }]) {
+  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_MAX_SECONDS: '-1' }, { KIT_PLAY_MAX_SECONDS: 'soon' },
+    // Only the full set is sharded.
+    { KIT_PLAY_SET: 'commit', KIT_PLAY_SHARD_COUNT: '2' }, { KIT_PLAY_SET: 'critical', KIT_PLAY_SHARD_INDEX: '1', KIT_PLAY_SHARD_COUNT: '2' }]) {
     await assert.rejects(() => runGate({ env }), /ENOENT/)
   }
 })

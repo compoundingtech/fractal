@@ -14,6 +14,7 @@
 //! that reports to this seat. A new source, such as a watch on any subject, adds one more reader.
 //! Expected-by times are only what a source states today (a watch's deadline, a retry's time);
 //! forecasts from a stage's history can fill it in later.
+use crate::MissionsStore;
 use super::*;
 use crate::IdleHoldsStore;
 

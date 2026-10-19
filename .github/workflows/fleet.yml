@@ -1291,7 +1291,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1443,7 +1443,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1623,7 +1623,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1800,7 +1800,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1977,7 +1977,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -2546,7 +2546,7 @@ jobs:
         if: (runner.os == 'Linux') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -2868,7 +2868,15 @@ jobs:
         run: |
           git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
-            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
+      - name: Shadow-verify the published notes
+        if: ${{ always() && steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+          [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+          python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
+            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true
@@ -3108,7 +3116,7 @@ jobs:
         if: (runner.os == 'Linux') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -3166,6 +3174,10 @@ jobs:
       - name: Run all three systemd-scope tests in the VM
         id: vmtest
         env:
+          FRACTAL_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
+          FRACTAL_ISOLATION_WORKSPACE: ${{ github.workspace }}
+          FRACTAL_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
+          FRACTAL_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
           ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
           ST_ISOLATION_WORKSPACE: ${{ github.workspace }}
           ST_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
@@ -3174,7 +3186,7 @@ jobs:
           start=$SECONDS
           mkdir -p "$RUNNER_TEMP/vm-out"
           "$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
-          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "$ST_ISOLATION_TIMINGS" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "${FRACTAL_ISOLATION_TIMINGS-${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
           printf '| VM test driver total | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
         if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
       - name: Build the sekrets VM test driver
@@ -3187,6 +3199,7 @@ jobs:
       - name: Run the sekrets gateway test in the VM
         id: sekrets-test
         env:
+          FRACTAL_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
           ST_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
         run: |
           start=$SECONDS
@@ -3321,6 +3334,8 @@ jobs:
               "clients/typescript/st3-client/BUCK*",
               "clients/typescript/st3-views/**",
               "clients/typescript/st3-scenarios/**",
+              # The st3-scenarios recording import reads the client wire schema at runtime.
+              "docs/st3/client-v0/schemas/client-v0.schema.json",
               # Views tests and scenario lanes read committed client/scenario fixtures.
               "fixtures/**",
               "package.json*",
@@ -3356,9 +3371,128 @@ jobs:
               "apps/fractal-web/src/changelog/**",
               "apps/fractal-web/src/web/ColdOpen.stories.tsx",
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
+              # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
+              "apps/fractal-web/.changelog/**",
+              "apps/fractal-web/packages/st3-sdk/src/**",
+              "clients/typescript/st3-views/**",
+              # The rest of its module closure inside the app, named file by file so other app-only changes still skip kit plays.
+              "apps/fractal-web/src/command-palette/fuzzy.ts",
+              "apps/fractal-web/src/conversation/alerts/AgentAlerts.tsx",
+              "apps/fractal-web/src/conversation/alerts/AlertButton.tsx",
+              "apps/fractal-web/src/conversation/alerts/AnswerAlert.tsx",
+              "apps/fractal-web/src/conversation/fixtures.ts",
+              "apps/fractal-web/src/conversation/fromTimeline.ts",
+              "apps/fractal-web/src/conversation/model.ts",
+              "apps/fractal-web/src/conversation/semantics.ts",
+              "apps/fractal-web/src/conversation/todos/AgentTodos.tsx",
+              "apps/fractal-web/src/conversation/todos/model.ts",
+              "apps/fractal-web/src/data/arrangements.ts",
+              "apps/fractal-web/src/data/asking.ts",
+              "apps/fractal-web/src/data/attention.ts",
+              "apps/fractal-web/src/data/fixtureSource.ts",
+              "apps/fractal-web/src/data/projections.ts",
+              "apps/fractal-web/src/data/react.tsx",
+              "apps/fractal-web/src/data/source.ts",
+              "apps/fractal-web/src/data/subjectReadPort.ts",
+              "apps/fractal-web/src/declarations/model.ts",
+              "apps/fractal-web/src/documents/DocumentLink.tsx",
+              "apps/fractal-web/src/documents/DocumentPane.tsx",
+              "apps/fractal-web/src/documents/document-port.ts",
+              "apps/fractal-web/src/extensions/app-public.ts",
+              "apps/fractal-web/src/extensions/build.ts",
+              "apps/fractal-web/src/extensions/public.ts",
+              "apps/fractal-web/src/fixtures/projections.ts",
+              "apps/fractal-web/src/fixtures/world.ts",
+              "apps/fractal-web/src/folders/client.ts",
+              "apps/fractal-web/src/folders/core.mts",
+              "apps/fractal-web/src/folders/edit.ts",
+              "apps/fractal-web/src/folders/fixture.ts",
+              "apps/fractal-web/src/folders/sidebarAdapter.ts",
+              "apps/fractal-web/src/folders/useSidebarFolders.ts",
+              "apps/fractal-web/src/icons/WfIcon.tsx",
+              "apps/fractal-web/src/missions/fixtures.ts",
+              "apps/fractal-web/src/missions/MissionsPane.tsx",
+              "apps/fractal-web/src/missions/presentation.ts",
+              "apps/fractal-web/src/monitor/fixtures.ts",
+              "apps/fractal-web/src/resources/agent/model.ts",
+              "apps/fractal-web/src/resources/contract.ts",
+              "apps/fractal-web/src/resources/envelope.ts",
+              "apps/fractal-web/src/resources/fixtures.ts",
+              "apps/fractal-web/src/shell/AgentAttention.tsx",
+              "apps/fractal-web/src/shell/AgentFolders.tsx",
+              "apps/fractal-web/src/shell/AgentUsage.tsx",
+              "apps/fractal-web/src/shell/context.tsx",
+              "apps/fractal-web/src/shell/icons.tsx",
+              "apps/fractal-web/src/shell/sidebar/filter.ts",
+              "apps/fractal-web/src/shell/sidebar/show.ts",
+              "apps/fractal-web/src/shell/sidebar/ShowMenu.tsx",
+              "apps/fractal-web/src/shell/sidebar/state.ts",
+              "apps/fractal-web/src/shell/sidebar/StatusIcon.tsx",
+              "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
+              "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
+              "apps/fractal-web/src/state/persistence.ts",
+              "apps/fractal-web/src/telemetry/measurement/counters.ts",
+              "apps/fractal-web/src/telemetry/measurement/developer.ts",
+              "apps/fractal-web/src/telemetry/measurement/engine.ts",
+              "apps/fractal-web/src/telemetry/measurement/index.ts",
+              "apps/fractal-web/src/telemetry/meters.tsx",
+              "apps/fractal-web/src/telemetry/ux.ts",
+              "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+              "apps/fractal-web/src/terminal/assets/JetBrainsMono-Regular.woff2",
+              "apps/fractal-web/src/terminal/cellWidth.ts",
+              "apps/fractal-web/src/terminal/DomTerminal.tsx",
+              "apps/fractal-web/src/terminal/fixtures.ts",
+              "apps/fractal-web/src/terminal/fonts.css",
+              "apps/fractal-web/src/terminal/ghosttyKeyboard.ts",
+              "apps/fractal-web/src/terminal/ghosttyKeyCodes.generated.ts",
+              "apps/fractal-web/src/terminal/historySource.ts",
+              "apps/fractal-web/src/terminal/palette.ts",
+              "apps/fractal-web/src/terminal/TerminalDetail.tsx",
+              "apps/fractal-web/src/terminal/terminalFonts.ts",
+              "apps/fractal-web/src/terminal/TerminalHistory.tsx",
+              "apps/fractal-web/src/terminal/terminalInputWire.ts",
+              "apps/fractal-web/src/terminal/TerminalKeyboardBinding.tsx",
+              "apps/fractal-web/src/terminal/TerminalKeyboard.tsx",
+              "apps/fractal-web/src/terminal/TerminalPane.tsx",
+              "apps/fractal-web/src/terminal/TerminalResize.tsx",
+              "apps/fractal-web/src/terminal/terminalText.ts",
+              "apps/fractal-web/src/terminal/TerminalViewport.tsx",
+              "apps/fractal-web/src/ui-compat/components.tsx",
+              "apps/fractal-web/src/ui-compat/foundations.ts",
+              "apps/fractal-web/src/ui-compat/live-theme.stylex.ts",
+              "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
+              "apps/fractal-web/src/web/AgentActions.tsx",
+              "apps/fractal-web/src/web/AttentionControls.tsx",
+              "apps/fractal-web/src/web/capturedChanges.ts",
+              "apps/fractal-web/src/web/ChangesInspector.tsx",
+              "apps/fractal-web/src/web/composerSend.ts",
+              "apps/fractal-web/src/web/ConversationHeaderActions.tsx",
+              "apps/fractal-web/src/web/ConversationPaneFallback.tsx",
+              "apps/fractal-web/src/web/ConversationPane.tsx",
+              "apps/fractal-web/src/web/conversationPreferences.ts",
+              "apps/fractal-web/src/web/ConversationStates.tsx",
+              "apps/fractal-web/src/web/conversationTranscript.ts",
+              "apps/fractal-web/src/web/DeclarationDialog.tsx",
+              "apps/fractal-web/src/web/lastObserved.tsx",
+              "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
+              "apps/fractal-web/src/web/liveSidebarTree.ts",
+              "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
+              "apps/fractal-web/src/web/perfMarks.ts",
+              "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
+              "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
+              "apps/fractal-web/src/web/sidebarAttention.ts",
+              "apps/fractal-web/src/web/SidebarEmptyState.tsx",
+              "apps/fractal-web/src/web/sidebarRow.ts",
+              "apps/fractal-web/src/web/workspaceView.ts",
+              "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
+              "apps/fractal-web/src/workbench-kit/IconButton.tsx",
+              "apps/fractal-web/src/workbench-kit/icons.tsx",
+              "fixtures/clients/words.json",
               "apps/fractal-web/src/web/index.html",
               "clients/typescript/st3-scenarios/**",
               "clients/typescript/st3-client/**",
+              # The st3-scenarios recording import reads the client wire schema at runtime.
+              "docs/st3/client-v0/schemas/client-v0.schema.json",
               "package.json*",
               "pnpm-workspace.yaml*",
               "pnpm-lock.yaml",
@@ -3459,6 +3593,9 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   fractal-web-execution:
     name: fractal-web-execution
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1]}' || '{"shard":[0]}') }}
     needs: [fractal-web-changes, genie-freshness]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
@@ -3503,26 +3640,22 @@ jobs:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
           KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
+          KIT_SHARD_INDEX: ${{ matrix.shard }}
+          KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '2' || '1' }}
+          KIT_RECEIPT_DIRECTORY: "${{ runner.temp }}/kit-play-receipts"
           KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}
           KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}
           KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}
           APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-      - name: Fill the web shell closure
-        shell: bash
-        run: bash scripts/ci-web-shell fill
-        env:
-          CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
-        continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
-      - name: Save the web shell closure
-        uses: actions/cache/save@v4
+      - name: Preserve kit shard receipt
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
-        continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
+          name: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/kit-play-receipts/receipt.json"
+          if-no-files-found: ignore
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -3535,7 +3668,8 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 1
-    permissions: {}
+    permissions:
+      contents: read
     steps:
       - name: Require detection and, for web changes, execution
         env:
@@ -3581,6 +3715,18 @@ jobs:
               sys.exit(main())
 
           PY
+      - uses: actions/checkout@v4
+        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        with:
+          pattern: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*"
+          path: "${{ runner.temp }}/kit-play-receipts"
+      - name: Require every kit shard and exact full-index coverage
+        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        run: node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" 2
       - name: Report job cache coverage
         if: always()
         shell: bash

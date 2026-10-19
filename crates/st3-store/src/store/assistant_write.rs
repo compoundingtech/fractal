@@ -9,12 +9,6 @@ pub struct AssistantWriteAuthorization {
     pub policy_revision: u64,
     pub scope: String,
     pub recipient: Option<String>,
-    pub approval_subject: Option<String>,
-}
-
-/// The connection must be the writer transaction that commits the protected mutation.
-pub fn authorize(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<(), St3Error> {
-    authorized_grant(connection, origin, authorization).map(|_| ())
 }
 
 pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, St3Error> {
@@ -23,7 +17,7 @@ pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &As
         .map(str::to_owned).ok_or_else(|| St3Error::new("forbidden", "assistant grant identity is absent"))
 }
 
-fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, St3Error> {
+pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, St3Error> {
     let denied = || St3Error::new("forbidden", "assistant write authorization changed or expired before commit");
     let claim = |kind: &str| -> Result<Option<ClaimRecord>, St3Error> {
         connection.query_row(/* sqlite-large-value: allow-for-now lv-h45d00adfd56b owner=st3_store::store::assistant_write TODO=trace-statement-and-value-representation */ &latest_claim_of_kind_query(),
@@ -42,15 +36,12 @@ fn authorized_grant(connection: &Connection, origin: &str, authorization: &Assis
         || fields["expires_at_unix_ms"].as_u64().map(u128::from).is_none_or(|expiry| expiry <= now_ms())
         || !fields["scopes"].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope.as_str() == Some(&authorization.scope)))
     { return Err(denied()); }
-    if let Some(recipient) = &authorization.recipient
-        && !fields["recipient_allowlist"].as_array().is_some_and(|recipients| recipients.iter().any(|value| value.as_str() == Some(recipient)))
-    {
-        return Err(denied());
-    }
-    if let Some(subject) = &authorization.approval_subject {
-        let approved: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.person-done' AND actor=?2 AND origin=?3 AND json_extract(body,'$.fields.answer.id')='approve' AND json_extract(body,'$.fields.acted_for') IS NULL)",
-            params![subject,authorization.owner,origin],|row| row.get(0)).map_err(internal)?;
-        if !approved { return Err(denied()); }
+    if authorization.scope == "write.assistant.messages" {
+        let recipient = authorization.recipient.as_deref().filter(|id| id.starts_with("agent/"))
+            .ok_or_else(|| St3Error::new("forbidden", "assistant messages require an existing agent recipient"))?;
+        if current_desired_row(connection, recipient).map_err(internal)?.is_none_or(|row| row.kind != "agent") {
+            return Err(St3Error::new("forbidden", "assistant messages require an existing agent recipient"));
+        }
     }
     Ok(granted)
 }

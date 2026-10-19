@@ -30,7 +30,7 @@
       "clippy::unnecessary_get_then_check": 1,
       "clippy::unnecessary_lazy_evaluations": 1
     },
-    "st3-api": {
+    "st3-api-core": {
       "clippy::collapsible_if": 2,
       "clippy::manual_next_back": 1
     },
@@ -49,6 +49,11 @@
     "st3-github-base": {
       "clippy::type_complexity": 3
     },
+    "st3-missions": {
+      "clippy::cloned_ref_to_slice_refs": 1,
+      "clippy::collapsible_if": 3,
+      "clippy::needless_borrow": 1
+    },
     "st3-reconcile": {
       "clippy::collapsible_if": 3,
       "clippy::empty_line_after_doc_comments": 2,
@@ -56,15 +61,16 @@
       "clippy::type_complexity": 3,
       "clippy::useless_format": 1
     },
-    "st3-store": {
-      "clippy::cloned_ref_to_slice_refs": 5,
-      "clippy::collapsible_if": 13,
-      "clippy::double_ended_iterator_last": 1,
-      "clippy::needless_borrow": 1,
+    "st3-seats": {
+      "clippy::cloned_ref_to_slice_refs": 4,
       "clippy::needless_question_mark": 1,
-      "clippy::redundant_closure": 1,
-      "clippy::too_many_arguments": 1,
       "clippy::type_complexity": 2
+    },
+    "st3-store": {
+      "clippy::collapsible_if": 10,
+      "clippy::double_ended_iterator_last": 1,
+      "clippy::redundant_closure": 1,
+      "clippy::too_many_arguments": 1
     },
     "st3-ui-model": {
       "clippy::field_reassign_with_default": 4

@@ -124,10 +124,10 @@ fn observer_actuals_external_writer_invalidates_warm_result() {
 fn observer_actuals_lru_is_bounded() {
     let cache = Actuals::default();
     let connection = Connection::open_in_memory().unwrap();
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h59ad9e8c88d9 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h483ca304fb64 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
         CREATE TABLE claims(store_index INTEGER PRIMARY KEY,id TEXT,batch_id TEXT,subject TEXT,kind TEXT,body TEXT,accepted_at_unix_ms TEXT);
         CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
-        CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
+        CREATE TABLE replica_records(claim_id TEXT,position INTEGER); CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);").unwrap();
     let serial = cache.seed(&connection, || cache.coverage_verified()).unwrap();
     for index in 0..LIMIT + 10 {
@@ -340,4 +340,67 @@ fn observer_actuals_full_replay_invalidates_a_warm_changed_subject() {
     assert_ne!(replayed.0, old);
     assert!(replayed.1 > 0, "full replay must discard even a warm changed-subject reduction");
     assert_eq!(read(&store).1, 0);
+}
+
+// Claims from three writers, several in one millisecond, each carrying different fields, so the
+// warm reduction must follow the canonical order through every interleaving of their arrival.
+fn tied_actuals_fixture() -> &'static ReplicationExchange {
+    static FIXTURE: std::sync::OnceLock<ReplicationExchange> = std::sync::OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let relay = Store::open_memory("dogwood").unwrap();
+        for (origin, writes) in [
+            ("alder", vec![(10, json!({"facts":{"state":"open"},"carried":"alder"})),
+                (30, json!({"facts":{"state":"held"}}))]),
+            ("birch", vec![(10, json!({"facts":{"state":"closed"},"nullable":Value::Null})),
+                (30, json!({"carried":"birch"}))]),
+            ("cedar", vec![(10, json!({"nullable":"set"})), (20, json!({"facts":{"state":"open"}}))]),
+        ] {
+            let writer = Store::open_memory(origin).unwrap();
+            for (at, fields) in writes {
+                append(&writer, SUBJECT, at, fields);
+            }
+            receive_and_project(&relay, origin, &exchange_from(&writer, &ReplicationInventory::default()));
+        }
+        exchange_from(&relay, &ReplicationInventory::default())
+    })
+}
+
+fn tied_actuals_reference() -> &'static Option<Value> {
+    static REFERENCE: std::sync::OnceLock<Option<Value>> = std::sync::OnceLock::new();
+    REFERENCE.get_or_init(|| {
+        let target = Store::open_memory("elm").unwrap();
+        receive_and_project(&target, "dogwood", tied_actuals_fixture());
+        latest_actual(&target.readers.get(), SUBJECT).unwrap()
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+    #[test]
+    fn observer_actuals_stay_pure_under_shuffled_split_duplicate_delivery_and_reopen(
+        ranks in proptest::collection::vec(any::<u64>(), 16),
+        width in 1usize..4,
+        copies in 1usize..3,
+    ) {
+        let exchange = tied_actuals_fixture();
+        prop_assert!(exchange.envelopes.len() <= ranks.len());
+        let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&index| (ranks[index], index));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        let target = Store::open(&path, "elm").unwrap();
+        for chunk in order.chunks(width) {
+            let envelopes = chunk.iter().flat_map(|&index|
+                std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
+            let admission = receive_and_project(&target, "dogwood",
+                &crate::store::tests_shared_seats::exchange_of("dogwood", envelopes));
+            prop_assert_eq!((admission.invalid, admission.unknown), (0, 0));
+            // Each read warms the reduction the next delivery must invalidate or extend.
+            read(&target);
+        }
+        prop_assert_eq!(&read(&target).0, tied_actuals_reference());
+        drop(target);
+        let target = Store::open(&path, "elm").unwrap();
+        prop_assert_eq!(&read(&target).0, tied_actuals_reference());
+    }
 }

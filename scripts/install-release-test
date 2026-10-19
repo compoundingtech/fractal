@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
@@ -9,7 +10,8 @@ mkdir -p "$work/platform-bin"
 printf '#!/bin/sh\necho Linux\n' > "$work/platform-bin/uname"
 chmod +x "$work/platform-bin/uname"
 export PATH="$work/platform-bin:$PATH"
-export ST_MACOS_INSTALL_HOME="$work/macos-home"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_MACOS_INSTALL_HOME="$work/macos-home" ST_MACOS_INSTALL_HOME="$work/macos-home"
 mkdir -p "$work/package/bin" "$work/installed"
 cp "${INSTALL_RELEASE_TEST_SCRIPT:-$repo/scripts/install-release}" "$work/package/install.sh"
 for binary in st3 pty; do
@@ -73,12 +75,13 @@ printf '#!/bin/sh\necho Darwin\n' > "$work/platform-bin/uname"
 cat > "$work/package/install-macos.py" <<'PY'
 import os
 import sys
+assert os.environ.get('FRACTAL_INSTANCE') == os.environ.get('ST_INSTANCE') == ''
 if os.environ.get('INSTALL_HELPER_FAIL'):
     print('helper failure', file=sys.stderr)
     raise SystemExit(1)
 print('app receipt')
 PY
-"$work/package/install.sh" --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
+FRACTAL_INSTANCE= ST_INSTANCE=masked-old "$work/package/install.sh" --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
 test ! -s "$work/quiet.out"
 test ! -s "$work/quiet.err"
 "$work/package/install.sh" --bin-dir "$work/installed" > "$work/notices.out"
@@ -157,7 +160,8 @@ p.add_argument('--restore-app', action='store_true')
 a = p.parse_args()
 job = Path(a.job)
 state = Path(os.environ['INSTALL_APP_FIXTURE'])
-assert Path(a.home).resolve() == Path(os.environ['ST_MACOS_INSTALL_HOME']).resolve()
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+assert Path(a.home).resolve() == Path(os.environ.get('FRACTAL_MACOS_INSTALL_HOME', os.environ.get('ST_MACOS_INSTALL_HOME'))).resolve()
 assert Path(a.bin_dir).is_absolute() and Path(a.app).is_absolute()
 if os.environ.get('INSTALL_INCOMPLETE_SIGNAL'):
     os.kill(os.getppid(), signal.SIGTERM)
@@ -174,7 +178,8 @@ else:
 print('app receipt')
 PY
 export INSTALL_APP_FIXTURE="$work/app-and-launchd"
-export INSTALL_FOREIGN_APP="$ST_MACOS_INSTALL_HOME/Applications/SmallTalk.app"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export INSTALL_FOREIGN_APP="${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME-}}/Applications/SmallTalk.app"
 # Reproduce the old check-then-act window: cat reads the saved witness after
 # the current snapshot, swaps in a foreign app, then returns the old witness.
 # The unchanged helper's restore would overwrite that foreign state. The safe
@@ -204,8 +209,10 @@ chmod +x "$work/platform-bin/cat"
 export INSTALL_REAL_CAT="$real_cat" INSTALL_RACE_MARKER="$work/owner-read-race"
 for mode in owner-read error signal foreign; do
   # Isolated transaction for each late failure, including separate bin context.
-  export ST_MACOS_INSTALL_HOME="$work/macos-$mode"
-  export INSTALL_FOREIGN_APP="$ST_MACOS_INSTALL_HOME/Applications/SmallTalk.app"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  export FRACTAL_MACOS_INSTALL_HOME="$work/macos-$mode" ST_MACOS_INSTALL_HOME="$work/macos-$mode"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  export INSTALL_FOREIGN_APP="${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME-}}/Applications/SmallTalk.app"
   export INSTALL_FAIL_DEST="$work/mac-$mode/pty"
   mkdir -p "$work/mac-$mode"
   cp -pP "$work/prior/"* "$work/mac-$mode/"
@@ -230,9 +237,11 @@ for mode in owner-read error signal foreign; do
     test "$(cat "$INSTALL_FOREIGN_APP/Contents/MacOS/st3")" = 'our app'
   fi
   test -d "$work/mac-$mode/.smalltalk-install.lock"
-  test -d "$ST_MACOS_INSTALL_HOME/Applications/.SmallTalk.app.archive-install.lock"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  test -d "${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME-}}/Applications/.SmallTalk.app.archive-install.lock"
   grep -q 'ownership cannot be established atomically' "$work/mac-$mode.err"
-  python3 - "$work/mac-$mode" "$ST_MACOS_INSTALL_HOME" <<'PYRECOVERY'
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  python3 - "$work/mac-$mode" "${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME-}}" <<'PYRECOVERY'
 from pathlib import Path
 import sys
 backups = list(Path(sys.argv[1]).glob('.smalltalk-install.*/previous/st3'))
@@ -245,12 +254,14 @@ PYRECOVERY
   test -z "$(ls -A "$work/another-$mode")"
 done
 # A signal before the backup marker neither invokes app restore nor loses files.
-export ST_MACOS_INSTALL_HOME="$work/macos-incomplete"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_MACOS_INSTALL_HOME="$work/macos-incomplete" ST_MACOS_INSTALL_HOME="$work/macos-incomplete"
 printf 'previous app and launchd fixture' > "$INSTALL_APP_FIXTURE"
 if INSTALL_INCOMPLETE_SIGNAL=1 "$work/package/install.sh" --bin-dir "$work/prior" --quiet; then exit 1; else test "$?" = 143; fi
 test "$(cat "$INSTALL_APP_FIXTURE")" = 'previous app and launchd fixture'
 test ! -e "$work/prior/.smalltalk-install.lock"
-test ! -e "$ST_MACOS_INSTALL_HOME/Applications/.SmallTalk.app.archive-install.lock"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+test ! -e "${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME-}}/Applications/.SmallTalk.app.archive-install.lock"
 rm "$work/platform-bin/cat"
 printf '#!/bin/sh\necho Linux\n' > "$work/platform-bin/uname"
 rm "$work/platform-bin/mv"

@@ -20,9 +20,13 @@
 //! posts that second's driver output, then runs four reconcile passes, the daemon's least rate
 //! while it idles. The file observer polls every second instead of every minute, and the
 //! workload waits until it records each change. Only a changed observation writes claims, so
-//! both give the claims of the minute polls. The daemon keeps its store in memory: the diet
-//! counts claims, and on a disk shared with other builds each of the workload's thousand
-//! durable writes waited tens of milliseconds. The suite runs 90 simulated seconds. The
+//! both give the claims of the minute polls. The daemon keeps its store in a file on a memory
+//! filesystem where the host has one: the diet counts claims, and on a disk shared with other
+//! builds each of the workload's thousand durable writes waited tens of milliseconds. It is not
+//! a shared-cache memory store: the observer polls on its own timer while passes run, and
+//! shared-cache connections that meet fail at once with `SQLITE_LOCKED` instead of waiting,
+//! which faulted a pass's step or failed the poll, whose retry then waits a minute. A file
+//! store's readers never wait on its writer. The suite runs 90 simulated seconds. The
 //! measurement in `doc/fleet/smalltalk/claim-log-diet` is the ten-minute run:
 //!
 //! ```sh
@@ -32,6 +36,7 @@
 //! Inside an st3 harness, unset `ST_AGENT` first: the local API binds a caller to the agent in
 //! its process ancestry, and these drivers write as their own agents.
 
+use st3::MissionsStore;
 use st3::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -143,16 +148,25 @@ mission "diet/loop-{index}" state="ready" {{
 struct Daemon {
     store: Arc<Store>,
     client: Client,
-    server: tokio::task::JoinHandle<()>,
+    /// The daemon's own runtime. It serves the API and runs every reconcile pass, so the timers
+    /// those passes arm run on it too, the file observer's polls among them. A poll writes to the
+    /// store, so only ending this runtime stops the daemon writing; see `stop`.
+    runtime: tokio::runtime::Runtime,
     reconciler: Arc<Reconciler<NoRuntime>>,
 }
 
 impl Daemon {
     async fn start(root: &Path) -> Self {
-        let store = Arc::new(Store::open_memory(NODE).unwrap());
-        let notify = Arc::new(Notify::new());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("diet-daemon")
+            .enable_all()
+            .build()
+            .unwrap();
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
+        let store = Arc::new(Store::open(&state_dir.join("claims.sqlite3"), NODE).unwrap());
+        let notify = Arc::new(Notify::new());
         let state = AppState {
             owning_person: None,
             store: store.clone(),
@@ -170,7 +184,7 @@ impl Daemon {
         };
         let socket = root.join("st3.sock");
         let server_socket = socket.clone();
-        let server = tokio::spawn(async move {
+        runtime.spawn(async move {
             let _ = st3::api::serve_unix(&server_socket, st3::api::router(state)).await;
         });
         // The workload runs every reconcile pass itself; see `reconcile`.
@@ -191,7 +205,7 @@ impl Daemon {
         Self {
             store,
             client: Client::new(Endpoint::Unix(socket)),
-            server,
+            runtime,
             reconciler,
         }
     }
@@ -199,7 +213,8 @@ impl Daemon {
     /// One reconcile pass, off the async runtime, as the daemon runs it.
     async fn reconcile(&self) {
         let reconciler = self.reconciler.clone();
-        tokio::task::spawn_blocking(move || reconciler.reconcile_once())
+        self.runtime
+            .spawn_blocking(move || reconciler.reconcile_once())
             .await
             .unwrap()
             .unwrap();
@@ -227,10 +242,17 @@ impl Daemon {
         }
     }
 
-    /// Stop serving before the socket's directory goes away.
+    /// Stop serving before the socket's directory goes away, and stop every timer the reconcile
+    /// passes armed. The file observer keeps polling every second until its runtime ends, and
+    /// a poll that writes after the counts are taken, or while the replica converges, races
+    /// them: it can append a claim the counts never saw, or meet the replication export's
+    /// writes and fail it.
     async fn stop(self) {
-        self.server.abort();
-        let _ = self.server.await;
+        let runtime = self.runtime;
+        // Dropping a runtime waits until its tasks and blocking threads have stopped.
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
     }
 
     fn publish(&self, source: &str, workspace: &Path) -> Vec<String> {
@@ -482,7 +504,12 @@ fn converge(source: &Store, target: &Store) {
 }
 
 async fn run_workload(seconds: u64) -> Report {
-    let root = tempfile::tempdir().unwrap();
+    // On a memory filesystem a durable commit does not wait for a disk; see the module comment.
+    let root = match Path::new("/dev/shm") {
+        shm if shm.is_dir() => tempfile::tempdir_in(shm),
+        _ => tempfile::tempdir(),
+    }
+    .unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("config.toml"), "version = 0\n").unwrap();

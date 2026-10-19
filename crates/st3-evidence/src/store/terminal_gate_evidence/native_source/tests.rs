@@ -1,21 +1,25 @@
 #![allow(unused_imports)]
 use crate::PublicationFactsStore;
-use st3_store::store::terminal_gate_evidence::native_source_shared::*;
+use st3_attention::store::terminal_gate_evidence::native_source_shared::*;
 use super::*;
 use crate::graph::{parse_execution_intent, parse_intent};
 use crate::store::{Store, append_claim_tx, project_mission_run_created, select_replicated_desired, select_replicated_mission};
 use serde_json::json;
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
-use st3_store::store::terminal_gate_evidence::native_source_shared::*;
-use st3_store::store::terminal_gate_evidence::native_source_shared::{Binding, FINGERPRINT, GUARD, NativeSource, RAW_BYTES, ROWS, SOURCE_BYTES, bounded_row, decode, point};
-use st3_store::store::terminal_gate_evidence::native_source_shared::{required};
-use st3_store::store::terminal_gate_evidence::native_source_tests_shared::*;
-use st3_store::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
+use st3_attention::store::terminal_gate_evidence::native_source_shared::*;
+use st3_attention::store::terminal_gate_evidence::native_source_shared::{Binding, FINGERPRINT, GUARD, NativeSource, RAW_BYTES, ROWS, SOURCE_BYTES, bounded_row, decode, point};
+use st3_attention::store::terminal_gate_evidence::native_source_shared::{required};
+use st3_attention::store::terminal_gate_evidence::native_source_tests_shared::*;
+use st3_attention::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
 
 
 #[test]
 fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
-    for n in [0, 1024, 100_000] {
+    // The largest population only has to outgrow the bounds below: an unrelated INSERT may take at most
+    // 20,000 VM steps and no full scan, so any work per prior row fails at 25,000 rows as it would at
+    // 100,000. Pull requests seed 25,000; the daily run (ST_TEST_SCALE=full, docs/ci.md) seeds 100,000.
+    let largest = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") { 100_000 } else { 25_000 };
+    for n in [0, 1024, largest] {
         let f = Fixture::seeded();
         if n > 0 {
             f.populate_foreign(n);
