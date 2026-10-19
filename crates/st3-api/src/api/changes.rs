@@ -15,14 +15,14 @@ pub struct ReadQuery {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Cursor {
+pub struct Cursor {
     repository: String,
     pin: String,
     after: String,
     offline: bool,
 }
 
-fn entry(state: &AppState, repository: &str) -> Result<Arc<Entry>, ApiError> {
+pub fn entry(state: &AppState, repository: &str) -> Result<Arc<Entry>, ApiError> {
     state
         .store
         .git_change_registry()
