@@ -50,8 +50,8 @@ with tempfile.TemporaryDirectory() as tmp:
                      "ST_PERF_SLOT_HELD": "legacy-stale"}
         marked = start(inherited, command=[sys.executable, "-c",
             "import os; "
-            "assert os.environ['FRACTAL_PERF_SLOT_HELD'] == str(os.getppid()); "
-            "assert os.environ['ST_PERF_SLOT_HELD'] == str(os.getppid())"])
+            "assert os.environ['FRACTAL_PERF_SLOT_HELD'] == open('/proc/%d/stat' % os.getppid()).read().rsplit(')', 1)[1].split()[1]; "
+            "assert os.environ['ST_PERF_SLOT_HELD'] == open('/proc/%d/stat' % os.getppid()).read().rsplit(')', 1)[1].split()[1]"])
         assert marked.wait(10) == 0, marked.stderr.read()
         assert "perf slot free" in status() and not holder.exists()
 

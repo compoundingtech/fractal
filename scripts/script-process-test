@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Safe host-side signal ownership tests. Orphan parent kills are VM-only."""
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from script_process import signal_private
+
+HERE = Path(__file__).resolve().parent
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'Linux pidfd/subreaper ownership contract')
+class SignalOwnershipTests(unittest.TestCase):
+    def test_shell_suite_replaces_a_stale_supervisor_marker_and_preserves_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / 'suite'
+            fixture.write_text(f'set -e\n. {str(HERE / "script-test-supervisor")!r}\n'
+                               f'python3 {str(HERE / "st3_test_process.py")!r} --is-supervised\n'
+                               'exit 17\n')
+            result = subprocess.run(['bash', str(fixture)], timeout=5,
+                env={**os.environ, 'SMALLTALK_TEST_SUPERVISOR': 'stale-marker'})
+            self.assertEqual(result.returncode, 17)
+
+    def test_parent_kill_fixtures_are_confined_to_the_guest(self):
+        import re
+        patterns = [r'os\.kill\(\s*os\.getppid\(', r'kill\s+-\w+\s+["\x27]?\$PPID']
+        for path in HERE.rglob('*'):
+            if not path.is_file() or path.name == 'script-orphan-guest-test' or '__pycache__' in path.parts:
+                continue
+            try:
+                content = path.read_text()
+            except UnicodeDecodeError:
+                continue
+            for pattern in patterns:
+                self.assertIsNone(re.search(pattern, content), str(path))
+
+    def child(self, marker):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                 env={**os.environ, 'SCRIPT_TEST_OWNER': marker})
+        self.addCleanup(self.finish, child)
+        return child
+
+    @staticmethod
+    def finish(child):
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+
+    def test_private_marker_and_start_receipt_required(self):
+        child = self.child('private-fixture')
+        ticks = int(Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()[19])
+        self.assertFalse(signal_private(child.pid, signal.SIGTERM,
+                                        environment={'SCRIPT_TEST_OWNER': 'different-fixture'}))
+        self.assertFalse(signal_private(child.pid, signal.SIGTERM, start_ticks=ticks + 1,
+                                        environment={'SCRIPT_TEST_OWNER': 'private-fixture'}))
+        self.assertIsNone(child.poll())
+        self.assertTrue(signal_private(child.pid, signal.SIGTERM, start_ticks=ticks,
+                                       environment={'SCRIPT_TEST_OWNER': 'private-fixture'}))
+        self.assertEqual(child.wait(timeout=3), -signal.SIGTERM)
+
+    def test_parent_self_and_pid_one_refused_before_pidfd_open(self):
+        with patch('os.pidfd_open', side_effect=AssertionError('must not open an ancestor')):
+            for pid in (1, os.getpid(), os.getppid()):
+                self.assertFalse(signal_private(pid, signal.SIGTERM, parent=os.getppid()))
+
+    def test_endpoint_conflict_refused(self):
+        child = subprocess.Popen(['sleep', '30'], env={**os.environ,
+            'FRACTAL_ENDPOINT': '/private/one', 'ST3_ENDPOINT': '/private/two'})
+        self.addCleanup(self.finish, child)
+        self.assertFalse(signal_private(child.pid, signal.SIGTERM, endpoint='/private/one'))
+        self.assertIsNone(child.poll())
+
+    def test_exited_pidfd_never_signals_a_replacement(self):
+        child = self.child('same-marker')
+        original_open = os.pidfd_open
+        def exit_after_pin(pid):
+            fd = original_open(pid)
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+            child.wait()
+            return fd
+        with patch('os.pidfd_open', side_effect=exit_after_pin), \
+             patch('os.kill', side_effect=AssertionError('numeric signal forbidden')):
+            self.assertFalse(signal_private(child.pid, signal.SIGTERM,
+                                            environment={'SCRIPT_TEST_OWNER': 'same-marker'}))
+
+    def test_late_installer_request_cannot_signal_its_new_parent(self):
+        # A duplicate/delayed request can only reach the pipe's original reader.
+        with tempfile.TemporaryDirectory() as tmp:
+            child = Path(tmp) / 'installer.py'
+            child.write_text("import os, signal, time\n"
+                "signal.signal(signal.SIGTERM, lambda *_: exit(43))\n"
+                "os.write(int(os.environ['INSTALL_TEST_SIGNAL_FD']), b'TT')\n"
+                "time.sleep(10)\n")
+            result = subprocess.run([sys.executable, str(HERE / 'test-signal-target'),
+                                     sys.executable, str(child)], timeout=5)
+            self.assertEqual(result.returncode, 43)
+
+    def test_reaped_evidence_group_is_never_signalled(self):
+        loader = importlib.machinery.SourceFileLoader('prepush', str(HERE / 'evidence-prepush'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        child = subprocess.Popen(['true'])
+        child.wait()
+        with patch('os.killpg', side_effect=AssertionError('reaped PID/group reused')):
+            module.stop(child, 0)
+
+
+if __name__ == '__main__':
+    unittest.main()

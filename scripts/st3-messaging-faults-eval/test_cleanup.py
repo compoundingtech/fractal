@@ -19,6 +19,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from script_process import signal_private
 loader = importlib.machinery.SourceFileLoader('cleanup_eval', str(HERE / 'run'))
 runner = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(runner)
@@ -139,7 +141,7 @@ export default api => {
                     provider = rows[0]['pid']
                     child = int((root / 'child.pid').read_text())
                     self.assertEqual(os.getpgid(child), child)
-                    os.kill(provider, signal.SIGTERM)
+                    signal_private(provider, signal.SIGTERM, root=root)
                     launcher.wait(timeout=3)
                     self.assertEqual(launcher.returncode, 1, (root / 'provider.log').read_text())
                     wait_for(lambda: not Path(f'/proc/{child}').exists(), 2)
@@ -217,7 +219,11 @@ export default api => {
                                 fds.append(os.pidfd_open(pid))
                             except ProcessLookupError:
                                 pass
-                        os.kill(controller if target == 'controller' else launcher.pid, sig)
+                        if target == 'controller':
+                            signal_private(controller, sig,
+                                environment={'ST3_MESSAGING_ROOT': str(root)})
+                        else:
+                            launcher.send_signal(sig)
                         launcher.wait(timeout=10)
                         wait_for(lambda: all(not Path(f'/proc/{pid}').exists() for pid in pids), 5)
                         wait_for(lambda: not Path(f'/proc/{guardian}').exists(), 5)

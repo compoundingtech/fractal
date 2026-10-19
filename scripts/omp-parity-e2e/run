@@ -72,7 +72,7 @@ cleanup() {
     tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
   fi
   if [[ -n "$DAEMON" ]]; then
-    kill -TERM "$DAEMON" 2>/dev/null || true
+    python3 "$ROOT/scripts/script_process.py" "$DAEMON" 15 --root "$ISO"
     wait "$DAEMON" 2>/dev/null || true
   fi
   if ((KEEP)); then

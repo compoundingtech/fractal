@@ -20,6 +20,8 @@ import tomllib
 import uuid
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from script_process import signal_private
 CASES = ("baseline", "daemon-restart", "binary-swap", "path-deploy", "link-seconds", "link-minutes",
          "receiver-down", "harness-restart", "channel-killed", "old-channel", "handoff-failed")
 
@@ -65,13 +67,23 @@ async def until(predicate, timeout=30):
     raise TimeoutError("condition did not become true")
 
 
+async def spawn(*command, **options):
+    marker = secrets.token_hex(16)
+    options['env'] = {**options.get('env', os.environ), 'SCRIPT_TEST_PROCESS': marker}
+    process = await asyncio.create_subprocess_exec(*command, **options)
+    process.signal_marker = marker
+    return process
+
+
 async def stop(process):
     if process:
+        # asyncio's child watcher may already have reaped the group leader.
+        # Never signal that old group number. Revalidate each marked private
+        # descendant after pinning its pidfd, including inherited pipe writers.
         for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(process.pid, sig)
-            except ProcessLookupError:
-                pass
+            for proc in Path('/proc').glob('[0-9]*'):
+                signal_private(int(proc.name), sig,
+                               environment={'SCRIPT_TEST_PROCESS': process.signal_marker})
             if sig == signal.SIGTERM:
                 try:
                     await asyncio.wait_for(process.wait(), 1)
@@ -100,7 +112,7 @@ def give_bytes(source, destination):
 
 
 async def capture(*command, env):
-    process = await asyncio.create_subprocess_exec(*command, env=env, start_new_session=True,
+    process = await spawn(*command, env=env, start_new_session=True,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         return await asyncio.wait_for(process.communicate(), 5)
@@ -224,14 +236,14 @@ class Node:
     async def spawn(self, args, log):
         stream = (self.root / log).open("ab")
         self.logs.append(stream)
-        process = await asyncio.create_subprocess_exec(str(self.binary), *args,
+        process = await spawn(str(self.binary), *args,
             env=self.env, cwd=self.root / "ws", stdin=asyncio.subprocess.DEVNULL,
             stdout=stream, stderr=stream, start_new_session=True)
         self.processes.append(process)
         return process
 
     async def cli(self, *args, check=True):
-        process = await asyncio.create_subprocess_exec(str(self.binary), "--endpoint", str(self.endpoint),
+        process = await spawn(str(self.binary), "--endpoint", str(self.endpoint),
             *args, env=self.env, start_new_session=True, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), self.bound)
@@ -338,7 +350,7 @@ class Node:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 for row in self.seats():
                     try:
-                        os.kill(row["pid"], sig)
+                        signal_private(row["pid"], sig, endpoint=self.endpoint, start_ticks=row["start_ticks"])
                     except ProcessLookupError:
                         pass
                 await asyncio.sleep(0.2)
@@ -715,13 +727,16 @@ agent "fault-probe" {{
             fault_started = now_ms()
             fault_monotonic = time.monotonic()
             link.drop()
-            os.kill(channels[0]["pid"], signal.SIGKILL)
+            if not signal_private(channels[0]["pid"], signal.SIGKILL, endpoint=target.endpoint,
+                                  start_ticks=channels[0]["start_ticks"]):
+                raise RuntimeError("channel fault target no longer matches its private receipt")
             subject = await send(source, case)
         elif case == "harness-restart":
             link.drop()
             if len(initial) != 1:
                 raise RuntimeError("expected exactly one provider")
-            os.kill(initial[0], signal.SIGKILL)
+            if not signal_private(initial[0], signal.SIGKILL, endpoint=target.endpoint):
+                raise RuntimeError("harness fault target no longer matches its private endpoint")
             subject = await send(source, case)
             async def restarted():
                 current = provider_pids(target.seats())
@@ -886,7 +901,7 @@ agent "fault-probe" {{
             await link.close()
             for node in reversed(nodes):
                 try:
-                    terminal = await asyncio.create_subprocess_exec("pty", "peek", "--plain", "--full", "eval.fault-probe",
+                    terminal = await spawn("pty", "peek", "--plain", "--full", "eval.fault-probe",
                         env={**node.env, "PTY_ROOT": str(node.root / "pty")}, start_new_session=True,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     try:
@@ -943,7 +958,7 @@ async def main(args):
         else:
             # Appended to below, so it must be its own file.
             shutil.copy2(args.binary, replacement)
-        probe = await asyncio.create_subprocess_exec(str(old), "resume-probe",
+        probe = await spawn(str(old), "resume-probe",
             env={"PATH": os.environ["PATH"]}, start_new_session=True, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             probe_stdout, _ = await asyncio.wait_for(probe.communicate(), 5)

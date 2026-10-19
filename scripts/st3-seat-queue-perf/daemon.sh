@@ -56,29 +56,11 @@ perf_stop_daemon() {
   PTY_ROOT="$root/pty" pty list --json 2>/dev/null | jq -r '.[].name' | while read -r session; do
     PTY_ROOT="$root/pty" pty kill "$session" >/dev/null 2>&1 || true
   done
-  kill -TERM "$pid" 2>/dev/null || true
+  python3 "${BASH_SOURCE[0]%/*}/../script_process.py" "$pid" 15 --root "$root"
   for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-  declare -A ancestors=()
-  ancestor=$$
-  while [[ -n "$ancestor" && "$ancestor" != 0 ]]; do
-    ancestors[$ancestor]=1
-    ancestor="$(awk '/^PPid:/ {print $2}' "/proc/$ancestor/status" 2>/dev/null || true)"
-  done
-  for signal in TERM KILL; do
-    for proc in /proc/[0-9]*; do
-      other="${proc#/proc/}"
-      [[ -n "${ancestors[$other]:-}" ]] && continue
-      # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-      if { tr '\0' ' ' <"$proc/cmdline"; } 2>/dev/null | grep -qF "$root/bin/" \
-        || [[ "$(readlink "$proc/cwd" 2>/dev/null)" == "$root/"* ]] \
-        || { tr '\0' '\n' <"$proc/environ"; } 2>/dev/null | awk -v endpoint="$root/st3.sock" '
-          /^FRACTAL_ENDPOINT=/ { preferred_set = 1; preferred = substr($0, 18) }
-          /^ST3_ENDPOINT=/ { legacy = substr($0, 14) }
-          END { exit ((preferred_set ? preferred : legacy) != endpoint) }
-        '; then
-        kill "-$signal" "$other" 2>/dev/null || true
-      fi
-    done
+  for signal in 15 9; do
+    python3 "${BASH_SOURCE[0]%/*}/../script_process.py" all "$signal" --root "$root"
+    python3 "${BASH_SOURCE[0]%/*}/../script_process.py" all "$signal" --endpoint "$root/st3.sock"
     sleep 1
   done
 }
