@@ -2,6 +2,7 @@
 use crate::store::*;
 use crate::store::operations::*;
 
+
 pub fn clock_run(store: &Store, key: &str) -> MissionRunView {
         store
             .create_mission_run(&MissionRunRequest {

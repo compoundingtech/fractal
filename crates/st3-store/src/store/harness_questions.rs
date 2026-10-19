@@ -84,15 +84,3 @@ pub fn question_at(
         resolution,
     }))
 }
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::harness_questions_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::harness_questions_tests_shared_seats::{DAY, answer};
-
-
-}

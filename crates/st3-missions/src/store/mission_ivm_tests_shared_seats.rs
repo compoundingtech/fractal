@@ -6,6 +6,7 @@ use smallclaims::ivm::{SourceCut, events};
 use crate::store::attention_ivm::tests_shared_seats::*;
 use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::*;
 
+
 pub fn register(store: &Store) -> Arc<Views> {
         let views = Arc::new(Views::new(definitions()).unwrap());
         let mut writer = store.connection.write();

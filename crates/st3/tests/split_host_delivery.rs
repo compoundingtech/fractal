@@ -2,6 +2,8 @@
 //! Raw cross-daemon retries deliberately document known limitation #3104, not fleet dedupe.
 #![cfg(unix)]
 
+use st3::AdhocWorkStore;
+use st3::MissionsStore;
 use st3::SeatsStoreCore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

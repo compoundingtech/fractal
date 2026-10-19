@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use std::sync::{Arc, Mutex};
 
 
-fn claim(subject: &str, kind: &str, fields: Value, key: &str) -> ClaimInput {
+pub fn claim(subject: &str, kind: &str, fields: Value, key: &str) -> ClaimInput {
     ClaimInput {
         subject: subject.into(),
         kind: kind.into(),

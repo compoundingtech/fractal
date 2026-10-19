@@ -88,6 +88,12 @@ pub mod projectors_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
+pub use crate::store::shared_missions::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
 pub use crate::store::shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -106,29 +112,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::model::{
-    ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest,
-    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability,
-    ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec,
-    DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView,
-    LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView,
-    MissionInputKind, MissionOutputView, MissionResponse, MissionRevisionOperation,
-    MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunReportView,
-    MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent,
-    OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult,
-    PlannedAction, PlannerSpec, PlanningCandidateView, PlanningPreviewView,
-    PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
-    ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
-    RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
-    SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
-    SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
-};
+use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus, SubscriptionRequestDecision, SubscriptionRequestView, UsageSummary, WorkSelector, WorkWakeView};
+#[cfg(any(test, feature = "test-support"))]
+use crate::model::WorkRequest;
 #[cfg(test)]
 use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicationInventory, ReplicationReceipt};
 #[cfg(any(test, feature = "test-support"))]
@@ -137,7 +128,7 @@ use crate::model::ReplicationExchange;
 #[cfg(test)]
 #[cfg(any(test, feature = "test-support"))]
 use smallclaims::replication::ReplicationBatch;
-use crate::model::{SeatQueueMoveRequest, SeatQueueMoveView};
+use crate::model::SeatQueueMoveView;
 use crate::seat_queue::{self, Placement, QueueJoin, QueueMove, SeatStep};
 #[cfg(test)]
 use smallclaims::claim::ReplicaEnvelopePayload;
@@ -194,13 +185,6 @@ pub mod attention_list;
 pub mod owner_lists;
 pub mod summary_list;
 // Registration stays opt-in until the shared installer certifies every source family.
-#[cfg_attr(
-    not(any(test, feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "prepared attention operators await certified shared-runtime integration"
-    )
-)]
 pub mod attention_ivm;
 pub mod backup;
 pub mod checkpoint_rules;
@@ -215,7 +199,7 @@ pub mod database_size;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
-pub use person_work::AskImages;
+
 pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
@@ -316,7 +300,7 @@ pub type CumulativeUsage = (u64, u64, u64, u64, Option<f64>, Option<String>);
 
 /// The latest rollup snapshot of one series, with its cost when every token in it was priced.
 #[derive(Clone)]
-struct RollupSpend {
+pub struct RollupSpend {
     total: u64,
     input: u64,
     output: u64,
@@ -665,20 +649,6 @@ pub struct AgentWorkQueue {
     pub next_work_id: Option<String>,
     pub upcoming_work_ids: Vec<String>,
     pub queued_work_count: u64,
-}
-
-/// The longest one `work wait` stops the execution clock. A wait past it must be declared again,
-/// so a seat that stopped answering cannot hide behind a wait.
-pub const MAX_STEP_WAIT_MS: u64 = 12 * 60 * 60 * 1000;
-
-/// A wait span as hours and minutes, for the budget error and the step view.
-pub fn format_wait_span(milliseconds: u128) -> String {
-    let minutes = milliseconds / 60_000;
-    match (minutes / 60, minutes % 60) {
-        (0, minutes) => format!("{minutes}m"),
-        (hours, 0) => format!("{hours}h"),
-        (hours, minutes) => format!("{hours}h{minutes:02}m"),
-    }
 }
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
@@ -1360,7 +1330,7 @@ const STATUS_WORKERS: usize = 4;
 /// the query names `claims_subject_kind_index`: SQLite then seeks past a subject's harness
 /// reports instead of reading each one. Unlike `NOT LIKE`, the ranges are case-sensitive, as
 /// `str::starts_with` is.
-const ACTUAL_STATE_CLAIM: &str = "(claims.kind<'harness.' OR claims.kind>='harness/')
+pub const ACTUAL_STATE_CLAIM: &str = "(claims.kind<'harness.' OR claims.kind>='harness/')
      AND claims.kind NOT IN ('intent.desired', 'runtime.readiness-deadline-reached',
                              'reconcile.fault')";
 
@@ -1374,7 +1344,7 @@ pub const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
 
 // Both discovery and index installation share the actual fold's open-ended kind predicate.
 // Custom actual-state kinds can also supply a runtime id; a fixed kind allowlist is incomplete.
-const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
+pub const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
     THEN '$.runtime_id' ELSE '$.fields.runtime_id' END)";
 static RUNTIME_ID_INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
     /* sqlite-large-value: allow-for-now lv-h05d58f75a636 owner=st3_store::store TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_runtime_id_subject_index
@@ -1444,19 +1414,7 @@ pub const INCARNATION_OF_CLAIM: &str =
         THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END)";
 
 /// The predicate of `mission_runs_open_index`, word for word, so SQLite can use the index.
-const OPEN_MISSION_RUN: &str = "mission_runs.status NOT IN ('completed','failed','cancelled')";
-
-/// The first (`ASC`) or last (`DESC`) acceptance time of the claims about subject `?1` that
-/// name incarnation `?2`, at or before store index `?3`: one seek into the incarnation's claims.
-pub fn incarnation_claim_time_query(order: &str) -> String {
-    format!(
-        "SELECT accepted_at_unix_ms
-         FROM claims INDEXED BY claims_incarnation_accepted_index
-         WHERE subject=?1 AND {INCARNATION_OF_CLAIM}=?2 AND store_index<=?3
-         ORDER BY length(accepted_at_unix_ms) {order}, accepted_at_unix_ms {order}
-         LIMIT 1"
-    )
-}
+pub const OPEN_MISSION_RUN: &str = "mission_runs.status NOT IN ('completed','failed','cancelled')";
 
 /// Whether `subject` names a runtime, whose stopped or undeclared state puts it in history.
 fn runtime_subject(subject: &str) -> bool {
@@ -1631,7 +1589,7 @@ fn runtime_view_entry_from(
 /// A single-origin runtime-only history cannot have rival runtime authority. Runtime observations
 /// append fields, so an omitted field retains its newest earlier value; explicit null replaces it.
 /// Other actual kinds and origins use the general fold and causal source selection instead.
-fn runtime_only_authority(
+pub fn runtime_only_authority(
     connection: &Connection,
     subject: &str,
     through: u64,
@@ -2021,30 +1979,6 @@ impl Deref for Store {
     }
 }
 
-// Owner joins compare the run ID with the reference's suffix, so SQLite looks each owner up by
-// primary key instead of scanning every run for each desired row on every reconcile pass.
-pub const TERMINAL_OWNED_RUNTIME_SUBJECTS: &str = "SELECT desired.subject
-     FROM desired
-     JOIN mission_runs owner
-       ON substr(desired.owner_run, 1, 12)='mission-run/'
-      AND owner.id=substr(desired.owner_run, 13)
-     JOIN mission_runs root ON root.id=owner.root_run_id
-     LEFT JOIN run_generations generation
-       ON substr(desired.owner_generation, 1, 15)='run-generation/'
-      AND generation.id=substr(desired.owner_generation, 16)
-     LEFT JOIN step_runs step ON step.subject=desired.owner_step
-     WHERE desired.member IS NOT NULL
-       AND (
-         owner.status IN ('completed','failed','cancelled')
-         OR owner.phase='terminal'
-         OR root.status IN ('completed','failed','cancelled')
-         OR root.phase='terminal'
-         OR generation.status IN ('completed','failed','cancelled')
-         OR step.status='cancelled'
-         OR (owner.phase='final-cancelled' AND desired.kind IN ('exec','pty')
-             AND (desired.owner_step IS NULL OR step.status IN ('completed','failed')))
-       )
-     ORDER BY desired.subject";
 pub const ACTUAL_CACHE_LIMIT: usize = 4096;
 
 pub struct MessageCacheEntry {
@@ -2054,10 +1988,10 @@ pub struct MessageCacheEntry {
 }
 
 pub struct ChildMissionContext {
-    root_revision: String,
-    root_run_id: String,
-    parent_step_run: String,
-    default_selector: Option<WorkSelector>,
+    pub root_revision: String,
+    pub root_run_id: String,
+    pub parent_step_run: String,
+    pub default_selector: Option<WorkSelector>,
 }
 
 fn stale_ref_request_tx(connection: &Connection, resource: &str, discovery: &str) -> Result<Option<String>> {
@@ -2310,307 +2244,11 @@ fn migrate_mission_run_deadlines(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// One repository item whose recorded facts changed, with the facts that changed. `deliver` says
-/// whether the change asks a subscription for a review or a triage.
-pub struct DiscoveredItem {
-    subject: String,
-    kind: &'static str,
-    facts: Value,
-    changed_fields: Vec<String>,
-    /// The data types the change belongs to: the item's collection, `comments`, `reactions` or
-    /// `mentions`.
-    data_types: BTreeSet<String>,
-    deliver: bool,
-}
 
-/// The data types a change to an item's facts belongs to. A comment, a reaction and a mention
-/// each have their own; every other fact belongs to the item's collection.
-fn item_data_types(
-    collection: &str,
-    prior: Option<&Value>,
-    facts: &Value,
-    changed_fields: &[String],
-) -> BTreeSet<String> {
-    let mut data_types = BTreeSet::new();
-    for field in changed_fields {
-        match field.as_str() {
-            "comments" => data_types.insert("comments".to_owned()),
-            "reactions" => data_types.insert("reactions".to_owned()),
-            "mentions" => data_types.insert("mentions".to_owned()),
-            "recent_comments" => data_types.insert("comments".to_owned()),
-            "last_comment" => {
-                let reactions = |value: Option<&Value>| {
-                    value
-                        .and_then(|value| value.pointer("/last_comment/reactions"))
-                        .cloned()
-                };
-                if reactions(prior) != reactions(Some(facts)) {
-                    data_types.insert("reactions".to_owned());
-                }
-                let without_reactions = |value: Option<&Value>| {
-                    let mut comment = value.and_then(|value| value.get("last_comment")).cloned();
-                    if let Some(Value::Object(comment)) = comment.as_mut() {
-                        comment.remove("reactions");
-                    }
-                    comment
-                };
-                if without_reactions(prior) != without_reactions(Some(facts)) {
-                    data_types.insert("comments".to_owned())
-                } else {
-                    false
-                }
-            }
-            _ => data_types.insert(collection.to_owned()),
-        };
-    }
-    data_types
-}
-
-/// A pull request is reviewed once for each head it is ready at: when it first appears open and
-/// ready, when a draft becomes ready, and when a new head replaces one that was known. Nothing
-/// else starts a review. A closure, a merge, a reopening at the same head, a title edit, and a
-/// field that an older build did not record never do, because st would review a head it already
-/// saw or one nobody can act on. A known item with no known head proves nothing, so a head first
-/// recorded for it is a baseline.
-fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
-    // An item resource names the head `head_sha`; a listing names it `head`.
-    let head_of = |item: &Value| {
-        item.get("head_sha")
-            .or_else(|| item.get("head"))
-            .filter(|head| !head.is_null())
-            .cloned()
-    };
-    let head = head_of(item);
-    let open = item
-        .get("state")
-        .and_then(Value::as_str)
-        .is_none_or(|state| state == "open");
-    let ready = item.get("draft").and_then(Value::as_bool) != Some(true);
-    if head.is_none() || !open || !ready {
-        return false;
-    }
-    let Some(prior) = prior else {
-        return true;
-    };
-    let prior_head = head_of(prior);
-    prior.get("draft").and_then(Value::as_bool) == Some(true)
-        || prior_head.is_some_and(|prior_head| Some(prior_head) != head)
-}
-
-/// The repository collections whose items become their own resources, with each item's subject
-/// segment and resource kind.
-const REPOSITORY_COLLECTIONS: [(&str, &str, &str); 2] = [
-    ("pull_requests", "pull-request", "vcs.pull-request"),
-    ("issues", "issue", "vcs.issue"),
-];
-
-/// The most mentions one item resource keeps, newest first.
-const ITEM_MENTIONS: usize = 50;
-
-/// What an item resource records after one sighting: its prior facts with every fact the
-/// sighting read laid over them. A listing names the head commit `head`; the resource calls it
-/// `head_sha`. A fact the sighting read as null is gone, except an unknown head. Only an open
-/// pull request is known to be unmerged: one that closes keeps `merged` only when the sighting
-/// could tell a merge from a closure. An edit to an older comment does not replace the last
-/// comment, and mentions add to the ones known, keeping the newest of each login.
-fn item_facts(
-    repository: &str,
-    field: &str,
-    number: u64,
-    prior: Option<&Value>,
-    seen: &Value,
-) -> serde_json::Map<String, Value> {
-    let mut facts = prior
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    for (name, value) in seen.as_object().into_iter().flatten() {
-        let name = match name.as_str() {
-            "new" => continue,
-            "head" => "head_sha",
-            name => name,
-        };
-        match (name, facts.get(name)) {
-            (_, _) if value.is_null() => {
-                if name != "head_sha" {
-                    facts.remove(name);
-                }
-            }
-            ("last_comment", Some(known)) if !newer_comment(value, known) => {}
-            // Each comment and review once, by kind and ID; the newest are kept.
-            ("recent_comments", known) => {
-                let merged = crate::resource::merge_recent_comments(
-                    known.and_then(Value::as_array).into_iter().flatten(),
-                    value.as_array().into_iter().flatten(),
-                    Some(crate::resource::RECENT_COMMENTS),
-                );
-                facts.insert(name.into(), Value::Array(merged));
-            }
-            ("mentions", Some(Value::Array(known))) => {
-                let mut mentions = BTreeMap::<String, Value>::new();
-                for mention in known.iter().chain(value.as_array().into_iter().flatten()) {
-                    let Some(login) = mention.get("login").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let at = |mention: &Value| {
-                        mention.get("at").and_then(Value::as_str).map(str::to_owned)
-                    };
-                    if mentions
-                        .get(login)
-                        .is_none_or(|kept| at(mention) >= at(kept))
-                    {
-                        mentions.insert(login.to_owned(), mention.clone());
-                    }
-                }
-                let mut mentions = mentions.into_values().collect::<Vec<_>>();
-                mentions.sort_by_key(|mention| {
-                    std::cmp::Reverse(mention.get("at").and_then(Value::as_str).map(str::to_owned))
-                });
-                mentions.truncate(ITEM_MENTIONS);
-                mentions.sort_by_key(|mention| {
-                    mention
-                        .get("login")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                });
-                facts.insert(name.into(), Value::Array(mentions));
-            }
-            _ => {
-                facts.insert(name.into(), value.clone());
-            }
-        }
-    }
-    facts.insert("repository".into(), Value::String(repository.into()));
-    facts.insert("number".into(), Value::from(number));
-    let state = facts
-        .entry("state")
-        .or_insert_with(|| Value::String("open".into()))
-        .clone();
-    if field == "pull_requests" {
-        facts.entry("draft").or_insert_with(|| Value::Bool(false));
-        if state == "open" {
-            facts.insert("merged".into(), Value::Bool(false));
-        } else if seen.get("merged").is_none() && seen.get("state").is_some() {
-            facts.remove("merged");
-        }
-    }
-    facts
-}
-
-use crate::resource::newer_comment;
-
-/// The items of one repository collection whose recorded facts change with this observation.
-/// `current` names only the items the observation saw, each with only the facts it read; an
-/// item it did not see keeps its facts. `recorded` reads an item resource's latest facts.
-///
-/// An item resource that was never recorded falls back to the item in the previous repository
-/// facts, where builds before item resources kept every item, and a recorded resource takes
-/// what it lacks from there; such an item is recorded once even when nothing changed, so its
-/// resource holds every fact from then on. An item known to neither is new,
-/// unless the observation says it existed before the observer last looked (`"new": false`) or
-/// this is the repository's baseline. Only a new item, or a pull request at a new ready head,
-/// asks a subscription for a review or a triage.
-fn discovered_collection_items(
-    repository: &str,
-    field: &str,
-    previous: Option<&Value>,
-    current: &Value,
-    recorded: &mut dyn FnMut(&str) -> Option<Value>,
-) -> Vec<DiscoveredItem> {
-    let Some((_, segment, kind)) = REPOSITORY_COLLECTIONS
-        .iter()
-        .copied()
-        .find(|(name, _, _)| *name == field)
-    else {
-        return Vec::new();
-    };
-    // The first observation is the baseline. The first listing that names its repository ID is
-    // also the first complete listing: the earlier facts came from a first-page read, so the items
-    // this listing adds were missed, not opened. Either way its items become known without a
-    // delivery.
-    let baseline = previous.is_none()
-        || (current.get("repository_id").is_some()
-            && previous
-                .and_then(|value| value.get("repository_id"))
-                .is_none());
-    let Some(current_items) = current.get(field).and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let legacy_items = previous
-        .and_then(|value| value.get(field))
-        .and_then(Value::as_array);
-    current_items
-        .iter()
-        .filter_map(|item| {
-            let number = item.get("number")?.as_u64()?;
-            let subject = format!("{repository}/{segment}/{number}");
-            let resource = recorded(&subject);
-            let legacy = legacy_items
-                .and_then(|items| {
-                    items
-                        .iter()
-                        .find(|old| old.get("number").and_then(Value::as_u64) == Some(number))
-                })
-                .map(|old| Value::Object(item_facts(repository, field, number, None, old)));
-            // A resource recorded before items carried `head_sha` takes its head from the listing.
-            let prior = match (&resource, legacy) {
-                (Some(resource), Some(Value::Object(mut legacy))) => {
-                    legacy.extend(resource.as_object().cloned().unwrap_or_default());
-                    Some(Value::Object(legacy))
-                }
-                (Some(resource), _) => Some(resource.clone()),
-                (None, legacy) => legacy,
-            };
-            let prior = prior.as_ref();
-            let facts = Value::Object(item_facts(repository, field, number, prior, item));
-            if resource.as_ref() == Some(&facts) {
-                return None;
-            }
-            // Creation receipts establish identity and attribution, not observer state.
-            let observed_prior = prior.filter(|prior| prior.get("state").is_some());
-            let new_item =
-                observed_prior.is_none() && !baseline && item.get("new") != Some(&Value::Bool(false));
-            let deliver = match (field, observed_prior) {
-                ("pull_requests", Some(prior)) => pull_request_needs_review(Some(prior), &facts),
-                (_, Some(_)) => false,
-                ("pull_requests", None) => new_item && pull_request_needs_review(None, &facts),
-                _ => new_item,
-            };
-            let changed_fields = facts
-                .as_object()
-                .into_iter()
-                .flatten()
-                .filter(|(name, value)| {
-                    prior.and_then(|prior| prior.get(name.as_str())) != Some(*value)
-                })
-                .map(|(name, _)| name.clone())
-                .chain(
-                    prior
-                        .and_then(Value::as_object)
-                        .into_iter()
-                        .flat_map(|prior| {
-                            prior
-                                .keys()
-                                .filter(|name| facts.get(name.as_str()).is_none())
-                                .cloned()
-                        }),
-                )
-                .collect::<Vec<_>>();
-            Some(DiscoveredItem {
-                subject,
-                kind,
-                data_types: item_data_types(field, prior, &facts, &changed_fields),
-                changed_fields,
-                facts,
-                deliver,
-            })
-        })
-        .collect()
-}
 
 /// Item claims written before items carried `head_sha` still cite the repository listing they
 /// came from, and that listing names the head.
-fn listed_head_tx(
+pub fn listed_head_tx(
     connection: &Connection,
     item: Option<&Value>,
 ) -> rusqlite::Result<Option<String>> {
@@ -2641,144 +2279,6 @@ fn listed_head_tx(
         .and_then(|item| item.get("head"))
         .and_then(Value::as_str)
         .map(str::to_owned))
-}
-
-/// How a watch ended, when it did: the `subscription.watch-ended` claim for the watch that began
-/// at its `since`. Watching again begins a new watch.
-pub fn watch_ended_tx(
-    connection: &Connection,
-    subject: &str,
-    watch: &crate::model::WatchSpec,
-) -> Result<Option<Value>, St3Error> {
-    smallclaims::touched::note_read(|| subject.to_owned());
-    let since = watch.since_unix_ms.to_string();
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT body FROM claims WHERE subject=?1 AND kind='subscription.watch-ended'",
-        )
-        .map_err(internal)?;
-    let bodies = statement
-        .query_map([subject], |row| row.get::<_, String>(0))
-        .map_err(internal)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(internal)?;
-    Ok(bodies
-        .into_iter()
-        .filter_map(|body| serde_json::from_str::<Value>(&body).ok())
-        .map(|body| body["fields"].clone())
-        .find(|fields| fields.get("since_unix_ms").and_then(Value::as_str) == Some(since.as_str())))
-}
-
-/// End a watch: why, and the final wake that told its seat, if one did. Ending it twice records
-/// nothing more.
-pub fn end_watch_tx(
-    transaction: &rusqlite::Transaction<'_>,
-    origin: &str,
-    batch_id: Option<&str>,
-    subject: &str,
-    watch: &crate::model::WatchSpec,
-    reason: &str,
-    message: Option<&str>,
-) -> Result<bool, St3Error> {
-    if watch_ended_tx(transaction, subject, watch)?.is_some() {
-        return Ok(false);
-    }
-    let mut fields = json!({
-        "reason": reason,
-        "since_unix_ms": watch.since_unix_ms.to_string(),
-    });
-    if let Some(message) = message {
-        fields["message"] = Value::String(message.to_owned());
-    }
-    append_claim_tx(
-        transaction,
-        origin,
-        subject,
-        "subscription.watch-ended",
-        None,
-        &json!({"fields": fields}),
-        &[],
-        batch_id,
-    )
-    .map_err(claim_append_error)?;
-    Ok(true)
-}
-
-/// The seat that registered the comment or review `kind` `id` of a repository.
-pub fn github_post_agent_tx(
-    connection: &Connection,
-    locator: &str,
-    kind: &str,
-    id: u64,
-) -> Result<Option<String>, St3Error> {
-    let subject = crate::github_watch::github_post_subject(locator, kind, id);
-    let body = connection
-        .prepare_cached("SELECT body FROM claims WHERE subject=?1 AND kind='github.posted' LIMIT 1")
-        .map_err(internal)?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h2a701f6bec02 owner=st3_store::store TODO=trace-statement-and-value-representation */ [&subject], |row| row.get::<_, String>(0))
-        .optional()
-        .map_err(internal)?;
-    Ok(body
-        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-        .and_then(|body| body["fields"]["agent"].as_str().map(str::to_owned)))
-}
-
-/// The mission runs that published a `resource/mission-run/RUN/pull-request` naming this pull
-/// request, by URL or by repository and number, at the same head when both name one. An
-/// authoring mission publishes that resource when it opens the pull request.
-const AUTHORING_PULL_REQUEST_RUNS_QUERY: &str =
-    "SELECT subject, body FROM claims WHERE id IN (
-         SELECT id FROM claims WHERE kind='resource.observed'
-           AND subject LIKE 'resource/mission-run/%/pull-request'
-           AND json_extract(body, '$.fields.facts.url')=?1
-         UNION
-         SELECT id FROM claims WHERE kind='resource.observed'
-           AND subject LIKE 'resource/mission-run/%/pull-request'
-           AND json_extract(body, '$.fields.facts.repository')=?2
-           AND json_extract(body, '$.fields.facts.number')=?3
-     ) ORDER BY CANONICAL_ASC(claims)";
-
-fn authoring_pull_request_runs_tx(
-    connection: &Connection,
-    facts: &Value,
-) -> rusqlite::Result<Vec<String>> {
-    let url = facts.get("url").and_then(Value::as_str);
-    let repository = facts.get("repository").and_then(Value::as_str);
-    let number = facts.get("number").and_then(Value::as_u64);
-    if url.is_none() && (repository.is_none() || number.is_none()) {
-        return Ok(Vec::new());
-    }
-    let head = facts.get("head_sha").and_then(Value::as_str);
-    // An OR can scan the whole partial index. UNION locates matching claim IDs with one
-    // expression-index seek per identity, deduplicates dual matches, then orders only those
-    // claims with the same canonical order as the original query.
-    let mut statement =
-        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc5e29f33fe99 owner=st3_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(AUTHORING_PULL_REQUEST_RUNS_QUERY))?;
-    let candidates = statement
-        .query_map(params![url, repository, number], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut runs = Vec::new();
-    for (resource, body) in candidates {
-        let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        let authored_head = value
-            .pointer("/fields/facts/head_sha")
-            .and_then(Value::as_str);
-        if head.is_some() && authored_head.is_some() && head != authored_head {
-            continue;
-        }
-        let Some(run) = resource
-            .strip_prefix("resource/")
-            .and_then(|name| name.strip_suffix("/pull-request"))
-        else {
-            continue;
-        };
-        if !runs.iter().any(|known| known == run) {
-            runs.push(run.to_owned());
-        }
-    }
-    Ok(runs)
 }
 
 /// Fill the message index once, from the claims a store held before the index existed. The
@@ -2967,16 +2467,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn cached_idempotency_response<T: DeserializeOwned>(
-        &self,
-        key: &str,
-    ) -> Result<Option<T>> {
-        smallclaims::store::idempotency::cached_response(&self.readers.get(), key)?
-            .map(|response| serde_json::from_str(&response))
-            .transpose()
-            .map_err(Into::into)
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub fn cache_idempotency_response<T: Serialize>(
         &self,
@@ -2993,92 +2483,6 @@ impl Store {
             })
             .map_err(anyhow::Error::msg)??;
         Ok(())
-    }
-
-    pub fn apply_drained_revision(
-        &self,
-        run: &str,
-    ) -> Result<Option<RevisionSubmissionView>, St3Error> {
-        let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
-        let proposal = {
-            let connection = self.connection.write();
-            let active: u32 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM step_runs
-                     WHERE generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)
-                       AND status IN ('claimed','working','verifying')",
-                    [run_id],
-                    |row| row.get(0),
-                )
-                .map_err(internal)?;
-            if active != 0 {
-                return Ok(None);
-            }
-            let current_generation: String = connection
-                .query_row(
-                    "SELECT current_generation_id FROM mission_runs WHERE id=?1",
-                    [run_id],
-                    |row| row.get(0),
-                )
-                .map_err(internal)?;
-            for descendant in
-                descendant_mission_run_ids_tx(&connection, &current_generation).map_err(internal)?
-            {
-                let active: u32 = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM step_runs
-                         WHERE run_id=?1
-                           AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)
-                           AND status IN ('claimed','working','verifying')",
-                        [descendant],
-                        |row| row.get(0),
-                    )
-                    .map_err(internal)?;
-                if active != 0 {
-                    return Ok(None);
-                }
-            }
-            let proposal_id = connection
-                .query_row(
-                    /* sqlite-large-value: allow-for-now lv-hc891c2e1527a owner=st3_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-                        "SELECT p.id FROM revision_proposals p
-                     JOIN mission_runs r ON r.id=p.run_id
-                     JOIN claims created ON created.subject='revision-proposal/' || p.id
-                       AND created.kind='revision-proposal.created'
-                     WHERE p.run_id=?1 AND p.source_generation_id=r.current_generation_id
-                       AND p.status='draining'
-                     ORDER BY CANONICAL_ASC(created) LIMIT 1",
-                    ),
-                    [run_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(internal)?;
-            proposal_id
-                .map(|id| revision_proposal_view_tx(&connection, &id))
-                .transpose()
-                .map_err(internal)?
-        };
-        let Some(proposal) = proposal else {
-            return Ok(None);
-        };
-        let run = self.finish_proposal_cutover(
-            &proposal.id,
-            &proposal.actor,
-            &format!("revision-proposal:{}:drained", proposal.id),
-        )?;
-        let proposal = self
-            .revision_proposal(&proposal.id)
-            .map_err(internal)?
-            .expect("the applied proposal exists");
-        Ok(Some(RevisionSubmissionView {
-            provenance: self
-                .mission_provenance(&run.mission, &proposal.candidate_revision)
-                .map_err(internal)?,
-            status: "applied".into(),
-            mission_run: run,
-            proposal: Some(proposal),
-        }))
     }
 
     /// What changed after store index `index` and local observation `local`, and the indexes the
@@ -3292,23 +2696,6 @@ impl Store {
     ) -> Result<bool> {
         let connection = self.readers.get();
         fresh_context_ready_tx(&connection, step, actor, incarnation).map_err(Into::into)
-    }
-
-    /// Every reference in a publication that resolves neither in the publication nor here: a
-    /// pinned mission revision that is not stored, or a mission, agent or observer that nothing
-    /// declares. The publication routes refuse them, and their previews list them as blockers.
-    pub fn unresolved_references(
-        &self,
-        intent: &NormalizedIntent,
-    ) -> Result<Vec<String>, St3Error> {
-        let connection = self.readers.get();
-        crate::references::publication(
-            intent,
-            &ReferenceGraph {
-                connection: &connection,
-            },
-            &self.origin,
-        )
     }
 
     /// Every reference in the ready missions, current declarations and active runs of the graph
@@ -5174,20 +4561,6 @@ impl Store {
         transaction.rollback().unwrap();
     }
 
-    /// Drop the history an agreed checkpoint at `cut` would drop on this node.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn trim_checkpoint_for_test(&self, cut: u128) -> usize {
-        let plan = plan_drops(&self.checkpoint_sealed_set(cut).unwrap());
-        let mut writer = self.connection.write();
-        let transaction = writer.transaction().unwrap();
-        use smallclaims::store::checkpoint::{checkpoint_name, delete_dropped_rows_tx, record_checkpoint_tombstones_tx};
-        record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(cut), &plan.envelopes, &plan.claims)
-            .unwrap();
-        delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims).unwrap();
-        transaction.commit().unwrap();
-        plan.claims.len()
-    }
-
     pub fn status_for_subject_names_at(
         &self,
         subjects: BTreeSet<String>,
@@ -5840,7 +5213,7 @@ impl Store {
             .collect()
     }
 
-    fn signature_attention_items(&self) -> Result<Vec<AttentionItemView>> {
+    pub fn signature_attention_items(&self) -> Result<Vec<AttentionItemView>> {
         let mut items = Vec::new();
         for fault in self.signature_state_faults()? {
             items.push(AttentionItemView {
@@ -5983,7 +5356,7 @@ impl Store {
     // prefix/type/collation filter. Byte slicing preserves embedded NULs; the second
     // key also preserves SQLite blob-valued IDs without scanning other runs. The
     // prefix byte length follows the database encoding.
-    const SCHEDULE_ACTIVE_STARTED_RUN_QUERY: &str = "SELECT EXISTS(
+    pub const SCHEDULE_ACTIVE_STARTED_RUN_QUERY: &str = "SELECT EXISTS(
         SELECT 1 FROM claims AS started
         JOIN mission_runs AS run
           ON run.id IN (
@@ -6781,31 +6154,6 @@ fn ensure_awaited_mission_run_tx(
         ));
     }
     Ok(())
-}
-
-/// The claim that changes who a run reports to after it started. Its latest one replaces what
-/// the creation claim recorded; one with no `report_to` means the run reports to nobody.
-pub const RUN_REPORT_KIND: &str = "mission-run.report-to";
-
-/// The agent, stall limit and completion report that a report claim or a creation claim
-/// records, or `None` when it names no agent.
-pub fn run_report_fields(body: &Value) -> Option<(String, u64, bool, bool)> {
-    let fields = body.get("fields").unwrap_or(body);
-    Some((
-        fields.get("report_to")?.as_str()?.to_owned(),
-        fields
-            .get("stalled_after_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(crate::mission::DEFAULT_STALLED_AFTER_MS),
-        fields
-            .get("report_completed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        fields
-            .get("report_stalls")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-    ))
 }
 
 fn adopt_declared_mission_revision_tx(
@@ -7619,8 +6967,8 @@ pub struct DesiredRow {
     pub claim_id: String,
     pub body: String,
     pub member: Option<String>,
-    owner_run: Option<String>,
-    owner_generation: Option<String>,
+    pub owner_run: Option<String>,
+    pub owner_generation: Option<String>,
 }
 
 fn resolve_mission_run_inputs(
@@ -7712,7 +7060,7 @@ fn resolve_mission_run_inputs(
     Ok(resolved)
 }
 
-fn enforce_mission_run_capacity(
+pub fn enforce_mission_run_capacity(
     transaction: &Connection,
     requested: &MissionSpec,
 ) -> Result<(), St3Error> {
@@ -7804,7 +7152,7 @@ fn subject_owned_by(connection: &Connection, subject: &str, owner_run: &str) -> 
         .is_some_and(|owner| owner == owner_run)
 }
 
-fn desired_row_at(
+pub fn desired_row_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -8003,7 +7351,7 @@ fn unresolved_graph_references(
 
 /// The store as the reference checks read it.
 pub struct ReferenceGraph<'a> {
-    connection: &'a Connection,
+    pub connection: &'a Connection,
 }
 
 impl crate::references::Graph for ReferenceGraph<'_> {
@@ -8209,7 +7557,7 @@ fn validate_claim_cardinality(
     Ok(())
 }
 
-fn normalize_resource_observation(
+pub fn normalize_resource_observation(
     transaction: &Connection,
     input: &ClaimInput,
 ) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
@@ -8786,7 +8134,7 @@ pub fn insert_local_observation_tx(
     ))
 }
 
-fn latest_claim_of_kind_tx(
+pub fn latest_claim_of_kind_tx(
     transaction: &Transaction<'_>,
     subject: &str,
     kind: &str,
@@ -9742,7 +9090,7 @@ SELECT kind FROM kinds WHERE kind IS NOT NULL AND EXISTS(
     WHERE subject=?1 AND kind=kinds.kind AND store_index<=?2
 ) ORDER BY kind";
 
-fn has_unknown_claim_at(
+pub fn has_unknown_claim_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -10254,33 +9602,7 @@ fn cache_local_apply_receipt_tx(
     Ok(response)
 }
 
-/// The lease expiry of a step's newest replicated `work.claimed`, `work.renewed` or
-/// `work.progress` claim. Each kind's newest accepted time is one seek of the subject-kind
-/// index; only the claims accepted in those milliseconds are put in canonical order, so the read
-/// stays the same size however many reports and renewals the step has.
-fn last_replicated_lease_query() -> String {
-    let newest = |kind: &str| {
-        format!(
-            "SELECT '{kind}', (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_kind_accepted_index
-                 WHERE subject=?1 AND kind='{kind}'
-                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1)"
-        )
-    };
-    canonical_sql(&format!(
-        "WITH newest(kind, accepted) AS ({} UNION ALL {} UNION ALL {})
-         SELECT json_extract(claims.body, '$.fields.claim_expires_at_unix_ms')
-         FROM newest CROSS JOIN claims INDEXED BY claims_subject_kind_accepted_index
-           ON claims.subject=?1 AND claims.kind=newest.kind
-          AND length(claims.accepted_at_unix_ms)=length(newest.accepted)
-          AND claims.accepted_at_unix_ms=newest.accepted
-         ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-        newest("work.claimed"),
-        newest("work.renewed"),
-        newest("work.progress"),
-    ))
-}
-
-fn mark_replay_safe_receipt_tx(transaction: &Transaction<'_>, key: &str) -> Result<()> {
+pub fn mark_replay_safe_receipt_tx(transaction: &Transaction<'_>, key: &str) -> Result<()> {
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-hea1a64394fa8 owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET replay_safe=1 WHERE operation_id=?1",
         [opaque_cache_key(key)],
@@ -10395,7 +9717,7 @@ pub fn latest_actual(connection: &Connection, subject: &str) -> Result<Option<Va
     latest_actual_at(connection, subject, None)
 }
 
-fn selected_actual_source_at(
+pub fn selected_actual_source_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -10560,7 +9882,7 @@ fn nonowner_terminal_observation(
         )
 }
 
-fn latest_actual_at(
+pub fn latest_actual_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -11500,83 +10822,6 @@ pub fn harness_fold_at(
     }))
 }
 
-fn working_episode_query() -> String {
-    format!(
-        "SELECT claims.id, json_extract(claims.body, '$.fields.state'), claims.accepted_at_unix_ms
-         FROM claims INDEXED BY claims_incarnation_accepted_index
-         JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND claims.kind='harness.observed'
-           AND {INCARNATION_OF_CLAIM}=?2
-           AND json_extract(claims.body, '$.fields.incarnation_id')=?2
-           AND +claims.store_index<=?3
-         ORDER BY length(claims.accepted_at_unix_ms) DESC, claims.accepted_at_unix_ms DESC"
-    )
-}
-
-fn agent_working_since_at(
-    connection: &Connection,
-    agent: &str,
-    incarnation: &str,
-    snapshot_index: u64,
-) -> Result<Option<u128>> {
-    // Stream accepted-time groups backwards. Resolve complete canonical keys only for
-    // ties, before applying the state fold. Non-working ends the episode; null does not.
-    // Tie lookups must share the stream's cut, including for standalone callers.
-    let snapshot = if connection.is_autocommit() {
-        Some(connection.unchecked_transaction()?)
-    } else {
-        None
-    };
-    let since = (|| -> Result<Option<String>> {
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h82abc66857d0 owner=st3_store::store TODO=trace-statement-and-value-representation */ &working_episode_query())?;
-        let mut rows = statement.query_map(params![agent, incarnation, snapshot_index], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut group = Vec::<(String, Option<String>, String)>::new();
-        let mut since = None;
-        let fold_group = |group: &mut Vec<(String, Option<String>, String)>,
-                          since: &mut Option<String>|
-         -> Result<bool> {
-            if group.len() > 1 {
-                let mut keyed = group
-                    .drain(..)
-                    .map(|row| Ok((canonical::claim_key(connection, &row.0)?, row)))
-                    .collect::<Result<Vec<_>>>()?;
-                keyed.sort_by(|a, b| b.0.cmp(&a.0));
-                group.extend(keyed.into_iter().map(|(_, row)| row));
-            }
-            for (_, state, time) in group.drain(..) {
-                match state.as_deref() {
-                    Some("working") => *since = Some(time),
-                    Some(_) => return Ok(true),
-                    None => {}
-                }
-            }
-            Ok(false)
-        };
-        for row in &mut rows {
-            smallclaims::read_budget::check()?;
-            let row = row?;
-            if group.last().is_some_and(|previous| previous.2 != row.2)
-                && fold_group(&mut group, &mut since)?
-            {
-                return Ok(since);
-            }
-            group.push(row);
-        }
-        fold_group(&mut group, &mut since)?;
-        Ok(since)
-    })()?;
-    if let Some(snapshot) = snapshot {
-        snapshot.commit()?;
-    }
-    Ok(since.and_then(|time| time.parse().ok()))
-}
-
 fn claim_ids_at(
     connection: &Connection,
     subject: &str,
@@ -11851,7 +11096,7 @@ pub fn intent_leaves_tx(transaction: &Transaction<'_>, subject: &str) -> Result<
         .collect())
 }
 
-fn mission_definition_token_tx(
+pub fn mission_definition_token_tx(
     transaction: &Transaction<'_>,
     mission_id: &str,
 ) -> Result<Vec<String>> {
@@ -11956,7 +11201,7 @@ fn loop_item_round_tx(
 }
 
 /// A step run's own row, without its queue and wake enrichment.
-fn step_run_row_tx(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
+pub fn step_run_row_tx(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
     connection
         .query_row(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee,
@@ -12410,15 +11655,15 @@ fn attention_item_from_failure(request: AttentionRequestView) -> AttentionItemVi
     }
 }
 
-fn is_terminal_run_state(status: &str) -> bool {
+pub fn is_terminal_run_state(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled")
 }
 
-fn is_terminal_generation_state(status: &str) -> bool {
+pub fn is_terminal_generation_state(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "superseded")
 }
 
-fn operational_repair_plan_tx(
+pub fn operational_repair_plan_tx(
     connection: &Connection,
     snapshot_unix_ms: u128,
 ) -> Result<OperationalRepairPlan> {
@@ -13299,7 +12544,7 @@ fn insert_mission_deadline_tx(
 
 /// Admission is the first completion of the synthetic after-run step. The retained budget
 /// becomes one deadline in the same transaction, and later retries cannot restart its clock.
-fn arm_waiting_mission_deadline_tx(
+pub fn arm_waiting_mission_deadline_tx(
     transaction: &Transaction<'_>,
     step: &str,
     admitted_at_unix_ms: u128,
@@ -13476,7 +12721,7 @@ pub struct WorkActionWriterProbe {
 
 #[cfg(any(test, feature = "test-support"))]
 impl WorkActionWriterProbe {
-    fn start(key: &str) -> Self {
+    pub fn start(key: &str) -> Self {
         Self {
             key: key.to_owned(),
             scope: Some(smallclaims::sqlite::work::SqliteWorkScope::start()),
@@ -13529,7 +12774,7 @@ pub fn streamed_digest_matches_materialized_rows() {
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn a_receipt_measures_how_far_behind_this_node_is() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     for index in 0..1_200 {
         source
@@ -13613,7 +12858,7 @@ impl Store {
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn a_peer_that_says_how_many_envelopes_it_takes_gets_pages_that_size() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     for index in 0..5_000 {
         source
@@ -13665,7 +12910,7 @@ pub fn a_peer_that_says_how_many_envelopes_it_takes_gets_pages_that_size() {
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn a_catching_up_node_projects_once_per_interval_and_again_when_caught_up() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     for index in 0..1_800 {
         source
@@ -13743,7 +12988,7 @@ pub fn a_catching_up_node_projects_once_per_interval_and_again_when_caught_up() 
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
     let target = Store::open_memory("target").unwrap();
@@ -13791,7 +13036,7 @@ pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
     let target = Store::open_memory("target").unwrap();
@@ -13858,7 +13103,7 @@ pub fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_re
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
     let target = Store::open_memory("target").unwrap();
@@ -13938,7 +13183,7 @@ pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn batches_accepted_in_one_millisecond_extend_the_projection_without_a_replay() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
     let target = Store::open_memory("target").unwrap();
@@ -14158,7 +13403,7 @@ pub fn terminal_binding_replica_admission_rejects_a_foreign_actor() {
 
 /// Reapply this host's lease renewals that have not replicated yet after a projection replay,
 /// and forget each one whose lease has ended.
-fn reapply_local_work_lease_renewals_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn reapply_local_work_lease_renewals_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
     let mut statement = transaction
         .prepare(
             "SELECT subject, attempt, lease_owner, lease_incarnation,
@@ -14242,7 +13487,7 @@ fn replay_projects_kind(kind: &str) -> bool {
 /// mission one claim is about. Rebuilding one costs what its own history costs, not what the
 /// store's does.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Aggregate {
+pub enum Aggregate {
     RunTree(String),
     RunPart(String),
     Desired(String),
@@ -14344,7 +13589,7 @@ fn generation_run_tx(
 
 /// The root run of the mission run tree `subject` belongs to: a run, a generation, a step run
 /// or a revision proposal.
-fn run_tree_of_tx(
+pub fn run_tree_of_tx(
     transaction: &Transaction<'_>,
     subject: &str,
 ) -> Result<Option<String>, St3Error> {
@@ -14522,7 +13767,7 @@ fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, S
 /// them all in one writer hold of up to 10 s.
 ///
 /// A tree whose root has ended, or whose links have not all arrived, rebuilds whole.
-fn run_part_of_tx(
+pub fn run_part_of_tx(
     transaction: &Transaction<'_>,
     subject: &str,
 ) -> Result<Option<Aggregate>, St3Error> {
@@ -14574,7 +13819,7 @@ fn run_part_of_tx(
 /// Rebuild one part of a run tree whose root never ended (see `run_part_of_tx`): the root with
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
-fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), St3Error> {
+pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), St3Error> {
     #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
@@ -14802,7 +14047,7 @@ fn claims_in_replay_order_tx(
 /// Rebuild one mission run tree from nothing, as a full replay would, but from the tree's own
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
-fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), St3Error> {
+pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), St3Error> {
     #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
@@ -14932,12 +14177,6 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
     reapply_local_work_lease_renewals_tx(transaction)
 }
 
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    /// Run trees this thread rebuilt from their own claims.
-    static RUN_TREE_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Rebuild one desired subject, document or mission from its own claims in the replay's order.
 fn rebuild_base_aggregate_tx(
     transaction: &Transaction<'_>,
@@ -15032,7 +14271,7 @@ pub fn try_project_all_simple_replication_tx(
     .map(|decision| decision == IncrementalProjection::Projected)
 }
 
-fn try_project_simple_replication_tx(
+pub fn try_project_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     through: u64,
@@ -15627,7 +14866,7 @@ fn replay_graph_from_nothing_with_progress_tx(
     Ok(())
 }
 
-fn project_replicated_base_claims(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn project_replicated_base_claims(transaction: &Transaction<'_>) -> Result<(), St3Error> {
     project_replicated_base_claims_with_progress(transaction, &mut |_| {})
 }
 
@@ -16435,7 +15674,7 @@ pub fn project_mission_run_update(
     Ok(())
 }
 
-fn project_revision_proposal(
+pub fn project_revision_proposal(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
     fields: &Value,
@@ -16939,7 +16178,7 @@ pub fn select_replicated_mission(
     Ok(())
 }
 
-fn mission_state_name(state: &MissionState) -> &'static str {
+pub fn mission_state_name(state: &MissionState) -> &'static str {
     match state {
         MissionState::Draft => "draft",
         MissionState::Ready => "ready",
@@ -16947,7 +16186,7 @@ fn mission_state_name(state: &MissionState) -> &'static str {
     }
 }
 
-fn normalize_step_run(value: &str) -> String {
+pub fn normalize_step_run(value: &str) -> String {
     if value.starts_with("step-run/") {
         value.to_owned()
     } else {
@@ -16963,7 +16202,7 @@ pub fn normalize_seat(value: &str) -> String {
     }
 }
 
-fn normalize_mission_run(value: &str) -> String {
+pub fn normalize_mission_run(value: &str) -> String {
     if value.starts_with("mission-run/") {
         value.to_owned()
     } else {
@@ -16971,7 +16210,7 @@ fn normalize_mission_run(value: &str) -> String {
     }
 }
 
-struct RosterStepRow {
+pub struct RosterStepRow {
     subject: String,
     run: String,
     step: String,
@@ -16984,7 +16223,7 @@ struct RosterStepRow {
 }
 
 impl RosterStepRow {
-    fn seat_step(&self) -> SeatStep<'_> {
+    pub fn seat_step(&self) -> SeatStep<'_> {
         SeatStep {
             subject: &self.subject,
             run: &self.run,
@@ -17017,7 +16256,7 @@ const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assigne
      ORDER BY length(created_at_unix_ms), created_at_unix_ms, subject";
 
 pub struct RecordedSeatMove {
-    movement: QueueMove,
+    pub movement: QueueMove,
     pub view: SeatQueueMoveView,
 }
 
@@ -17079,41 +16318,6 @@ pub fn seat_queue_joins_query() -> String {
     )
 }
 
-/// The current generation's steps of actor `?1` (every actor when null), with finished and
-/// pending ones when `?2`, and agentless ones when `?3` and no actor is named. With `open_only`
-/// the finished steps are left out in SQL, word for word the predicate of
-/// `step_runs_open_index`, so the read covers the fleet's open steps and not every step it ran.
-pub fn work_at_snapshot_query(open_only: bool) -> String {
-    work_at_snapshot_query_of(open_only, "")
-}
-
-/// [`work_at_snapshot_query`] of only the step subjects in the JSON array `?4`, by their key.
-pub fn selected_work_at_snapshot_query(open_only: bool) -> String {
-    work_at_snapshot_query_of(open_only, "subject IN (SELECT value FROM json_each(?4)) AND")
-}
-
-fn work_at_snapshot_query_of(open_only: bool, selected: &str) -> String {
-    let open = if open_only {
-        "AND status NOT IN ('completed','failed','cancelled')"
-    } else {
-        ""
-    };
-    format!(
-        "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
-                lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
-         FROM step_runs
-         WHERE {selected} (agentless=0 OR (?3 AND ?1 IS NULL))
-           AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
-           AND (?1 IS NULL
-                OR assignee=?1
-                OR lease_owner=?1
-                OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1))
-           AND (?2 OR status NOT IN ('pending','completed','failed','cancelled'))
-           {open}
-         ORDER BY created_at_unix_ms, step_path"
-    )
-}
-
 /// [`work_at_snapshot_query`] for one named actor `?1`. The reconciler reads each running seat's
 /// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
@@ -17168,7 +16372,7 @@ pub fn named_run_probes() -> usize {
 
 /// [`seat_queue_inputs_tx`], keeping only `seats` when given: every move and join is still read
 /// in one pass, but only those seats' named runs are probed, one query each.
-fn seat_queue_inputs_of_tx(
+pub fn seat_queue_inputs_of_tx(
     connection: &Connection,
     agent: Option<&str>,
     only: Option<&BTreeSet<String>>,
@@ -17287,7 +16491,7 @@ fn seat_queue_inputs_of_tx(
     Ok(seats)
 }
 
-fn flatten_steps<'a>(
+pub fn flatten_steps<'a>(
     mission: &'a MissionSpec,
     inherited_selector: Option<WorkSelector>,
     inherited_constraints: &[String],
@@ -17385,7 +16589,7 @@ fn selector_agents(selector: &WorkSelector) -> &[String] {
     }
 }
 
-fn flatten_mission_step_specs(mission: &MissionSpec) -> Vec<&crate::model::StepSpec> {
+pub fn flatten_mission_step_specs(mission: &MissionSpec) -> Vec<&crate::model::StepSpec> {
     fn append<'a>(mission: &'a MissionSpec, output: &mut Vec<&'a crate::model::StepSpec>) {
         for id in &mission.display_order {
             let step = &mission.steps[id];
@@ -17400,7 +16604,7 @@ fn flatten_mission_step_specs(mission: &MissionSpec) -> Vec<&crate::model::StepS
     output
 }
 
-fn interpolate_selector(
+pub fn interpolate_selector(
     selector: &WorkSelector,
     variables: &BTreeMap<String, String>,
 ) -> Result<(Option<String>, Vec<String>, bool), St3Error> {
@@ -17497,7 +16701,7 @@ fn extend_loop_variables(
     }
 }
 
-fn interpolate_goals(
+pub fn interpolate_goals(
     goals: &[String],
     variables: &BTreeMap<String, String>,
 ) -> Result<String, St3Error> {
@@ -17780,7 +16984,7 @@ fn flattened_step_definition_hashes(mission: &MissionSpec) -> BTreeMap<String, S
 /// The seat whose claim the carried projection gives up: an unreported verifying step
 /// becomes ready in the new generation. A carried `ready` claim records it as `claimant`;
 /// other carried statuses record the lease they keep under the same field.
-fn dropped_claimant<'a>(old: &'a StepRunView, status: &str) -> Option<&'a str> {
+pub fn dropped_claimant<'a>(old: &'a StepRunView, status: &str) -> Option<&'a str> {
     (status == "ready" && matches!(old.status.as_str(), "claimed" | "working" | "verifying"))
         .then_some(old.claimant.as_deref())
         .flatten()
@@ -17791,7 +16995,7 @@ fn dropped_claimant<'a>(old: &'a StepRunView, status: &str) -> Option<&'a str> {
 /// keeps the step first, as a reorder never takes a held step's place. The
 /// lookup starts from the named steps, so its cost follows current work rather
 /// than every carried step in history.
-fn carried_claimants_tx<'a>(
+pub fn carried_claimants_tx<'a>(
     connection: &Connection,
     ready: impl IntoIterator<Item = &'a str>,
 ) -> Result<HashMap<String, String>> {
@@ -17824,28 +17028,7 @@ pub fn is_failed_terminal(status: &str, phase: &str) -> bool {
     status == "failed" && phase == "terminal"
 }
 
-/// A reopened run keeps its completed normal work and retries its failed steps. Work that the
-/// failure cancelled and every final step start again.
-pub fn retain_reopened_step_paths(
-    mission: &MissionSpec,
-    current: &[StepRunView],
-    compatible: &mut BTreeSet<String>,
-) {
-    let finals = flatten_mission_step_specs(mission)
-        .into_iter()
-        .filter(|step| step.finally)
-        .map(|step| step.path.as_str())
-        .collect::<BTreeSet<_>>();
-    compatible.retain(|path| {
-        current.iter().any(|step| {
-            &step.step == path
-                && (step.status == "failed"
-                    || (step.status == "completed" && !finals.contains(path.as_str())))
-        })
-    });
-}
-
-fn carried_step_projection(step: &StepRunView) -> (&str, bool) {
+pub fn carried_step_projection(step: &StepRunView) -> (&str, bool) {
     match step.status.as_str() {
         "verifying" if step.worker_reported => ("verifying", true),
         "verifying" => ("ready", false),
@@ -17853,28 +17036,9 @@ fn carried_step_projection(step: &StepRunView) -> (&str, bool) {
     }
 }
 
-/// Return the current-generation step that took the place of a superseded step, whoever holds it.
-fn current_generation_successor_tx(
-    connection: &Connection,
-    step: &StepRunView,
-) -> rusqlite::Result<Option<StepRunView>> {
-    let run_id = step.run.strip_prefix("mission-run/").unwrap_or(&step.run);
-    connection
-        .query_row(
-            "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
-                    lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
-             FROM step_runs
-             WHERE run_id=?1 AND step_path=?2 AND generation_id<>?3
-               AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
-            params![run_id, step.step, generation_id_from_subject(&step.generation)],
-            step_run_from_row,
-        )
-        .optional()
-}
-
 /// A carried step keeps the worker lease of the status it carries, so its worker continues in
 /// the successor generation without claiming again.
-fn carried_step_lease(
+pub fn carried_step_lease(
     carried: Option<&StepRunView>,
     status: &str,
 ) -> (Option<String>, Option<String>, Option<u128>) {
@@ -18015,11 +17179,11 @@ pub fn step_timeout_episode(subject: &str, attempt: u32, extension_ms: u64) -> S
     format!("attention/{}", &digest[..32])
 }
 
-fn enrich_step_queue(connection: &Connection, view: &mut StepRunView) -> rusqlite::Result<()> {
+pub fn enrich_step_queue(connection: &Connection, view: &mut StepRunView) -> rusqlite::Result<()> {
     enrich_step_queue_at(connection, view, now_ms())
 }
 
-fn enrich_step_queue_at(
+pub fn enrich_step_queue_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -18029,7 +17193,7 @@ fn enrich_step_queue_at(
 
 /// [`enrich_step_queue_at`] for the steps of one read: the pinned definitions already parsed for
 /// an earlier step of it are reused, not parsed again for each step.
-fn enrich_step_queue_cached(
+pub fn enrich_step_queue_cached(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -18061,7 +17225,7 @@ fn enrich_step_queue_cached(
 
 /// When st last nudged a held step's holder in this attempt: one indexed lookup of the step's
 /// newest `work.nudged` claim.
-fn enrich_step_nudge_at(
+pub fn enrich_step_nudge_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -18174,33 +17338,7 @@ pub fn enrich_step_summaries_at(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub fn enrich_step_queue_for_reconcile_at(
-    connection: &Connection,
-    view: &mut StepRunView,
-    snapshot_unix_ms: u128,
-) -> rusqlite::Result<()> {
-    enrich_step_queue_for_reconcile_cached(
-        connection,
-        view,
-        snapshot_unix_ms,
-        &mut PinnedDefinitions::default(),
-    )
-}
-
-fn enrich_step_queue_for_reconcile_cached(
-    connection: &Connection,
-    view: &mut StepRunView,
-    snapshot_unix_ms: u128,
-    definitions: &mut PinnedDefinitions,
-) -> rusqlite::Result<()> {
-    apply_effective_step_state(connection, view, snapshot_unix_ms)?;
-    enrich_step_definition_cached(connection, view, definitions)?;
-    adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
-    person_work::enrich_responses(connection, view)
-}
-
-fn pinned_generation_mission_tx(
+pub fn pinned_generation_mission_tx(
     connection: &Connection,
     generation: &str,
 ) -> rusqlite::Result<Option<MissionSpec>> {
@@ -18229,10 +17367,6 @@ fn pinned_generation_mission_tx(
     .transpose()
 }
 
-pub fn enrich_step_definition(connection: &Connection, view: &mut StepRunView) -> rusqlite::Result<()> {
-    enrich_step_definition_cached(connection, view, &mut PinnedDefinitions::default())
-}
-
 /// The pinned definitions one read has parsed, by generation. A generation's definition is the
 /// whole mission, so parsing it again for each of the run's steps costs the square of the run's
 /// size (4,200 steps: 170 s in a debug build).
@@ -18255,7 +17389,7 @@ impl PinnedDefinitions {
     }
 }
 
-fn enrich_step_definition_cached(
+pub fn enrich_step_definition_cached(
     connection: &Connection,
     view: &mut StepRunView,
     definitions: &mut PinnedDefinitions,
@@ -18275,7 +17409,7 @@ fn apply_step_definition(view: &mut StepRunView, mission: &MissionSpec) {
     }
 }
 
-fn fresh_context_ready_tx(
+pub fn fresh_context_ready_tx(
     connection: &Connection,
     step: &StepRunView,
     actor: &str,
@@ -18603,28 +17737,8 @@ pub fn step_execution_clock_at(
     ))
 }
 
-/// The lease that bounds the open execution interval of `subject`'s `attempt` as of
-/// `snapshot_unix_ms`, as its claims last named it, when an interval is open under one. A
-/// quiet renewal moves the step's lease without a claim, never this one.
-pub fn step_timing_lease_at(
-    connection: &Connection,
-    subject: &str,
-    attempt: u32,
-    snapshot_unix_ms: u128,
-) -> rusqlite::Result<Option<u128>> {
-    let (started, _, lease) =
-        fold_step_timing_open(&step_timing_events(connection, subject)?, attempt, snapshot_unix_ms);
-    Ok(started.and(lease))
-}
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static STEP_TIMING_FOLD_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static STEP_TIMING_ROWS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// A step's step and work events in canonical order, as its execution timing folds them.
-fn step_timing_events(
+pub fn step_timing_events(
     connection: &Connection,
     subject: &str,
 ) -> rusqlite::Result<Vec<(String, Value, u128)>> {
@@ -18647,7 +17761,7 @@ fn step_timing_events(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_ROWS_PARSED.with(|rows| rows.set(rows.get() + events.len()));
     Ok(events
         .into_iter()
@@ -18738,27 +17852,16 @@ pub fn fold_step_clock(
     }
 }
 
-/// [`fold_step_timing`]'s events folded up to `snapshot_unix_ms`: the open interval's start,
-/// if any, the time elapsed in closed intervals, and the lease the claims last named.
-fn fold_step_timing_open(
-    events: &[(String, Value, u128)],
-    attempt: u32,
-    snapshot_unix_ms: u128,
-) -> (Option<u128>, u128, Option<u128>) {
-    let fold = fold_step_clock_open(events, attempt, snapshot_unix_ms);
-    (fold.started, fold.elapsed, fold.lease_expires)
-}
-
 /// The events folded up to the snapshot, before the interval that is running is settled.
-struct ClockFold {
-    started: Option<u128>,
-    elapsed: u128,
-    lease_expires: Option<u128>,
+pub struct ClockFold {
+    pub started: Option<u128>,
+    pub elapsed: u128,
+    pub lease_expires: Option<u128>,
     paused_until: Option<u128>,
     waited: u128,
 }
 
-fn fold_step_clock_open(
+pub fn fold_step_clock_open(
     events: &[(String, Value, u128)],
     attempt: u32,
     snapshot_unix_ms: u128,
@@ -19054,7 +18157,7 @@ pub fn apply_effective_step_state_with_owner(
     Ok(())
 }
 
-fn active_step_blockers_tx(
+pub fn active_step_blockers_tx(
     connection: &Connection,
     subject: &str,
     snapshot_unix_ms: u128,
@@ -19075,7 +18178,7 @@ fn active_step_blockers_tx(
     Ok(blockers)
 }
 
-fn planning_session_view_tx(
+pub fn planning_session_view_tx(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<PlanningSessionView>> {
@@ -19200,7 +18303,7 @@ fn planning_session_view_tx(
     }))
 }
 
-fn descendant_mission_run_ids_tx(
+pub fn descendant_mission_run_ids_tx(
     connection: &Connection,
     generation_id: &str,
 ) -> rusqlite::Result<Vec<String>> {
@@ -19224,7 +18327,7 @@ fn descendant_mission_run_ids_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn terminalize_generation_steps_tx(
+pub fn terminalize_generation_steps_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     generation_id: &str,
@@ -19276,7 +18379,7 @@ fn terminalize_generation_steps_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn terminalize_run_steps_tx(
+pub fn terminalize_run_steps_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     run_id: &str,
@@ -19309,7 +18412,7 @@ fn terminalize_run_steps_tx(
     Ok(claim_ids)
 }
 
-fn terminalize_projected_generation_steps_tx(
+pub fn terminalize_projected_generation_steps_tx(
     transaction: &Transaction<'_>,
     generation_id: &str,
     reason: &str,
@@ -19430,7 +18533,7 @@ fn terminalize_projected_run_tree_tx(
     Ok(())
 }
 
-fn step_owner_is_terminal_tx(
+pub fn step_owner_is_terminal_tx(
     transaction: &Transaction<'_>,
     subject: &str,
 ) -> Result<bool, St3Error> {
@@ -19479,7 +18582,7 @@ fn step_owner_is_terminal_tx(
     ))
 }
 
-fn cancel_mission_run_tx(
+pub fn cancel_mission_run_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     run_subject: &str,
@@ -19680,7 +18783,7 @@ fn cancel_mission_run_tx(
     Ok(claim_ids)
 }
 
-fn cancel_descendant_mission_runs_tx(
+pub fn cancel_descendant_mission_runs_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     generation_id: &str,
@@ -19757,11 +18860,11 @@ fn cancel_descendant_mission_runs_tx(
     Ok(claim_ids)
 }
 
-fn mission_run_view_tx(connection: &Connection, run_id: &str) -> rusqlite::Result<MissionRunView> {
+pub fn mission_run_view_tx(connection: &Connection, run_id: &str) -> rusqlite::Result<MissionRunView> {
     mission_run_view_with_enrichment_tx(connection, run_id, true)
 }
 
-fn mission_run_view_for_reconcile_tx(
+pub fn mission_run_view_for_reconcile_tx(
     connection: &Connection,
     run_id: &str,
 ) -> rusqlite::Result<MissionRunView> {
@@ -19770,7 +18873,7 @@ fn mission_run_view_for_reconcile_tx(
 
 /// Replay only needs effective predecessor states and run variables. Presentation
 /// enrichment re-parses the complete mission and wake history for every step.
-fn mission_run_view_for_projection_tx(
+pub fn mission_run_view_for_projection_tx(
     connection: &Connection,
     run_id: &str,
 ) -> rusqlite::Result<MissionRunView> {
@@ -19793,7 +18896,7 @@ fn mission_run_view_for_projection_tx(
     Ok(view)
 }
 
-fn first_readiness_fault_tx(
+pub fn first_readiness_fault_tx(
     connection: &Connection,
     subject: &str,
 ) -> rusqlite::Result<Option<String>> {
@@ -19831,13 +18934,13 @@ fn mission_run_view_with_enrichment_tx(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum MissionRunEnrichment {
+pub enum MissionRunEnrichment {
     Presentation,
     Reconcile,
     Evaluation,
 }
 
-fn mission_run_view_and_definition_tx(
+pub fn mission_run_view_and_definition_tx(
     connection: &Connection,
     run_id: &str,
     enrichment: MissionRunEnrichment,
@@ -19956,7 +19059,7 @@ fn run_outcome_from_claim(
     })
 }
 
-const MISSION_RUN_HEADER_SELECT: &str =
+pub const MISSION_RUN_HEADER_SELECT: &str =
         "SELECT mission_runs.id, mission_runs.mission_id, mission_runs.initial_revision,
                 mission_runs.current_generation_id, run_generations.revision,
                 mission_runs.root_revision, mission_runs.root_run_id, mission_runs.parent_step_run,
@@ -19970,18 +19073,6 @@ const MISSION_RUN_HEADER_SELECT: &str =
          LEFT JOIN mission_run_after ON mission_run_after.run_id=mission_runs.id
          ORDER BY mission_runs.created_at_unix_ms, mission_runs.id";
 
-/// The headers of the runs still running, standing or blocked, read through the open runs index.
-pub fn open_mission_run_headers_query() -> String {
-    MISSION_RUN_HEADER_SELECT.replace(
-        "ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
-        &format!(
-            "WHERE {OPEN_MISSION_RUN}
-               AND mission_runs.status IN ('running','standing','blocked')
-             ORDER BY mission_runs.created_at_unix_ms, mission_runs.id"
-        ),
-    )
-}
-
 pub fn mission_run_header_tx(
     connection: &Connection,
     run_id: &str,
@@ -19993,7 +19084,7 @@ pub fn mission_run_header_tx(
     connection.query_row(/* sqlite-large-value: allow-for-now lv-hd46d340d6da4 owner=st3_store::store TODO=trace-statement-and-value-representation */ &query, [run_id], mission_run_header_from_row)
 }
 
-fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRunView> {
+pub fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRunView> {
     let id: String = row.get(0)?;
     let generation_id: String = row.get(3)?;
     let root_run_id: String = row.get(6)?;
@@ -20187,7 +19278,7 @@ pub fn loop_run_views_tx(
     Ok(loops)
 }
 
-fn revision_proposal_view_tx(
+pub fn revision_proposal_view_tx(
     connection: &Connection,
     proposal_id: &str,
 ) -> rusqlite::Result<RevisionProposalView> {
@@ -20230,7 +19321,7 @@ fn revision_proposal_view_tx(
     )
 }
 
-fn revision_cutover_name(cutover: &RevisionCutover) -> &'static str {
+pub fn revision_cutover_name(cutover: &RevisionCutover) -> &'static str {
     match cutover {
         RevisionCutover::RestartActive => "restart-active",
         RevisionCutover::WhenIdle => "when-idle",
@@ -20275,7 +19366,7 @@ pub mod tests;
 /// The projected tables the graph digest commits: digest label, table, digested columns in
 /// order, and row order. Triggers built from the same list bump `graph_generation` whenever one
 /// of these columns changes.
-const GRAPH_DIGEST_TABLES: [smallclaims::store::runtime::LegacyDigestTable; 6] = [
+pub const GRAPH_DIGEST_TABLES: [smallclaims::store::runtime::LegacyDigestTable; 6] = [
     (
         "desired",
         "desired",
@@ -20391,7 +19482,7 @@ pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn check_observer_completion(
+pub fn check_observer_completion(
     transaction: &Transaction<'_>,
     observer: &str,
     desired_revision: &str,
@@ -20430,7 +19521,7 @@ pub fn append_claim_with_fences(
     append_claim_with_subject_fences(graph, input, fence, event_runtime, None, None)
 }
 
-fn append_claim_with_subject_fences(
+pub fn append_claim_with_subject_fences(
     graph: &GraphStore,
     input: &ClaimInput,
     fence: Option<&crate::mailbox::Fence>,
@@ -21029,7 +20120,7 @@ pub fn replication_snapshot_moves_an_exclusive_inventory_into_its_successor() {
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn replication_snapshot_inserts_new_envelopes_in_canonical_order() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let target = Store::open_memory("z").unwrap();
     let initial = target.replication_snapshot().unwrap();
     target
@@ -21120,7 +20211,7 @@ pub fn replication_snapshot_keeps_compact_envelope_identifiers() {
 #[cfg(any(test, feature = "test-support"))]
 #[test]
 pub fn a_malformed_peer_hash_does_not_stop_replication() {
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     let target = Store::open_memory("target").unwrap();
     source.bind_fleet(FLEET).unwrap();
@@ -21248,13 +20339,7 @@ pub mod mailbox_lease_shared_seats;
 pub mod mailbox_lease_tests_shared_seats;
 
 #[cfg(any(test, feature = "test-support"))]
-pub mod mission_ivm_tests_shared_seats;
-
-#[cfg(any(test, feature = "test-support"))]
 pub mod native_resume_tests_shared_seats;
-
-#[cfg(any(test, feature = "test-support"))]
-pub mod operations_tests_shared_seats;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod person_work_tests_shared_seats;
@@ -21285,3 +20370,39 @@ pub mod trace_principal_tests_shared_seats;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod usage_period_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod arrangements_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod authored_pull_requests_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod card_fold_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod convergence_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod provenance_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod schedule_active_run_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod shared_seats_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod step_wait_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod work_renew_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod writer_bound_tests_shared_missions;

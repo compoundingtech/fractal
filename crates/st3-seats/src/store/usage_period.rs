@@ -1,8 +1,8 @@
 //! The part of `store::usage_period` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::usage_period::*;
-pub use st3_store::store::usage_period::{create_schema};
+pub use st3_missions::store::usage_period::*;
+pub use st3_missions::store::usage_period::{create_schema};
 
 pub fn boundary_rows(
     connection: &Connection,
@@ -62,8 +62,8 @@ pub fn boundary_rows(
 mod tests {
     use super::*;
     use std::time::Instant;
-    use st3_store::store::usage_period_tests_shared_seats::*;
-    use st3_store::store::usage_period_tests_shared_seats::{DAY, fixture};
+    use st3_missions::store::usage_period_tests_shared_seats::*;
+    use st3_missions::store::usage_period_tests_shared_seats::{DAY, fixture};
 
     fn oracle(store: &Store, since: u64, until: u64) -> (Vec<Value>, Value) {
         let connection = store.readers.get();

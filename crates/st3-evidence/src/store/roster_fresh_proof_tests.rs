@@ -7,7 +7,7 @@ use st3_seats::store::roster_fresh_proof_tests_shared::*;
 use st3_seats::store::roster_fresh_proof_tests_shared::{SUBJECT, unrelated};
 
 
-fn fixture(history: bool) -> (Store, u64, Arc<Vec<Value>>, u128) {
+pub fn fixture(history: bool) -> (Store, u64, Arc<Vec<Value>>, u128) {
     let store = Store::open_memory("node").unwrap();
     let _wake = store.start_agent_roster_refresher().unwrap();
     unrelated(&store);

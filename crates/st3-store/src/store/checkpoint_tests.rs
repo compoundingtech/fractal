@@ -2030,7 +2030,7 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
     use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
     use smallclaims::sqlite::WriterJob;
     use std::sync::atomic::Ordering;
-    const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
+    pub const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
     // Sealing prepares the next chunk on a read connection while the queued write runs. A
     // shared-memory store answers that contention with SQLITE_LOCKED, so this uses a file.
     let scratch = tempfile::tempdir().unwrap();
@@ -2407,31 +2407,6 @@ fn native_auth_checkpoint_keeps_current_episode_start_outside_history_window() {
     let gone = dropped(&plan_drops(&sealed.build()));
     assert!(!gone.contains(&start));
     assert!(gone.contains(&repeat));
-}
-
-#[test]
-fn a_kept_usage_fold_answers_as_a_fresh_fold_after_a_usage_trim() {
-    let store = Store::open_memory("alder").unwrap();
-    let old = now_ms() - 9 * DAY_MS;
-    for n in 0..6_u64 {
-        store.set_write_clock_at(old + u128::from(n) * DAY_MS / 8).unwrap();
-        store.append_claim(&input(AGENT, "harness.usage", Some(AGENT),
-            rollup("claude/aaaa", old + u128::from(n) * DAY_MS / 8, 100 * (n + 1)),
-            &format!("kept-rollup-{n}"))).unwrap();
-    }
-    store.set_write_clock_at(now_ms()).unwrap();
-    store.seal_local_batches().unwrap();
-    let subjects = [AGENT.to_owned()];
-    let kept = |store: &Store| store.usage_summaries_at(&subjects, None).unwrap().remove(AGENT);
-    let fresh = |store: &Store| store.usage_summary_at(AGENT, None, None).unwrap();
-    assert_eq!(kept(&store), fresh(&store));
-    // Trim without the hook that forgets kept reductions: the fold itself must stay right.
-    assert!(store.trim_checkpoint_for_test(now_ms() + 1_000) > 0, "the trim drops older rollups");
-    assert_eq!(kept(&store), fresh(&store));
-    store.append_claim(&input(AGENT, "harness.usage", Some(AGENT),
-        rollup("claude/aaaa", now_ms(), 900), "kept-rollup-after-trim")).unwrap();
-    assert_eq!(kept(&store), fresh(&store));
-    assert_eq!(kept(&store).unwrap().total_tokens, 900);
 }
 
 #[test]

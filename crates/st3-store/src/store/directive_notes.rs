@@ -190,7 +190,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-fn project(tx: &Transaction<'_>, person: &str, id: &str) -> Result<()> {
+pub fn project(tx: &Transaction<'_>, person: &str, id: &str) -> Result<()> {
     let key = canonical::sortable_key(&canonical::claim_key(tx, id)?);
     tx.execute(/* sqlite-large-value: allow-for-now lv-h88d1aeed0c6e owner=st3_store::store::directive_notes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_directive_notes(person,claim_id,head_key) VALUES(?1,?2,?3)
         ON CONFLICT(person) DO UPDATE SET claim_id=excluded.claim_id,head_key=excluded.head_key

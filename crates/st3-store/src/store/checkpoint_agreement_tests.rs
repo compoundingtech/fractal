@@ -2,7 +2,7 @@
 use super::*;
 use smallclaims::store::checkpoint_agreement::*;
 
-const FLEET: &str = "fleet/test";
+pub const FLEET: &str = "fleet/test";
 const CUT: u128 = 20 * DAY_MS;
 
 #[test]
@@ -101,7 +101,7 @@ fn startup_revisions_are_display_metadata_in_a_mixed_checkpoint_round() {
     );
 }
 
-fn claim(kind: &str, subject: &str, writer: &str, fields: Value) -> CheckpointClaim {
+pub fn claim(kind: &str, subject: &str, writer: &str, fields: Value) -> CheckpointClaim {
     CheckpointClaim {
         id: format!("{kind}:{subject}:{writer}:{fields}"),
         kind: kind.into(),

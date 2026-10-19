@@ -1,3 +1,6 @@
+use crate::DelegationStore;
+use crate::LanesStore;
+use crate::PersonWorkStore;
 use crate::EvidenceStore;
 use super::*;
 

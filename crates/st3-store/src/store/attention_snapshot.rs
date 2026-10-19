@@ -1583,7 +1583,7 @@ pub fn conversation_agent(
 }
 
 /// Whether a record with this idempotency key exists.
-fn recorded(connection: &Connection, key: &str) -> Result<bool> {
+pub fn recorded(connection: &Connection, key: &str) -> Result<bool> {
     Ok(connection
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
@@ -2792,75 +2792,5 @@ mod native_prompt_tests {
         assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
         assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
         assert_eq!(resolve(answered.store_index), expected);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::attention_snapshot_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
-use super::*;
-    use crate::model::ClaimInput;
-
-    /// Registered custom attention is admitted with its request, so an active custom card
-    /// leaves no future change, and only its recipient ever sees it.
-    #[test]
-    fn registered_custom_attention_has_no_future_change_once_active() {
-        let store = Store::open_memory("garden").unwrap();
-        let manifest: st3_schema::custom::Manifest = serde_json::from_str(include_str!(
-            "../../../../examples/st3/custom-review.json"
-        ))
-        .unwrap();
-        store
-            .register_custom_kind(&custom::RegistrationRequest {
-                manifest,
-                actor: "agent/garden/seed".into(),
-            })
-            .unwrap();
-        store
-            .append_claim(&ClaimInput {
-                subject: "custom/garden/review/v1/fence".into(),
-                kind: "custom.garden.review.v1.requested".into(),
-                actor: Some("agent/garden/seed".into()),
-                fields: serde_json::from_value(json!({
-                    "title": "Retain the seed history?",
-                    "detail": "Choose Keep or Discard.",
-                    "recipient": "person/lichen"
-                }))
-                .unwrap(),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        assert!(
-            store
-                .attention_snapshot(Some("person/lichen"), now_ms())
-                .unwrap()
-                .iter()
-                .any(|item| item.subject == "custom/garden/review/v1/fence")
-        );
-        assert_eq!(
-            store
-                .attention_collection_snapshot(Some("person/lichen"), now_ms())
-                .unwrap()
-                .1,
-            None
-        );
-        assert_eq!(
-            store.attention_collection_snapshot(None, now_ms()).unwrap().1,
-            None
-        );
-        parity(&store, Some("person/lichen"), now_ms());
-        parity(&store, None, now_ms());
-        parity(&store, Some("person/avery"), now_ms());
-        assert!(store
-            .attention_snapshot(Some("person/avery"), now_ms())
-            .unwrap()
-            .is_empty());
     }
 }

@@ -5,8 +5,8 @@ use smallclaims::store::checkpoint::claims_of_kind_in_order;
 use st3_schema::harness_questions::{
     Answer, OBSERVED, Question, RESOLVED, Receipt, Status, actor_key, answers, questions, subject,
 };
-pub use st3_store::store::harness_questions::*;
-pub use st3_store::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
+pub use st3_missions::store::harness_questions::*;
+pub use st3_missions::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
 
 /// A native question as the harness shows it, without its text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,8 +190,8 @@ impl HarnessQuestionsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::harness_questions_tests_shared_seats::*;
-    use st3_store::store::harness_questions_tests_shared_seats::{DAY, answer};
+    use st3_missions::store::harness_questions_tests_shared_seats::*;
+    use st3_missions::store::harness_questions_tests_shared_seats::{DAY, answer};
 
     fn observation() -> QuestionObservation {
         QuestionObservation {

@@ -10,6 +10,8 @@
 //! Every test owns an in-memory graph and a fake runtime, and runs without a tokio runtime so
 //! no observer polls a provider.
 
+use st3::MissionsStore;
+use st3::MissionsStoreCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

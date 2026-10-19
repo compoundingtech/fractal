@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::rollout::{Operation, Policy, Selection};
-pub use st3_store::store::rollouts::*;
-pub use st3_store::store::rollouts::{intake_held, message_allowed, retiring_ask_live};
+pub use st3_missions::store::rollouts::*;
+pub use st3_missions::store::rollouts::{intake_held, message_allowed, retiring_ask_live};
 
 pub trait RolloutsStore {
     /// The seat's current intake hold, if a rollout holds its independent mail.
