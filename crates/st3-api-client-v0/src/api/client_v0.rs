@@ -6411,6 +6411,7 @@ async fn terminal_stream_socket(
     mut first_frame: Option<FirstFrame>,
 ) {
     let subject = terminal_subject(&id);
+    let mut graph = state.store.subscribe_runtime_authority(&subject);
     let live_store = state.store.clone();
     let live_subject = subject.clone();
     let live_incarnation = expected_incarnation.clone();
@@ -6431,7 +6432,6 @@ async fn terminal_stream_socket(
         }
     };
     let terminal_id = client_detail_id("terminal", &id);
-    let mut graph = state.event_notify.subscribe();
     let mut screens =
         terminal_view::subscribe(&state.pty_root, &live.runtime_id, &live.incarnation_id);
     let first = tokio::time::Instant::now() + TERMINAL_FIRST_SCREEN_TIMEOUT;
