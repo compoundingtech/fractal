@@ -141,7 +141,7 @@ export const AllBadStale: Story = {
     expect(agentRefs('allBad')).toEqual([wire.id, futureUsageRef])
     const staleMarker = canvasElement.querySelector<HTMLElement>('[data-wf-roster-stale]')
     expect(staleMarker?.dataset.wfRosterStale).toBe('decode')
-    expect(staleMarker?.textContent).toBe('Last observed roster. Live updates pending')
+    expect(staleMarker?.textContent).toBe('Last observed roster')
 
     const notices = canvasElement.querySelectorAll<HTMLElement>('[data-wf-roster-decode]')
     expect(notices).toHaveLength(1)
