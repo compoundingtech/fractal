@@ -12,7 +12,7 @@ use crate::store::summary_list::{SummaryInputs, SummaryMachines, SummaryShared};
 use st3_ui_model::missions::Display;
 
 #[derive(Debug)]
-struct RosterNotPublished;
+pub struct RosterNotPublished;
 
 impl std::fmt::Display for RosterNotPublished {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,29 +34,11 @@ pub fn active(mission: &st3_ui_model::missions::Mission) -> bool {
     !mission.system && mission.word.is_active()
 }
 
-pub fn native(
-    state: &AppState,
-    session: &ClientSession,
-    request: &CollectionSubscribe,
-    snapshot: &ClientSnapshot,
-    now: u128,
-    windows: Option<&collection_windows::Windows>,
-    commits: Option<u64>,
-) -> anyhow::Result<Vec<Value>> {
-    let person = person_filter(session, request.person.as_deref())
-        .map_err(|e| anyhow::anyhow!(e.message))?;
-    let attention = state.store.attention_snapshot(person.as_deref(), now)?;
-    // What needs the person is what waits on their answer: an update asks nothing.
-    let alerts = attention.iter().filter(|item| item.is_alert()).count();
-    let shared = shared(state, session, request, snapshot, now, windows, commits, None)?;
-    Ok(vec![row(person.as_deref(), alerts, &shared)?])
-}
-
 /// What every selection's summary shares at `snapshot`: each mission and whether it is active,
 /// the working agents and the machine counts, of `machines` when they were read at `snapshot`.
 /// No count here depends on the selected person.
 #[allow(clippy::too_many_arguments)]
-fn shared(
+pub fn shared(
     state: &AppState,
     session: &ClientSession,
     request: &CollectionSubscribe,
@@ -166,7 +148,7 @@ fn shared(
 
 /// One selection's summary row: what needs `person` (its `alerts`) beside the counts every
 /// selection shares.
-fn row(person: Option<&str>, alerts: usize, shared: &SummaryShared) -> anyhow::Result<Value> {
+pub fn row(person: Option<&str>, alerts: usize, shared: &SummaryShared) -> anyhow::Result<Value> {
     let active = shared
         .missions
         .iter()
@@ -191,21 +173,6 @@ pub fn published_attention_alerts(rows: &[Value], person: Option<&str>) -> usize
         .filter(|row| person.is_none_or(|person| row["person_id"] == person))
         .filter(|row| row["alert"] == true)
         .count()
-}
-
-/// The row of `person` from the newest shared counts and attention publication, with the
-/// shared counts' cut and publication time: what the refresher publishes for that selection.
-/// `None` until both are published. Memory only: a window that opens a selection is served at
-/// once, before the refresher publishes it.
-pub fn published_row(
-    store: &Store,
-    person: Option<&str>,
-) -> Option<(u64, u128, Value)> {
-    let (shared, _) = store.summary_shared()?;
-    let attention = store.newest_attention_list().1?;
-    let alerts = published_attention_alerts(&attention.rows, person);
-    let row = row(person, alerts, &shared).ok()?;
-    Some((shared.cut, shared.published_at_unix_ms, row))
 }
 
 pub fn machine_counts(
@@ -244,20 +211,6 @@ pub fn machine_counts(
         }] += 1;
     }
     json!({"connected":counts[0],"indirect":counts[1],"offline":counts[2]})
-}
-
-pub fn retain_timestamp(items: &mut [Value], previous: &BTreeMap<String, Value>) {
-    for item in items {
-        if let Some(old) = item["id"].as_str().and_then(|id| previous.get(id))
-            && old["revision"] == item["revision"]
-            && old["person_id"] == item["person_id"]
-        {
-            item["updated_at"] = old["updated_at"].clone();
-            if !old["agents_as_of"].is_null() {
-                item["agents_as_of"] = old["agents_as_of"].clone();
-            }
-        }
-    }
 }
 
 /// How often the shared counts are computed again with nothing else changed: delivery

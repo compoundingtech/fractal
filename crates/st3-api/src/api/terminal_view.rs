@@ -96,7 +96,7 @@ impl Screen {
     }
 }
 
-type WatchKey = (PathBuf, String);
+pub type WatchKey = (PathBuf, String);
 
 static WATCHERS: LazyLock<Mutex<HashMap<WatchKey, Arc<watch::Sender<ViewState>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -134,7 +134,7 @@ pub fn subscribe(
 }
 
 /// One watcher handed to the emulation thread.
-struct WatchJob {
+pub struct WatchJob {
     key: WatchKey,
     sender: Arc<watch::Sender<ViewState>>,
     fallback_title: String,
