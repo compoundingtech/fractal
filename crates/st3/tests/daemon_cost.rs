@@ -3038,6 +3038,9 @@ async fn trim_cost(store: &Arc<Store>) -> Cost {
             .unwrap()
             .as_millis()
             + 1_000;
+        // Pacing only sleeps between chunks; the counts are the whole process's, so a rest would
+        // count whatever else runs meanwhile, and a larger store has more chunks to rest after.
+        store.set_trim_pause(Duration::ZERO);
         let plan = st3::store::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
         let rows = (plan.claims.len() + plan.envelopes.len()) as u64;
         let before = work::total();
