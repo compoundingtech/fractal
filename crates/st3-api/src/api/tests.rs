@@ -1101,6 +1101,14 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
     let resources = client_message_resources(&store, None, false, Some(seat)).unwrap();
     assert_eq!(resources.len(), 3);
     assert!(resources.iter().all(|resource| resource["delivery"]["state"] == "waiting"));
+    let now = client_now_ms();
+    let rows = store.client_messages_page(None, Some(seat), false, store.index().unwrap(), None, 20).unwrap();
+    assert_eq!(rows.len(), 3);
+    for (message, metadata, current) in rows {
+        let resource = client_message_resource(&store, message, &metadata, current, now).unwrap();
+        assert_eq!(resource["delivery"]["state"], "waiting");
+        assert_eq!(resource["delivery"]["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
+    }
     // A different message's clear cannot release the head or its queued successors.
     diagnostic(&messages[2].0, "first", "ready", "preparation succeeded; FIFO blocker cleared");
     assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)

@@ -14704,6 +14704,82 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn messages_paging_discovery_does_not_negotiate_the_feature() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for session in [
+            ClientSession::local(None).unwrap(),
+            ClientSession::local(Some("person/alex")).unwrap(),
+            ClientSession::for_tests("client/test", "person/alex", "unix"),
+            ClientSession::for_tests_scoped("client/test", "person/alex", &["read.projections"]),
+            ClientSession::pairing(),
+        ] {
+            assert!(!session.messages_paging);
+            let capability = capabilities(&state, &session).into_iter()
+                .find(|capability| capability["id"] == "messages-paging").unwrap();
+            assert_eq!(capability["version"], 2);
+            assert_eq!(capability["state"], if session.allows("read.projections") {
+                "granted"
+            } else {
+                "ungranted"
+            });
+            assert!(!session.messages_paging);
+        }
+    }
+
+    #[test]
+    fn messages_paging_requires_the_exact_request_feature_token() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (features, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("conversation-blocks.v1"), false),
+            (Some("messages-paging"), false),
+            (Some("messages-paging.v1"), false),
+            (Some("messages-paging.v20"), false),
+            (Some("prefix-messages-paging.v2"), false),
+            (Some("messages-paging.v2.extra"), false),
+            (Some("Messages-Paging.v2"), false),
+            (Some("messages-paging.v2"), true),
+            (Some("custom-subjects.v1, messages-paging.v2 , conversation-blocks.v1"), true),
+        ] {
+            let mut request = Request::builder().uri("/v1/client/messages");
+            if let Some(features) = features {
+                request = request.header("x-st3-features", features);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            assert_eq!(authenticate(&state, &request, "unix").unwrap().messages_paging,
+                expected, "{features:?}");
+        }
+    }
+
+    #[test]
+    fn messages_paging_repeated_feature_headers_use_only_the_first_value() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (first, second, expected) in [
+            ("conversation-blocks.v1", "messages-paging.v2", false),
+            ("", "messages-paging.v2", false),
+            ("messages-paging.v20", "messages-paging.v2", false),
+            ("messages-paging.v2", "conversation-blocks.v1", true),
+            ("custom-subjects.v1, messages-paging.v2", "", true),
+        ] {
+            let mut request = Request::builder()
+                .uri("/v1/client/messages")
+                .body(Body::empty()).unwrap();
+            request.headers_mut().append("x-st3-features", first.parse().unwrap());
+            request.headers_mut().append("x-st3-features", second.parse().unwrap());
+            assert_eq!(request.headers().get_all("x-st3-features").iter().count(), 2);
+            assert_eq!(
+                authenticate(&state, &request, "unix").unwrap().messages_paging,
+                expected,
+                "only the first feature header negotiates: {first:?}, {second:?}",
+            );
+        }
+    }
+
+    #[test]
     fn paired_authentication_uses_pairing_claims_and_honors_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -14747,6 +14823,22 @@ subscription "watch/source" {
                 .actor,
             "client/test-session"
         );
+        let session = authenticate(&state, &request, "fabric-loopback").unwrap();
+        assert!(!session.messages_paging);
+        assert!(!revalidate_session(&state, &session).unwrap().messages_paging);
+        let mut negotiated_request = Request::builder()
+            .uri("/v1/client/collections/stream")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .header("x-st3-features", "conversation-blocks.v1, messages-paging.v2")
+            .body(Body::empty())
+            .unwrap();
+        let session = authenticate(&state, &negotiated_request, "fabric-loopback").unwrap();
+        assert!(session.messages_paging);
+        let refreshed = revalidate_session(&state, &session).unwrap();
+        assert!(refreshed.messages_paging);
+        assert!(refreshed.conversation_blocks);
+        negotiated_request.headers_mut().remove("x-st3-features");
+        assert!(!authenticate(&state, &negotiated_request, "fabric-loopback").unwrap().messages_paging);
         state
             .store
             .append_claim(&ClaimInput {
@@ -20995,6 +21087,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
         };
         let mut remote_request = request.clone();
