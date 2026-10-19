@@ -5,7 +5,7 @@ export { DockedSplit, dockedSplitBounds, dockedSplitStorageKey, readDockedSize, 
 export { Pane, PaneHeader, PaneHeaderButton, PaneHeaderToggle, type PaneProps, type PaneTabItem } from './composition/Pane.tsx'
 export { ChromeControl } from './composition/ChromeControl.tsx'
 export type { ChromeControlProps } from './composition/ChromeControl.tsx'
-export { NarrowSheet, NarrowActionRow } from './composition/NarrowLayout.tsx'
+export { NarrowSheet, NarrowActionRow, NarrowLayoutContext } from './composition/NarrowLayout.tsx'
 export { SidebarAgentRow, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
 export { SidebarTree } from './sidebar/SidebarTree.tsx'
 export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'

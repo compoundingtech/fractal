@@ -22,6 +22,7 @@ import { readingColumnStyles } from '../reading-column.stylex'
 import { observeUserMessageOverflow, TranscriptActiveContext } from './user-message-overflow'
 import { TranscriptSearch } from './TranscriptSearch'
 import { useClockLabel } from '../../time/clock'
+import { NarrowLayoutContext } from './NarrowLayout'
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -316,6 +317,7 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
 export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true }: TranscriptProps) {
   const scrollId = React.useId()
+  const narrow = React.useContext(NarrowLayoutContext)
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. A child effect runs before its provider's adoption effect, so
@@ -383,7 +385,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   const headerStatus = <>
     {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
     {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
-    {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><RunElapsed startedAt={running.work.startedAt} now={now} /></>}
+    {running !== undefined && <>{!narrow && <div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div>}<RunElapsed startedAt={running.work.startedAt} now={now} /></>}
   </>
   return <TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
