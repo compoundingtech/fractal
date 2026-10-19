@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, fullCases } from './kit-play-commit-set.mjs'
+import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
 
@@ -26,6 +26,9 @@ const option = (name, allowed, fallback) => {
 }
 const set = option('KIT_PLAY_SET', ['all', 'critical', 'commit'], 'all')
 const a11y = option('KIT_PLAY_A11Y', ['on', 'off'], 'on')
+// The strict case policy is the kit's own. Only the gate's fixture builds, whose tiny index has none of
+// its stories, supply theirs as a JSON list of [id, cases] pairs; an empty value is unset.
+const overrides = process.env.KIT_PLAY_CASE_OVERRIDES ? new Map(JSON.parse(process.env.KIT_PLAY_CASE_OVERRIDES)) : FULL_CASE_OVERRIDES
 const maxSeconds = process.env.KIT_PLAY_MAX_SECONDS ? Number(process.env.KIT_PLAY_MAX_SECONDS) : null
 if (maxSeconds !== null && !(Number.isFinite(maxSeconds) && maxSeconds > 0)) throw new Error('KIT_PLAY_MAX_SECONDS must be a positive number of seconds')
 // Only the full set is sharded; the critical and per-commit sets run whole on one runner.
@@ -86,6 +89,7 @@ const writeReceipt = async () => {
     headSha: process.env.GITHUB_SHA,
     set, a11y, maxSeconds, overBudget,
     stories: ids.length, expectedCases, cases: rows.length, workers, omitted,
+    caseOverrides: Object.fromEntries([...overrides].filter(([id]) => fullIds.includes(id))),
     passed: rows.filter(row => row.pass).length, failed: rows.filter(row => !row.pass).length,
     playMinutes: elapsedSeconds / 60,
     storybookBuildSeconds: Number(process.env.KIT_STORYBOOK_BUILD_SECONDS ?? 0),
@@ -111,15 +115,18 @@ try {
   if (!response.ok) throw new Error(`Storybook index: HTTP ${response.status}`)
   // Validate the complete index; fullIds is the selected set's inventory, which the union gate
   // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
-  fullIds = storyIdsFromIndex(await response.json(), set === 'all' ? {} : { tag: 'critical' }).toSorted()
+  const index = await response.json()
+  fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
+  validateCaseOverrides(index.entries, overrides)
   ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
   let cases
   if (set === 'commit') {
-    const selection = commitSetCases(ids)
+    const selection = commitSetCases(ids, { overrides })
     ;({ ids, cases } = selection)
     omitted = { stories: selection.omittedStories, cases: selection.omittedCases }
   } else {
-    cases = fullCases(ids)
+    cases = fullCases(ids, overrides)
+    omitted = { stories: ids.filter(id => overrides.get(id)?.length === 0), cases: ids.length * 4 - cases.length }
   }
   expectedCases = cases.length
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
