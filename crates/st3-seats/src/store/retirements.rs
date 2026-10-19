@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{LifecycleUnavailableReason, MessageSendRefusal};
-pub use st3_store::store::retirements::*;
-pub use st3_store::store::retirements::{KIND, SCHEMA, admit_recipient, create_selection_triggers, overlay_row, project_subject, record, refuse_declaration, terminal_selection, writer_required};
+pub use st3_missions::store::retirements::*;
+pub use st3_missions::store::retirements::{KIND, SCHEMA, admit_recipient, create_selection_triggers, overlay_row, project_subject, record, refuse_declaration, terminal_selection, writer_required};
 
 fn check_registry(
     connection: &Connection,
@@ -167,8 +167,8 @@ impl RetirementsStore for Store {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-    use st3_store::store::fleet_admission_tests_shared_seats::*;
-    use st3_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
+    use st3_missions::store::fleet_admission_tests_shared_seats::*;
+    use st3_missions::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 
     #[test]
     fn previous_registries_retain_unknown_kind_and_field_and_upgrade_admits_original_claim() {
@@ -277,8 +277,8 @@ mod registry_tests {
 mod tests {
     use super::*;
     use std::sync::Barrier;
-    use st3_store::store::retirements_tests_shared_seats::*;
-    use st3_store::store::retirements_tests_shared_seats::{ACTOR, SUBJECT, send};
+    use st3_missions::store::retirements_tests_shared_seats::*;
+    use st3_missions::store::retirements_tests_shared_seats::{ACTOR, SUBJECT, send};
 
     /// The part of st3-store's producer guard for the message producers that moved up with this crate.
     #[test]
@@ -287,7 +287,7 @@ mod tests {
         assert!(source.contains("append_claim_tx(") && source.contains("\"message.sent\""));
     }
 
-    fn declare(store: &Store) -> String {
+    pub fn declare(store: &Store) -> String {
         let source = "version 2\nagent \"example/retiring\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
         let intent = crate::parse_intent(source, store.origin()).unwrap();
         store.apply_internal(&intent, "retirement-fixture").unwrap();

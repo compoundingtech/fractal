@@ -69,9 +69,3 @@ impl AdmissionState {
         holder
     }
 }
-
-#[cfg(test)]
-mod tests {
-    
-
-}

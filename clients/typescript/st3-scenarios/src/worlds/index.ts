@@ -1,6 +1,7 @@
 import type { WorldDefinition } from '../kit/world.ts'
 import { ciFailingFix } from './ciFailingFix.ts'
 import { empty } from './empty.ts'
+import { failedSyncArrangementsAbsent } from './failedSyncArrangementsAbsent.ts'
 import { failedSyncCapabilityAbsent } from './failedSyncCapabilityAbsent.ts'
 import { failedSyncCursorGap } from './failedSyncCursorGap.ts'
 import { failedSyncForbidden } from './failedSyncForbidden.ts'
@@ -44,6 +45,7 @@ export const worldDefinitions: readonly WorldDefinition[] = [
   failedSyncSubscriptionError,
   failedSyncSubscriptionLimitLegacy,
   failedSyncCapabilityAbsent,
+  failedSyncArrangementsAbsent,
   failedSyncRateLimited,
   failedSyncCursorGap,
   failedSyncPageCursorExpired,
