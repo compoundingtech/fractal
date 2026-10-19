@@ -649,7 +649,7 @@ export const fractalWebStoreCache = {
 /**
  * The web lane's complete devShell closure and `print-dev-env` script. An exact derivation
  * identity covers transitive toolchain inputs without invalidating on unrelated flake edits.
- * No prefix restore: a different identity is always a miss.
+ * No prefix restore: a different identity is always a miss. Only protected-main upkeep fills it.
  */
 export const fractalWebShellEnv = {
   CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell',
@@ -770,11 +770,6 @@ export const fractalWebJobs = {
           'if-no-files-found': 'ignore',
         },
       },
-      // Only a pull request can read what it saves; merge groups wait for main upkeep's entry.
-      ...[
-        { name: 'Fill the web shell closure', shell: 'bash', run: 'bash scripts/ci-web-shell fill', env: fractalWebShellEnv },
-        { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
-      ].map((step) => ({ ...step, 'continue-on-error': true, if: "${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}" })),
     ],
   },
   'fractal-web': {

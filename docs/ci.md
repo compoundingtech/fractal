@@ -597,7 +597,7 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
-  `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
+  `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
   and `.github/repo-settings.json*`.
@@ -670,11 +670,9 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `run` exec `nix develop .#web -c ...` instead. Bump the key's format version when changing
   the cached representation or restore semantics.
   Trust: the restored entry supplies store paths and a shell script that the job executes.
-  Main upkeep's `warm-fractal-web` fills the main-scoped entry. A pull request that misses saves
-  the entry under its own ref, only for `pull_request` events; this is a deliberate exception
-  to "only Main upkeep saves caches". GitHub scopes an entry to its ref, so a pull request's own
-  entry is only ever read by that pull request: no other pull request, merge group or main reads
-  it. Merge groups never save and wait for Main upkeep's entry.
+  Only protected-main upkeep's `warm-fractal-web` fills the main-scoped entry. Pull requests
+  and merge groups restore that exact entry when available and never publish shell copies.
+  A new web identity uses the cold-shell fallback until main upkeep has populated its entry.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.

@@ -6,6 +6,6 @@
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
   "compatibility": { "status": "none", "detail": "The versioned web-shell cache uses exact derivation keys without prefix restoration. Restored entries must record the expected identity; mismatched or incomplete entries fall back to nix develop. Real transitive web toolchain changes invalidate the cache." },
   "downtime": { "status": "none", "detail": "None." },
-  "manual": { "status": "none", "detail": "No manual step; main upkeep and pull request runs populate the new cache format." },
+  "manual": { "status": "none", "detail": "No manual step; only protected-main upkeep populates the new cache format. Pull requests and merge groups remain restore-only." },
   "recovery": { "status": "none", "detail": "A cache miss evaluates the current web shell normally." }
 }

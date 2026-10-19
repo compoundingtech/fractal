@@ -269,12 +269,14 @@ assert "needs.genie-freshness.result == 'success'" in execution
 assert "bash scripts/ci-web-shell run bash scripts/ci-fractal-web" in execution, "the lanes run in the cached web shell"
 assert "nix develop .#web -c" in (root / "scripts/ci-web-shell").read_text(), "a missing shell cache falls back to evaluating the flake"
 assert "actions/cache/restore@" in execution
-# Main upkeep publishes the shared caches. The one save here fills the web shell closure for a pull
-# request whose flake inputs changed, so that its own later runs hit; it is scoped to that pull request.
-saves = re.findall(r"(?ms)^      - name: ([^\n]*)\n(?:(?!^      - ).)*?uses: actions/cache/save@(?:(?!^      - ).)*", execution)
-assert saves == ["Save the web shell closure"], saves
-save = execution[execution.index("      - name: Save the web shell closure"):]
-assert "github.event_name == 'pull_request'" in save and "steps.web-shell.outputs.cache-hit != 'true'" in save
+# Execution only restores: PR-scoped shell copies consume repository quota but
+# cannot warm merge groups. Protected-main upkeep remains the sole shell writer.
+assert "actions/cache/save@" not in execution and "actions/cache@" not in execution
+assert "bash scripts/ci-web-shell fill" not in execution
+upkeep = (root / ".github/workflows/main-upkeep.yml").read_text()
+assert "name: Save the web shell closure" in upkeep
+assert "name: Save the pnpm store" in upkeep
+assert "bash scripts/ci-web-shell fill" in upkeep
 assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()

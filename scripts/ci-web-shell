@@ -3,7 +3,7 @@
 # `key` evaluates only its derivation identity, without realizing the tools. Unrelated Rust flake
 # edits therefore preserve the entry; every transitive shell input and shellHook remains covered.
 # Bump the format version in `key` whenever the cached representation or restore semantics change.
-# Main upkeep fills the shared entry; a pull request that misses fills its own ref.
+# Only protected-main upkeep fills the shared entry.
 # A missing, incomplete or differently identified entry falls back to `nix develop .#web`.
 set -euo pipefail
 cmd=${1:?usage: scripts/ci-web-shell key|fill|run COMMAND...}
