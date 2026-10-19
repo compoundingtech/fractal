@@ -1,14 +1,27 @@
 import type { StorybookConfig } from '@storybook/react-vite'
 import tailwindcss from '@tailwindcss/vite'
-import stylex from '@stylexjs/unplugin'
+import { createStylexVitePlugins } from '../../../apps/fractal-web/scripts/stylex.mjs'
 
 const config: StorybookConfig = {
-  // The live roster story replays captured daemon payloads through the SDK decode.
-  stories: ['../src/**/*.stories.tsx', '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx', '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx'],
+  stories: [
+    '../src/**/*.stories.tsx',
+    '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx',
+    '../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx',
+    // The live roster story replays captured daemon payloads through the SDK decode.
+    '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx',
+  ],
   staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],
   core: { disableTelemetry: true },
-  viteFinal: async (config) => ({ ...config, plugins: [...(config.plugins ?? []), tailwindcss(), stylex.vite({ useCSSLayers: false })] }),
+  viteFinal: async (config) => ({
+    ...config,
+    plugins: [
+      ...(config.plugins ?? []),
+      tailwindcss(),
+      // Keep compiled rules on the eager preview entry, not a lazy app pane's CSS asset.
+      ...createStylexVitePlugins({ entries: [new URL('./preview.ts', import.meta.url).pathname] }),
+    ],
+  }),
 }
 export default config
