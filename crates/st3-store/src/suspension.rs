@@ -434,19 +434,6 @@ pub fn blockers(store: &Store, subject: &str, incarnation: &str) -> Result<Vec<S
     Ok(blocking)
 }
 
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::suspension::shared_tests_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::suspension::shared_tests_seats::{continuation_claim};
-
-
-    
-
-}
 
 #[cfg(test)]
 mod background_job_tests {
