@@ -26,6 +26,7 @@ kdl = "6"
 libc = "0.2"
 libghostty-vt = "=0.2.1"
 notify = "8"
+parking_lot = "0.12"
 opentelemetry = "0.30"
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
