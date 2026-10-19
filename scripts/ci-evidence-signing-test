@@ -322,6 +322,32 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'source_inputs' not in project_run(dict(PROJECT_BASE_SHA=''))[1]['inputs'], 'no base commit, no key'
     print('passed: source_inputs is signed only when the base evidence-verify projects a well-formed key; every other case is an exact-tree note')
 
+    # --- the linux-gate aggregate carries its input key too; its job sets no PROJECT_BASE_SHA, so the base comes from the event payload
+    def aggregate_run(payload, extra=None):
+        event = tmp / 'event.json'
+        event.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        env_ = dict(NEEDS_JSON=json.dumps({'linux-gate': {'result': 'success'}, 'linux-tests': {'result': 'success'}}),
+                    GITHUB_EVENT_NAME='merge_group', GITHUB_EVENT_PATH=str(event), GITHUB_REPOSITORY='example/repo', GITHUB_SHA='d' * 40)
+        env_.update(extra or {})
+        done = subprocess.run([sys.executable, str(stub_dir / 'ci-evidence-signing'), 'aggregate', str(out)], capture_output=True, text=True,
+                              env=dict(BASE, **env_))
+        return done, json.loads(out.read_text()) if done.returncode == 0 else None
+
+    with_verify(f'import json,sys\njson.dump(sys.argv[1:], open({str(seen)!r}, "w"))\nprint(json.dumps({{"source_inputs": {KEY!r}}}))\n')
+    done, facts = aggregate_run({'merge_group': {'base_sha': 'c' * 40}})
+    assert done.returncode == 0 and facts['inputs']['source_inputs'] == KEY, done.stdout + done.stderr
+    assert json.loads(seen.read_text()) == ['--project', '--check', 'linux-gate', '--revision', 'HEAD', '--policy-from', 'c' * 40, '--repository', 'example/repo']
+    aggregate_run({'pull_request': {'base': {'sha': 'e' * 40}}})
+    assert json.loads(seen.read_text())[6] == 'e' * 40, 'a pull request projects with its base'
+    aggregate_run({}, dict(GITHUB_EVENT_NAME='push'))
+    assert json.loads(seen.read_text())[6] == 'd' * 40, 'a push to main projects with the commit itself, as PROJECT_BASE_SHA does'
+    aggregate_run({'merge_group': {'base_sha': 'c' * 40}}, dict(PROJECT_BASE_SHA='f' * 40))
+    assert json.loads(seen.read_text())[6] == 'f' * 40, 'PROJECT_BASE_SHA wins when the step sets it'
+    for payload in ('not json', {'merge_group': {'base_sha': 'not-a-sha'}}, '[]'):
+        done, facts = aggregate_run(payload, dict(GITHUB_SHA=''))
+        assert done.returncode == 0 and 'source_inputs' not in facts['inputs'], (payload, 'an unreadable base is no base: an exact-tree note')
+    print('passed: the aggregate note signs its input key, with the base from PROJECT_BASE_SHA or the event payload, and none when that is unreadable')
+
     # --- a job whose gate said skip makes no note even if its logs and steps look like a success
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='false')).returncode == 0
     gated = helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='true'))
