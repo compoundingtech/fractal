@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `ec50c24743da46807b7a41a95cf179371461f19b98fba3f9a60a69065251130c`
+Storage digest: `b0615c71ded03b34c11349eacf89e30b660ed25713207561b92eaa301abcf3ae`
 
 ## Subject families
 
@@ -309,6 +309,36 @@ Resolved ledger rows, prepared bindings and result proof remain stored indefinit
 
 The old version-18 binary refuses version 19. Do not lower `user_version` for rollback: drain starts, revoke pending operations and verify that all producers and operation-owned runtimes have ended, preserve the ledger and runtime generation records as evidence, then restore a consistent pre-upgrade database and runtime state with their matching binary under Operations supervision. New exec generation records contain operation provenance that older runtimes cannot read; restoring only SQLite is insufficient. A claim-only restore does not carry cancellation tombstones and cannot safely authorize starting old unresolved producers. Roll forward if closure cannot be proved. See [seat lifecycle](../seat-lifecycle.md#pending-runtime-starts).
 
+## Immutable claim positions
+
+`claim_positions` holds each claim's position in its batch, the canonical order's fifth
+component. Admission stores it: a replicated claim takes its record's wire position before the
+claim row is inserted, and a local claim takes the number of claims its batch already holds,
+which is where sealing places its record. A later record of the same claim can only lower the
+value, so the stored position is the least position over every record the member has held and
+does not depend on arrival order. For claims stored before this table existed, triggers store
+the legacy value (least record position, else arrival count among surviving siblings) just
+before deleting an earlier sibling, deleting a record or changing a record's claim or position
+could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
+never deleted. No history backfill runs at open; a claim without a row and without any removal
+since keeps the legacy value, which equals what would be stored.
+
+## Retired identity ledger
+
+`retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
+checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
+`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
+background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
+per background writer loan with its cursor in `meta`, resting outside the loan for
+max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
+identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
+stays retired and is also labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
+the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
+would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
+equates with a BLOB.
+
 ## Local message selectors
 
 The client message list pages through `local_client_message_selectors_v1`, a SQLite projection kept only on the local node. It is derived from message claims and from the `desired` projection, so it is not part of this registry. It adds no subject family, resource kind, claim kind or claim field. The registry digest and the replication compatibility digest therefore stay unchanged. Nodes with and without this table exchange claims as before. The `_v1` suffix is the projection version: a layout change uses a new table name, never an edit to this one in place.
@@ -390,17 +420,3 @@ A store with no completed selector cut records resumable initialization metadata
 One worker-owned guard saves and disables SQLite automatic WAL checkpoints for the entire initial online backfill, including the foreground writes interleaved between background loans. The daemon WAL recycler owns checkpoint scheduling. Completing the cut, returning an error or unwinding drops the guard and restores the incoming policy; an explicitly disabled policy remains disabled. Explicit benchmark rebuilds additionally perform a passive checkpoint outside their chunk transactions. Checkpoint cost must be reported separately from commit-inclusive chunk duration.
 
 Each transaction records backfill progress in `meta` under `client_message_selectors_v1_backfill` as `{"cut": INITIAL_INDEX, "phase": "clear" | "headers" | "pending", "after": LAST_SUBJECT}`; `client_message_selectors_v1_fold` separately records any unfinished subject fold. A restart resumes both instead of rescanning completed work. A populated store opened with pending rows queued reconciles them without discarding its headers or resetting its epoch. The final transaction writes the completed cut `client_message_selectors_v1_cut` and deletes the backfill marker together. Until then, negotiated v2 pages return retryable HTTP 503 `message-selectors-not-ready`, while legacy unindexed readers remain available. Ordinary maintenance after initialization keeps serving the previous published frontier. Earlier local message body-version tables and their triggers are dropped when the store opens. No claim is rewritten.
-
-## Immutable claim positions
-
-`claim_positions` holds each claim's position in its batch, the canonical order's fifth
-component. Admission stores it: a replicated claim takes its record's wire position before the
-claim row is inserted, and a local claim takes the number of claims its batch already holds,
-which is where sealing places its record. A later record of the same claim can only lower the
-value, so the stored position is the least position over every record the member has held and
-does not depend on arrival order. For claims stored before this table existed, triggers store
-the legacy value (least record position, else arrival count among surviving siblings) just
-before deleting an earlier sibling, deleting a record or changing a record's claim or position
-could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
-never deleted. No history backfill runs at open; a claim without a row and without any removal
-since keeps the legacy value, which equals what would be stored.
