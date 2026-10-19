@@ -433,7 +433,9 @@ there with the base commit's key list. That is what a later gate that fetched th
 own local refs. A lane prints `ok`, or `would-reject` with the verifier's reason (`no_note` for a lane this run did
 not sign, `not_on_remote`, `check_failed`, `untrusted_level`, `stale_tree` and the rest of the verifier's reasons). The job summary carries the table and a
 total (`lanes`, `ok`, `would_reject`, `refs_added`, seconds); each line is also in the log as
-`evidence-shadow v1 ...`. It gates nothing and never changes the job's result.
+`evidence-shadow v1 ...`. A lane listed in `--optional` (one that runs only when its paths changed, such as
+`fractal-web`) reads `n/a not_run` when this run made no record for it and is counted apart. It gates nothing and never
+changes the job's result.
 
 ### What reaches the signing environment
 
