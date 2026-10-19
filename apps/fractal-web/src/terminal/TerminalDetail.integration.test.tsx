@@ -20,7 +20,7 @@ import { resizeSettleMillis, type RawTerminalPort } from './rawTerminalState.ts'
 import { rawInput, type TerminalInputWire } from './terminalInputWire.ts'
 import { TerminalDetail } from './TerminalDetail.tsx'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const ref = 'terminal/example'
 // The daemon names the terminal `terminal/<agent id>`, not by the view's subject address.

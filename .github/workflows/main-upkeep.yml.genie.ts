@@ -5,7 +5,11 @@ import {
   buildEnv,
   cargoCacheStep,
   commonSetupSteps,
+  fractalWebShellCache,
+  fractalWebShellEnv,
   fractalWebStoreCache,
+  genieNixCacheStep,
+  genieSetupSteps,
   linuxRunner,
   linuxStageJob,
   linuxStageRunner,
@@ -33,7 +37,7 @@ const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => (
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
   steps: [
     { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
-    ...(nixOnly ? [nixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
+    ...(nixOnly ? [genieNixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
       ...step,
       if: 'success()',
       id: step.id === 'cargo-cache' ? 'cargo-probe' : 'nix-probe',
@@ -54,7 +58,7 @@ fi`,
       { name: 'Save Nix outputs', run: 'bash scripts/ci-nix-cache save' },
       // PR/merge builds restore these entries and retain exact-source artifacts. Only
       // protected main fills the shared dependency quota, including after eviction.
-      ...(nixOnly ? [nixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
+      ...(nixOnly ? [genieNixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
         name: `Save the missing main ${step.id}`,
         if: `github.ref == 'refs/heads/main' && steps.${step.id === 'cargo-cache' ? 'cargo-probe' : 'nix-probe'}.outputs.cache-hit != 'true'`,
         uses: 'actions/cache/save@v4',
@@ -104,7 +108,7 @@ export default githubWorkflow(auditCaches({
     'linux-tests': warmJob('tests', workspacePreparationSteps),
     'linux-clippy': warmJob('clippy', commonSetupSteps),
     'linux-fleet-compat': warmJob('fleet-compat', commonSetupSteps),
-    'genie-freshness': warmJob('genie', commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache')), true),
+    'genie-freshness': warmJob('genie', genieSetupSteps, true),
     'isolation-vm': warmJob('isolation-vm', commonSetupSteps),
     'typescript-cache': {
       name: 'warm-typescript',
@@ -141,11 +145,18 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
         { name: 'Probe the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: { ...fractalWebStoreCache, 'lookup-only': true } },
+        { name: 'Probe the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: { ...fractalWebShellCache, 'lookup-only': true } },
         ...[
           ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true' || steps.web-shell.outputs.cache-hit != 'true'" })),
+        ...[
           { ...nixDevelopStep({ name: 'Fetch the locked packages', flake: '.#web', command: ['pnpm', 'fetch'] }), env: pnpmStoreEnv },
           { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: fractalWebStoreCache },
         ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true'" })),
+        ...[
+          { name: 'Fill the web shell closure', shell: 'bash', run: 'bash scripts/ci-web-shell fill', env: fractalWebShellEnv },
+          { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
+        ].map((step) => ({ ...step, if: "steps.web-shell.outputs.cache-hit != 'true'" })),
       ],
     },
     // This check never ran in merge_group; keep its main measurements and generated-store cache.

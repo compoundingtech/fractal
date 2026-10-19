@@ -17,6 +17,7 @@
 //! Inside an st seat, run it with `env -u ST_AGENT` under `systemd-run --user --pipe` or another
 //! parent outside the seat: the API binds callers to the agent in their process ancestry.
 
+use st3::MissionsStore;
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -399,6 +400,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(3_601))
         .unwrap();
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
@@ -569,6 +571,7 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     let notify = Arc::new(Notify::new());
     let event_notify = watch::channel(0_u64).0;
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),

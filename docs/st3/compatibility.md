@@ -1,4 +1,4 @@
-# Smalltalk 0.x compatibility
+# Fractal 0.x compatibility
 
 For your own fleet, install the **same verified release source on every member** and read the
 release's **Upgrade impact** before restart. A patch tag is a publication label, not a promise
@@ -31,7 +31,7 @@ fresh writer; it is not a downgrade or permission to overwrite a running member.
 | --- | --- |
 | SQLite schema and startup DDL | Read all transitions in the source interval. A numeric schema identity alone does not describe every startup index or projection change. |
 | Checkpoint rules | All participating members must agree on rules before new sealing. Mixed builds can replicate signed history while sealing stalls or projections differ. A rules bump alone does not establish a full-replay trigger. See [checkpoints](checkpoints.md). |
-| Claim registry and replication | Admitted history, known claim vocabulary, projection digests and signature verification are separate checks. Equal replication digests alone do not establish claim-signature validity. See [replication](replication.md). |
+| Claim registry and replication | Admitted history, known claim vocabulary, projection digests and signature verification are separate checks. Equal replication digests alone do not establish claim-signature validity. An exchange's optional `build` names the sender's build for divergence faults; older peers omit it and ignore it. See [replication](replication.md). |
 | Client API | `st3.client.v0`, projection versions and capability versions are distinct from release tags and database schema. Discover capabilities first; unknown required capability versions stop the client, while unknown optional capabilities may be ignored. See the [client contract](client-v0/README.md#discovery-lists-and-details). |
 | Native harness and driver resume | Provider APIs, managed extensions and saved resume state have their own contracts. See [seats across deploys](seat-deploys.md); rolling back across the push-delivery boundary can require coordinated seat restarts. |
 
@@ -52,7 +52,7 @@ shape. Consult the release notes before using new client features.
 ## Harness support and test coverage
 
 Install and log in to the harness as the OS user who runs the daemon. Record its actual version
-when diagnosing an issue; Smalltalk does not publish a universal minimum-version promise for
+when diagnosing an issue; Fractal does not publish a universal minimum-version promise for
 all future vendor releases. No exhaustive real-provider version matrix is established for
 v0.3.17. The rows below describe tested native contracts, not acceptance of every vendor version.
 
@@ -63,18 +63,41 @@ v0.3.17. The rows below describe tested native contracts, not acceptance of ever
 | pi and omp | Managed extension, mailbox and resume contracts have boot/delivery regressions. An unseen omp build is measured in a disposable native admission probe before launch; a failed probe refuses launch and reports the boundary. |
 | OpenCode | Loopback API, mailbox and resume contracts have boot/delivery regressions. An unseen build is measured before launch; a failed native contract disables delivery and retains queued mail. |
 
-The [boot canaries](../../scripts/st3-boot-canaries/README.md) use real Smalltalk processes with
+The [boot canaries](../../scripts/st3-boot-canaries/README.md) use real Fractal processes with
 stand-in providers; they do not prove real vendor login, model turns or every installed vendor
 version. Native admission probes identify the exact installed build, and their exceptions expire
 when the build identity changes. Follow [admission diagnosis](seat-deploys.md#harness-admission-at-the-next-launch)
 rather than bypassing a failed boundary without understanding it.
 
-Historical cross-build tests pin exact sources in
+### Rolling previous-release evidence
+
+Cross-build tests pin exact sources in
 [the fleet baseline](../../.github/fleet-compat-baseline.json) and
-[the messaging baseline](../../.github/messaging-compat-baseline.json). Those fixtures prove their
-specified histories and messaging contracts, not arbitrary mixed fleets or downgrade support.
-The friend-ready idle and delivery gates remain separate evidence; packaging or documentation
-checks do not replace their continuous observations.
+[the messaging baseline](../../.github/messaging-compat-baseline.json). The ordinary window is
+the **previous published stable release → current candidate**, not a permanent historical
+source. Both pins record the release tag, its full source commit and native release archive
+URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published `bin/st3`;
+historical messaging uses the channel source from the same release commit.
+
+After each stable publication, release automation opens a baseline maintenance PR against
+`main`. It derives the source from `RELEASE.json`, verifies the dereferenced tag and the two
+archives, and advances both unheld pins. It does **not** change the already-published release
+commit: a release cannot contain its own source SHA. A human reviews and merges that PR before
+the next stable candidate can be published. Baseline-only maintenance does not itself create
+another daily release.
+
+CI compares the pins with the actual published stable release list, excluding drafts,
+prereleases and unpublished tags. A pin more than one published stable release behind fails.
+`why` describes the rolling policy; it is not an exemption. `exception_reason` is normally
+`null`. A temporary older hold requires a nonempty explicit reason describing the compatibility
+boundary and when the hold can be removed. Automation preserves that hold; remove the reason
+and repin once it is resolved. Release preparation requires the latest published baseline
+unless the pin carries that explicit exception. See [CI operations](../ci.md#rolling-compatibility-baselines)
+for recovery and local commands.
+
+These fixtures prove their specified histories and messaging contracts, not arbitrary mixed
+fleets or downgrade support. The friend-ready idle and delivery gates remain separate evidence;
+packaging or documentation checks do not replace their continuous observations.
 
 ## Platform verification
 

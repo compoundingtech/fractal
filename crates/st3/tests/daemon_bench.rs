@@ -30,6 +30,9 @@
 //! It fails when a person-facing read's p99 passes the budget, and when a read's median grows by
 //! more than twice from one scale to the next, which means it does work that grows with the store.
 
+use st3::MissionsStore;
+use st3::PersonWorkStore;
+use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -102,7 +105,7 @@ async fn person_facing_reads_answer_within_their_budget() {
         println!("skipped: set ST_BENCH=1 to run the daemon benchmark");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -260,7 +263,7 @@ fn write_bursts_share_their_commits() {
         println!("skipped: set ST_BENCH=1 to run the daemon benchmark");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -425,6 +428,7 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
@@ -440,6 +444,7 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
     };
     // As the daemon does when it starts.
     st3::api::start_operation_report(&state);
+    st3::api::start_published_lists(&state);
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
@@ -455,6 +460,10 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
             .await
             .unwrap()
     };
+    let seeded_cut = store.index().unwrap();
+    tokio::time::timeout(Duration::from_secs(120),
+        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        .await.expect("benchmark lists publish the seeded fleet cut").unwrap();
     // The fleet takes its steps before the reconciler starts, which could otherwise block a step
     // between its turning ready and its claim.
     let reconciler = settings.reconciler.then(|| {
@@ -1664,7 +1673,59 @@ fn synthetic_fields(spec: &st3_schema::ClaimSpec, index: usize) -> BTreeMap<Stri
         };
         fields.insert(name.clone(), value);
     }
+    if spec.kind == "gate.requested" {
+        // Preserve the original every-third reviewer density: reviews and attention must
+        // traverse real candidates without adding unrelated work to mission-detail probes.
+        // Alternate legacy and structured review requests within that population.
+        for name in st3_schema::review::REQUEST_FIELDS {
+            fields.remove(name);
+        }
+        if index.is_multiple_of(3) {
+            fields.insert("reviewer".into(), json!("person/reviewer"));
+        }
+        if index.is_multiple_of(6) {
+            fields.extend(BTreeMap::from([
+                ("gate_subject".into(), json!("gate-operation/reviewer")),
+                ("generation".into(), json!("run-generation/tester")),
+                ("episode".into(), json!(index as u64)),
+                ("change".into(), json!({"kind":"github.pull-request","subject":"resource/tester/change"})),
+                ("head".into(), json!({"kind":"git.commit","sha":"a".repeat(40)})),
+                ("scope".into(), json!({"coverage":["implementation"]})),
+                ("author".into(), json!("agent/alex")),
+                ("binding_claim".into(), json!("binding")),
+                ("delta_ref".into(), json!("doc/tester/delta")),
+            ]));
+        }
+    }
     fields
+}
+
+#[test]
+fn synthetic_review_requests_admit_legacy_and_structured_fields() {
+    let store = Store::open_memory("ada").unwrap();
+    let registry = st3_schema::registry();
+    let spec = &registry.claims["gate.requested"];
+    for index in 0..6 {
+        let fields = synthetic_fields(spec, index);
+        assert_eq!(fields.contains_key("reviewer"), index.is_multiple_of(3));
+        if index.is_multiple_of(3) {
+            assert_eq!(fields["reviewer"], json!("person/reviewer"));
+        }
+        for name in st3_schema::review::REQUEST_FIELDS {
+            assert_eq!(fields.contains_key(name), index.is_multiple_of(6), "{name}");
+        }
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("gate-operation/tester/{index}"),
+                kind: spec.kind.clone(),
+                actor: None,
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("reviewer-{index}")),
+            })
+            .unwrap();
+    }
 }
 
 pub(crate) fn claim_input(kind: &str, key: &str, index: usize, run: &str) -> ClaimInput {
@@ -1692,6 +1753,7 @@ async fn send_messages(scratch: &Path, main: &Path, count: usize) {
     let store = Arc::new(Store::open(main, NODE).unwrap());
     let socket = scratch.join("generate.sock");
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,

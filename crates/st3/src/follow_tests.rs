@@ -184,7 +184,7 @@ async fn trace_follow_advances_empty_filtered_pages_and_stops_on_resync() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn trace_follow_uses_legacy_only_when_the_page_route_is_absent() {
+async fn trace_follow_reports_a_missing_page_route_without_reading_legacy_history() {
     let output = scripted_cli(
         &[
             "--json",
@@ -206,24 +206,19 @@ async fn trace_follow_uses_legacy_only_when_the_page_route_is_absent() {
                 "/v1/health".into(),
                 Reply::Value(json!({"features":{"bounded_legacy_events":1}})),
             ),
-            (
-                events_path(10).replace("/events/page?", "/events?"),
-                Reply::Value(json!([event(11)])),
-            ),
-            (
-                events_path(11).replace("/events/page?", "/events?"),
-                Reply::Error(410),
-            ),
         ],
     )
     .await;
-    assert_refusal(&output, 0);
-    let event: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(event["store_index"], 11);
+    assert_eq!(
+        output.result.unwrap_err().to_string(),
+        "st API returned 404: "
+    );
+    assert_eq!(output.requests.len(), 3);
+    assert!(output.stdout.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
-async fn trace_follow_refuses_an_unbounded_legacy_daemon_without_reading_its_history() {
+async fn trace_follow_refuses_an_endpoint_version_transition_without_entering_legacy_feed() {
     let output = scripted_cli(
         &[
             "--json",
@@ -247,13 +242,36 @@ async fn trace_follow_refuses_an_unbounded_legacy_daemon_without_reading_its_his
     .await;
     assert!(output.result.is_err());
     assert_eq!(output.requests.len(), 3);
+    assert!(output.stdout.is_empty());
+    let message = output.result.unwrap_err().to_string();
+    assert!(message.contains("2026-10-16 13:50 UTC"));
     assert!(
-        output
-            .result
-            .unwrap_err()
-            .to_string()
-            .contains("upgrade the daemon")
+        message.contains(
+            "https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh"
+        )
     );
+    assert!(message.contains("--edge --no-run"));
+    assert!(message.contains("If the daemon just restarted"));
+    assert!(message.contains("st service restart"));
+    assert!(message.contains("rerun the original command"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn non_trace_missing_page_requires_upgrade_without_reading_history() {
+    let path = events_path(10);
+    let client = Client::scripted_follow_test(vec![
+        (path.clone(), Reply::MissingRoute),
+        ("/v1/health".into(), Reply::Value(json!({"features":{}}))),
+    ]);
+    let error = LocalEventFeed::default()
+        .read(&client, path.split_once('?').unwrap().1)
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("2026-10-16 13:50 UTC"));
+    assert!(error.to_string().contains("--edge --no-run"));
+    assert!(error.to_string().contains("st service restart"));
+    assert_eq!(client.follow_test_result().0.len(), 2);
 }
 
 #[tokio::test(start_paused = true)]

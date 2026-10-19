@@ -35,6 +35,8 @@
 //!   `agents-v1`, holds the agents roster only. A report compares only with main's reports of
 //!   its own profile.
 
+use st3::MissionsStore;
+use st3::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -172,6 +174,9 @@ const MIX: &[Load] = &[
     load("replication wake", 0.2, 1_000),
     load("message send", 0.1, 250),
     load("person read", 0.5, 250),
+    // Synthetic 20-subscriber bursts exercise shared collection admission under the mix.
+    load("collection missions", 0.1, 4_000),
+    load("collection attention", 0.1, 4_000),
     // Enough samples to measure usage separately from the rotating person-read mix.
     load("client usage", 0.5, 300),
 ];
@@ -327,7 +332,7 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
         println!("skipped: set ST_LOAD_GATE=1 to run the load test");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -420,7 +425,7 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
         println!("skipped: set ST_LOAD_GATE=1 and ST_LOAD_HOG=1 to run the hog load test");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -708,7 +713,7 @@ fn a_cold_roster_rebuild_reads_the_fleet_in_few_statements() {
         println!("skipped: set ST_LOAD_GATE=1 to run the load test");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -1187,6 +1192,8 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
         ("seat work", "GET /v1/work"),
         ("person read /v1/client/now", "GET /v1/client/now"),
         ("person read /v1/client/agents", "GET /v1/client/agents"),
+        ("person read /v1/client/missions", "GET /v1/client/missions"),
+        ("missions snapshot", "stream missions"),
         (ROSTER_SNAPSHOT, "stream agents"),
         (ROSTER_CONNECT_SNAPSHOT, "stream agents"),
         ("work snapshot", "stream work"),
@@ -1197,24 +1204,19 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
             .unwrap_or_else(|| panic!("{path} has no target in slo/targets.toml"));
         assert_eq!(descriptive_target(name), Some(target.target(false)), "{name}");
     }
-    for name in [
-        "claim",
-        "replication exchange",
-        "person read /v1/client/missions",
-        "missions snapshot",
-        LONG_POLL,
-    ] {
+    for name in ["claim", "replication exchange", LONG_POLL] {
         assert_eq!(descriptive_target(name), None, "{name}");
     }
-    // Every path over its descriptive target but within its budget fails nothing.
+    // Include the existing measured fresh read: its 1000 ms budget is independent
+    // of its 300 ms target. A descriptive miss within that budget fails nothing.
     let mut report = Report {
         daemon_cores: cpu_budget(),
         long_poll_seats: SEATS,
         roster_subscribers: ROSTER_SUBSCRIBERS,
         ..Report::default()
     };
-    for (name, budget, count) in MIX
-        .iter()
+    for (name, budget, count) in mix(Conditions { measured: true, ..Conditions::default() })
+        .into_iter()
         .map(|load| (load.name, load.budget, 100))
         .chain([
             (ROSTER_SNAPSHOT, ROSTER_BUDGET, ROSTER_SUBSCRIBERS),
@@ -1490,6 +1492,7 @@ struct Context {
     client: Client,
     /// Client reads come from a person, as stui and the app make them.
     person: Client,
+    collections: st3_client::Client,
     store: Arc<Store>,
     peer: Arc<Store>,
     daemon: tokio::runtime::Handle,
@@ -1666,6 +1669,7 @@ fn run(
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
@@ -1751,6 +1755,7 @@ fn run(
     let context = Arc::new(Context {
         client: Client::unix(&socket),
         person: Client::unix_as(&socket, "person/bench-operator").unwrap(),
+        collections: st3_client::Client::unix_as(&socket, "person/bench-operator"),
         store,
         peer,
         daemon: daemon.handle().clone(),
@@ -2672,8 +2677,37 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             )
             .await
         }
+        "collection missions" | "collection attention" => {
+            let collection = if name == "collection missions" { "missions" } else { "attention" };
+            let mut readers = tokio::task::JoinSet::new();
+            let barrier = Arc::new(tokio::sync::Barrier::new(20));
+            for n in 0..20 {
+                let client = context.collections.clone();
+                let barrier = barrier.clone();
+                readers.spawn(async move {
+                    let mut stream = client.collection_stream().await.map_err(|e| e.to_string())?;
+                    barrier.wait().await;
+                    stream.subscribe(&format!("load-{n}"), collection, 20, None, None)
+                        .await.map_err(|e| e.to_string())?;
+                    let event = tokio::time::timeout(Duration::from_secs(10), stream.next_event())
+                        .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+                    if !matches!(event, Some(st3_client::CollectionEvent::Snapshot { .. })) {
+                        return Err(format!("{collection}: expected initial snapshot, got {event:?}"));
+                    }
+                    Ok::<_, String>(stream)
+                });
+            }
+            // Hold every socket until all frames arrive; the registry's weak lifetime must
+            // not expire between readers, and errors propagate rather than skipping a line.
+            let mut streams = Vec::new();
+            while let Some(result) = readers.join_next().await {
+                streams.push(result.map_err(|e| e.to_string())??);
+            }
+            for stream in streams { stream.close().await; }
+            Ok(())
+        }
         "person read fresh" => {
-            // What `st agents ls` always sends: it waits for one roster refresh by design.
+            // Explicit legacy freshness remains a separate load case; ordinary CLI lists no longer send it.
             match context.person.get::<Value>(&format!("/v1/client/agents?fresh=true&limit={ROSTER_LIMIT}")).await {
                 Ok(_) => Err("person read fresh".into()),
                 Err(error) => Err(format!("fresh agents: {error}")),
