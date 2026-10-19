@@ -137,6 +137,69 @@ impl Store {
         Ok(overview)
     }
 
+    /// Assistant scalars for the newest open run, or the newest terminal run.
+    /// Selection is independent of the native card's three-run history preview.
+    /// Only scalar columns of the selected run's current generation are read;
+    /// step prose, histories and unrelated runs are never hydrated.
+    pub fn assistant_mission_run_metadata_at(
+        &self,
+        mission: &str,
+        at_unix_ms: u128,
+    ) -> Result<Option<Value>> {
+        let connection = self.readers.get();
+        let selected = connection.query_row(
+            "SELECT id,status FROM mission_runs WHERE id=COALESCE(
+                (SELECT id FROM mission_runs
+                 WHERE mission_id=?1 AND status NOT IN ('completed','failed','cancelled')
+                 ORDER BY created_at_unix_ms DESC,id DESC LIMIT 1),
+                (SELECT id FROM mission_runs WHERE mission_id=?1
+                 ORDER BY created_at_unix_ms DESC,id DESC LIMIT 1))",
+            [mission.strip_prefix("mission/").unwrap_or(mission)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?;
+        let Some((run, status)) = selected else { return Ok(None); };
+        let mut statement = connection.prepare(
+            "SELECT s.status,s.assignee,s.lease_owner,s.lease_expires_at_unix_ms,
+                    r.status,r.phase,g.status,root.status,root.phase
+             FROM step_runs s JOIN mission_runs r ON r.id=s.run_id
+             JOIN run_generations g ON g.id=r.current_generation_id
+             JOIN mission_runs root ON root.id=r.root_run_id
+             WHERE s.run_id=?1 AND s.generation_id=r.current_generation_id",
+        )?;
+        let mut steps = Vec::new();
+        let mut done = 0_u64;
+        for row in statement.query_map([&run], |row| {
+            Ok((
+                row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?, row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?, row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })? {
+            let (step_status, assignee, mut claimant, expiry, run_status, run_phase,
+                generation_status, root_status, root_phase) = row?;
+            done += u64::from(step_status == "completed");
+            let terminal = is_terminal_run_state(&run_status) || run_phase == "terminal"
+                || is_terminal_generation_state(&generation_status)
+                || is_terminal_run_state(&root_status) || root_phase == "terminal";
+            let expired = matches!(step_status.as_str(), "claimed" | "working" | "verifying" | "blocked")
+                && expiry.as_deref().map(str::parse::<u128>).transpose()?
+                    .is_some_and(|expiry| expiry <= at_unix_ms);
+            if terminal || expired {
+                claimant = None;
+            }
+            steps.push(json!({
+                "state": if step_status == "blocked" && !terminal && !expired { "blocked" } else { "other" },
+                "assignee": assignee, "claimant": claimant,
+            }));
+        }
+        Ok(Some(json!({
+            "id": format!("mission-run/{run}"), "status": status,
+            "progress": {"total": steps.len(), "done": done}, "steps": steps,
+        })))
+    }
+
     /// A run card's progress counts cover every step; only its first twenty steps are hydrated.
     pub fn mission_step_preview(&self, run: &str) -> Result<(u64, u64, Vec<StepRunView>)> {
         self.mission_step_preview_at(run, now_ms())

@@ -3,6 +3,87 @@
 use super::*;
 pub use st3_delivery::store::missions::*;
 
+// One query preserves the native collection's indexed latest/live probes and shallow
+// key sort. Assistant membership matches reads::ident before pagination/hydration:
+// mission/ contributes eight allowed ASCII bytes; '-' is literal at the GLOB class end.
+// GLOB stops at NUL, so reject it explicitly. API regression tests exercise this SQL
+// against the canonical identifier policy, including every ASCII byte.
+macro_rules! assistant_mission_identifier_sql {
+    () => {
+        "length(CAST(ids.mission_id AS BLOB)) + length('mission/') BETWEEN 1 AND 256
+         AND instr(ids.mission_id,char(0))=0
+         AND ids.mission_id NOT GLOB '*[^a-zA-Z0-9/._:@+=~-]*'"
+    };
+}
+
+const MISSION_COLLECTION_PAGE_SQL: &str = concat!("WITH RECURSIVE run_missions(mission_id) AS (
+    SELECT MIN(mission_id) FROM mission_runs
+    UNION ALL
+    SELECT (SELECT MIN(mission_id) FROM mission_runs WHERE mission_id>run_missions.mission_id)
+    FROM run_missions WHERE mission_id IS NOT NULL
+ ), ids AS (
+    SELECT mission_id FROM mission_definitions
+    UNION SELECT mission_id FROM run_missions WHERE mission_id IS NOT NULL
+ )
+ SELECT ids.mission_id, COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms,'0')
+ FROM ids
+ LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
+ LEFT JOIN claims published ON published.id=def.claim_id
+ LEFT JOIN mission_runs latest ON latest.id=(
+    SELECT id FROM mission_runs WHERE mission_id=ids.mission_id
+    ORDER BY created_at_unix_ms DESC,id DESC LIMIT 1)
+ LEFT JOIN mission_runs live ON live.id=(
+    SELECT id FROM mission_runs WHERE mission_id=ids.mission_id AND status IN ('running','standing')
+    ORDER BY status LIMIT 1)
+ WHERE (NOT ?7 OR (", assistant_mission_identifier_sql!(), "))
+   AND (?5 IS NULL OR CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) < ?5
+     OR (CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) = ?5 AND ids.mission_id > ?6))
+   AND (?1 OR ids.mission_id NOT LIKE '__st3/%')
+   AND (?1 OR CASE
+       WHEN live.status IS NOT NULL THEN live.status
+       WHEN def.state='retired' THEN 'retired'
+       WHEN latest.status IS NOT NULL THEN latest.status
+       ELSE def.state END NOT IN ('completed','failed','cancelled','retired')
+       -- A failed/cancelled run remains briefly unless its mission was retired.
+       OR (latest.status IN ('failed','cancelled')
+           AND COALESCE(def.state,'')<>'retired'
+           AND live.status IS NULL
+           AND CAST(latest.updated_at_unix_ms AS INTEGER)>=?4))
+ ORDER BY CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms) AS INTEGER) DESC,
+          ids.mission_id ASC
+ LIMIT ?2 OFFSET ?3");
+
+#[cfg(test)]
+mod identifier_query_tests {
+    use super::*;
+
+    #[test]
+    fn identifier_mission_query_preserves_indexed_run_probes() {
+        let store = Store::open_memory("identifier-query").unwrap();
+        let connection = store.readers.get();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {MISSION_COLLECTION_PAGE_SQL}")).unwrap();
+        let mut plans = Vec::new();
+        for assistant_identifiers_only in [false, true] {
+            let plan = statement.query_map(params![
+                false, 10_i64, 0_i64, 0_i64, None::<i64>, None::<String>,
+                assistant_identifiers_only,
+            ], |row| row.get::<_, String>(3)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            let description = plan.join("\n");
+            for index in [
+                "mission_runs_collection_latest_index", "mission_runs_collection_live_index",
+            ] {
+                assert!(description.contains(index), "{description}");
+            }
+            assert!(!plan.iter().any(|step| step.starts_with("SCAN mission_runs")),
+                "run history must remain indexed probes: {description}");
+            plans.push(plan);
+        }
+        assert_eq!(plans[0], plans[1], "membership must not introduce a different scan");
+    }
+}
+
 pub type StepStateRow = (String, bool, u32, String, String, String, String, String);
 
 /// The most one `work extend` adds to a step attempt's execution budget.
@@ -1187,6 +1268,28 @@ pub trait MissionsStore {
             after: Option<&(u128, String)>,
             at_unix_ms: u128,
         ) -> Result<Vec<(String, u128)>>;
+    fn assistant_mission_collection_page_at(
+            &self,
+            history: bool,
+            offset: usize,
+            limit: usize,
+            after: Option<&(u128, String)>,
+            at_unix_ms: u128,
+        ) -> Result<Vec<(String, u128)>>;
+    #[allow(clippy::too_many_arguments)]
+    fn mission_collection_page_filtered_at(
+            &self,
+            history: bool,
+            offset: usize,
+            limit: usize,
+            after: Option<&(u128, String)>,
+            at_unix_ms: u128,
+            assistant_identifiers_only: bool,
+        ) -> Result<Vec<(String, u128)>>;
+    fn assistant_mission_state_counts_at(
+            &self,
+            at_unix_ms: u128,
+        ) -> Result<BTreeMap<String, u64>>;
     #[allow(clippy::too_many_arguments)]
     fn create_planning_session(
             &self,
@@ -1940,52 +2043,44 @@ impl MissionsStore for Store {
     }
 
     fn mission_collection_page_at(
-            &self,
-            history: bool,
-            offset: usize,
-            limit: usize,
-            after: Option<&(u128, String)>,
-            at_unix_ms: u128,
-        ) -> Result<Vec<(String, u128)>> {
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+    ) -> Result<Vec<(String, u128)>> {
+        self.mission_collection_page_filtered_at(history, offset, limit, after, at_unix_ms, false)
+    }
+
+    /// Assistant-visible shallow mission keys, filtered before SQL pagination and
+    /// card hydration. Native collection callers retain their broader ID contract.
+    fn assistant_mission_collection_page_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+    ) -> Result<Vec<(String, u128)>> {
+        self.mission_collection_page_filtered_at(history, offset, limit, after, at_unix_ms, true)
+    }
+
+    fn mission_collection_page_filtered_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+        assistant_identifiers_only: bool,
+    ) -> Result<Vec<(String, u128)>> {
         let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
+        // Seek once per distinct mission, not once per historical run. Latest and live
+        // state are indexed probes; only shallow mission keys reach the final sort.
         let mut statement = connection.prepare(
-            /* sqlite-large-value: allow-for-now lv-h3638f892091c owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ "WITH ids AS (
-                SELECT mission_id FROM mission_definitions
-                UNION SELECT mission_id FROM mission_runs
-             ), run_states AS (
-                SELECT mission_id, SUM(status='running') AS running, SUM(status='standing') AS standing
-                FROM mission_runs GROUP BY mission_id
-             ), latest AS (
-                SELECT mission_id, status, updated_at_unix_ms,
-                       ROW_NUMBER() OVER (PARTITION BY mission_id ORDER BY created_at_unix_ms DESC, id DESC) AS rank
-                FROM mission_runs
-             )
-             SELECT ids.mission_id, COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms,'0')
-             FROM ids
-             LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
-             LEFT JOIN claims published ON published.id=def.claim_id
-             LEFT JOIN run_states ON run_states.mission_id=ids.mission_id
-             LEFT JOIN latest ON latest.mission_id=ids.mission_id AND latest.rank=1
-             WHERE (?5 IS NULL OR CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) < ?5
-                 OR (CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) = ?5 AND ids.mission_id > ?6))
-               AND (?1 OR ids.mission_id NOT LIKE '__st3/%')
-               AND (?1 OR CASE
-                   WHEN COALESCE(run_states.running,0)>0 THEN 'running'
-                   WHEN COALESCE(run_states.standing,0)>0 THEN 'standing'
-                   WHEN def.state='retired' THEN 'retired'
-                   WHEN latest.status IS NOT NULL THEN latest.status
-                   ELSE def.state END NOT IN ('completed','failed','cancelled','retired')
-                   -- A run that failed or was cancelled stays in view for a while with its
-                   -- outcome, instead of vanishing the moment it ends, unless its mission
-                   -- was retired.
-                   OR (latest.status IN ('failed','cancelled')
-                       AND COALESCE(def.state,'')<>'retired'
-                       AND COALESCE(run_states.running,0)=0 AND COALESCE(run_states.standing,0)=0
-                       AND CAST(latest.updated_at_unix_ms AS INTEGER)>=?4))
-             ORDER BY CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms) AS INTEGER) DESC,
-                      ids.mission_id ASC
-             LIMIT ?2 OFFSET ?3",
+            /* sqlite-large-value: allow-for-now lv-hc3d42d8510f3 owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ MISSION_COLLECTION_PAGE_SQL,
         )?;
         statement
             .query_map(
@@ -1995,7 +2090,12 @@ impl MissionsStore for Store {
                     offset as i64,
                     ended_since as i64,
                     after.map(|key| key.0 as i64),
-                    after.map(|key| key.1.trim_start_matches("mission/"))
+                    after.map(|key| if assistant_identifiers_only {
+                        key.1.strip_prefix("mission/").unwrap_or(&key.1)
+                    } else {
+                        key.1.trim_start_matches("mission/")
+                    }),
+                    assistant_identifiers_only
                 ],
                 |row| {
                     Ok((
@@ -2009,6 +2109,59 @@ impl MissionsStore for Store {
                 Ok((id, time.parse()?))
             })
             .collect()
+    }
+
+    /// Count the current collection's phases without constructing mission cards or steps.
+    fn assistant_mission_state_counts_at(
+        &self,
+        at_unix_ms: u128,
+    ) -> Result<BTreeMap<String, u64>> {
+        let connection = self.readers.get();
+        let sql = canonical_sql(
+            concat!("WITH ids AS (
+                SELECT mission_id FROM mission_definitions UNION SELECT mission_id FROM mission_runs
+             ), ranked AS (
+                SELECT mission_id,id,status,updated_at_unix_ms,
+                    ROW_NUMBER() OVER (PARTITION BY mission_id ORDER BY created_at_unix_ms DESC,id DESC) AS rank
+                FROM mission_runs
+             ), counts AS (
+                SELECT mission_id,SUM(status='running') AS running,SUM(status='standing') AS standing
+                FROM mission_runs GROUP BY mission_id
+             ), phases AS (
+                SELECT ids.mission_id, latest.status AS latest_status, latest.updated_at_unix_ms,
+                    COALESCE(def.state,'ready') AS definition_state,
+                    CASE WHEN COALESCE(counts.running,0)>0 THEN 'running'
+                         WHEN COALESCE(counts.standing,0)>0 THEN 'standing'
+                         WHEN def.state='retired' THEN 'retired'
+                         ELSE COALESCE(latest.status,def.state,'ready') END AS phase
+                FROM ids
+                LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
+                LEFT JOIN counts ON counts.mission_id=ids.mission_id
+                LEFT JOIN ranked latest ON latest.mission_id=ids.mission_id AND latest.rank=1
+                WHERE ids.mission_id NOT LIKE '__st3/%' AND (",
+                assistant_mission_identifier_sql!(), ")
+             ), visible AS (
+                SELECT * FROM phases
+                WHERE phase NOT IN ('completed','failed','cancelled','retired')
+                   OR (phase IN ('failed','cancelled') AND CAST(updated_at_unix_ms AS INTEGER)>=?1)
+             ), projected AS (
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM ranked r WHERE r.mission_id=visible.mission_id AND r.rank<=3
+                    AND (SELECT json_extract(claims.body,'$.fields.status') FROM claims
+                         WHERE claims.subject='mission-run/'||r.id AND claims.kind='reconcile.fault'
+                           AND json_extract(claims.body,'$.fields.scope')=?2
+                         ORDER BY CANONICAL_DESC(claims) LIMIT 1)='faulted'
+                ) THEN 'blocked' ELSE phase END AS state FROM visible
+             )
+             SELECT state,COUNT(*) FROM projected GROUP BY state"),
+        );
+        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0f6cce1c8f3d owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ &sql)?
+            .query_map(params![
+                at_unix_ms.saturating_sub(RECENTLY_ENDED_MS) as i64,
+                crate::model::FIRST_READINESS_FAULT_SCOPE
+            ], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4233,7 +4386,7 @@ impl MissionsStore for Store {
             .map(|id| id.trim_start_matches("mission/"))
             .collect::<Vec<_>>();
         connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h0f6cce1c8f3d owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ &sql)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h580d8608ff7c owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ &sql)?
             .query_map([serde_json::to_string(&ids)?], mission_run_header_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)

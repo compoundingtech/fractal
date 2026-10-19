@@ -2471,7 +2471,10 @@ mod tests {
 pub use crate::external_sessions::shared_tests_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, path_executable, texts, transcript_session, unfurled_timeline};
+pub use crate::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, texts, transcript_session, unfurled_timeline};
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+pub use crate::external_sessions::shared_tests_seats::path_executable;
 use super::*;
 
     fn assert_omp_message_usage_once(content: Value) {

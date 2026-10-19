@@ -7163,6 +7163,95 @@ fn retrying_the_only_failed_step_reopens_its_failed_run() {
 }
 
 #[test]
+fn mission_collection_keyset_preserves_zero_run_and_live_run_semantics() {
+    let store = Store::open_memory("node").unwrap();
+    for name in ["zero", "live", "retired", "completed", "recent", "old", "__st3/internal"] {
+        publish_mission(
+            &store,
+            &format!("version 2\nmission \"{name}\" state=\"ready\" {{ goal \"Selection fixture.\" }}"),
+            &format!("publish-{name}"),
+        );
+    }
+    let at = RECENTLY_ENDED_MS + 1_000;
+    {
+        let connection = store.connection.lock().unwrap();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h734fabdede7d owner=st3_missions::store::tests TODO=prepare-body-and-predecessor-values */
+            "UPDATE claims SET accepted_at_unix_ms='900' WHERE id=(SELECT claim_id FROM mission_definitions WHERE mission_id='zero')",
+            [],
+        ).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hc0ef180f74f0 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET state='retired' WHERE mission_id='retired'", []).unwrap();
+        for (id, mission, status, created, updated) in [
+            ("live-standing", "live", "standing", "1", "800"),
+            ("live-running", "live", "running", "2", "800"),
+            // Latest is terminal, but either older live run keeps this mission current.
+            ("live-terminal", "live", "completed", "3", "900"),
+            ("retired-terminal", "retired", "failed", "1", "900"),
+            ("completed-terminal", "completed", "completed", "1", "900"),
+            ("recent-terminal", "recent", "failed", "1", "1000"),
+            ("old-terminal", "old", "cancelled", "1", "999"),
+            // A legacy run-only mission must not disappear from selection.
+            ("orphan-terminal", "orphan", "standing", "1", "900"),
+        ] {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-ha05d1586ee98 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
+                "INSERT INTO mission_runs(id,mission_id,initial_revision,current_generation_id,
+                 root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,
+                 created_at_unix_ms,updated_at_unix_ms)
+                 VALUES(?1,?2,'revision','generation','revision',?1,'','person/test','{}',
+                        'normal',?3,'normal',?4,?5)",
+                params![id, mission, status, created, updated],
+            ).unwrap();
+        }
+    }
+    let collect = |history| {
+        let mut rows = Vec::new();
+        let mut after = None;
+        loop {
+            let page = store.mission_collection_page_at(history, 0, 1, after.as_ref(), at).unwrap();
+            let Some((id, time)) = page.first() else { break };
+            after = Some((*time, id.clone()));
+            rows.extend(page);
+        }
+        assert_eq!(rows, store.mission_collection_page_at(history, 0, 100, None, at).unwrap());
+        rows.into_iter().map(|row| row.0).collect::<Vec<_>>()
+    };
+    assert_eq!(collect(false), ["mission/recent", "mission/live", "mission/orphan", "mission/zero"]);
+    let history = collect(true);
+    for name in ["zero", "live", "retired", "completed", "recent", "old", "__st3/internal", "orphan"] {
+        assert!(history.contains(&format!("mission/{name}")), "{history:?}");
+    }
+    // Standing alone also overrides the newer terminal header.
+    store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-h4693babd3624 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "DELETE FROM mission_runs WHERE id='live-running'", [],
+    ).unwrap();
+    assert!(collect(false).contains(&"mission/live".to_owned()));
+}
+
+#[test]
+fn mission_collection_seek_indexes_upgrade_existing_stores() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.db");
+    {
+        let store = Store::open(&path, "node").unwrap();
+        store.connection.lock().unwrap().execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h88c34ab03a0f owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */
+            "DROP INDEX mission_runs_collection_latest_index;
+             DROP INDEX mission_runs_collection_live_index;",
+        ).unwrap();
+    }
+    let store = Store::open(&path, "node").unwrap();
+    let connection = store.connection.lock().unwrap();
+    for name in ["mission_runs_collection_latest_index", "mission_runs_collection_live_index"] {
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+            [name], |row| row.get::<_, bool>(0),
+        ).unwrap());
+    }
+}
+
+#[test]
 fn a_failed_mission_stays_in_the_current_view_for_a_day() {
     let store = Store::open_memory("node").unwrap();
     let failed = failed_takeover_run(&store, &["deploy-check"]);
