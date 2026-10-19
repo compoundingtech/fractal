@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Summarize the daily long-lane run: each lane's result, time and failed steps; on red, one tracking issue.
+
+Results come from the workflow's own `needs` (NEEDS_JSON), so a lane that never started still counts. Times
+and failed steps come from this run attempt's jobs in the Actions API; when that read fails the table still
+lists every result, marked with the times as unavailable.
+"""
+from datetime import datetime
+import json
+import os
+import subprocess
+import sys
+
+
+def seconds(start, end):
+    if not start or not end:
+        return None
+    parse = lambda value: datetime.fromisoformat(value.replace('Z', '+00:00'))
+    return max(0, int((parse(end) - parse(start)).total_seconds()))
+
+
+def duration(value):
+    if value is None:
+        return 'n/a'
+    minutes, rest = divmod(value, 60)
+    return f'{minutes}m {rest:02d}s' if minutes else f'{rest}s'
+
+
+def rows(lanes, needs, jobs):
+    """One row per lane, in the order the workflow declares them."""
+    by_name = {job.get('name'): job for job in jobs}
+    out = []
+    for lane, name in lanes.items():
+        result = needs.get(lane, {}).get('result') or 'missing'
+        job = by_name.get(name, {})
+        steps = job.get('steps') or []
+        timed = [(seconds(step.get('started_at'), step.get('completed_at')), step.get('name')) for step in steps]
+        timed = [(value, step) for value, step in timed if value is not None]
+        out.append({
+            'lane': name,
+            'result': result,
+            'seconds': seconds(job.get('started_at'), job.get('completed_at')),
+            'longest': max(timed, default=None),
+            'failed': [step.get('name') for step in steps if step.get('conclusion') == 'failure'],
+            'url': job.get('html_url'),
+        })
+    return out
+
+
+def table(lane_rows):
+    lines = ['| Lane | Result | Time | Longest step | Failed steps |', '| --- | --- | --- | --- | --- |']
+    for row in lane_rows:
+        lane = f"[{row['lane']}]({row['url']})" if row['url'] else row['lane']
+        mark = '✅' if row['result'] == 'success' else '❌'
+        longest = f"{row['longest'][1]} ({duration(row['longest'][0])})" if row['longest'] else 'n/a'
+        failed = '; '.join(row['failed']) or ('—' if row['result'] == 'success' else 'none recorded')
+        lines.append(f"| {lane} | {mark} {row['result']} | {duration(row['seconds'])} | {longest} | {failed} |")
+    return '\n'.join(lines) + '\n'
+
+
+def red(lane_rows):
+    return [row for row in lane_rows if row['result'] != 'success']
+
+
+def gh(*args):
+    return subprocess.run(['gh', *args], check=True, capture_output=True, text=True).stdout
+
+
+def run_jobs(environment):
+    path = (f"repos/{environment['GITHUB_REPOSITORY']}/actions/runs/{environment['GITHUB_RUN_ID']}"
+            f"/attempts/{environment['GITHUB_RUN_ATTEMPT']}/jobs?per_page=100")
+    jobs = []
+    for line in gh('api', '--paginate', path, '--jq', '.jobs[]|@json').splitlines():
+        if line.strip():
+            jobs.append(json.loads(line))
+    return jobs
+
+
+def track(title, body):
+    """Comment on the one open issue with exactly this title, or open it."""
+    found = json.loads(gh('issue', 'list', '--state', 'open', '--search', f'"{title}" in:title',
+                          '--json', 'number,title', '--limit', '20') or '[]')
+    exact = [issue['number'] for issue in found if issue.get('title') == title]
+    if exact:
+        gh('issue', 'comment', str(min(exact)), '--body', body)
+        return f'commented on #{min(exact)}'
+    return 'opened ' + gh('issue', 'create', '--title', title, '--body', body).strip()
+
+
+def main(environment=os.environ):
+    lanes = json.loads(environment['LANES'])
+    needs = json.loads(environment['NEEDS_JSON'])
+    run_url = (f"{environment['GITHUB_SERVER_URL']}/{environment['GITHUB_REPOSITORY']}"
+               f"/actions/runs/{environment['GITHUB_RUN_ID']}")
+    try:
+        jobs, note = run_jobs(environment), ''
+    except (subprocess.CalledProcessError, OSError, ValueError) as error:
+        jobs, note = [], f'\nLane times are unavailable: the jobs read failed ({error}).\n'
+        print(f'::warning::lane times unavailable: {error}')
+    lane_rows = rows(lanes, needs, jobs)
+    failing = red(lane_rows)
+    total = sum(row['seconds'] or 0 for row in lane_rows)
+    heading = '## Daily long lanes: ' + ('green' if not failing else f'red ({len(failing)} of {len(lane_rows)} lanes)')
+    report = (f"{heading}\n\nRun [{environment['GITHUB_RUN_ID']}]({run_url}) at `{environment['GITHUB_SHA']}`, "
+              f"{duration(total)} of lane time.\n\n{table(lane_rows)}{note}")
+    with open(environment['GITHUB_STEP_SUMMARY'], 'a') as stream:
+        stream.write(report)
+    print(report)
+    if failing:
+        outcome = track(environment['TITLE'], report)
+        print(f'tracking issue: {outcome}')
+        with open(environment['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write(f'\nTracking issue: {outcome}\n')
+
+
+if __name__ == '__main__':
+    sys.exit(main())

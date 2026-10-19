@@ -4,7 +4,7 @@ use crate::AttentionListStore;
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn page(
+pub async fn page(
     state: &AppState,
     snapshot: &ClientSnapshot,
     projection: &str,

@@ -2,6 +2,27 @@
 //! published views both build client rows, so these sit below both.
 use sha2::{Digest as _, Sha256};
 
+/// How long an issued page cursor stays valid. Legacy collections retain complete result sets
+/// for it; negotiated message pages retain only issued cursor metadata. Either expires on
+/// restart, eviction, or this TTL.
+pub const CLIENT_PAGE_TTL_MS: u128 = 300_000;
+
+/// Milliseconds the client-facing clock runs ahead of the wall clock. Only tests set it, so a
+/// test can cross a real freshness horizon without sleeping through it.
+static CLIENT_CLOCK_SKEW_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn set_client_clock_skew_ms(skew_ms: u64) {
+    CLIENT_CLOCK_SKEW_MS.store(skew_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn client_now_ms() -> u128 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    now + u128::from(CLIENT_CLOCK_SKEW_MS.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 pub fn client_timestamp(unix_ms: u128) -> String {
     let unix_ms = i64::try_from(unix_ms).unwrap_or(i64::MAX);
     chrono::DateTime::from_timestamp_millis(unix_ms)
