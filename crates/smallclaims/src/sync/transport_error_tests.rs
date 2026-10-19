@@ -311,7 +311,9 @@ fn only_transport_classes_advance_routes() {
         anyhow::anyhow!("replication-exchange-metadata-too-large"),
         anyhow::anyhow!("backend connect timeout stream carrier-unavailable"),
         anyhow::anyhow!("signature or protocol mismatch"),
-        anyhow::Error::new(PeerOverloaded { retry_after: OVERLOAD_RETRY }),
+        anyhow::Error::new(PeerOverloaded {
+            retry_after: OVERLOAD_RETRY,
+        }),
         anyhow::Error::new(FabricGrantRefusal {
             node: "peer".into(),
             protocol: "st3-peer-v1".into(),
@@ -340,20 +342,28 @@ fn fabric_faults_advance_but_refusal_usage_and_unknown_errors_do_not() {
             message: "message does not determine policy".into(),
             peer: None,
             service: None,
-        }).context("dial");
+        })
+        .context("dial");
         let mut route = 0;
         let transport = class == FabricErrorClass::Fault;
         assert_eq!(advance_failed_route(&mut route, &error), transport);
         assert_eq!(route, usize::from(transport));
     }
     let mut route = 0;
-    assert!(!advance_failed_route(&mut route, &anyhow::anyhow!("fabric unavailable")));
+    assert!(!advance_failed_route(
+        &mut route,
+        &anyhow::anyhow!("fabric unavailable")
+    ));
     assert_eq!(route, 0);
 }
 
 #[tokio::test]
 async fn request_builder_errors_and_unmarked_backend_network_errors_stay_on_route() {
-    let malformed = replication_http_client().post("not a URL").send().await.unwrap_err();
+    let malformed = replication_http_client()
+        .post("not a URL")
+        .send()
+        .await
+        .unwrap_err();
     let error = request_route_failure(malformed);
     let mut route = 0;
     assert!(!advance_failed_route(&mut route, &error));
@@ -361,6 +371,62 @@ async fn request_builder_errors_and_unmarked_backend_network_errors_stay_on_rout
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let error = anyhow::Error::new(exchange(socket.local_addr().unwrap(), None).await.unwrap_err())
         .context("local backend request failed");
+    assert!(!advance_failed_route(&mut route, &error));
+    assert_eq!(route, 0);
+}
+
+#[tokio::test]
+async fn malformed_http_response_heads_are_application_not_stream_failures() {
+    for answer in [
+        &b"NOTHTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"[..],
+        &b"HTTP/1.1 XYZ Invalid\r\ncontent-length: 0\r\n\r\n"[..],
+        &b"HTTP/1.1 200 OK\r\ninvalid header: value\r\n\r\n"[..],
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_request(&mut stream).await;
+            stream.write_all(answer).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let error = exchange(address, None).await.unwrap_err();
+        peer.await.unwrap();
+        assert!(
+            error.is_request(),
+            "control must reach the broad request category"
+        );
+        let error = request_route_failure(error);
+        let mut route = 0;
+        assert_eq!(route_failure(&error), RouteFailure::Application, "{error:#}");
+        assert!(!advance_failed_route(&mut route, &error));
+        assert_eq!(route, 0);
+    }
+}
+
+#[tokio::test]
+async fn malformed_chunk_framing_is_application_not_stream_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nnot-a-chunk-size\r\n")
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let response = exchange(address, None).await.unwrap();
+    let error = response.bytes().await.unwrap_err();
+    peer.await.unwrap();
+    assert!(
+        error.is_decode(),
+        "control must reach the broad decode category"
+    );
+    let error = response_route_failure(error);
+    let mut route = 0;
+    assert_eq!(route_failure(&error), RouteFailure::Application, "{error:#}");
     assert!(!advance_failed_route(&mut route, &error));
     assert_eq!(route, 0);
 }

@@ -17,6 +17,7 @@ flate2 = "1"
 getrandom = { version = "0.3", features = ["std"] }
 hex = "0.4"
 hmac = "0.12"
+hyper = { version = "1", features = ["client", "http1"] }
 libc = "0.2"
 opentelemetry = { version = "0.30", default-features = false, features = ["metrics", "trace"] }
 parking_lot = "0.12"

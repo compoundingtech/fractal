@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Only outbound connect, request/response stream, HTTP transport timeout and carrier-unavailable errors advance routes. Backend, metadata budget, HTTP error status, authentication/grant, protocol, builder, Fabric usage and ambiguous errors remain on the current route with normal backoff. Fabric typed fault errors remain eligible for fallback; untyped legacy errors are conservative application failures. Existing successful-fallback preferred retry remains bounded at 60 seconds. Wire formats and limits are unchanged."
+    "detail": "Only outbound connect, typed request/response stream, HTTP transport timeout and carrier-unavailable errors advance routes. Backend, metadata budget, HTTP error status/framing, authentication/grant, protocol, builder, Fabric usage and ambiguous errors remain on the current route with normal backoff. Hyper parser errors and malformed chunk framing are application errors, not proof of a broken carrier. Fabric typed fault errors remain eligible for fallback; untyped legacy errors are conservative application failures. Existing successful-fallback preferred retry remains bounded at 60 seconds. Wire formats and limits are unchanged."
   },
   "downtime": {
     "status": "none",

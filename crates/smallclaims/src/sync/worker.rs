@@ -1313,7 +1313,10 @@ async fn dial_peer<B: Backend>(
                     },
                     last_http_success.as_ref(),
                     &http,
-                    (is_http && exchange_unanswered(&error)).then_some(peer.url.as_str()),
+                    (is_http
+                        && route_failure(&error) != RouteFailure::Application
+                        && exchange_unanswered(&error))
+                    .then_some(peer.url.as_str()),
                     &mut early_spent,
                 )
                 .await
@@ -1420,23 +1423,55 @@ fn request_route_failure(error: reqwest::Error) -> anyhow::Error {
         RouteFailure::Timeout
     } else if error.is_connect() {
         RouteFailure::Connect
-    } else if error.is_request() || error.is_body() {
-        RouteFailure::Stream
     } else {
-        RouteFailure::Application
+        stream_route_failure(&error)
     };
     anyhow::Error::new(error).context(class)
 }
 
-/// `Response::bytes` reads raw bytes: reqwest's "decode" here means a broken
-/// body stream, not a JSON/protocol/decompression error in our application.
+/// Reading raw response bytes can fail on transport or HTTP framing. Reqwest's
+/// broad "decode" category alone does not distinguish these.
 fn response_route_failure(error: reqwest::Error) -> anyhow::Error {
     let class = if error.is_timeout() {
         RouteFailure::Timeout
     } else {
-        RouteFailure::Stream
+        stream_route_failure(&error)
     };
     anyhow::Error::new(error).context(class)
+}
+
+/// Reqwest's request/decode categories also include HTTP parser failures. Only
+/// typed stream evidence permits failover; protocol and unknown causes stay put.
+fn stream_route_failure(error: &(dyn std::error::Error + 'static)) -> RouteFailure {
+    let mut cause = Some(error);
+    let mut stream = false;
+    while let Some(error) = cause {
+        if let Some(error) = error.downcast_ref::<hyper::Error>() {
+            if error.is_parse() || error.is_user() {
+                return RouteFailure::Application;
+            }
+            stream |= error.is_incomplete_message()
+                || error.is_closed()
+                || error.is_body_write_aborted();
+        }
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            stream |= matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        cause = error.source();
+    }
+    if stream {
+        RouteFailure::Stream
+    } else {
+        RouteFailure::Application
+    }
 }
 
 /// Whether an exchange failed before the peer sent any response head: its connection could not

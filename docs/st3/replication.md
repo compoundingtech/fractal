@@ -428,7 +428,8 @@ for replacing a legacy local dial helper.
 Only transport failures advance to the next configured route: connection failures,
 broken request/response streams, HTTP transport timeouts, and unavailable carriers
 (including Fabric's typed `fault` class or no installed carrier). The worker marks
-failures at the outbound HTTP send/raw-body boundary, not by parsing error text.
+failures at the outbound HTTP send/raw-body boundary using typed Hyper/I/O causes,
+not by parsing error text; broad reqwest request/decode categories are insufficient.
 An HTTP error response, backend/export/receive failure, metadata budget rejection,
 authentication or grant refusal, invalid protocol/JSON/compression, request-builder
 error, Fabric `usage` error, or ambiguous/untyped error keeps the current route and

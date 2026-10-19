@@ -3518,28 +3518,38 @@ async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route
     );
     for (status, code) in [
         (StatusCode::INTERNAL_SERVER_ERROR, "replication-request-failed"),
-        (StatusCode::INTERNAL_SERVER_ERROR, "replication-exchange-metadata-too-large"),
-        (StatusCode::PAYLOAD_TOO_LARGE, "replication-exchange-metadata-too-large"),
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "replication-exchange-metadata-too-large",
+        ),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "replication-exchange-metadata-too-large",
+        ),
         (StatusCode::UNAUTHORIZED, "auth-failed"),
         (StatusCode::UNPROCESSABLE_ENTITY, "invalid-exchange"),
         (StatusCode::OK, "invalid-protocol"),
     ] {
         let state = state.clone();
-        let app = Router::new().route(EXCHANGE_PATH, post(move |body: Bytes| {
-            let state = state.clone();
-            async move {
-                // A signed success carrying the wrong type exercises protocol decoding;
-                // all other cases are signed application refusals.
-                let mut response = signed_response(
-                    &state,
-                    &FleetAuth::body_digest(&body),
-                    0,
-                    serde_json::json!({"code": code}),
-                ).unwrap();
-                *response.status_mut() = status;
-                response
-            }
-        }));
+        let app = Router::new().route(
+            EXCHANGE_PATH,
+            post(move |body: Bytes| {
+                let state = state.clone();
+                async move {
+                    // A signed success carrying the wrong type exercises protocol decoding;
+                    // all other cases are signed application refusals.
+                    let mut response = signed_response(
+                        &state,
+                        &FleetAuth::body_digest(&body),
+                        0,
+                        serde_json::json!({"code": code}),
+                    )
+                    .unwrap();
+                    *response.status_mut() = status;
+                    response
+                }
+            }),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer = PeerConfig {
             name: "peer".into(),
@@ -3555,10 +3565,16 @@ async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route
             EXCHANGE_PATH,
             &serde_json::json!({}),
             false,
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         server.abort();
         let mut route = 0;
-        assert_eq!(route_failure(&error), RouteFailure::Application, "{code}: {error:#}");
+        assert_eq!(
+            route_failure(&error),
+            RouteFailure::Application,
+            "{code}: {error:#}"
+        );
         assert!(!advance_failed_route(&mut route, &error), "{code}");
         assert_eq!(route, 0);
         // Application failures still use the same accumulating normal backoff.
