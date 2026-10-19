@@ -123,6 +123,12 @@ def rust(p):
     for old in ("st3::http", "st3::relay_diagnostic", "st_chatgpt::call"):
         new = IDENTIFIER_TOKEN.sub(lambda m: IDENTIFIERS[m[1]], old)
         text = text.replace('"' + new + '"', '"' + old + '"')
+    # wit-bindgen derives these modules from package st2:resource-provider.
+    # They are ABI namespaces, not references to the renamed root Rust crate.
+    # Canonicalize earlier script output too, so regeneration repairs it.
+    for root in ("exports", "fixture"):
+        text = text.replace(root + "::fractal_legacy_runner::resource_provider",
+                            root + "::st2::resource_provider")
     # Package selection in source comments/examples is not an executable rename.
     text = re.sub(r"(?P<flag>(?:-p|--package)\s+)(?P<name>" +
                   "|".join(map(re.escape, sorted(PACKAGES, key=len, reverse=True))) +
@@ -132,6 +138,14 @@ def rust(p):
 
 changed = 0
 for p in FILES:
+    if p.is_symlink():
+        target = p.readlink().as_posix()
+        rewritten = source_paths(target)
+        if rewritten != target:
+            p.unlink()
+            p.symlink_to(rewritten)
+            changed += 1
+        continue
     if not p.is_file():
         continue
     relative = p.relative_to(ROOT).as_posix()
