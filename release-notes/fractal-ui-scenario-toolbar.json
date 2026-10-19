@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Add the shared Scenario toolbar to Fractal UI Storybook and check Markdown scenario consumption in CI",
+  "summary": "Add the shared Scenario toolbar to Fractal UI Storybook, check Markdown scenario consumption in CI, and track the recording import's client wire schema in web and kit CI inputs",
   "replay": {"status": "none", "detail": "Storybook-only scenario binding; no runtime replay change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rules change."},
