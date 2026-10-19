@@ -251,8 +251,9 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
-printf 'ST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" >> "$GITHUB_ENV"`,
+printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
   },
   {
     name: 'Prepare provider component fixtures',
@@ -388,6 +389,11 @@ printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
     name: 'Run all three systemd-scope tests in the VM',
     id: 'vmtest',
     env: {
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      FRACTAL_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
+      FRACTAL_ISOLATION_WORKSPACE: '${{ github.workspace }}',
+      FRACTAL_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
+      FRACTAL_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
       ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
       ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
       ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
@@ -396,7 +402,7 @@ printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
     run: `start=$SECONDS
 mkdir -p "$RUNNER_TEMP/vm-out"
 "$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
-jq -r '"| VM boot | \\(.boot_seconds)s |\\n| systemd-scope tests in VM (extract and run) | \\(.test_seconds)s |"' "$ST_ISOLATION_TIMINGS" >> "$GITHUB_STEP_SUMMARY"
+jq -r '"| VM boot | \\(.boot_seconds)s |\\n| systemd-scope tests in VM (extract and run) | \\(.test_seconds)s |"' "\${FRACTAL_ISOLATION_TIMINGS-\${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
 printf '| VM test driver total | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
   },
   // The sekrets gateway needs real Unix users, a login session and a user manager: a second
@@ -411,7 +417,8 @@ printf '| sekrets VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB
   {
     name: 'Run the sekrets gateway test in the VM',
     id: 'sekrets-test',
-    env: { ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    env: { FRACTAL_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}', ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
     run: `start=$SECONDS
 mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
 "$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"

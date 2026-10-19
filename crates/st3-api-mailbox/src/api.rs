@@ -88,50 +88,50 @@ use crate::model::{
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 use crate::delivery_presence;
-pub use st3_api::api::published_attention::start_attention_list;
+pub use st3_api_core::api::published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
-pub use st3_api::api::published_attention::{published_attention_rows, refresh_attention_list};
+pub use st3_api_core::api::published_attention::{published_attention_rows, refresh_attention_list};
 #[cfg(target_os = "linux")]
-pub use st3_api::api::tile_endpoint::{
+pub use st3_api_core::api::tile_endpoint::{
     SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
     spawn_from as spawn_tile_endpoints_from,
 };
-pub use st3_api::api::published_lists::{start_published_lists, wait_published_lists_at_least};
+pub use st3_api_core::api::published_lists::{start_published_lists, wait_published_lists_at_least};
 // Other api code calls these handlers directly.
-use st3_api::api::launches::{
+use st3_api_core::api::launches::{
     approve_planning_session, cancel_planning_session, mission, preview_named_planning_candidate,
     revise_planning_session, start_planning_session,
 };
-use st3_api::api::messages::post_message_claim;
-use st3_api::api::operations::{get_slo, get_slo_history};
-use st3_api::api::records::post_review;
-use st3_api::api::sessions::clear_context;
-use st3_api::api::work::retry_work;
+use st3_api_core::api::messages::post_message_claim;
+use st3_api_core::api::operations::{get_slo, get_slo_history};
+use st3_api_core::api::records::post_review;
+use st3_api_core::api::sessions::clear_context;
+use st3_api_core::api::work::retry_work;
 // The tests call these handlers directly.
 #[cfg(test)]
-use st3_api::api::client_reads::{
+use st3_api_core::api::client_reads::{
     client_agents, client_agents_detail, client_history, client_history_detail,
     client_launches_detail, client_work,
 };
 #[cfg(test)]
-use st3_api::api::messages::list_messages;
+use st3_api_core::api::messages::list_messages;
 #[cfg(test)]
-use st3_api::api::operations::{doctor, events};
+use st3_api_core::api::operations::{doctor, events};
 #[cfg(test)]
-use st3_api::api::records::post_claim;
+use st3_api_core::api::records::post_claim;
 #[cfg(test)]
-use st3_api::api::replication::{replication_export, replication_receive, replication_wake};
-pub use st3_api::api::client_v0::raw_terminal::splice as raw_terminal_splice;
+use st3_api_core::api::replication::{replication_export, replication_receive, replication_wake};
+pub use st3_api_core::api::client_v0::raw_terminal::splice as raw_terminal_splice;
 pub use crate::delivery_presence::claude_channel_attached;
 pub use crate::peer::track_remote_reads;
 pub use crate::model::new_request_id;
 pub use crate::model::FleetEndpointsRequest;
-pub use st3_api::api::*;
-pub use st3_api::api::{AUTHORITY_INDETERMINATE_REASON, AgentSuspensionRequest, ApiError, AppState, BoundAgent, DEVICE_SIGNATURE_WINDOW_MS, FleetInviteCreated, FleetInviteRequest, FleetInviteRevokeRequest, FleetPersonRequest, FleetRemoveRequest, FleetStatus};
-pub use st3_api::api::{PUBLISH_SAMPLE_CLAIMS, ReservedUnixSocket, RouteFamily, RuleAudit, RuleSetRequest, SIGNED_LONG_MESSAGE_FIELDS, SIGNED_MESSAGE_FIELDS, SuspensionFence, agent_harness, client_attention_resources_at, cold_agent_roster_rebuild};
-pub use st3_api::api::{fabric_router_with, is_work_wake, mission_eligibility_doctor, raw_terminal_owner_splice, record_publish_latency, record_stream_latency, request_latency_target_windows, request_latency_windows, request_resume, request_suspend, reserve_unix_socket};
-pub use st3_api::api::{router_with, serve_reserved_unix_with_ready, serve_tcp, serve_unix, serve_unix_bound, serve_unix_bound_with_ready, serve_unix_with_ready, signal_message_changed, slo_rows, start_agent_roster, start_native_session_discovery, start_operation_report};
-pub use st3_api::api::{unix_reservation_path};
+pub use st3_api_core::api::*;
+pub use st3_api_core::api::{AUTHORITY_INDETERMINATE_REASON, AgentSuspensionRequest, ApiError, AppState, BoundAgent, DEVICE_SIGNATURE_WINDOW_MS, FleetInviteCreated, FleetInviteRequest, FleetInviteRevokeRequest, FleetPersonRequest, FleetRemoveRequest, FleetStatus};
+pub use st3_api_core::api::{PUBLISH_SAMPLE_CLAIMS, ReservedUnixSocket, RouteFamily, RuleAudit, RuleSetRequest, SIGNED_LONG_MESSAGE_FIELDS, SIGNED_MESSAGE_FIELDS, SuspensionFence, agent_harness, client_attention_resources_at, cold_agent_roster_rebuild};
+pub use st3_api_core::api::{fabric_router_with, is_work_wake, mission_eligibility_doctor, raw_terminal_owner_splice, record_publish_latency, record_stream_latency, request_latency_target_windows, request_latency_windows, request_resume, request_suspend, reserve_unix_socket};
+pub use st3_api_core::api::{router_with, serve_reserved_unix_with_ready, serve_tcp, serve_unix, serve_unix_bound, serve_unix_bound_with_ready, serve_unix_with_ready, signal_message_changed, slo_rows, start_agent_roster, start_native_session_discovery, start_operation_report};
+pub use st3_api_core::api::{unix_reservation_path};
 pub mod mailbox;
 
 /// This crate's route family. st3-daemon serves it beside every other family (its `api::router`);

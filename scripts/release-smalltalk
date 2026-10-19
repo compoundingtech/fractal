@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Build and verify a native Smalltalk archive. Never installs or restarts a service.
 # Usage: scripts/release-smalltalk [--dry-run] TARGET OUTPUT_DIRECTORY
 set -Eeuo pipefail
@@ -142,7 +143,8 @@ mkdir "$work/extracted"
 tar -C "$work/extracted" -xzf "$archive"
 test "$(readlink "$work/extracted/$package/bin/fractal")" = st3
 mkdir -p "$work/install-home"
-ST_MACOS_INSTALL_HOME="$work/install-home" ST_MACOS_APP_PATH="$work/installed/SmallTalk.app" \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+FRACTAL_MACOS_INSTALL_HOME="$work/install-home" ST_MACOS_INSTALL_HOME="$work/install-home" FRACTAL_MACOS_APP_PATH="$work/installed/SmallTalk.app" ST_MACOS_APP_PATH="$work/installed/SmallTalk.app" \
   "$work/extracted/$package/install.sh" --bin-dir "$work/installed"
 # Query outside the build checkout: installed tools must retain their baked source identity.
 (cd "$work/extracted" && "$work/installed/st" --version --json) > "$work/version.json"
@@ -158,9 +160,10 @@ PY_VERSION
 "$work/installed/st3" --help >/dev/null
 "$work/installed/st" --help >/dev/null
 "$work/installed/pty" --version
-env -u ST_AGENT HOME="$work/install-home" XDG_CONFIG_HOME="$work/install-home/.config" \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+env -u FRACTAL_AGENT -u ST_AGENT HOME="$work/install-home" XDG_CONFIG_HOME="$work/install-home/.config" \
   XDG_CACHE_HOME="$work/install-home/.cache" XDG_STATE_HOME="$work/install-home/.local/state" \
-  ST3_PERSON=person/release-smoke ST3_ENDPOINT="$work/absent.sock" \
+  FRACTAL_PERSON=person/release-smoke ST3_PERSON=person/release-smoke FRACTAL_ENDPOINT="$work/absent.sock" ST3_ENDPOINT="$work/absent.sock" \
   python3 crates/stui/tests/pty_smoke.py "$work/installed/st" --ui --no-panic
 python3 - "$archive" <<'PY'
 import hashlib, pathlib, sys

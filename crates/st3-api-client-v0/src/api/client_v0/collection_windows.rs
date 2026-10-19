@@ -8,8 +8,8 @@ use crate::PublishedViewsStore;
 use super::*;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
-pub use st3_api::api::client_v0::collection_windows::*;
-pub use st3_api::api::client_v0::collection_windows::{COLLECTIONS, Prepared, ReadFence, Windows};
+pub use st3_api_core::api::client_v0::collection_windows::*;
+pub use st3_api_core::api::client_v0::collection_windows::{COLLECTIONS, Prepared, ReadFence, Windows};
 
 #[cfg(test)]
 mod tests {

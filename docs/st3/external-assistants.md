@@ -4,6 +4,34 @@ Status: assistant pairing, grant management, bounded reads, and explicitly scope
 
 The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p st3-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
 
+## Adapter call diagnostics
+
+`st-chatgpt` emits one structured `tracing` completion event per dispatched tool
+call, including local validation failures and cancellation when its future is
+dropped. Capture is off by default. Operators may opt in with
+`RUST_LOG=st_chatgpt::call=info` on the adapter process; records go to stderr,
+never the MCP stdio output or the default user answer. Only the adapter call
+target is admitted, even with a broader `RUST_LOG` setting. This does not enable
+daemon OTLP export; configure the daemon's existing trace export separately.
+
+Fields are `tool` (closed published name or `unknown`), `outcome`
+(`success`, `error`, `cancelled`), `code` (adapter-selected code, never a raw
+daemon error), monotonic `duration_ms`, optional `daemon_request_id` (only a
+`request/<UUID>` from the daemon envelope), and optional `response_bytes`
+(exact buffered HTTP response body length, not MCP framing or a token count).
+Duration covers validation and gateway dispatch/body decoding, not subsequent
+MCP delivery. Cancellation before an envelope is decoded has no daemon ID;
+it does not prove a proposed write was rolled back. Hard process termination
+cannot emit a completion event.
+
+No arguments, message/alert content, credentials, handles, raw request/response,
+arbitrary error messages, or caller-chosen action IDs are logged. Byte counts
+reuse the existing JSON decoder's response buffer, without a second serialization.
+Daemon request IDs can join existing `st.request.id` server evidence when that
+capture is enabled. Browser read/send matching and page/budget efficiency
+acceptance remain separate rollout evidence; instrumentation does not authorize
+new production writes or grant changes. Refs #3336, #2172, #3257.
+
 ## Trust boundaries and residual risk
 
 The intended composition is external reasoning service → MCP tunnel/shim → SCG approval/execution → st assistant grant → receiving agent. SCG verifies the caller's signing identity; st separately verifies its assistant grant and authorization proofs. A request-body actor, bare approval identifier, ordinary tunnel signature, or person-device signature is not an assistant authorization proof.
