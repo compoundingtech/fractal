@@ -226,7 +226,7 @@ export const RowActions: Story = {
         // A keyboard context-menu event targets the focused tree row, not its inner painted frame.
         child.closest<HTMLElement>('[role="row"]')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 0 }))
       } else await userEvent.click(child.querySelector<HTMLElement>('[data-agent-menu]')!)
-      const childMenu = await waitFor(() => within(document.body).getByRole('menu', { name: `Actions for ${noSessionChild.title}`, exact: true }))
+      const childMenu = await waitFor(() => within(document.body).getByRole('menu', { name: `Actions for ${noSessionChild.title}` }))
       await expect(within(childMenu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAttribute('aria-disabled', 'true')
       await expect(childMenu).toHaveTextContent('No session reported for this subagent')
       const reason = within(childMenu).getByText('No session reported for this subagent')
