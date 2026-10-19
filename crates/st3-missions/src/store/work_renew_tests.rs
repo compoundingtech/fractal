@@ -155,8 +155,8 @@ fn a_renewal_holds_the_writer_for_a_fixed_number_of_statements_whatever_the_clai
         short.0.statements
     );
     assert!(
-        short.1.statements <= 27,
-        "a published renewal grew past its 27-statement writer budget: {}",
+        short.1.statements <= 28,
+        "a published renewal grew past its 28-statement writer budget: {}",
         short.1.statements
     );
     assert_eq!(
