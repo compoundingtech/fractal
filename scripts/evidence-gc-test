@@ -244,9 +244,22 @@ class Gc(unittest.TestCase):
         self.f.git('add', '-A')
         with At(40):
             self.f.git('commit', '-q', '-m', 'only an old commit')
-        code, _, error = self.run_gc('--apply')
+        code, _, error = self.run_gc('--apply', '--head', 'f' * 40)
         self.assertEqual(code, 1)
         self.assertIn('refusing', error)
+
+    def test_apply_without_naming_any_head_is_refused_and_a_dry_run_is_not(self):
+        old, recent, pr = self.world()
+        record = self.record(pr[0], pr[1], 29)  # the head of an open PR, old: an empty head list would delete it
+        before = self.refs()
+        code, _, error = self.run_gc('--apply')
+        self.assertEqual(code, 2)
+        self.assertIn('needs the open pull request heads', error)
+        self.assertEqual(self.refs(), before)
+        code, result, _ = self.run_gc()  # a dry run may be asked with no heads: it only reports
+        self.assertEqual((code, result['mode']), (0, 'dry-run'))
+        self.assertEqual(self.run_gc('--head', pr[0], '--apply')[0], 0)
+        self.assertIn(f'refs/notes/evidence/{pr[1]}/{record}', self.refs())
 
     def test_bad_arguments_are_refused(self):
         self.world()

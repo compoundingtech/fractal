@@ -96,6 +96,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(git(remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').splitlines()) == 2
     tree_refs = git(remote, 'for-each-ref', '--format=%(refname)', f'refs/notes/evidence/{tree}').splitlines()
     assert len(tree_refs) == 2 and all(r.startswith(f'refs/notes/evidence/{tree}/') for r in tree_refs), tree_refs  # a tree's records are one prefix
+    assert sorted(a['ref'] for a in out['accepted']) == sorted(tree_refs), 'the output names the ref each record is filed under'
     print('passed: signed full notes (a failing stage too) are published; a rogue signer and an unlisted check are refused by name')
 
     # The push token travels in the environment, never in an argument.

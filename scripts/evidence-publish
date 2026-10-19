@@ -115,7 +115,7 @@ def main(argv):
                 raise Refused(f'{ref} already names {existing}; evidence refs are never replaced')
             if not existing:
                 git('update-ref', ref, record, '0' * len(record))
-            entry = {'record': record, 'check': check}
+            entry = {'record': record, 'check': check, 'ref': ref}  # the ref the record is filed under: refs/notes/evidence/<tree>/<record>
             if key:
                 # An index by input key, one ref per record: a newer record never replaces an older one, so a newer
                 # failure with the same key can be found next to an older pass. The ref name repeats the record.

@@ -105,7 +105,7 @@ def main():
         notes = 'ok' if code == 0 else 'failed'
         for check, entry in sorted(checks.items()):
             if isinstance(entry, dict) and entry.get('require', 'off') != 'off' and entry.get('inputs') is not None and re.fullmatch(r'[A-Za-z0-9._-]+', check):
-                code, out = run(sys.executable, VERIFIER, '--repo', '.', '--revision', 'FETCH_HEAD', '--check', check, '--project', '--policy-from', base,
+                code, out = run(sys.executable, VERIFIER, '--repo', '.', '--revision', context['head'], '--check', check, '--project', '--policy-from', base,
                                 '--repository', repository, timeout=VERIFIER_TIMEOUT)
                 try:
                     key = json.loads(out).get('source_inputs') if code == 0 else None

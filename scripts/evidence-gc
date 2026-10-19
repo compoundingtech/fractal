@@ -56,6 +56,10 @@ class Refused(Exception):
     pass
 
 
+class Usage(Refused):
+    pass
+
+
 def git(repo, *args, stdin=None, header=None, check=True):
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     if header:
@@ -332,6 +336,8 @@ def main(argv):
         heads = [h for h in dict.fromkeys(heads)]
         if not all(OID.match(h) for h in heads):
             raise Refused('--head values must be full commit ids')
+        if args.apply and not heads and not args.github:
+            raise Usage('--apply needs the open pull request heads to protect: give --head, --heads-from or --github (an empty list would delete them)')
         repository = args.github or 'compoundingtech/smalltalk'
         policy = git(args.repo, 'show', f'{args.policy_from or args.main}:.st/evidence-skip-policy.json', check=False)
         policy_text = policy.stdout.decode() if policy.returncode == 0 else ''
@@ -356,7 +362,7 @@ def main(argv):
         return status
     except Refused as error:
         print(f'evidence-gc: {error}', file=sys.stderr)
-        return 1
+        return 2 if isinstance(error, Usage) else 1
 
 
 if __name__ == '__main__':

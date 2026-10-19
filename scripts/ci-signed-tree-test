@@ -109,6 +109,25 @@ class SignedTree(unittest.TestCase):
         fetched = subprocess.run(['git', '-C', str(self.last_checkout), 'for-each-ref', '--format=%(refname)', 'refs/notes/'], capture_output=True, text=True).stdout.split()
         self.assertEqual(fetched, [f'refs/notes/evidence/{tree}/{mine}'])
 
+    def test_a_record_reachable_only_through_the_input_index_is_found(self):
+        """The job projects the PULL REQUEST HEAD (not whatever FETCH_HEAD is after the notes fetch) to fetch the input-keyed refs."""
+        doc = json.loads(two_check_policy('shadow'))
+        doc['checks']['unit']['inputs'] = ['src.txt']
+        self.set_policy(json.dumps(doc))
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'unit declares inputs')
+        old_head, old_tree = self.pull_request({'src.txt': 'same\n', 'other.txt': 'one\n'}, number=1)
+        key = support.evidence_verify.project(str(self.f.repo), old_tree, ['src.txt'])
+        record = self.note(old_head, old_tree, inputs={'source_inputs': key})
+        self.f.git('update-ref', f'refs/notes/evidence-input/unit/{key}/{record}', record)
+        head, tree = self.pull_request({'src.txt': 'same\n', 'other.txt': 'two\n'}, number=2)  # another tree, the same declared inputs
+        self.assertNotEqual(tree, old_tree)
+        # No record under the head's own tree: it is found only through refs/notes/evidence-input/unit/<key>/, which the job must fetch.
+        fields = self.run_job(head, number=2)
+        self.assertEqual(fields['lanes'], 'unit:wrong_definition')  # found (the note lacks the lane digest), not no_record
+        fetched = subprocess.run(['git', '-C', str(self.last_checkout), 'for-each-ref', '--format=%(refname)', 'refs/notes/'], capture_output=True, text=True).stdout.split()
+        self.assertEqual(fetched, [f'refs/notes/evidence-input/unit/{key}/{record}'])
+
     def test_a_bad_note_is_reported_with_its_reason_and_a_reject_mode_is_still_only_reported(self):
         head, tree = self.pull_request({'src.txt': 'three\n'})
         self.note(head, tree, exit_code=1)
