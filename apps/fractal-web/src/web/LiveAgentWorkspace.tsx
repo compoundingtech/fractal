@@ -375,7 +375,6 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const chosen = panes.find((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ?? urlPane
   const visiblePanes = chosen && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...panes, chosen] : panes
   const phoneTabs = React.useMemo(() => {
-    if (!narrow) return []
     const names = new Map(agents.map(agent => [agent.ref, agent.name]))
     return [
       ...[...new Set([...phoneAgents, current])]
@@ -384,7 +383,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       { id: 'changes', label: 'Changes' },
       ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, byRef.get(pane.ref)?.title) })),
     ]
-  }, [narrow, agents, phoneAgents, current, visiblePanes, byRef])
+  }, [agents, phoneAgents, current, visiblePanes, byRef])
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
   const width = dragWidth ?? Math.round(ratio * viewport)
   const maxPanel = Math.max(240, viewport - (collapsed ? 40 : Math.min(width, Math.max(208, Math.min(440, viewport - 640)))) - 640)
