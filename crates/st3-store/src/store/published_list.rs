@@ -311,20 +311,6 @@ pub fn decides_asks(kind: &str) -> bool {
 }
 
 impl Store {
-    /// How far replicated claims are projected: claims after this index that arrived by
-    /// replication may still wait in the backlog, and a pass that projects them moves it on. A
-    /// list that folded past them before then reads their claims again once it moves.
-    pub fn projection_frontier(&self) -> Result<u64> {
-        let connection = self.readers.get();
-        let frontier = connection
-            .prepare_cached(
-                "SELECT COALESCE(MAX(last_good_store_index), 0) FROM projection_health
-                 WHERE aggregate='graph'",
-            )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h404ef2f195fd owner=st3_store::store::published_list TODO=trace-statement-and-value-representation */ [], |row| row.get::<_, u64>(0))?;
-        Ok(frontier)
-    }
-
     /// The person asks that `requesters` made, with the step each asked from, in one read for a
     /// whole fold. Person asks are few; the kind index bounds the read to them.
     pub fn asks_by_requesters(

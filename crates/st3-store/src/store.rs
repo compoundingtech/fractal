@@ -1355,7 +1355,7 @@ static RUNTIME_ID_INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(
 ));
 
 /// The predicate of `claims_current_view_index`, word for word, so SQLite can use the index.
-const CURRENT_VIEW_CLAIM: &str = "(kind='intent.desired'
+pub const CURRENT_VIEW_CLAIM: &str = "(kind='intent.desired'
    OR json_extract(body, '$.fields.status') NOT IN ('stopped', 'absent', 'exited')
    OR json_extract(body, '$.status') NOT IN ('stopped', 'absent', 'exited'))";
 
@@ -10316,7 +10316,7 @@ fn login_evidence_in_epoch(
 /// fence, when the seat has no claim of login evidence in this runtime epoch
 /// ([`login_evidence_in_epoch`]). Every view it returns otherwise is the one the full fold would
 /// return, and the view it skips is never `needs-login`.
-fn current_harness_fold_at(
+pub fn current_harness_fold_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -11096,7 +11096,7 @@ pub fn step_run_row_tx(connection: &Connection, subject: &str) -> Result<Option<
 /// does. A request is current while its owner (a step, mission or loop run) is open on the
 /// generation, revision, definition and attempt it was asked for. An answer does not make a
 /// request stale: the reviewers' list leaves out answered requests separately.
-fn human_review_currency(
+pub fn human_review_currency(
     connection: &Connection,
     request: ClaimRecord,
 ) -> Result<std::result::Result<HumanReviewView, String>> {
@@ -11292,7 +11292,7 @@ fn reviewer_answer_sql(result: &str) -> String {
 
 /// The reviewer's answer to the human gate request `request`, the first one by
 /// `reviewer_answer_sql` when a race left two.
-fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<Option<ClaimRecord>> {
+pub fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<Option<ClaimRecord>> {
     connection
         .query_row(
             /* sqlite-large-value: allow-for-now lv-h852d069ae2ac owner=st3_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
@@ -20270,3 +20270,12 @@ pub mod message_send_tests_shared_delivery;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod writer_bound_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod agent_view_tests_shared_attention_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod checkpoint_agreement_tests_shared_attention_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod checkpoint_capture_epoch_tests_shared_attention_tests;
