@@ -288,7 +288,7 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
 
   it('removes the waiting notice and skeleton as soon as roster rows are published', async () => {
     await mount(width)
-    expect(sidebar().querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents')
+    expect(sidebar().querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents…')
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(0)
     expect(roster().querySelector('[data-wf-roster-skeleton]')).not.toBeNull()
     await act(async () => registry.set(agents, { _tag: 'Observed', value: [agent], freshness: 'stale', coverage: { _tag: 'Partial' } }))

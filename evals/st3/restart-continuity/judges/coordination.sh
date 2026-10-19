@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 
-dev_agent="agent/$ST_MISSION_RUN/rc.dev"
-sup_agent="agent/$ST_MISSION_RUN/rc.sup"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+dev_agent="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/rc.dev"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+sup_agent="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/rc.sup"
 dev_messages="$(st3 conversations ls "$dev_agent" --archive --json)"
 sup_messages="$(st3 conversations ls "$sup_agent" --archive --json)"
 requester_messages="$(st3 conversations ls person/eval-requester --archive --json)"
-work_tag="mission-run:mission-run/$ST_MISSION_RUN"
-direct_tag="mission-run:$ST_MISSION_RUN"
-injector="exec/$ST_MISSION_RUN/eval/restart-continuity/inject"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+work_tag="mission-run:mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+direct_tag="mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+injector="exec/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/eval/restart-continuity/inject"
 
 assignments="$(jq --arg tag "$work_tag" \
   '[.[] | select(.from == "daemon/runtime" and (.tags | index($tag)))]' <<<"$dev_messages")"
@@ -35,7 +42,8 @@ test "$(jq -r '.[0].status' <<<"$reports")" = closed
 test "$(jq 'length' <<<"$confirmations")" -eq 1
 
 duplicate_subject="$(jq -r '.[0].subject' <<<"$duplicates")"
-restart_subject="$(st3 subject show "resource/mission-run/$ST_MISSION_RUN/restart" --json \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+restart_subject="$(st3 subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/restart" --json \
   | jq -r '.status.subjects[0].actual | (.fields // .) | .duplicate_message')"
 test "$duplicate_subject" = "$restart_subject"
 

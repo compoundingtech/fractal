@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # st2 Claude status-line tee: record the status-line payload (stdin JSON) to the agent's
 # harness-context record, then hand the SAME bytes to the operator's own renderer.
 #
@@ -37,11 +38,25 @@ for name in ST_CLAUDE_IDENTITY ST_CLAUDE_RUNTIME_ID ST_CLAUDE_SESSION ST_CLAUDE_
     export "$name"
   fi
 done
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+# Identity conflicts never select either alias; diagnostics contain names only.
+for fractal_legacy in ST_AGENT ST_CLAUDE_EXPECTED_NATIVE_SESSION ST_CLAUDE_IDENTITY ST_CLAUDE_RESUME_GENERATION ST_CLAUDE_RUNTIME_ID ST_CLAUDE_SESSION ST_CLAUDE_SESSION_SEQ; do
+  fractal_preferred=FRACTAL_${fractal_legacy#*_}
+  eval 'fractal_new_set=${'"$fractal_preferred"'+x}; fractal_new=${'"$fractal_preferred"'-}; fractal_old_set=${'"$fractal_legacy"'+x}; fractal_old=${'"$fractal_legacy"'-}'
+  if [ "$fractal_new_set" = x ] && [ -n "$fractal_new" ] && [ "$fractal_old_set" = x ] && [ "$fractal_new" != "$fractal_old" ]; then
+    printf 'conflicting identity environment: %s and %s\n' "$fractal_preferred" "$fractal_legacy" >&2
+    unset "$fractal_preferred" "$fractal_legacy"
+    return 1 2>/dev/null || exit 1
+  fi
+done
+unset fractal_legacy fractal_preferred fractal_new_set fractal_new fractal_old_set fractal_old
 
-identity="${ST_CLAUDE_IDENTITY:-${ST_AGENT:-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+identity="${FRACTAL_CLAUDE_IDENTITY-${ST_CLAUDE_IDENTITY:-${FRACTAL_AGENT-${ST_AGENT:-}}}}"
 # CATALOG-first, matching claude-observe.sh: `--catalog` resolves the agent DECLARATION, and with
 # a custom bus root (ST_ROOT != CATALOG) resolution under ST_ROOT would find nothing.
-root="${CATALOG:-${ST_ROOT:-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+root="${CATALOG:-${FRACTAL_ROOT-${ST_ROOT:-}}}"
 if [[ -z "$identity" || -z "$root" ]] || ! command -v st2 >/dev/null 2>&1; then
   exec cat >/dev/null
 fi

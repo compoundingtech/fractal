@@ -1629,10 +1629,14 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
         .get("api_version")
         .and_then(serde_json::Value::as_str)
         .context("the st API response envelope has no api_version")?;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
+    // Receive transport labels only; keep sender names until every member accepts aliases.
+    // Sunset: 60 days after the first release shipping this bridge.
     anyhow::ensure!(
-        matches!(version, "st3.v1" | "st3.client.v0"),
+        matches!(version, "st3.v1" | "fractal.v1" | "st3.client.v0" | "fractal.client.v0"),
         "the st API returned unsupported version {version}"
     );
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     let value = envelope
         .as_object_mut()
         .and_then(|envelope| envelope.remove("value"))
@@ -1643,6 +1647,23 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_api_transport_envelopes_accept_old_and_fractal_versions() {
+        for version in ["st3.v1", "fractal.v1", "st3.client.v0", "fractal.client.v0"] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "api_version": version, "value": {"accepted": true}
+            })).unwrap();
+            assert_eq!(decode_api_response::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"accepted": true}));
+        }
+        for version in ["fractal.v2", "fractal.client.v1"] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "api_version": version, "value": {}
+            })).unwrap();
+            assert!(decode_api_response::<serde_json::Value>(&bytes).is_err());
+        }
+    }
 
     #[test]
     fn otel_disabled_client_sends_no_trace_headers() {
