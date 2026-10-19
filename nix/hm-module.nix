@@ -94,8 +94,10 @@ let
     set -eu
   '' + migrationReady + (if pkgs.stdenv.hostPlatform.isLinux then ''
     for unit in smalltalk.service st3.service; do
-      status=$(${pkgs.systemd}/bin/systemctl --user show "$unit" --property=ActiveState --value) || exit 1
-      case "$status" in inactive|failed) ;; *) exit 1 ;; esac
+      status=$(${pkgs.systemd}/bin/systemctl --user show "$unit" --property=LoadState --property=ActiveState) || {
+        printf '%s\n' "$status" | ${pkgs.gnugrep}/bin/grep -Fxq 'LoadState=not-found' || exit 1
+      }
+      printf '%s\n' "$status" | ${pkgs.gnugrep}/bin/grep -Eq '^ActiveState=(inactive|failed)$' || exit 1
     done
   '' else ''
     for label in org.nix-community.home.smalltalk com.compoundingtech.st3; do

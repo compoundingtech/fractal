@@ -1065,6 +1065,14 @@
             }).config;
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
+            fakeSystemctl = pkgs.writeShellScript "fractal-migration-test-systemctl" ''
+              case "$FAKE_STATE:$3" in
+                legacy-inactive:st3.service) printf 'LoadState=loaded\nActiveState=inactive\n' ;;
+                active:*) printf 'LoadState=loaded\nActiveState=active\n' ;;
+                unknown:*) exit 1 ;;
+                *) printf 'LoadState=not-found\nActiveState=inactive\n'; exit 4 ;;
+              esac
+            '';
           in
           assert builtins.all (item: item.assertion) rendered.assertions;
           assert preflight.before == [ "writeBoundary" ];
@@ -1112,7 +1120,27 @@
             && completed.launchd.agents.fractal.config.Label == "com.compoundingtech.fractal"
             && completed.launchd.agents.fractal.config.RunAtLoad
             && !(noApply.home.file ? "Library/LaunchAgents/com.compoundingtech.fractal-apply.plist"));
-          pkgs.runCommand "smalltalk-hm-module-fractal-prestage-eval" { } "touch $out";
+          pkgs.runCommand "smalltalk-hm-module-fractal-prestage-eval" { } (
+            pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              # Exercise the emitted ExecCondition, never a live service manager.
+              mkdir -p config/fractal state/fractal
+              for directory in config/fractal state/fractal; do
+                printf '%s\n' 'arn:lmig:smalltalk:2026-10-16-state-dirs-fractal' > "$directory/.fractal-migration-completed"
+              done
+              substitute ${rendered.systemd.user.services.fractal.Service.ExecCondition} guard \
+                --replace-fail '${pkgs.systemd}/bin/systemctl' '${fakeSystemctl}' \
+                --replace-fail '/home/example/.local/state' "$PWD/state" \
+                --replace-fail '/home/example/.config' "$PWD/config"
+              FAKE_STATE=legacy-inactive ${pkgs.runtimeShell} guard
+              FAKE_STATE=absent ${pkgs.runtimeShell} guard
+              if FAKE_STATE=active ${pkgs.runtimeShell} guard; then
+                echo 'active legacy daemon passed migration guard' >&2; exit 1
+              fi
+              if FAKE_STATE=unknown ${pkgs.runtimeShell} guard; then
+                echo 'unknown service-manager state passed migration guard' >&2; exit 1
+              fi
+            '' + "touch $out"
+          );
         checks.fractal-aliases =
           let
             rendered = (mkHmModuleEval { fractalBinary = true; }).config;
