@@ -501,7 +501,7 @@ def inventory(path, relative, crates, packages):
                 # Manifest paths and dependency/feature selectors describe source
                 # builds. Executable target names are compared with Cargo metadata.
                 continue
-            if import_path or any(part in token for part in ('crates/', 'clients/', '/src/', '/tests/', '/templates/', 'docs/', 'node_modules/', 'target/', 'packages/', 'scripts/')):
+            if import_path or any(part in token for part in ('crates/', 'clients/', '/src/', '/tests/', '/templates/', 'docs/', 'node_modules/', 'target/', 'packages/', 'scripts/', '.github/')):
                 continue
             if token.endswith(('.rs', '.toml', '.ts', '.tsx', '.py', '.sh')) or re.fullmatch(r'\.\./fractal-[a-z-]+', token):
                 continue
