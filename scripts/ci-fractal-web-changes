@@ -177,6 +177,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/perfMarks.ts",
     "apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx",
     "apps/fractal-web/src/web/ResponsiveAgentSidebar.tsx",
+    "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
+    "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
     "apps/fractal-web/src/web/sidebarAttention.ts",
     "apps/fractal-web/src/web/SidebarChrome.stories.tsx",
     "apps/fractal-web/src/web/SidebarChromeFooter.tsx",

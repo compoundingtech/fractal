@@ -506,6 +506,318 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
     needs: [linux-test-build]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+  daily-tests:
+    name: daily-tests
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CI_RUN_ID: ${{ github.run_id }}
+      CI_TEST_PARTITION: "hash:1/2"
+      CI_TEST_THREADS: "8"
+      ST_TEST_SCALE: full
+      CI_CACHE_DEV_SHELL: default
+    steps:
+      - name: Require the shared test producer to succeed
+        env:
+          PRODUCER_RESULT: ${{ needs.linux-test-build.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use the runner's own caches
+        run: |
+          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+      - name: Restore the local Nix cache
+        id: nix-cache
+        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/st-ci-cache"
+          key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
+          restore-keys: |
+            nix5-linux-tests-${{ runner.os }}-
+            nix4-linux-tests-${{ runner.os }}-
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test home and XDG state
+        run: |
+          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
+          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        if: env.CI_LOCAL_CACHES != '1'
+        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Prepare the historical messaging channel
+        if: runner.os == 'Linux'
+        run: |
+          binary=$(timeout 10m bash scripts/messaging-compat-binary)
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
+      - name: Prepare provider component fixtures
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths --print-build-logs)
+          for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
+            wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+            printf 'ST2_%s_COMPONENT=%s/share/st2/providers/st2_%s_component.component.wasm\n' "$provider" "$components" "$wasm" >> "$GITHUB_ENV"
+          done
+      - name: Download this run attempt’s successful test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.linux-test-build.outputs.artifact-id }}
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+        run: python3 scripts/ci-test-archive download
+      - name: Verify source, hashes and extract test archives
+        shell: bash
+        run: nix develop -c python3 scripts/ci-test-archive consume
+        env:
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+      - name: Install matching rendered hooks
+        shell: bash
+        run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Summarize tested revision
+        run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
+      - name: Run nextest at full scale
+        shell: bash
+        run: nix develop -c bash scripts/ci-linux tests
+      - name: Save Nix outputs to the local Nix cache
+        if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
+        run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
+      - id: build-snapshot-save
+        name: Keep valid same-source build outputs
+        if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
+        env:
+          CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
+        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
+      - id: build-snapshot-upload
+        name: Retain the same-source build snapshot
+        if: "!cancelled() && steps.build-snapshot-save.outputs.publish == 'true'"
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build-snapshot-save.outputs.name }}
+          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+          overwrite: true
+      - name: Wait before retrying build snapshot retention
+        if: "!cancelled() && steps.build-snapshot-upload.outcome == 'failure'"
+        timeout-minutes: 1
+        shell: bash
+        run: 'echo "::warning::Build snapshot upload failed; retrying once in 15 seconds."; sleep 15'
+      - name: Retry retaining the same-source build snapshot
+        if: "!cancelled() && steps.build-snapshot-upload.outcome == 'failure'"
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build-snapshot-save.outputs.name }}
+          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+          overwrite: true
+      - name: Retain stage logs and timings
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-tests-logs
+          path: |
+            ${{ runner.temp }}/ci-logs/
+            target/messaging-faults/
+            target/boot-canaries/
+          if-no-files-found: ignore
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    needs: [linux-test-build]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+  daily-tests-shard-2:
+    name: daily-tests-shard-2
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CI_RUN_ID: ${{ github.run_id }}
+      CI_TEST_PARTITION: "hash:2/2"
+      CI_TEST_THREADS: "8"
+      ST_TEST_SCALE: full
+      CI_CACHE_DEV_SHELL: default
+    steps:
+      - name: Require the shared test producer to succeed
+        env:
+          PRODUCER_RESULT: ${{ needs.linux-test-build.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use the runner's own caches
+        run: |
+          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+      - name: Restore the local Nix cache
+        id: nix-cache
+        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/st-ci-cache"
+          key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
+          restore-keys: |
+            nix5-linux-tests-${{ runner.os }}-
+            nix4-linux-tests-${{ runner.os }}-
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test home and XDG state
+        run: |
+          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
+          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        if: env.CI_LOCAL_CACHES != '1'
+        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Prepare the historical messaging channel
+        if: runner.os == 'Linux'
+        run: |
+          binary=$(timeout 10m bash scripts/messaging-compat-binary)
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
+      - name: Prepare provider component fixtures
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths --print-build-logs)
+          for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
+            wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+            printf 'ST2_%s_COMPONENT=%s/share/st2/providers/st2_%s_component.component.wasm\n' "$provider" "$components" "$wasm" >> "$GITHUB_ENV"
+          done
+      - name: Download this run attempt’s successful test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.linux-test-build.outputs.artifact-id }}
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+        run: python3 scripts/ci-test-archive download
+      - name: Verify source, hashes and extract test archives
+        shell: bash
+        run: nix develop -c python3 scripts/ci-test-archive consume
+        env:
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+      - name: Install matching rendered hooks
+        shell: bash
+        run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Summarize tested revision
+        run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
+      - name: Run nextest at full scale
+        shell: bash
+        run: nix develop -c bash scripts/ci-linux tests
+      - name: Save Nix outputs to the local Nix cache
+        if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
+        run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
+      - id: build-snapshot-save
+        name: Keep valid same-source build outputs
+        if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
+        env:
+          CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
+        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
+      - id: build-snapshot-upload
+        name: Retain the same-source build snapshot
+        if: "!cancelled() && steps.build-snapshot-save.outputs.publish == 'true'"
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build-snapshot-save.outputs.name }}
+          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+          overwrite: true
+      - name: Wait before retrying build snapshot retention
+        if: "!cancelled() && steps.build-snapshot-upload.outcome == 'failure'"
+        timeout-minutes: 1
+        shell: bash
+        run: 'echo "::warning::Build snapshot upload failed; retrying once in 15 seconds."; sleep 15'
+      - name: Retry retaining the same-source build snapshot
+        if: "!cancelled() && steps.build-snapshot-upload.outcome == 'failure'"
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build-snapshot-save.outputs.name }}
+          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+          overwrite: true
+      - name: Retain stage logs and timings
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-tests-shard-2-logs
+          path: |
+            ${{ runner.temp }}/ci-logs/
+            target/messaging-faults/
+            target/boot-canaries/
+          if-no-files-found: ignore
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    needs: [linux-test-build]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
   linux-fleet-compat:
     name: daily-fleet-compat
     runs-on:
@@ -645,7 +957,13 @@ jobs:
     if: github.ref == 'refs/heads/main'
   daily-report:
     name: daily-report
-    needs: [linux-test-build, isolation-vm, mail-redelivery-canaries, linux-fleet-compat]
+    needs:
+      - linux-test-build
+      - isolation-vm
+      - mail-redelivery-canaries
+      - linux-fleet-compat
+      - daily-tests
+      - daily-tests-shard-2
     if: ${{ always() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -662,7 +980,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TITLE: Daily long-lane run failed
-          LANES: '{"linux-test-build":"daily-test-build","isolation-vm":"daily-isolation-vm","mail-redelivery-canaries":"daily-mail-redelivery-canaries","linux-fleet-compat":"daily-fleet-compat"}'
+          LANES: '{"linux-test-build":"daily-test-build","isolation-vm":"daily-isolation-vm","mail-redelivery-canaries":"daily-mail-redelivery-canaries","linux-fleet-compat":"daily-fleet-compat","daily-tests":"daily-tests","daily-tests-shard-2":"daily-tests-shard-2"}'
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: python3 scripts/ci-daily-long-report
       - name: Report job cache coverage

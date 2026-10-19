@@ -4,6 +4,7 @@ import { interactionVars as interaction, colorVars as c, typeVars as t, radiusVa
 import { SidebarStatus as StatusGlyph } from '../sidebar/SidebarStatus'
 import { Icon } from './Icons'
 import { ChromeControl } from './ChromeControl'
+import { NarrowLayoutContext } from './NarrowLayout'
 import type { AgentStatus } from '../sidebar/model'
 
 /**
@@ -167,13 +168,16 @@ export function ThreadHeader({
   sidebarToggleRef?: React.Ref<HTMLButtonElement>
   /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
   sidebarSheet?: { readonly open: boolean; readonly id: string }
-  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. */
+  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
   narrow?: boolean
 }) {
+  // The `narrow` prop is authoritative for the header's own controls: they size as 44px touch targets even when the host did not provide the context.
+  const inheritedNarrow = React.useContext(NarrowLayoutContext)
   return (
-    <header data-testid="thread-header" {...stylex.props(styles.header)}>
+    <NarrowLayoutContext.Provider value={narrow === true || inheritedNarrow}>
+    <header data-testid="thread-header" {...stylex.props(styles.header, narrow && styles.headerNarrow)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
-        <ChromeControl ref={sidebarToggleRef} icon="chevron-right" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
+        <ChromeControl ref={sidebarToggleRef} icon="chevron-right" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>
@@ -186,15 +190,16 @@ export function ThreadHeader({
         {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}
         {elapsed !== undefined ? <span role="timer" aria-label="Current conversation turn elapsed">{elapsed}</span> : null}
         <div data-testid="native-action-slot" ref={actionPortalRef}>{nativeActions}</div>
-        {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs)}>Open <Icon name="chevron-down" size={12} /></button>}
-        {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs)}>Commit <Icon name="chevron-down" size={12} /></button>}
+        {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Open <Icon name="chevron-down" size={12} /></button>}
+        {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Commit <Icon name="chevron-down" size={12} /></button>}
         {!narrow && terminalAvailable && <ChromeControl icon="drawer" label="Toggle terminal drawer" pressed={drawerOpen} onPress={onToggleDrawer} />}
         {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="drawer" label="Toggle terminal drawer" disabledReason={terminalDisabledReason} />}
         {narrow
-          ? <ChromeControl icon="panel" label="Agent details" popup="dialog" expanded={panelOpen} active={panelOpen} onPress={onTogglePanel} />
+          ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={panelOpen} active={panelOpen} onPress={onTogglePanel} />
           : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
       </div>
     </header>
+    </NarrowLayoutContext.Provider>
   )
 }
 
@@ -217,6 +222,8 @@ const styles = stylex.create({
   resizeVertical: { position: 'absolute', insetBlockStart: 0, insetBlockEnd: 1, insetInlineStart: 0, width: 1, cursor: 'col-resize', zIndex: 2, touchAction: 'none', '::after': { content: '""', position: 'absolute', insetInline: -3, insetBlock: 0 }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   resizeHorizontal: { position: 'absolute', insetInlineStart: 0, insetInlineEnd: 4, insetBlockStart: 0, height: 1, cursor: 'row-resize', zIndex: 2, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   header: { height: g.band, display: 'flex', alignItems: 'center', gap: g.gutter, paddingInline: g.gutter, flexShrink: 0, minWidth: 0 },
+  // A landscape phone's notch sits beside the header; the gutter stays the minimum.
+  headerNarrow: { paddingInlineStart: `max(${g.gutter}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${g.gutter}, env(safe-area-inset-right, 0px))` },
   breadcrumb: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
@@ -225,6 +232,7 @@ const styles = stylex.create({
   actionSlot: { display: 'flex', alignItems: 'center', gap: 8 },
   actions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 6 },
   outlineXs: { height: g.controlSm, display: 'inline-flex', alignItems: 'center', paddingInline: 6, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, backgroundColor: 'rgba(255, 255, 255, 0.025)', color: c.fg, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },
+  outlineTouch: { height: g.touchTarget },
   drawer: { display: 'flex', flexDirection: 'column', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.borderStrong, backgroundColor: c.canvas, flexShrink: 0, minHeight: 0 },
   drawerHead: { height: 32, display: 'flex', alignItems: 'center', gap: 12, paddingInline: 12 },
   drawerLabel: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgMuted, fontWeight: t.weightMedium },

@@ -419,6 +419,11 @@ the principal it claims, it is a full-tier single-note commit about this commit 
 is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
 accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
 
+A step-based job may record extra named inputs next to the fixed ones: `STEP_INPUTS` is a JSON object of short
+lower-case names with nonempty string values (a shard number, a test set). It can add a name but never replace a fixed
+one, and anything malformed makes no note. The aggregate note ignores jobs of the separate `fractal-web` lane
+(`fractal-web-*`): that lane is skipped whenever no web path changed, which must not stop the `linux-gate` verdict.
+
 ### Shadow verification
 
 After publishing, the aggregate note job runs `scripts/ci-evidence-shadow` (from the base commit, fail-soft,
@@ -428,7 +433,9 @@ there with the base commit's key list. That is what a later gate that fetched th
 own local refs. A lane prints `ok`, or `would-reject` with the verifier's reason (`no_note` for a lane this run did
 not sign, `not_on_remote`, `check_failed`, `untrusted_level`, `stale_tree` and the rest of the verifier's reasons). The job summary carries the table and a
 total (`lanes`, `ok`, `would_reject`, `refs_added`, seconds); each line is also in the log as
-`evidence-shadow v1 ...`. It gates nothing and never changes the job's result.
+`evidence-shadow v1 ...`. A lane listed in `--optional` (one that runs only when its paths changed, such as
+`fractal-web`) reads `n/a not_run` when this run made no record for it and is counted apart. It gates nothing and never
+changes the job's result.
 
 ### What reaches the signing environment
 

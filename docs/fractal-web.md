@@ -100,6 +100,12 @@ shortcut through the kit tooltip. `wf/Sidebar/Responsive navigation` covers ligh
 and dark surfaces at 440px and 1440px, with both themes included in `AllStates`.
 The sidebar's **Collapse agents** and **Close agents** buttons use the same shared
 chrome control and named kit tooltip; opening the drawer focuses **Close agents**.
+Below 900px the phone drawer owns its open state and retains the same roster while
+hidden, so opening it does not render the conversation. Its controls use the kit's
+44px narrow-layout targets and safe-area insets. The phone tab panel and portal
+host remain at the same reconciliation position across the breakpoint, preserving
+composer drafts and scroll state. The dock and phone drawer share the same tree,
+reported occupancy/spend metrics and stale/unavailable-state presentations.
 
 ## Observation and unavailable states
 

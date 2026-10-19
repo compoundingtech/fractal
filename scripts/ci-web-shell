@@ -10,7 +10,7 @@
 # flake. Any problem on the way falls back to `nix develop .#web`, so a miss only costs time.
 #
 # The cache entry is keyed by the files the shell is built from (see fractalWebShellCache in
-# .github/workflows/workspace-ci.ts); main upkeep fills it, and a run that misses fills its own ref.
+# .github/workflows/workspace-ci.ts); only protected-main upkeep fills the shared entry.
 set -euo pipefail
 cmd=${1:?usage: scripts/ci-web-shell fill|run COMMAND...}
 shift
