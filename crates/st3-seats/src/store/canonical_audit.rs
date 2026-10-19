@@ -956,6 +956,58 @@ fn every_shared_projection_agrees_after_shuffle_restart_and_checkpoint() {
 }
 
 #[test]
+fn every_shared_projection_agrees_after_duplicated_and_batched_delivery() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = Store::open_memory("alder").unwrap();
+    write_audit_history(&source);
+    let exchange = exchange_from(&source, &ReplicationInventory::default());
+    let count = exchange.envelopes.len();
+    let reference = Store::open_memory("birch").unwrap();
+    receive_and_project(&reference, "alder", &exchange);
+    let mut mismatches = Vec::new();
+    // Batches of each width in reverse order, every envelope twice in its batch, and the whole
+    // exchange again halfway through, so old duplicates arrive after newer claims.
+    for width in [1, 2, 3, 7] {
+        let name = format!("duplicated-{width}");
+        let path = directory.path().join(format!("{name}.sqlite3"));
+        let mut target = Store::open(&path, &name).unwrap();
+        let order = (0..count).rev().collect::<Vec<_>>();
+        for (batch, chunk) in order.chunks(width).enumerate() {
+            let envelopes = chunk
+                .iter()
+                .flat_map(|&index| [exchange.envelopes[index].clone(), exchange.envelopes[index].clone()])
+                .collect();
+            receive_and_project(&target, "alder", &exchange_of("alder", envelopes));
+            if batch == order.len() / width / 2 {
+                receive_and_project(&target, "alder", &exchange);
+            }
+        }
+        compare_shared(&reference, &target, &format!("{name}/arrival"), &mut mismatches);
+        // Every copy collapsed onto one held envelope and one claim each.
+        let held = |store: &Store| {
+            let connection = store.readers.get();
+            ["replica_envelopes", "claims"].map(|table| {
+                connection
+                    .query_row(/* sqlite-large-value: allow-for-now lv-h36fb7b5ff718 owner=st3_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, i64>(0))
+                    .unwrap()
+            })
+        };
+        assert_eq!(held(&target), held(&reference), "{name}: duplicates were stored");
+        receive_and_project(&target, "alder", &exchange);
+        compare_shared(&reference, &target, &format!("{name}/redelivery"), &mut mismatches);
+        drop(target);
+        target = Store::open(&path, &name).unwrap();
+        target.replay_replication_graph().unwrap();
+        compare_shared(&reference, &target, &format!("{name}/restart-replay"), &mut mismatches);
+    }
+    assert!(
+        mismatches.is_empty(),
+        "shared projection divergence:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
 fn equal_time_writers_choose_the_same_shared_source() {
     let at = now_ms();
     let writers = [
