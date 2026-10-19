@@ -1,5 +1,6 @@
 //! Host-local suspension payloads, pulled in bounded chunks on demand. Transcript contents
 //! never enter claims. Git's normal index, branch and working tree are never changed.
+use crate::SeatsStore;
 use crate::{
     model::{MemberSpec, St3Error},
     store::Store,

@@ -41,6 +41,8 @@ pub mod prepared_envelope;
 mod replica_record;
 pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
+mod full_inventory_tests;
+#[cfg(test)]
 mod exchange_budget_tests;
 #[cfg(test)]
 mod projection_busy_tests;
@@ -803,6 +805,7 @@ pub struct Store {
     pub rules_stale: AtomicBool,
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
+    pub(crate) signature_migration_work: Mutex<Option<principals::SignatureEnvelopeWork>>,
     pub origin: String,
     /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
     /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
@@ -949,6 +952,11 @@ impl Store {
             [],
             |row| row.get(0),
         )?;
+        if fresh {
+            // Only before the first table. Pages a trim frees can then go back to the
+            // filesystem; an existing store switches with one VACUUM (docs/st3/retention.md).
+            connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")?;
+        }
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
@@ -958,10 +966,9 @@ impl Store {
         })?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
-            inventory_generation::initialize(connection)?;
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbdb606ee3fe6 owner=smallclaims::store TODO=trace-statement-and-value-representation */ principals::PRINCIPAL_SCHEMA)?;
-            Ok(())
+            inventory_generation::initialize(connection)
         })?;
+        principals::initialize_schema(connection)?;
         if fresh {
             runtime.create_schema_for_fresh_store(connection)?;
         } else {
@@ -1065,6 +1072,7 @@ impl Store {
             rules: std::sync::RwLock::new(None),
             rules_stale: AtomicBool::new(true),
             verdicts_due: AtomicBool::new(false),
+            signature_migration_work: Mutex::new(None),
             origin,
             path,
             shared_memory,
@@ -1741,11 +1749,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
     )?;
     anyhow::ensure!(
         table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses an unsupported st schema; start with a new state directory"
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
     );
     anyhow::ensure!(
         version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses unsupported st schema version {version}"
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
     );
     Ok(())
 }
@@ -3826,6 +3834,33 @@ const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// Newly admitted claims projected per writer transaction. A catch-up page must not keep
 /// queued lease renewals and messages behind its entire incremental projection.
 pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
+
+/// Full-inventory answers since the daemon started: each lists every identity this node holds,
+/// which on a large store can pass `MAX_EXCHANGE_BYTES` and fail the peer's inflate.
+pub static FULL_INVENTORY_ANSWERS: AtomicU64 = AtomicU64::new(0);
+static FULL_INVENTORY_LOGGED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// Count a full-inventory answer and say so at most once a minute: how many identities it lists,
+/// and what the request carried, so the request that reached this path can be told apart (an
+/// older build's complete listing, or a digest with nothing listed).
+fn note_full_inventory_answer(identities: usize, listed: usize, complete: bool) {
+    FULL_INVENTORY_ANSWERS.fetch_add(1, Ordering::Relaxed);
+    let now = now_ms() as u64;
+    let last = FULL_INVENTORY_LOGGED_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 60_000
+        || FULL_INVENTORY_LOGGED_AT
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    eprintln!(
+        "st: warning: answering a replication exchange with the full inventory ({identities} \
+         identities): the request had no range digests and no digest or a different one, listing \
+         {listed} identities ({})",
+        if complete { "a complete listing" } else { "not a complete listing" }
+    );
+}
 
 /// The most bytes one exchange's JSON may take before compression: the limit a peer inflates to
 /// (`MAX_EXCHANGE_BYTES`), less room for the signed answer that wraps it. A page is chosen by
@@ -6258,6 +6293,13 @@ impl Store {
         } else {
             remote.digest == replication_inventory_digest(&remote.envelopes)
         };
+        if !same {
+            note_full_inventory_answer(
+                snapshot.inventory.envelopes.len(),
+                remote.envelopes.len(),
+                remote_is_complete,
+            );
+        }
         let missing = if same || !remote_is_complete {
             Vec::new()
         } else {
@@ -9327,7 +9369,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-he7b2f39a2da2 owner=smallclai
         now,
     )?;
     // A device signed this claim before the node wrote it: keep the signature with it.
-    principals::attach_expected_signature_tx(transaction, &id, subject, kind, actor)?;
+    principals::attach_expected_signature_from_writer_tx(transaction, &id, subject, kind, actor, origin)?;
     Ok(ClaimRecord {
         id,
         store_index,

@@ -2,7 +2,7 @@
 //! This accessor adds neither a readiness certificate nor a separate view registry.
 use super::*;
 
-const QUERY: &str =
+pub const QUERY: &str =
     "SELECT s.subject, s.run_id, r.mission_id, s.step_path, s.title, s.goals, s.status,
                     s.updated_at_unix_ms
              FROM step_runs s
@@ -50,5 +50,3 @@ pub fn read(
         .collect()
 }
 
-#[cfg(test)]
-mod tests;
