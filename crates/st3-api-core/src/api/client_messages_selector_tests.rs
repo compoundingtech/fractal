@@ -651,14 +651,14 @@ fn client_messages_selector_claim_edits_and_deletes_match_fresh_canonical_pages(
         let mut writer = store.connection.write();
         let tx = writer.transaction().unwrap();
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-ha31b4cbda808 owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.from','agent/edited','$.fields.to','person/blair','$.fields.content','edited canonical content','$.fields.tags',json('[\"reminder:mutation\",\"version:18446744073709551615\"]')) WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-hd675ce7440cc owner=st3_api_core::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.from','agent/edited','$.fields.to','person/blair','$.fields.content','edited canonical content','$.fields.tags',json('[\"reminder:mutation\",\"version:18446744073709551615\"]')) WHERE subject=?1",
             [subject(0)],
         ).unwrap();
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h51c6915775b1 owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.to',?2,'$.fields.tags',json('[\"reminder:mutation\",\"version:1\"]')) WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h49cfbe56c20b owner=st3_api_core::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.to',?2,'$.fields.tags',json('[\"reminder:mutation\",\"version:1\"]')) WHERE subject=?1",
             rusqlite::params![subject(3), PERSON],
         ).unwrap();
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h962c6d0d950e owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h7d1d837b5a92 owner=st3_api_core::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1",
             rusqlite::params![subject(7), (BASE_TIME + 999).to_string()]).unwrap();
         tx.commit().unwrap();
     }
@@ -675,7 +675,7 @@ fn client_messages_selector_claim_edits_and_deletes_match_fresh_canonical_pages(
         "accepted-time edit must move the header before tied arrivals");
     {
         let writer = edited.connection.write();
-        writer.execute(/* sqlite-large-value: allow-for-now lv-haccf95923239 owner=st3_api::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject=?1", [subject(0)]).unwrap();
+        writer.execute(/* sqlite-large-value: allow-for-now lv-h4cdcbc51dcd3 owner=st3_api_core::api::client_messages_selector_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject=?1", [subject(0)]).unwrap();
     }
     drop(edited);
     let deleted = Store::open(&path, "selector-mutations").unwrap();
@@ -742,8 +742,8 @@ fn client_messages_selector_desired_delete_seeks_only_subject_and_affected_remin
         (3, vec![declared_selector_subject(3)]),
     ] {
         let subject = declared_selector_subject(index);
-        assert_eq!(writer.execute(/* sqlite-large-value: allow-for-now lv-h45177bd8da33 owner=st3_api::api::client_messages_selector_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&subject]).unwrap(), 1);
-        let plan = writer.prepare(/* sqlite-large-value: allow-for-now lv-hc75d16d7bfac owner=st3_api::api::client_messages_selector_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+        assert_eq!(writer.execute(/* sqlite-large-value: allow-for-now lv-h4135f6463d55 owner=st3_api_core::api::client_messages_selector_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&subject]).unwrap(), 1);
+        let plan = writer.prepare(/* sqlite-large-value: allow-for-now lv-h9867da62da93 owner=st3_api_core::api::client_messages_selector_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
             .query_map([&subject], |row| row.get::<_, String>(3)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert!(plan.iter().any(|step| step.contains("SEARCH local_client_message_selectors_v1 USING PRIMARY KEY")),
@@ -752,7 +752,7 @@ fn client_messages_selector_desired_delete_seeks_only_subject_and_affected_remin
             "deletion must seek the affected reminder group: {plan:?}");
         assert!(!plan.iter().any(|step| step.contains("SCAN local_client_message_selectors_v1")),
             "deletion must not scan unrelated retained headers: {plan:?}");
-        let mut affected = writer.prepare(/* sqlite-large-value: allow-for-now lv-ha241fca48db7 owner=st3_api::api::client_messages_selector_tests TODO=trace-statement-and-value-representation */ &sql).unwrap().query_map([&subject], |row| row.get::<_, String>(0))
+        let mut affected = writer.prepare(/* sqlite-large-value: allow-for-now lv-h152dac534af3 owner=st3_api_core::api::client_messages_selector_tests TODO=trace-statement-and-value-representation */ &sql).unwrap().query_map([&subject], |row| row.get::<_, String>(0))
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         affected.sort();
         assert_eq!(affected, expected);
@@ -776,7 +776,7 @@ fn client_messages_selector_canonical_settlement_replay_commits_usable_declared_
     assert_eq!(expected[0].len(), LIMIT + 3, "declared fixture must span continuation pages");
     assert!(!expected[3].is_empty(), "declared fixture must route to its mailbox");
     let epoch = store.client_messages_cut_epoch().unwrap();
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2390bb2bfc74 owner=st3_api::api::client_messages_selector_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='canonical_replay_settled'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h20fa8672f192 owner=st3_api_core::api::client_messages_selector_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='canonical_replay_settled'", []).unwrap();
     assert!(store.settle_runs_for_canonical_replay().unwrap().is_empty());
     assert!(store.client_messages_cut_epoch().unwrap() > epoch, "settlement must actually replay declarations");
     // Settlement itself is bounded; the committed old frontier remains usable

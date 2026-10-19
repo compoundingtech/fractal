@@ -68,9 +68,14 @@ perf_stop_daemon() {
     for proc in /proc/[0-9]*; do
       other="${proc#/proc/}"
       [[ -n "${ancestors[$other]:-}" ]] && continue
+      # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
       if { tr '\0' ' ' <"$proc/cmdline"; } 2>/dev/null | grep -qF "$root/bin/" \
         || [[ "$(readlink "$proc/cwd" 2>/dev/null)" == "$root/"* ]] \
-        || { tr '\0' '\n' <"$proc/environ"; } 2>/dev/null | grep -qxF "ST3_ENDPOINT=$root/st3.sock"; then
+        || { tr '\0' '\n' <"$proc/environ"; } 2>/dev/null | awk -v endpoint="$root/st3.sock" '
+          /^FRACTAL_ENDPOINT=/ { preferred_set = 1; preferred = substr($0, 18) }
+          /^ST3_ENDPOINT=/ { legacy = substr($0, 14) }
+          END { exit ((preferred_set ? preferred : legacy) != endpoint) }
+        '; then
         kill "-$signal" "$other" 2>/dev/null || true
       fi
     done

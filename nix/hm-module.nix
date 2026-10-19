@@ -281,6 +281,8 @@ in
           StandardErrorPath = "${cfg.stateDir}/logs/st3.stderr.log";
           # Only Home Manager-owned builds should trigger a launchd reload.
           EnvironmentVariables = environment // lib.optionalAttrs (!externallyManaged) {
+            # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+            FRACTAL_PACKAGE = toString effectivePackage;
             SMALLTALK_PACKAGE = toString effectivePackage;
           };
         };

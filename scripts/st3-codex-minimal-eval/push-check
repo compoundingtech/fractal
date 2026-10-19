@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Prove, with a live Codex seat, that a plain mission seat on an auto install can push the branch its
 # step declares to its own repository: the approval reviewer must not reject it.
 #
@@ -17,7 +18,7 @@
 # starts an isolated daemon with access_mode = "auto". Paid: one small Codex turn. Run by hand.
 set -Eeuo pipefail
 
-unset ST_AGENT ST3_INCARNATION ST_MISSION_RUN ST3_ENDPOINT ST_HOOKS
+unset FRACTAL_AGENT ST_AGENT FRACTAL_INCARNATION ST3_INCARNATION FRACTAL_MISSION_RUN ST_MISSION_RUN FRACTAL_ENDPOINT ST3_ENDPOINT FRACTAL_HOOKS ST_HOOKS
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 source "$repo/scripts/st3-seat-queue-perf/daemon.sh"
@@ -28,6 +29,8 @@ remote="$3"
 model="${4:-gpt-6.1-sol}"
 branch="push-check-$$"
 env_block='    env {
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      FRACTAL_PERMISSIONS "push-own-branch"
       ST_PERMISSIONS "push-own-branch"
     }'
 if [[ -n ${WITHOUT_PERMISSION:-} ]]; then env_block=""; fi
@@ -56,7 +59,8 @@ for _ in $(seq 1 150); do
   sleep 0.2
 done
 [[ -S "$root/st3.sock" ]] || { echo "the daemon did not open its socket" >&2; exit 1; }
-export ST3_ENDPOINT="$root/st3.sock"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_ENDPOINT="$root/st3.sock" ST3_ENDPOINT="$root/st3.sock"
 st="$root/bin/st3"
 cat >"$root/m.kdl" <<KDL
 version 2

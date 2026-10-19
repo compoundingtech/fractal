@@ -7,9 +7,9 @@ use super::*;
 use crate::api::published_attention::{
     published_assistant_attention_rows, published_view_not_ready,
 };
-use st3_api::api::client_v0::assistant::reads::paging::page;
-pub use st3_api::api::client_v0::assistant::reads::*;
-pub use st3_api::api::client_v0::assistant::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES, project_with_context, terminal};
+use st3_api_core::api::client_v0::assistant::reads::paging::page;
+pub use st3_api_core::api::client_v0::assistant::reads::*;
+pub use st3_api_core::api::client_v0::assistant::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES, project_with_context, terminal};
 #[path = "reads_conversation.rs"]
 mod conversation_reads;
 #[path = "reads_operational.rs"]
