@@ -1,5 +1,9 @@
+import { St3Client } from '@smalltalk/st3-client'
+import { arrangementActions } from '@st3/sdk/effect'
 import { catalog, loadWorld } from '@smalltalk/st3-scenarios'
 import { createReplay, realClock } from '@smalltalk/st3-scenarios/replay'
+import { st3InventoryGateway } from '../data/arrangements.ts'
+import { installPageFolders, sidebarFolders } from '../folders/client.ts'
 
 /** Only imported behind the page entry's compile-time DEV guard. */
 export const selectReplayWorld = (search: string): string | undefined => {
@@ -15,5 +19,13 @@ export const createDevReplay = (search: string) => {
   const id = selectReplayWorld(search)
   if (id === undefined) return undefined
   const world = loadWorld(id, { now: new Date().toISOString() })
-  return createReplay(world, { clock: realClock({ start: world.now }) })
+  const replay = createReplay(world, { clock: realClock({ start: world.now }) })
+  installPageFolders(sidebarFolders({
+    gateway: () => {
+      const options = { baseUrl: globalThis.location.origin, fetchImpl: replay.fetch }
+      return { ...st3InventoryGateway(options), actions: arrangementActions(new St3Client(options)) }
+    },
+    socket: replay.socket,
+  }))
+  return replay
 }
