@@ -5,9 +5,8 @@ import * as stylex from '@stylexjs/stylex'
 import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
 import * as Atom from 'effect/reactivity/Atom'
 import { DateTime } from 'effect'
-// Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
-import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { SidePanel } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SidePanel.tsx'
+import { ChromeControl } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { HumanTime } from '@smalltalk/fractal-ui/human-time'
 import { useDataSource } from '../data/react.tsx'
@@ -71,7 +70,6 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
   /** Closing releases UI demand, but the intent-created wrapper retains its poll for 60 seconds. */
   const resources = useAtomValue(source.resources === undefined ? unsupportedResources
     : resourcesOpen ? atoms.resources(agentRef) : unopenedResources)
-  const reasonId = React.useId()
   const disabledReason = resources._tag === 'Unavailable'
     ? resources.reason === 'ungranted' ? 'Read access to agent resources has not been granted.'
       : resources.reason === 'unsupported' ? 'This connection does not support agent resources.' : undefined
@@ -79,18 +77,17 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
   // A non-modal complementary panel: opening it never inerts or hides the workspace, so the click
   // commits the panel in the same frame instead of restyling the whole app.
   return <div {...stylex.props(styles.actions)}>
-    <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} aria-controls={resourcesOpen ? panelId : undefined} onHoverStart={prefetch} onFocus={prefetch} onPressStart={prefetch} onPress={() => onOpenChange(!resourcesOpen)} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button, styles.resourcesButton)}><CompositionIcon name="folder" /><span {...stylex.props(styles.resourcesLabel)}>Resources</span></Aria.Button>
+    <ChromeControl icon="folder" label="Resources" active={resourcesOpen} expanded={resourcesOpen} {...(resourcesOpen ? { controls: panelId } : {})} onPrefetch={prefetch} onPress={() => onOpenChange(!resourcesOpen)} {...(disabledReason === undefined ? {} : { disabledReason })} />
     {resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} aria-label="Agent resources" onClose={() => onOpenChange(false)}>
       <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => onOpenChange(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
       <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
     </SidePanel> : null}
-    {disabledReason === undefined ? null : <span id={reasonId} {...stylex.props(styles.reason)}>{disabledReason}</span>}
     <Aria.DialogTrigger>
       <Aria.Button {...stylex.props(styles.button)}>View KDL</Aria.Button>
       <DeclarationDialog subject={agentRef} />
     </Aria.DialogTrigger>
     <Aria.MenuTrigger>
-      <Aria.Button aria-label="Conversation menu" {...stylex.props(styles.button)}><CompositionIcon name="gear" /></Aria.Button>
+      <ChromeControl icon="gear" label="Conversation menu" />
       <Aria.Popover {...stylex.props(styles.popover)}>
         <Aria.Menu aria-label="Conversation settings" selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))} {...stylex.props(styles.menu)}>
           <Aria.MenuItem id="system" {...stylex.props(styles.menuItem)}>Show all system events</Aria.MenuItem>
@@ -156,9 +153,6 @@ const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { r
 const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: s.md },
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
-  resourcesButton: { justifyContent: 'center', width: { default: 28, '@media (min-width: 640px)': 'auto' }, paddingInline: { default: 0, '@media (min-width: 640px)': s.md } },
-  resourcesLabel: { display: { default: 'none', '@media (min-width: 640px)': 'inline' } },
-  reason: { fontSize: t.denseSize, color: c.fgMuted },
   contents: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
   heading: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
   sectionTitle: { fontSize: t.uiSize, marginBlock: s.md },

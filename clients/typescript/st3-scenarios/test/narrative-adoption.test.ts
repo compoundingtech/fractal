@@ -13,7 +13,7 @@ const narratives = ['fleet-mid-refactor', 'ci-failing-fix', 'long-debug-rabbit-h
 
 describe('production recording adoption and explicit synthetic splices', () => {
   it('retains the catalog and declares one honest source per slice', () => {
-    expect(catalog).toHaveLength(24)
+    expect(catalog).toHaveLength(25)
     expect(Object.keys(NARRATIVE_SPLICES)).toEqual(['fleet-mid-refactor', 'offline-reconnect-storm'])
     for (const id of narratives) {
       const world = loadWorld(id, { now: ANCHOR_MS })
