@@ -28,13 +28,13 @@ CREATE INDEX IF NOT EXISTS local_work_summaries_deadline
 // Both maintenance and its query-plan control use these exact indexed queries. Canonical
 // ranks begin with a fixed-width big-endian u128 accepted time. The exclusive upper prefix
 // therefore includes every tie at the captured millisecond, without a history fold.
-const WINNER: &str = "SELECT value FROM ivm_contributions
+pub const WINNER: &str = "SELECT value FROM ivm_contributions
  WHERE view=?1 AND key=?2 AND register=?3 AND rank<?4 ORDER BY rank DESC,claim_id DESC LIMIT 1";
 const LAST: &str = "SELECT value FROM ivm_contributions
  WHERE view=?1 AND key=?2 AND register=?3 ORDER BY rank DESC,claim_id DESC LIMIT 1";
-const NEXT: &str = "SELECT rank FROM ivm_contributions
+pub const NEXT: &str = "SELECT rank FROM ivm_contributions
  WHERE view=?1 AND key=?2 AND register=?3 AND rank>=?4 ORDER BY rank ASC,claim_id ASC LIMIT 1";
-const DUE: &str = "SELECT key FROM local_work_summaries
+pub const DUE: &str = "SELECT key FROM local_work_summaries
  WHERE next_at IS NOT NULL AND next_at<=?1 ORDER BY next_at,key LIMIT ?2";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -49,7 +49,7 @@ pub fn definitions() -> Vec<Box<dyn View>> {
 }
 pub struct WorkSummaries;
 
-fn key(subject: &str, attempt: u32) -> Result<String> {
+pub fn key(subject: &str, attempt: u32) -> Result<String> {
     Ok(serde_json::to_string(&(subject, attempt))?)
 }
 
@@ -132,7 +132,7 @@ fn decode_time(bytes: Vec<u8>) -> Result<u128> {
         .map_err(|_| anyhow::anyhow!("summary clock width"))?;
     Ok(u128::from_be_bytes(bytes))
 }
-fn clock(connection: &Connection) -> Result<u128> {
+pub fn clock(connection: &Connection) -> Result<u128> {
     decode_time(connection.query_row(
         "SELECT through_ms FROM local_work_summary_clock WHERE singleton=1",
         [],
@@ -224,7 +224,7 @@ fn maintain(tx: &Transaction<'_>, key: &str, at: u128) -> Result<bool> {
     Ok(new != old)
 }
 
-fn ready(connection: &Connection, views: &Views) -> Result<smallclaims::ivm::SourceCut> {
+pub fn ready(connection: &Connection, views: &Views) -> Result<smallclaims::ivm::SourceCut> {
     let cut = source_cut(connection)?.context("work summary source unavailable")?;
     anyhow::ensure!(
         matches!(
@@ -349,3 +349,9 @@ pub fn next_deadline(
     ready_at(connection, views, at)?;
     connection.query_row("SELECT next_at FROM local_work_summaries WHERE next_at IS NOT NULL ORDER BY next_at,key LIMIT 1",[],|row| row.get::<_,Vec<u8>>(0)).optional()?.map(decode_time).transpose()
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_missions;

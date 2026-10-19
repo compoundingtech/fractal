@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS local_agent_ordered_roots (
 );
 "#;
 
-struct Node {
+pub struct Node {
     id: u64,
     rank: Vec<u8>,
     priority: Vec<u8>,
@@ -26,7 +26,7 @@ struct Node {
     summary: Summary,
 }
 
-fn read(connection: &Connection, id: u64) -> Result<Node> {
+pub fn read(connection: &Connection, id: u64) -> Result<Node> {
     let (rank, priority, event, left, right, summary, machine) = connection.query_row(
         "SELECT rank,priority,event,left_id,right_id,summary,machine FROM local_agent_ordered_nodes WHERE id=?1",
         [id], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get(3)?,r.get(4)?,r.get::<_,String>(5)?,r.get::<_,Vec<u8>>(6)?)),
@@ -50,7 +50,7 @@ fn summary(connection: &Connection, id: Option<u64>) -> Result<Summary> {
         .map(|v| v.unwrap_or_default())
 }
 
-fn write(connection: &Connection, node: &mut Node) -> Result<()> {
+pub fn write(connection: &Connection, node: &mut Node) -> Result<()> {
     node.summary = summary(connection, node.left)?
         .join(&Summary::event(&node.event, node.id)?)
         .join(&summary(connection, node.right)?);
@@ -76,7 +76,7 @@ fn rotate_right(connection: &Connection, mut root: Node) -> Result<u64> {
     Ok(next.id)
 }
 
-fn insert(
+pub fn insert(
     connection: &Connection,
     root: Option<u64>,
     id: u64,
@@ -181,7 +181,7 @@ fn remove(
         }
     }
 }
-fn root(connection: &Connection, stream: &str) -> Result<Option<u64>> {
+pub fn root(connection: &Connection, stream: &str) -> Result<Option<u64>> {
     Ok(connection
         .query_row(
             "SELECT root FROM local_agent_ordered_roots WHERE stream=?1",

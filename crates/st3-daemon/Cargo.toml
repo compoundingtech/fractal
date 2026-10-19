@@ -9,7 +9,7 @@ license = "MIT"
 # Enabled by the st3 package for its tests and fixtures, and by the dev-dependency below for this package's
 # own tests (so `cargo test -p st3-daemon --lib` runs the test-support tests, as `-p st3 --lib` did).
 # Never enabled by a production build.
-test-support = ["st3-telemetry/test-support", "st3-store/test-support", "st3-evidence/test-support", "st3-github/test-support", "st3-peer/test-support", "st3-reconcile/test-support", "st3-api/test-support"]
+test-support = ["st3-telemetry/test-support", "st3-store/test-support", "st3-delivery/test-support", "st3-missions/test-support", "st3-seats/test-support", "st3-attention/test-support", "st3-evidence/test-support", "st3-github/test-support", "st3-peer/test-support", "st3-reconcile/test-support", "st3-api/test-support"]
 
 [dependencies]
 anyhow = "1"
@@ -40,9 +40,9 @@ opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "f8388fe7a8617d973e720e29107e68ac5ea95987" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
 resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
@@ -54,6 +54,10 @@ smallclaims = { path = "../smallclaims" }
 st3-kernel = { path = "../st3-kernel" }
 st3-telemetry = { path = "../st3-telemetry" }
 st3-store = { path = "../st3-store" }
+st3-delivery = { path = "../st3-delivery" }
+st3-missions = { path = "../st3-missions" }
+st3-seats = { path = "../st3-seats" }
+st3-attention = { path = "../st3-attention" }
 st3-evidence = { path = "../st3-evidence" }
 st3-github = { path = "../st3-github" }
 st3-peer = { path = "../st3-peer" }

@@ -1,3 +1,21 @@
+use crate::AttentionSnapshotStore;
+use crate::AttentionStore;
+use crate::ConversationReadsStore;
+use crate::DeliveryStore;
+use crate::DeliveryStoreCore;
+use crate::MailboxLeaseStore;
+use crate::AdhocWorkStore;
+use crate::CoordinationStore;
+use crate::DelegationStore;
+use crate::MissionsStore;
+use crate::MissionsStoreCore;
+use crate::WorkListStore;
+use crate::LimitsStore;
+use crate::RosterAdmissionStore;
+use crate::SeatStatusStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
+use crate::SubagentsStore;
 use crate::EvidenceStore;
 use crate::OwnedSetsStore;
 use crate::PublicationFactsStore;
@@ -99,6 +117,11 @@ mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{published_attention_rows, refresh_attention_list};
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
+    refresh_agent_roster(store, false)
+}
 mod directive_notes;
 mod request_latency;
 mod client_observations;
@@ -1186,6 +1209,7 @@ async fn response_envelope_unbounded(
             let remote = served_remote.clone();
             let result = read_deadline::spawn_mutation_handler(
                 state.store.clone(),
+                request_route.clone(),
                 track_remote_reads(remote, next.run(request)),
                 move |mut future, cx| {
                     if first_work.set(Instant::now()).is_ok() {
@@ -1971,6 +1995,21 @@ fn client_page_read_bounded(
     _pinned: bool,
     budget: Option<(&response_body::Context, usize)>,
 ) -> Result<ClientResourcePage, ApiError> {
+    client_page_read_projected(state, snapshot, collection, collection, items, query, budget, Ok)
+}
+
+/// Cache shallow source references, but budget and continue from delivered projected rows.
+#[allow(clippy::too_many_arguments)]
+fn client_page_read_projected(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    collection: &str,
+    response_collection: &str,
+    items: Vec<Value>,
+    query: &ClientListQuery,
+    budget: Option<(&response_body::Context, usize)>,
+    project: impl FnOnce(Vec<Value>) -> Result<Vec<Value>, ApiError>,
+) -> Result<ClientResourcePage, ApiError> {
     let (owner, terminal_state) = if collection == "terminals" {
         (query.owner.as_deref(), query.state.as_deref())
     } else {
@@ -2075,6 +2114,7 @@ fn client_page_read_bounded(
             client_v0::cut_oversized_timeline_entry(only, size);
         }
     }
+    let page_items = project(page_items)?;
     let make_page = |end| -> Result<ClientResourcePage, ApiError> {
         let has_more = end < items.len();
         let next_cursor = if has_more {
@@ -2101,7 +2141,7 @@ fn client_page_read_bounded(
         };
         Ok(ClientResourcePage {
             kind: "page".into(),
-            collection: collection.into(),
+            collection: response_collection.into(),
             filters: client_page_filters(collection, query),
             items: Vec::new(),
             page: ClientPageInfo {
@@ -2114,38 +2154,7 @@ fn client_page_read_bounded(
             replicated: None,
         })
     };
-    let mut packed_end = end;
-    let mut page = make_page(packed_end)?;
-    if let Some((context, max_bytes)) = budget {
-        let mut sizes = [0usize; CLIENT_MAX_PAGE_ITEMS];
-        let mut payload_bytes = page_items.len().saturating_sub(1);
-        for (size, item) in sizes.iter_mut().zip(&page_items) {
-            *size = response_body::json_size(item)?;
-            payload_bytes += *size;
-        }
-        // Try the complete page first: its final-page envelope has no cursor and
-        // can be smaller than a prefix's envelope. Descending prefixes then give
-        // the largest fitting page, even across cursor-size digit boundaries.
-        loop {
-            if context.page_envelope_size(snapshot, &page)? + payload_bytes <= max_bytes {
-                break;
-            }
-            if packed_end <= offset.saturating_add(1) {
-                let id = page_items.first().and_then(|item| item["id"].as_str()).unwrap_or("<empty page>");
-                return Err(ApiError {
-                    status: StatusCode::PAYLOAD_TOO_LARGE,
-                    code: "response-budget-exceeded".into(),
-                    message: format!("not even one whole item fits the assistant response envelope byte budget; item id: {id}"),
-                    details: Box::default(),
-                });
-            }
-            payload_bytes -= sizes[packed_end - offset - 1] + 1;
-            packed_end -= 1;
-            page = make_page(packed_end)?;
-        }
-        page_items.truncate(packed_end - offset);
-    }
-    page.items = page_items;
+    let page = client_pack_page(snapshot, page_items, budget, |count| make_page(offset + count))?;
     let has_more = page.page.has_more;
     if query.cursor.is_none() && has_more {
         let mut cache = client_page_cache()
@@ -2170,6 +2179,48 @@ fn client_page_read_bounded(
             });
         }
     }
+    Ok(page)
+}
+
+/// Fit whole projected items against the actual response envelope. Rebuild the cursor
+/// for every candidate prefix: its encoded size and position are both part of the budget.
+fn client_pack_page(
+    snapshot: &ClientSnapshot,
+    mut items: Vec<Value>,
+    budget: Option<(&response_body::Context, usize)>,
+    mut make_page: impl FnMut(usize) -> Result<ClientResourcePage, ApiError>,
+) -> Result<ClientResourcePage, ApiError> {
+    let mut count = items.len();
+    let mut page = make_page(count)?;
+    if let Some((context, max_bytes)) = budget {
+        let mut sizes = [0usize; CLIENT_MAX_PAGE_ITEMS];
+        let mut payload_bytes = count.saturating_sub(1);
+        for (size, item) in sizes.iter_mut().zip(&items) {
+            *size = response_body::json_size(item)?;
+            payload_bytes += *size;
+        }
+        // A final page without a cursor can fit where a shorter prefix cannot.
+        // Descending prefixes also handle cursor-size digit boundaries exactly.
+        loop {
+            if context.page_envelope_size(snapshot, &page)? + payload_bytes <= max_bytes {
+                break;
+            }
+            if count <= 1 {
+                let id = items.first().and_then(|item| item["id"].as_str()).unwrap_or("<empty page>");
+                return Err(ApiError {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    code: "response-budget-exceeded".into(),
+                    message: format!("not even one whole item fits the assistant response envelope byte budget; item id: {id}"),
+                    details: Box::default(),
+                });
+            }
+            payload_bytes -= sizes[count - 1] + 1;
+            count -= 1;
+            page = make_page(count)?;
+        }
+        items.truncate(count);
+    }
+    page.items = items;
     Ok(page)
 }
 
@@ -3147,31 +3198,32 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
 /// still has a transport to assess. A running seat with a stale path becomes `waiting`; an
 /// already-waiting seat retains its harness block and ask details.
 fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
-    const NATIVE_DRIVERS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
-    let Some(driver) = item
-        .get("driver")
-        .and_then(Value::as_str)
-        .filter(|driver| NATIVE_DRIVERS.contains(driver))
-        .map(str::to_owned)
-    else {
+    let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
-    let local = item.get("host_id").and_then(Value::as_str) == Some(local_host);
-    let live = matches!(
-        item.get("state").and_then(Value::as_str),
-        Some("running" | "waiting")
-    );
-    if !local || !live {
-        return;
-    }
-    let Some(recipient) = item.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    let assessment = delivery_presence::assess_current(recipient, &driver, item["incarnation_id"].as_str());
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+}
+
+/// Share the live/local/native eligibility with scalar readers such as assistant summary
+/// counts. Assess the published inputs without constructing a card or delivery JSON.
+fn agent_delivery_presence(
+    item: &Value,
+    runtime: Option<&str>,
+    local_host: &str,
+) -> Option<delivery_presence::Assessment> {
+    const NATIVE_DRIVERS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
+    let driver = item["driver"].as_str().filter(|driver| NATIVE_DRIVERS.contains(driver))?;
+    if item["host_id"].as_str() != Some(local_host)
+        || !matches!(runtime, Some("running" | "waiting"))
+    {
+        return None;
+    }
+    Some(delivery_presence::assess_current(
+        item["id"].as_str()?, driver, item["incarnation_id"].as_str(),
+    ))
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -7158,6 +7210,13 @@ fn doctor_report_with_operation_drift(
             status: "fail".into(),
             message: error.to_string(),
         }),
+    }
+    for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
+        checks.push(DoctorCheck {
+            name: fault.code.clone(),
+            status: if fault.code == "signature-state-corrupt" { "fail" } else { "warn" }.into(),
+            message: format!("{}: {}", fault.subject, fault.detail),
+        });
     }
     match state.store.claim_verdict_counts() {
         Ok(counts) => checks.push(claim_signatures_check(&counts)),

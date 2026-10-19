@@ -1,7 +1,8 @@
 //! The part of `store::evidence` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::SeatsStore;
 use super::*;
-pub use st3_store::store::evidence::*;
+pub use st3_attention::store::evidence::*;
 
 /// A roster head: its cut, every agent's refs, the first cards in order, and when published.
 pub type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);
@@ -409,13 +410,13 @@ impl EvidenceStore for Store {
 
     fn human_gate_requests(&self) -> Result<Vec<(String, String, String)>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf37f3493d01f owner=st3_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h05b50cdac9d8 owner=st3_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT request.id, json_extract(request.body, '$.fields.owner'), {}
              FROM claims request INDEXED BY claims_human_gate_request_index
              WHERE request.kind='gate.requested' AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
                AND json_extract(request.body, '$.fields.owner') IS NOT NULL
              ORDER BY CANONICAL_ASC(request)",
-            st3_store::store::human_review_reassignment::reviewer_sql("request", None),
+            human_review_reassignment::reviewer_sql("request", None),
         )))?;
         statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?

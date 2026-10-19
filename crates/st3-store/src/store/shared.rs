@@ -36,16 +36,16 @@ use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]
 use smallclaims::store::*;
 pub use smallclaims::store::{CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_MANIFEST_PAGE_LIMIT, CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED, CHECKPOINT_VERIFIED, Certificate, CheckpointAction, CheckpointClaim, CheckpointContext, CheckpointExcuseRequest, CheckpointManifest, CheckpointManifestCursor, CheckpointManifestNeed, CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView, CheckpointProof, CheckpointResumeRequest, CheckpointStatusView, ClaimTombstone, CreatedFleetInvite, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone, FleetAdmissionResidue, FleetInviteView, FleetRedemption, FleetRemoval, PendingCheckpointView, ReplicationAdmission, SealTerms, SealedSet, TRIM_CHUNK_ENVELOPES, TrimFault, VerifiedTerms, certificates, checkpoint_build, checkpoint_cut, checkpoint_name, checkpoint_participants, chosen_certificate, configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut, newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest};
-pub use crate::store::runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
-pub use crate::store::roster_admission::AdmissionGuard;
+pub use crate::store::runtime_starts::RuntimeStartOperation;
+
 pub use crate::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key, plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key};
 pub use crate::store::mission_eligibility::MISSING_AGENT_CONDITION;
 pub use crate::store::database_size::DatabaseSize;
-pub use crate::store::person_work::AskImages;
+
 pub use crate::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
-pub use crate::store::limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
+pub use crate::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use crate::store::limits::ACCOUNT_READING_WINDOW_MS;
-pub use crate::store::subagents::{EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView};
+pub use crate::store::subagents::{SUBAGENT_KINDS, SubagentView};
 pub use crate::store::runtime::SmalltalkRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
@@ -55,15 +55,16 @@ pub use st3_kernel::model::local_observation_position;
 pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
 use crate::store::*;
-use crate::store::{AgentResourcesChange, AgentResourcesDelta, AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow, DiscoveredItem};
-use crate::store::{GATE_BROKEN_CONDITION, HumanAttention, IdempotencyConflict, MAX_STEP_WAIT_MS, MailboxWatermark, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUN_REPORT_KIND, StatusEntry, StepLabel, StepTiming};
+use crate::store::{AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow};
+use crate::store::{GATE_BROKEN_CONDITION, HumanAttention, IdempotencyConflict, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, StatusEntry, StepLabel, StepTiming};
 use crate::store::{Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND, analyze_mission_revision, append_claim_fenced_outcome};
-use crate::store::{append_claim_tx, append_claim_with_commit_context, check_mailbox_fence, claim_append_error, claim_log_order, desired_from_row, desired_revision, end_watch_tx, fold_step_clock, fold_step_timing, format_wait_span, generation_id_from_subject};
-use crate::store::{github_post_agent_tx, insert_local_observation_tx, local_retention, loop_run_views_tx, migrate_local_usage_seen, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, normalize_message_party, project_mission_run_created, project_replicated_mission_runs, rebuild_planning_tx};
-use crate::store::{recently_ended_since, replay_graph_from_nothing_tx, roster_local_frontier, run_report_fields, runtime, seat_queue_joins_query, seat_queue_moves_query, select_replicated_desired, select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_run_from_row};
-use crate::store::{step_timeout_episode, step_timeout_extension_at, step_timing_lease_at, subject_status_at, subscription_started_run_tx, validate_claim_input, validate_local_observation, watch_ended_tx};
+use crate::store::{append_claim_tx, append_claim_with_commit_context, check_mailbox_fence, claim_append_error, claim_log_order, desired_from_row, desired_revision, fold_step_clock, fold_step_timing, generation_id_from_subject};
+use crate::store::{insert_local_observation_tx, local_retention, loop_run_views_tx, migrate_local_usage_seen, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, normalize_message_party, project_mission_run_created, project_replicated_mission_runs, rebuild_planning_tx};
+use crate::store::{recently_ended_since, replay_graph_from_nothing_tx, runtime, seat_queue_joins_query, seat_queue_moves_query, select_replicated_desired, select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_run_from_row};
+use crate::store::{step_timeout_episode, step_timeout_extension_at, subject_status_at, subscription_started_run_tx, validate_claim_input, validate_local_observation};
 #[cfg(any(test, feature = "test-support"))]
-use crate::store::{WORK_ACTION_WRITER_WORK, WorkActionWriterProbe, append_latest_observation, enrich_step_queue_for_reconcile_at, expire_work_lease_by_claim, mailbox_fence_evaluations, mailbox_incarnation_evaluations, message_canonical_key_query, message_canonical_key_tx, named_run_probes, runtime_view_entry, step_execution_timing_at};
+#[cfg(any(test, feature = "test-support"))]
+use crate::store::{WORK_ACTION_WRITER_WORK, WorkActionWriterProbe, append_latest_observation, expire_work_lease_by_claim, mailbox_fence_evaluations, mailbox_incarnation_evaluations, message_canonical_key_query, message_canonical_key_tx, named_run_probes, runtime_view_entry, step_execution_timing_at};
 #[cfg(any(test, feature = "test-support"))]
 use crate::store::{try_project_all_simple_replication_tx, validate_replicated_claim, verify_replica_batch};
 
