@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
+use crate::OwnedSetsAttentionStore;
 use crate::OwnedSetsStore;
 use st3_seats::store::owned_sets_tests_shared::*;
 use super::*;

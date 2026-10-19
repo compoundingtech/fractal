@@ -7,10 +7,10 @@ license = "MIT"
 
 [features]
 # Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-store/test-support"]
+test-support = ["st3-attention/test-support"]
 
 [dependencies]
-st3-store = { path = "../st3-store" }
+st3-attention = { path = "../st3-attention" }
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

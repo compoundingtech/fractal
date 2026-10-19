@@ -1,8 +1,8 @@
 //! The part of `store::revision_seats` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::revision_seats::*;
-pub use st3_store::store::revision_seats::{carry_completed_agents_tx};
+pub use st3_attention::store::revision_seats::*;
+pub use st3_attention::store::revision_seats::{carry_completed_agents_tx};
 
 pub trait RevisionSeatsStore {
     /// Check completed declaration carry before the API publishes the candidate revision.

@@ -559,108 +559,11 @@ fn pending_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::card_fold::health_capture_tests_shared_attention_tests::{fixture, insert};
+use super::*;
     use serde_json::json;
-
-    #[test]
-    fn private_card_extension_retains_raw_candidates_without_fallback_or_admission() {
-        use crate::model::CurrentHarnessView;
-        let connection = fixture();
-        insert(
-            &connection,
-            "desired-a",
-            "agent/a",
-            "intent.desired",
-            2,
-            102,
-            json!({}),
-        );
-        insert(
-            &connection,
-            "state-a",
-            "agent/a",
-            "harness.observed",
-            3,
-            103,
-            json!({"incarnation_id":"incarnation-a", "evidence_incarnation":"provider-a",
-                "ownership_sequence":1, "driver":"omp", "transport":"omp-channel",
-                "observed_since_ms":100}),
-        );
-        connection
-            .execute("UPDATE claims SET actor='agent/a' WHERE id='state-a'", [])
-            .unwrap();
-        insert(
-            &connection,
-            "output-a",
-            "agent/a",
-            "harness.output.observed",
-            4,
-            104,
-            json!({}),
-        );
-        let harness = CurrentHarnessView {
-            state: "idle".into(),
-            driver: Some("omp".into()),
-            incarnation_id: "incarnation-a".into(),
-            transport: Some("omp-channel".into()),
-            reason: None,
-            blocked_on: None,
-            ask: None,
-            input_buffer: None,
-            exit: None,
-            claim: "state-a".into(),
-            observed_at_unix_ms: 103,
-            since_unix_ms: 100,
-        };
-        let mut reads = super::super::AgentCardReads {
-            index: 10,
-            harness: std::collections::HashMap::from([("agent/a".into(), Some(harness))]),
-            activity: Default::default(),
-            suspensions: Default::default(),
-            rollouts: Default::default(),
-            health: BTreeMap::new(),
-        };
-        connection.execute_batch("BEGIN").unwrap();
-        reads
-            .prepare_health_chunk(
-                &connection,
-                "namespace-a",
-                1_000,
-                &[("agent/a", Some("runtime-a"), Some("desired-a"))],
-            )
-            .unwrap();
-        let captured = reads.take_health("agent/a").unwrap();
-        assert_eq!(captured.namespace, "namespace-a");
-        assert_eq!(captured.subject, "agent/a");
-        assert_eq!(captured.index, 10);
-        assert_eq!(captured.desired.unwrap().id, "desired-a");
-        assert_eq!(captured.harness_candidate.unwrap().id, "state-a");
-        assert_eq!(captured.output_candidate.unwrap().id, "output-a");
-        let owner = captured.owner_candidate.unwrap();
-        assert_eq!(
-            (owner.source.as_str(), owner.origin.as_str()),
-            ("state-a", "host/a")
-        );
-        assert_eq!(
-            (
-                owner.runtime_incarnation.as_str(),
-                owner.provider_incarnation.as_str()
-            ),
-            ("incarnation-a", "provider-a")
-        );
-        assert_eq!(
-            (
-                owner.ownership_sequence,
-                owner.driver.as_str(),
-                owner.component.as_str(),
-                owner.reported_since_ms
-            ),
-            (1, "omp", "omp-channel", Some(100))
-        );
-        // These are raw candidate values, not an admitted current provider or
-        // supported output capability. There is no positive-health conversion.
-        assert!(reads.take_health("agent/a").is_none());
-    }
 
     fn plan(connection: &Connection, sql: &str, values: &[&dyn rusqlite::ToSql]) -> String {
         connection
@@ -671,53 +574,6 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
             .join("; ")
-    }
-
-    fn fixture() -> Connection {
-        let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(
-            "CREATE TABLE claims(id TEXT NOT NULL UNIQUE,subject TEXT,kind TEXT,origin TEXT,
-                actor TEXT,store_index INTEGER PRIMARY KEY,accepted_at_unix_ms TEXT,body TEXT);
-             CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
-             CREATE INDEX claims_message_to_order_index ON claims(json_extract(body,'$.fields.to'),store_index)
-                WHERE kind='message.sent';",
-        ).unwrap();
-        insert(
-            &connection,
-            "runtime-a",
-            "agent/a",
-            "runtime.observed",
-            1,
-            100,
-            json!({
-                "status":"running", "incarnation_id":"incarnation-a"
-            }),
-        );
-        connection
-    }
-
-    fn insert(
-        connection: &Connection,
-        id: &str,
-        subject: &str,
-        kind: &str,
-        index: u64,
-        at: u64,
-        fields: Value,
-    ) {
-        connection
-            .execute(
-                "INSERT INTO claims VALUES(?1,?2,?3,'host/a','agent/sender',?4,?5,?6)",
-                params![
-                    id,
-                    subject,
-                    kind,
-                    index,
-                    at.to_string(),
-                    json!({"fields":fields}).to_string()
-                ],
-            )
-            .unwrap();
     }
 
     fn request() -> Request<'static> {

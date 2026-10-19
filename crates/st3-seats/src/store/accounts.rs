@@ -6,7 +6,7 @@ use crate::accounts::{
     AccountDecl, Binding, Candidate, HarnessBinding, harness_binding, most_usage_left,
     parse_account,
 };
-pub use st3_store::store::accounts::*;
+pub use st3_attention::store::accounts::*;
 
 /// The account a seat starts on, and the directory its login lives in on this host.
 #[derive(Clone, Debug, Eq, PartialEq)]

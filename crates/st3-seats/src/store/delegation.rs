@@ -1,16 +1,17 @@
 //! The part of `store::delegation` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::AttentionStore;
 use super::*;
 use crate::model::{DelegationPolicyRequest, DelegationProof};
-pub use st3_store::store::delegation::*;
-pub use st3_store::store::delegation::{ACTIONS, add_evidence, add_fields, policy_actions, validate_write};
+pub use st3_attention::store::delegation::*;
+pub use st3_attention::store::delegation::{ACTIONS, add_evidence, add_fields, policy_actions, validate_write};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::PersonStepResponse;
-    use st3_store::store::delegation_tests_shared_seats::*;
-    use st3_store::store::delegation_tests_shared_seats::{policy, proof, sent};
+    use st3_attention::store::delegation_tests_shared_seats::*;
+    use st3_attention::store::delegation_tests_shared_seats::{policy, proof, sent};
 
     #[test]
     fn delegated_ask_records_actor_person_instruction_and_replays() {

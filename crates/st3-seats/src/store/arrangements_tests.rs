@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 use super::arrangements::*;
 use super::*;
-use st3_store::store::arrangements_tests_shared_seats::*;
-use st3_store::store::arrangements_tests_shared_seats::{A, B, SUBJECT, append, create, input};
-use st3_store::store::directive_notes::tests_shared_seats::*;
-use st3_store::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
+use st3_attention::store::arrangements_tests_shared_seats::*;
+use st3_attention::store::arrangements_tests_shared_seats::{A, B, SUBJECT, append, create, input};
+use st3_attention::store::directive_notes::tests_shared_seats::*;
+use st3_attention::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 
 
 #[test]

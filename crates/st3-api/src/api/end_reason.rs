@@ -1,4 +1,6 @@
 #[cfg(test)]
+use crate::AttentionStoreCore;
+#[cfg(test)]
 use crate::OwnedSetsStore;
 use serde_json::{Value, json};
 use crate::model::{ClaimRecord, CurrentHarnessView, SubjectStatus};

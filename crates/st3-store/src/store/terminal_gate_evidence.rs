@@ -3,6 +3,9 @@
 //! No production extractor, trigger, registration, seed, flush or Doctor call exists here.
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence_shared_attention_tests::{MEMBERS};
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
 pub use crate::store::terminal_gate_evidence_shared::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -15,7 +18,6 @@ use smallclaims::ivm::install::{Mutation, Namespace, Operator};
 
 pub const VIEW: &str = "test.terminal-exec-gates.v1";
 pub const SOURCE: &str = "test.selected-terminal-facts.v1";
-const MEMBERS: usize = 64;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Facts {
@@ -373,3 +375,12 @@ pub mod native_source_transaction_hooks_operator_error_shared_seats;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod native_source_transaction_hooks_tests_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_transaction_hooks_tests_shared_attention_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_transaction_hooks_tests_operator_errors_shared_attention_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_attention_tests;

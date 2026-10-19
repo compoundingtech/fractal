@@ -15,22 +15,3 @@ pub fn step_back_in_time(store: &Store, subject: &str, accepted_at: &str) {
             .unwrap();
     }
 
-/// The collection snapshot's visible rows must equal a direct read at the same cut, in
-    /// the same order, for every person and boundary.
-    pub fn parity(store: &Store, person: Option<&str>, now: u128) {
-        let (rows, _) = store.attention_collection_snapshot(person, now).unwrap();
-        let direct = store.attention_snapshot(person, now).unwrap();
-        let keys = |items: &[AttentionItemView]| {
-            items
-                .iter()
-                .map(|item| {
-                    (
-                        item.subject.clone(),
-                        item.episode.clone(),
-                        item.requested_at_unix_ms,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(keys(&rows), keys(&direct), "{person:?} at {now}");
-    }

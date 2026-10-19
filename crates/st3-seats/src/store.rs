@@ -89,16 +89,16 @@ pub use attention_snapshot::{
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
-pub use st3_store::store::mission_eligibility::MISSING_AGENT_CONDITION;
-pub use st3_store::store::database_size::DatabaseSize;
+pub use st3_attention::store::mission_eligibility::MISSING_AGENT_CONDITION;
+pub use st3_attention::store::database_size::DatabaseSize;
 pub use person_work::AskImages;
-pub use st3_store::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
+pub use st3_attention::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
 pub use limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
 pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
-pub use st3_store::store::runtime::SmalltalkRuntime;
+pub use st3_attention::store::runtime::SmalltalkRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
@@ -106,18 +106,18 @@ use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
 pub use st3_kernel::model::local_observation_position;
 pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
-pub use st3_store::store::*;
-pub use st3_store::store::{AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow, DiscoveredItem, GATE_BROKEN_CONDITION, HumanAttention};
-pub use st3_store::store::{IdempotencyConflict, MAX_STEP_WAIT_MS, MailboxWatermark, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUN_REPORT_KIND, StatusEntry, StepLabel, StepTiming, Store, SubjectCache};
-pub use st3_store::store::{SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND, agent_queue_values, agent_view, analyze_mission_revision, append_claim_fenced_outcome};
-pub use st3_store::store::{append_claim_tx, append_claim_with_commit_context, arrangements, assistant_write, attention, attention_list, backup, backup_format, card_fold, check_mailbox_fence, checkpoint, checkpoint_rules};
-pub use st3_store::store::{checkpoint_status, claim_append_error, claim_log_order, client_summary, coordination, custom, database_size, declarations, delivery, desired_from_row, desired_revision, end_watch_tx};
-pub use st3_store::store::{fold_step_clock, fold_step_timing, format_wait_span, generation_id_from_subject, git_change_tables, github_post_agent_tx, glass_heads, glasses, idle_mail, insert_local_observation_tx, lanes, local_retention};
-pub use st3_store::store::{loop_run_views_tx, mailbox_changes, mailbox_wakes, message_bodies, migrate_local_usage_seen, mission_eligibility, mission_list, mission_provenance, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, missions};
-pub use st3_store::store::{normalize_message_party, observer_actuals, observer_subscription_detail, operation_audit, owned_sets, owner_lists, project_mission_run_created, project_replicated_mission_runs, projection_digest, projection_divergence, projectors, publication_facts};
-pub use st3_store::store::{published_list, published_views, rebuild_planning_tx, recently_ended_since, replay_graph_from_nothing_tx, resources, run_report_fields, runtime, runtime_list, seat_queue_joins_query, seat_queue_moves_query, select_replicated_desired};
-pub use st3_store::store::{select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_run_from_row, step_timeout_episode, step_timeout_extension_at, step_timing_lease_at, subject_status_at, subscription_started_run_tx, summary_list, unread_mail, validate_claim_input};
-pub use st3_store::store::{validate_local_observation, watch_ended_tx, work_list};
+pub use st3_attention::store::*;
+pub use st3_attention::store::{AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow, DiscoveredItem, GATE_BROKEN_CONDITION, HumanAttention};
+pub use st3_attention::store::{IdempotencyConflict, MAX_STEP_WAIT_MS, MailboxWatermark, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUN_REPORT_KIND, StatusEntry, StepLabel, StepTiming, Store, SubjectCache};
+pub use st3_attention::store::{SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND, agent_queue_values, agent_view, analyze_mission_revision, append_claim_fenced_outcome};
+pub use st3_attention::store::{append_claim_tx, append_claim_with_commit_context, arrangements, assistant_write, attention, attention_list, backup, backup_format, card_fold, check_mailbox_fence, checkpoint, checkpoint_rules};
+pub use st3_attention::store::{checkpoint_status, claim_append_error, claim_log_order, client_summary, coordination, custom, database_size, declarations, delivery, desired_from_row, desired_revision, end_watch_tx};
+pub use st3_attention::store::{fold_step_clock, fold_step_timing, format_wait_span, generation_id_from_subject, git_change_tables, github_post_agent_tx, glass_heads, glasses, idle_mail, insert_local_observation_tx, lanes, local_retention};
+pub use st3_attention::store::{loop_run_views_tx, mailbox_changes, mailbox_wakes, message_bodies, migrate_local_usage_seen, mission_eligibility, mission_list, mission_provenance, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, missions};
+pub use st3_attention::store::{normalize_message_party, observer_actuals, observer_subscription_detail, operation_audit, owned_sets, owner_lists, project_mission_run_created, project_replicated_mission_runs, projection_digest, projection_divergence, projectors, publication_facts};
+pub use st3_attention::store::{published_list, published_views, rebuild_planning_tx, recently_ended_since, replay_graph_from_nothing_tx, resources, run_report_fields, runtime, runtime_list, seat_queue_joins_query, seat_queue_moves_query, select_replicated_desired};
+pub use st3_attention::store::{select_replicated_mission, stale_pull_request_request_tx, step_execution_clock_at, step_run_from_row, step_timeout_episode, step_timeout_extension_at, step_timing_lease_at, subject_status_at, subscription_started_run_tx, summary_list, unread_mail, validate_claim_input};
+pub use st3_attention::store::{validate_local_observation, watch_ended_tx, work_list};
 pub mod accounts;
 pub mod adhoc_work;
 pub mod agent_messages;
@@ -414,9 +414,9 @@ impl SeatsStoreCore for Store {
 
 
 #[cfg(any(test, feature = "test-support"))]
-use st3_store::store::shared_seats::*;
+use st3_attention::store::shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
-pub use st3_store::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+pub use st3_attention::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
 /// A document republished all day, such as a probe report, arrives from its writer after this
 /// node's own newer claims (#898). Each binding keeps the earliest claim of its version whatever
 /// order bindings arrive in, so it extends the projection without rebuilding every version, and

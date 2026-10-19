@@ -2,6 +2,10 @@
 //! path and publishes them; collection windows serve the newest publication under its own cut
 //! and never fold attention while it runs. See `store::attention_list`.
 
+use crate::AttentionListStore;
+use crate::OwnerListsStore;
+use crate::PublishedViewsAttentionStore;
+use crate::SummaryListStore;
 use crate::SeatsStore;
 use super::*;
 use crate::store::attention_list::{AttentionDelta, AttentionPublication};

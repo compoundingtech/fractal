@@ -7,9 +7,10 @@ license = "MIT"
 
 [features]
 # Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-telemetry/test-support", "st3-secrets/test-support", "st3-seats-base/test-support", "st3-delivery-base/test-support", "st3-missions-base/test-support", "st3-github-base/test-support", "smallclaims/test-support"]
+test-support = ["dep:proptest", "st3-telemetry/test-support", "st3-secrets/test-support", "st3-seats-base/test-support", "st3-delivery-base/test-support", "st3-missions-base/test-support", "st3-github-base/test-support", "smallclaims/test-support"]
 
 [dependencies]
+proptest = { version = "1", optional = true }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"

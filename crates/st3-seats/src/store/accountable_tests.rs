@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_store::store::accountable_tests_shared_seats::*;
-use st3_store::store::accountable_tests_shared_seats::{PERSON, ROOT, SOURCE, intent};
+use st3_attention::store::accountable_tests_shared_seats::*;
+use st3_attention::store::accountable_tests_shared_seats::{PERSON, ROOT, SOURCE, intent};
 
 
 #[test]

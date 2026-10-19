@@ -1,3 +1,4 @@
+use crate::AttentionStoreCore;
 use crate::OwnedSetsStore;
 use super::*;
 use crate::store::owned_sets::{self as sets, Request as SetRequest};

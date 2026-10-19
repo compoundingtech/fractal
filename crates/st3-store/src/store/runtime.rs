@@ -617,7 +617,10 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
 
 #[cfg(test)]
 mod schema_install_tests {
-    use super::*;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::runtime_schema_install_tests_shared_attention_tests::{crash_during_schema_install_child};
+use super::*;
 
     #[test]
     fn complete_runtime_schema_does_not_take_a_held_writer_lock() {
@@ -875,113 +878,6 @@ mod schema_install_tests {
         assert!(connection.is_autocommit());
     }
 
-    #[test]
-    fn crashed_schema_chunks_recover_without_losing_existing_data() {
-        if std::env::var_os("ST3_SCHEMA_CRASH_PHASE").is_some() {
-            crash_during_schema_install_child();
-            unreachable!("the private child must exit at its crash point");
-        }
-        for phase in ["core", "runtime", "late-runtime"] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("schema.sqlite");
-            let marker = directory.path().join("crash-marker");
-            {
-                let connection = Connection::open(&path).unwrap();
-                connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved'); PRAGMA user_version=18;").unwrap();
-                if phase != "core" {
-                    connection
-                        .execute_batch(smallclaims::store::SCHEMA)
-                        .unwrap();
-                }
-            }
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "store::runtime::schema_install_tests::crashed_schema_chunks_recover_without_losing_existing_data",
-                    "--nocapture",
-                ])
-                .env("ST3_SCHEMA_CRASH_PATH", &path)
-                .env("ST3_SCHEMA_CRASH_MARKER", &marker)
-                .env("ST3_SCHEMA_CRASH_PHASE", phase)
-                .status()
-                .unwrap();
-            assert_eq!(status.code(), Some(86), "{phase}: crash hook must run");
-            assert_eq!(std::fs::read_to_string(&marker).unwrap(), phase);
-            {
-                let connection = Connection::open(&path).unwrap();
-                let partial = if phase == "core" {
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IN ('meta','batches'))"
-                } else if phase == "runtime" {
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')"
-                } else {
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='resource_observations')"
-                };
-                assert!(
-                    !connection
-                        .query_row(partial, [], |row| row.get::<_, bool>(0))
-                        .unwrap(),
-                    "{phase}: uncommitted DDL survived the process crash"
-                );
-            }
-            let recovered = Store::open(&path, "birch").unwrap();
-            let reader = recovered.readers.get();
-            assert_eq!(
-                reader
-                    .query_row("SELECT value FROM fixture_marker", [], |row| row
-                        .get::<_, String>(0))
-                    .unwrap(),
-                "preserved"
-            );
-            assert_eq!(
-                reader
-                    .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-                    .unwrap(),
-                st3_schema::STORAGE_VERSION
-            );
-            assert_eq!(
-                recovered
-                    .connection
-                    .write()
-                    .pragma_query_value(None, "synchronous", |row| row.get::<_, u32>(0))
-                    .unwrap(),
-                2
-            );
-        }
-    }
-
-    fn crash_during_schema_install_child() {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        let path = std::env::var_os("ST3_SCHEMA_CRASH_PATH").expect("private child database path");
-        let marker =
-            std::env::var_os("ST3_SCHEMA_CRASH_MARKER").expect("private child marker path");
-        let phase = std::env::var("ST3_SCHEMA_CRASH_PHASE").expect("private child phase");
-        let target = match phase.as_str() {
-            "core" => "claims",
-            "runtime" => "mission_runs",
-            "late-runtime" => "coordination_sends",
-            _ => panic!("unknown private crash phase"),
-        };
-        let connection = Connection::open(path).unwrap();
-        let marked_phase = phase.clone();
-        connection.authorizer(Some(move |context: AuthContext<'_>| {
-            if matches!(context.action, AuthAction::CreateTable { table_name } if table_name == target) {
-                std::fs::write(&marker, &marked_phase).unwrap();
-                // SAFETY: this private child must exit without SQLite or Rust cleanup.
-                unsafe { libc::_exit(86) };
-            }
-            Authorization::Allow
-        }));
-        if phase == "core" {
-            connection
-                .execute_batch(smallclaims::store::FRESH_SCHEMA)
-                .unwrap();
-        } else {
-            SmalltalkRuntime::default()
-                .create_schema_for_fresh_store(&connection)
-                .unwrap();
-        }
-        panic!("the crash point was not reached");
-    }
 }
 
 #[cfg(test)]
@@ -1067,10 +963,11 @@ use super::*;
 
 #[cfg(test)]
 mod extension_tests {
-    use super::*;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::runtime_extension_tests_shared_attention_tests::{First};
+use super::*;
 
-    #[derive(Default)]
-    struct First(std::sync::atomic::AtomicUsize);
     #[derive(Default)]
     struct Second(Mutex<Vec<u8>>);
 

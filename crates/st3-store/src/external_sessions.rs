@@ -250,34 +250,16 @@ fn next_timeline_generation() -> u64 {
 /// queued on a contended fold. Nothing here is compiled into release builds.
 #[cfg(any(test, feature = "test-support"))]
 pub mod timeline_test_support {
-    use std::collections::HashMap;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::external_sessions::shared_timeline_test_support_attention_tests::{scope};
+use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
     /// Per-scope instances of a process-wide budget or cache.
     pub type Scopes<T> = LazyLock<Mutex<HashMap<PathBuf, Arc<T>>>>;
-
-    /// A test's isolation scope: the temporary directory its transcripts live in. Paths
-    /// outside the temporary directory share one scope.
-    fn scope(path: &Path) -> PathBuf {
-        let temp = std::env::temp_dir();
-        path.strip_prefix(&temp)
-            .ok()
-            .and_then(|rest| rest.components().next())
-            .map_or_else(PathBuf::new, |first| temp.join(first))
-    }
-
-    /// The instance of a process-wide budget or cache for `path`'s scope, so each test owns
-    /// its own and parallel tests cannot affect each other through global state.
-    pub fn scoped<T>(scopes: &Scopes<T>, path: &Path, create: impl FnOnce() -> T) -> Arc<T> {
-        let mut scopes = scopes.lock().unwrap_or_else(|error| error.into_inner());
-        Arc::clone(
-            scopes
-                .entry(scope(path))
-                .or_insert_with(|| Arc::new(create())),
-        )
-    }
 
     static FOLD_WAITERS: AtomicUsize = AtomicUsize::new(0);
     static REFRESH_GATES: LazyLock<Mutex<HashMap<PathBuf, RefreshGate>>> =
@@ -4085,3 +4067,6 @@ use super::*;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod shared_tests_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod shared_timeline_test_support_attention_tests;

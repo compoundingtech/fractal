@@ -1,9 +1,9 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_store::store::resource_preparation_shared_seats::*;
-use st3_store::store::resource_preparation_shared_seats::{BEFORE_VALIDATE};
-use st3_store::store::resource_preparation::tests_shared_seats::*;
-use st3_store::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
+use st3_attention::store::resource_preparation_shared_seats::*;
+use st3_attention::store::resource_preparation_shared_seats::{BEFORE_VALIDATE};
+use st3_attention::store::resource_preparation::tests_shared_seats::*;
+use st3_attention::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
 
 
 fn observe(store: &Store, revision: &str, next: u128) -> ResourceObservationOutcome {

@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStore;
 use super::*;
-pub use st3_store::store::evidence::*;
+pub use st3_attention::store::evidence::*;
 
 pub trait EvidenceSeatsStore {
     /// [`Self::agent_resources_cached_at`], with when the rows were published.

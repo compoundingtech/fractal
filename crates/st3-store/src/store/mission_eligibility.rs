@@ -10,7 +10,7 @@ pub fn episode(run: &MissionRunView, step: &StepRunView) -> String {
     )
 }
 
-fn blocked(step: &StepRunView) -> bool {
+pub fn blocked(step: &StepRunView) -> bool {
     step.status == "blocked"
         && step
             .blocked_reason

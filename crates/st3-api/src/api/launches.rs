@@ -1,3 +1,4 @@
+use crate::AttentionStoreCore;
 use crate::SeatsStoreCore;
 use super::*;
 

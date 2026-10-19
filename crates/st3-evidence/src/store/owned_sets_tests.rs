@@ -1,4 +1,6 @@
 #![allow(unused_imports)]
+use crate::CardFoldStore;
+use crate::OwnedSetsAttentionStore;
 use crate::RolloutsStore;
 use crate::OwnedSetsStore;
 use super::owned_sets::{Options, Source};

@@ -2,6 +2,7 @@
 
 #![allow(unused_imports)]
 
+use crate::AttentionStoreCore;
 use crate::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

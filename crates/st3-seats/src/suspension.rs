@@ -1,5 +1,6 @@
 //! The part of `suspension` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::AttentionStoreCore;
 use crate::SeatsStoreCore;
 use crate::model::ClaimRecord;
 use crate::store::Store;
@@ -7,8 +8,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use crate::native_resume::{CONTINUE_ENV, CONTINUE_PATH_ENV, RESUME_ENV};
-pub use st3_store::suspension::*;
-pub use st3_store::suspension::{Suspension, blockers, bound_session, current, current_at, publication_action, resume_completed_key, resume_failed_key, resume_started_key, suspend_completed_key, suspend_failed_key, suspend_snapshot_key};
+pub use st3_attention::suspension::*;
+pub use st3_attention::suspension::{Suspension, blockers, bound_session, current, current_at, publication_action, resume_completed_key, resume_failed_key, resume_started_key, suspend_completed_key, suspend_failed_key, suspend_snapshot_key};
 
 /// Launcher-owned declaration identity forwarded into the durable native binding.
 pub const LAUNCH_DESIRED_TOKEN_ENV: &str = "ST3_LAUNCH_DESIRED_TOKEN";
@@ -241,8 +242,8 @@ mod background_job_tests {
 mod tests {
     use super::*;
     use serde_json::json;
-    use st3_store::suspension::shared_tests_seats::*;
-    use st3_store::suspension::shared_tests_seats::{continuation_claim};
+    use st3_attention::suspension::shared_tests_seats::*;
+    use st3_attention::suspension::shared_tests_seats::{continuation_claim};
 
     #[test]
     fn continuation_refusal_scope_repairs_legacy_and_keeps_later_failure_permanent() {

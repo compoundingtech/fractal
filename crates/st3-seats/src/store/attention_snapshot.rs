@@ -1,16 +1,17 @@
 //! The part of `store::attention_snapshot` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::AttentionStore;
 use super::*;
 use crate::model::LoopSpec;
-pub use st3_store::store::attention_snapshot::*;
-pub use st3_store::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, agent, conversation_agent, native_prompt_gone_key, person_attention_item, plan_approval, resolve_native_harness_at, screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key};
+pub use st3_attention::store::attention_snapshot::*;
+pub use st3_attention::store::attention_snapshot::{CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, agent, conversation_agent, native_prompt_gone_key, person_attention_item, plan_approval, resolve_native_harness_at, screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ClaimInput, PersonStepResponse};
-    use st3_store::store::attention_snapshot_tests_shared_seats::*;
-    use st3_store::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
+    use st3_attention::store::attention_snapshot_tests_shared_seats::*;
+    use st3_attention::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
 
     /// A person ask joins the collection at its asking claim's acceptance, never at the
     /// waiting time it names: a migrated ask can name a time before it was asked. Fault-only

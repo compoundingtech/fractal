@@ -1,5 +1,11 @@
 //! Tiny current summary on the existing protocol. Native reads are authorized in
 //! one snapshot; the contract stays the same when the shared IVM source takes over.
+use crate::AttentionListStore;
+use crate::AttentionStore;
+use crate::AttentionStoreCore;
+use crate::ClientSummaryStore;
+use crate::PublishedViewsAttentionStore;
+use crate::SummaryListStore;
 use crate::SeatsStore;
 use crate::EvidenceStore;
 use super::*;

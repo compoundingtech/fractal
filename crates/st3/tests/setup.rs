@@ -1,6 +1,7 @@
 #![cfg(unix)]
 //! Setup uses only this HOME, state directory and sockets; no host daemon or service.
 
+use st3::AttentionStoreCore;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{PermissionsExt as _, symlink};

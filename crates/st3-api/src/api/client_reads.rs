@@ -1,3 +1,5 @@
+use crate::AttentionStoreCore;
+use crate::OwnedSetsAttentionStore;
 use crate::RosterAdmissionStore;
 use crate::RuntimeStartsStore;
 use crate::SeatsStore;

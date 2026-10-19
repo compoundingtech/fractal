@@ -3,16 +3,16 @@
 use super::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
-pub use st3_store::store::mailbox_lease::*;
-pub use st3_store::store::mailbox_lease::{admit, check_argv_declaration, check_declaration, check_lease_fence, record, record_argv_binding, refuse_argv_native_adoption};
+pub use st3_attention::store::mailbox_lease::*;
+pub use st3_attention::store::mailbox_lease::{admit, check_argv_declaration, check_declaration, check_lease_fence, record, record_argv_binding, refuse_argv_native_adoption};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::mailbox_lease_shared_seats::*;
-    use st3_store::store::mailbox_lease_shared_seats::{AFTER_FAULT_ACQUISITION, AFTER_PROMOTION_PRECHECK, BEFORE_FAULT_READER, CARD_FAULT_DEADLINES, DURING_FAULT_READ};
-    use st3_store::store::mailbox_lease_tests_shared_seats::*;
-    use st3_store::store::mailbox_lease_tests_shared_seats::{authority, change_after_precheck, finished_without_the_writer, precheck_was_reached, promote_elsewhere, request};
+    use st3_attention::store::mailbox_lease_shared_seats::*;
+    use st3_attention::store::mailbox_lease_shared_seats::{AFTER_FAULT_ACQUISITION, AFTER_PROMOTION_PRECHECK, BEFORE_FAULT_READER, CARD_FAULT_DEADLINES, DURING_FAULT_READ};
+    use st3_attention::store::mailbox_lease_tests_shared_seats::*;
+    use st3_attention::store::mailbox_lease_tests_shared_seats::{authority, change_after_precheck, finished_without_the_writer, precheck_was_reached, promote_elsewhere, request};
 
     fn declare(store: &Store) {
         let intent = crate::graph::parse_intent("version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }", "node").unwrap();

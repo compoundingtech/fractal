@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use serde::Deserialize;
-pub use st3_store::store::agent_messages::*;
-pub use st3_store::store::agent_messages::{DAY_MS, DailyUsage, create_schema, flush, open, synthetic, windows};
+pub use st3_attention::store::agent_messages::*;
+pub use st3_attention::store::agent_messages::{DAY_MS, DailyUsage, create_schema, flush, open, synthetic, windows};
 
 #[cfg(test)]
 mod tests {

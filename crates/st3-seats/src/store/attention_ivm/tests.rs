@@ -2,8 +2,8 @@
 use super::*;
 use crate::store::custom::RegistrationRequest;
 use smallclaims::ivm::{Readiness, SourceCut, events};
-use st3_store::store::attention_ivm::tests_shared_seats::*;
-use st3_store::store::attention_ivm::tests_shared_seats::{custom, input, install, views};
+use st3_attention::store::attention_ivm::tests_shared_seats::*;
+use st3_attention::store::attention_ivm::tests_shared_seats::{custom, input, install, views};
 
 
 #[test]

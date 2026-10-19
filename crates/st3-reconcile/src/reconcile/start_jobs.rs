@@ -1,4 +1,6 @@
 //! Launch workers never occupy the planner/control blocking pool. Their durable results wake it.
+use crate::AttentionStoreCore;
+use crate::OwnedSetsAttentionStore;
 use crate::RuntimeStartsStore;
 use super::*;
 use crate::store::{RuntimeStartAdmission, RuntimeStartOperation};

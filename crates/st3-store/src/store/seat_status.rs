@@ -244,24 +244,6 @@ pub fn enrich_harness(
     Ok(())
 }
 
-impl Store {
-    /// Client status describes harness evidence. Work progress can prove delivery readiness
-    /// internally, but never substitutes for an observation in this contract.
-    pub fn observed_harness_at(
-        &self,
-        subject: &str,
-        index: u64,
-    ) -> Result<Option<crate::model::CurrentHarnessView>> {
-        let connection = self.readers.get();
-        let mut harness = current_harness_fold_at(&connection, subject, Some(index), false, false)?;
-        if let Some(view) = harness.as_mut() {
-            enrich_harness(&connection, subject, Some(index), view)?;
-        }
-        Ok(harness)
-    }
-
-}
-
 pub fn history_at(
     connection: &Connection,
     subject: &str,
@@ -408,7 +390,7 @@ mod tests {
 pub use crate::store::seat_status_tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::store::seat_status_tests_shared_seats::{checked_harness, input, observe, runtime};
+pub use crate::store::seat_status_tests_shared_seats::{input, observe, runtime};
 use super::*;
 
     #[test]
@@ -434,23 +416,6 @@ use super::*;
         claim.kind = "runtime.observed".into();
         claim.body = json!({"fields":{"status_transition":false}});
         assert!(history_source(&claim));
-    }
-
-    #[test]
-    fn status_upgrade_preserves_since_from_legacy_observations() {
-        let store = Store::open_memory("cedar").unwrap();
-        runtime(&store, "one");
-        let at = now_ms() - 1_000;
-        let first = observe(&store, "one", "idle", at, "ready");
-        store.connection.lock().unwrap().execute(
-            "UPDATE claims SET body=json_remove(body, '$.fields.observed_since_ms', '$.fields.status_transition') WHERE id=?1",
-            [first.id],
-        ).unwrap();
-        let before = checked_harness(&store, "agent/cedar").unwrap().unwrap();
-        observe(&store, "one", "idle", at + 1, "waiting");
-        let after = checked_harness(&store, "agent/cedar").unwrap().unwrap();
-        assert_eq!(before.since_unix_ms, at);
-        assert_eq!(after.since_unix_ms, before.since_unix_ms);
     }
 
     #[test]

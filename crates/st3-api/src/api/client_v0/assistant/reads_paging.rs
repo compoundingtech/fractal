@@ -1,5 +1,6 @@
 //! Page-sized assistant source reads. Mission cursors seek by key; attention and roster
 //! cursors reference an existing publication. Only the offline agent path caches shallow refs.
+use crate::AttentionListStore;
 use super::*;
 
 #[allow(clippy::too_many_arguments)]

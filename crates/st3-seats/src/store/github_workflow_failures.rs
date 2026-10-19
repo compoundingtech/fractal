@@ -2,16 +2,16 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::resource::github_workflows::PerformanceFailure;
-pub use st3_store::store::github_workflow_failures::*;
-pub use st3_store::store::github_workflow_failures::{deliver_tx};
+pub use st3_attention::store::github_workflow_failures::*;
+pub use st3_attention::store::github_workflow_failures::{deliver_tx};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::parse_test_intent as parse_intent;
     use crate::resource::github_workflows::PERFORMANCE_FAILURES_FIELD;
-    use st3_store::store::github_workflow_failures_tests_shared_seats::*;
-    use st3_store::store::github_workflow_failures_tests_shared_seats::{SOURCE, failure, publish};
+    use st3_attention::store::github_workflow_failures_tests_shared_seats::*;
+    use st3_attention::store::github_workflow_failures_tests_shared_seats::{SOURCE, failure, publish};
 
     fn observe(store: &Store, failures: Value, cursor: &str) -> ResourceObservationOutcome {
         let revision = store

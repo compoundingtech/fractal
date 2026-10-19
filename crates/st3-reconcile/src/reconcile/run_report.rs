@@ -8,6 +8,7 @@
 //! that show them. It never copies fault or cancellation text, which can carry anything a step
 //! printed. A reporter that is not a live agent gets a fault on the run instead, once per
 //! reason, and the next evaluation looks again without sending anything twice.
+use crate::AttentionSnapshotStore;
 use super::*;
 use serde_json::json;
 

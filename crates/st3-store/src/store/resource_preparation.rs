@@ -10,8 +10,8 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeCut {
     connection: usize,
-    file: String,
-    changes: u64,
+    pub file: String,
+    pub changes: u64,
     schema: i64,
     temp_schema: i64,
     data: i64,
@@ -105,7 +105,7 @@ pub struct Fence {
 
 pub struct Prepared<T> {
     owner: Arc<()>,
-    cut: Option<NativeCut>,
+    pub cut: Option<NativeCut>,
     pub value: Option<T>,
 }
 

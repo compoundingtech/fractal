@@ -1,5 +1,6 @@
 //! Start, checkpoint, transfer, acknowledge and close through an isolated durable daemon.
 #![cfg(unix)]
+use st3::AttentionStore;
 use st3::SeatsStoreCore;
 use serde_json::{Value, json};
 use st3::{api::AppState, model::ClaimInput, store::Store};

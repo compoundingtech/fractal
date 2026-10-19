@@ -3,7 +3,7 @@
 //! published, a collection socket rereads its windows when a newer one is published, never on a
 //! raw commit, so a commit that changes nothing in the view folds no window.
 
-use super::*;
+
 
 /// The collections a refresher may publish. Agents keep their own roster signal.
 pub const PUBLISHED_COLLECTIONS: [&str; 7] =
@@ -33,7 +33,7 @@ impl Default for PublishedViews {
     }
 }
 
-fn position(collection: &str) -> Option<usize> {
+pub fn position(collection: &str) -> Option<usize> {
     PUBLISHED_COLLECTIONS.iter().position(|name| *name == collection)
 }
 
@@ -97,23 +97,6 @@ impl PublishedViews {
     pub fn published(&self, collection: &str) -> bool {
         position(collection).is_some_and(|position| self.0.borrow()[position].published)
     }
-}
-
-impl Store {
-    /// Say that `collection`'s refresher has swapped in a newer published view. Call it after
-    /// every publication, including one at the same graph index after a deadline passed.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub fn publish_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.publish(collection);
-    }
-
-    /// Say that `collection`'s refresher stopped serving its view, because it exited or keeps
-    /// failing: its windows go back to following commits until it publishes again.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub fn withdraw_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.withdraw(collection);
-    }
-
 }
 
 #[cfg(test)]

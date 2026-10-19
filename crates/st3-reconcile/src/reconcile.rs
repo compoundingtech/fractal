@@ -1,5 +1,14 @@
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
+#[cfg(test)]
+use crate::AccountsAttentionStore;
+#[cfg(test)]
+use crate::StopDeferralAttentionStore;
+use crate::AttentionSnapshotStore;
+use crate::AttentionStore;
+use crate::AttentionStoreCore;
+use crate::OwnedSetsAttentionStore;
+use crate::SeatsAttentionStore;
 use crate::AccountsStore;
 use crate::RuntimeStartsStore;
 use crate::SeatsStore;

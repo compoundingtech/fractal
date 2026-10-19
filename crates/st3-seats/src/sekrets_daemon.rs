@@ -7,7 +7,7 @@ use crate::sekrets::identity::{self, STATEMENT_VERSION, Statement};
 use crate::sekrets::protocol::Attestation;
 use crate::model::St3Error;
 use crate::store::Store;
-pub use st3_store::sekrets_daemon::*;
+pub use st3_attention::sekrets_daemon::*;
 
 /// The person this daemon's seats work for: the configured `person`. Set once at startup.
 pub static PERSON: OnceLock<String> = OnceLock::new();
@@ -364,8 +364,8 @@ mod tests {
     use super::*;
     use crate::sekrets::store::LogEntry;
     use serde_json::json;
-    use st3_store::sekrets_daemon::shared_tests_seats::*;
-    use st3_store::sekrets_daemon::shared_tests_seats::{entry};
+    use st3_attention::sekrets_daemon::shared_tests_seats::*;
+    use st3_attention::sekrets_daemon::shared_tests_seats::{entry};
 
     #[test]
     fn busy_gateway_append_keeps_cursor_and_retries_the_same_entry() {

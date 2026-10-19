@@ -11,6 +11,10 @@
 //! records a `harness.diagnostic` claim. A mandatory resume binding failure also exits non-zero,
 //! as it always has.
 
+#[cfg(test)]
+use crate::AttentionSnapshotStore;
+#[cfg(test)]
+use crate::SeatStatusAttentionStore;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};

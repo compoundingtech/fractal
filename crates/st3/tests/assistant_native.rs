@@ -1,4 +1,6 @@
 //! Isolated real router/store coverage; no daemon, subprocess, ambient profile, or managed agent.
+use st3::AttentionListStore;
+use st3::AttentionStore;
 use st3::{SeatsStore as _, SeatsStoreCore};
 use std::{path::PathBuf, sync::Arc};
 

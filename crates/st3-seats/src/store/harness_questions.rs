@@ -5,8 +5,8 @@ use smallclaims::store::checkpoint::claims_of_kind_in_order;
 use st3_schema::harness_questions::{
     Answer, OBSERVED, Question, RESOLVED, Receipt, Status, actor_key, answers, questions, subject,
 };
-pub use st3_store::store::harness_questions::*;
-pub use st3_store::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
+pub use st3_attention::store::harness_questions::*;
+pub use st3_attention::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
 
 /// A native question as the harness shows it, without its text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,8 +190,8 @@ impl HarnessQuestionsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::harness_questions_tests_shared_seats::*;
-    use st3_store::store::harness_questions_tests_shared_seats::{DAY, answer};
+    use st3_attention::store::harness_questions_tests_shared_seats::*;
+    use st3_attention::store::harness_questions_tests_shared_seats::{DAY, answer};
 
     fn observation() -> QuestionObservation {
         QuestionObservation {
@@ -360,10 +360,10 @@ mod tests {
             state(&alder, "runtime.observed", json!({"status": "running", "runtime_id": "runtime-1", "incarnation_id": "inc-1"}));
             state(&alder, "harness.observed", json!({"state": "working", "driver": "claude", "incarnation_id": "inc-1"}));
             let first = alder.observe_harness_question(&observation()).unwrap();
-            st3_store::store::tests_shared::receive_and_project(
+            st3_attention::store::tests_shared::receive_and_project(
                 &birch,
                 "alder",
-                &st3_store::store::tests_shared::exchange_from(&alder, &ReplicationInventory::default()),
+                &st3_attention::store::tests_shared::exchange_from(&alder, &ReplicationInventory::default()),
             );
             // Both writers in the same later millisecond.
             for store in [&alder, &birch] {
@@ -382,11 +382,11 @@ mod tests {
                 .unwrap();
             for (name, source) in [("alder", &alder), ("birch", &birch)] {
                 let exchange =
-                    st3_store::store::tests_shared::exchange_from(source, &ReplicationInventory::default());
-                st3_store::store::tests_shared::receive_and_project(&relay, name, &exchange);
+                    st3_attention::store::tests_shared::exchange_from(source, &ReplicationInventory::default());
+                st3_attention::store::tests_shared::receive_and_project(&relay, name, &exchange);
             }
             (
-                st3_store::store::tests_shared::exchange_from(&relay, &ReplicationInventory::default()),
+                st3_attention::store::tests_shared::exchange_from(&relay, &ReplicationInventory::default()),
                 first.id,
             )
         })
@@ -398,8 +398,8 @@ mod tests {
         let connection = store.readers.get();
         let index = store.index().unwrap();
         json!({
-            "harness": st3_store::store::current_harness_at(&connection, &seat, None).unwrap(),
-            "history": st3_store::store::seat_status::history_at(&connection, &seat, 20 * DAY, index).unwrap(),
+            "harness": st3_attention::store::current_harness_at(&connection, &seat, None).unwrap(),
+            "history": st3_attention::store::seat_status::history_at(&connection, &seat, 20 * DAY, index).unwrap(),
             "question": store.harness_question(question, u128::MAX).unwrap(),
         })
     }
@@ -411,10 +411,10 @@ mod tests {
                 .iter()
                 .flat_map(|&index| std::iter::repeat_n(exchange.envelopes[index].clone(), copies))
                 .collect();
-            let admission = st3_store::store::tests_shared::receive_and_project(
+            let admission = st3_attention::store::tests_shared::receive_and_project(
                 target,
                 "cedar",
-                &st3_store::store::tests_shared_seats::exchange_of("cedar", envelopes),
+                &st3_attention::store::tests_shared_seats::exchange_of("cedar", envelopes),
             );
             assert_eq!((admission.invalid, admission.unknown), (0, 0));
         }
@@ -445,7 +445,7 @@ mod tests {
         let target = Store::open(&path, "dogwood").unwrap();
         deliver_harness(&target, &(0..exchange.envelopes.len()).rev().collect::<Vec<_>>(), 1, 1);
         assert_eq!(&harness_snapshot(&target), harness_reference());
-        st3_store::store::tests_shared::receive_and_project(&target, "cedar", exchange);
+        st3_attention::store::tests_shared::receive_and_project(&target, "cedar", exchange);
         assert_eq!(&harness_snapshot(&target), harness_reference());
         drop(target);
         let target = Store::open(&path, "dogwood").unwrap();

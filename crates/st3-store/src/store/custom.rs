@@ -102,7 +102,7 @@ fn fields(claim: &ClaimRecord) -> BTreeMap<String, Value> {
         .map(|v| v.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default()
 }
-fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>> {
+pub fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>> {
     connection.prepare(/* sqlite-large-value: allow-for-now lv-hc2de6c8b2f4d owner=st3_store::store::custom TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.id,claims.store_index,claims.batch_id,claims.subject,claims.kind,claims.origin,claims.actor,claims.body,claims.predecessors,claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.subject=?1
@@ -814,28 +814,6 @@ impl Store {
     pub fn custom_basis_revision(&self, subject: &str, kinds: &[String]) -> Result<String> {
         basis_revision(&self.readers.get(), subject, kinds)
     }
-    pub fn custom_attention_items(
-        &self,
-        person: Option<&str>,
-    ) -> Result<Vec<AttentionItemView>> {
-        let connection = self.readers.get();
-        let rows = if let Some(person) = person {
-            connection.prepare("SELECT body,requested_at FROM custom_sources WHERE active=1 AND person=?1 ORDER BY subject")?
-                .query_map([person], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            connection
-                .prepare(
-                    "SELECT body,requested_at FROM custom_sources WHERE active=1 ORDER BY subject",
-                )?
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        rows.into_iter()
-            .map(|(text, at)| {
-                attention_item(&serde_json::from_str(&text)?, at.parse().unwrap_or(0))
-            })
-            .collect()
-    }
     pub fn reply_custom_subject(&self, request: &ReplyRequest) -> Result<ClaimRecord, St3Error> {
         self.reply_custom_subject_authorized(request, None)
     }
@@ -953,3 +931,6 @@ fn timestamp(at: u128) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_attention_tests;

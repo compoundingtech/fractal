@@ -492,7 +492,7 @@ mod tests {
 pub use crate::store::mission_ivm_tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::store::mission_ivm_tests_shared_seats::{checkpoint, fixture, parity, register, start};
+pub use crate::store::mission_ivm_tests_shared_seats::start;
 
     
     

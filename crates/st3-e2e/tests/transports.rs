@@ -1,4 +1,8 @@
 #[cfg(test)]
+#[cfg(test)]
+use st3::AttentionStore;
+#[cfg(test)]
+use st3::AttentionStoreCore;
 use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;

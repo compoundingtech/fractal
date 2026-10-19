@@ -1,8 +1,8 @@
 //! The part of `store::stop_deferral` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::stop_deferral::*;
-pub use st3_store::store::stop_deferral::{create_schema};
+pub use st3_attention::store::stop_deferral::*;
+pub use st3_attention::store::stop_deferral::{create_schema};
 
 /// Store indexes per backfill page. A cold page reads only these kinds' rows; on a copy of a
 /// 16 GB production store the whole scan read about 26k rows in under two seconds.

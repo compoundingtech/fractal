@@ -98,7 +98,7 @@ pub fn graph(
 /// The missions whose declarations one run shares: each mission with the loop rounds embedded in
 /// it. Separate missions start separate runs, so one never resolves another's run-scoped
 /// declarations. An embedded mission without its owner is checked alone.
-fn runs<'a>(missions: &[&'a MissionSpec]) -> Vec<Vec<&'a MissionSpec>> {
+pub fn runs<'a>(missions: &[&'a MissionSpec]) -> Vec<Vec<&'a MissionSpec>> {
     let mut grouped = BTreeSet::new();
     let mut runs = Vec::new();
     for owner in missions

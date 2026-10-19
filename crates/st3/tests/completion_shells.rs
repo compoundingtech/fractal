@@ -4,6 +4,7 @@
 //! (docs/st3/cli-completion/spec.md). The shells are test inputs: the Nix check and the
 //! dev shell provide them, and a missing shell fails the test rather than skipping it.
 
+use st3::AttentionStoreCore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

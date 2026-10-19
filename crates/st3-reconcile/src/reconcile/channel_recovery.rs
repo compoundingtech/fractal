@@ -1,6 +1,8 @@
 //! Missing-channel recovery uses the ordinary fenced restart path and its native-session
 //! continuation. Actor-bound receipts keep the retry budget and parking durable across restarts
 //! and checkpoints. No message or delivery receipt is changed by recovery.
+use crate::AttentionStoreCore;
+use crate::OwnedSetsAttentionStore;
 use super::*;
 use serde_json::json;
 

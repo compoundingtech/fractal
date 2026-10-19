@@ -6,16 +6,16 @@ use crate::model::{
     DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, St3Error, UsedMissionSpec,
     WorkSelector,
 };
-pub use st3_store::references::*;
-pub use st3_store::references::{Graph, Scope, graph, publication};
+pub use st3_attention::references::*;
+pub use st3_attention::references::{Graph, Scope, graph, publication};
 
 #[cfg(test)]
 mod tests {
     use crate::graph::parse_intent;
     use crate::SeatsStoreCore;
     use crate::store::Store;
-    use st3_store::references::seats_shared_tests::*;
-    use st3_store::references::seats_shared_tests::{CYCLE, OBSERVER, SUBSCRIPTION, UNSTORED, WATCHER, cycle_revision, refusals, schedule, watch};
+    use st3_attention::references::seats_shared_tests::*;
+    use st3_attention::references::seats_shared_tests::{CYCLE, OBSERVER, SUBSCRIPTION, UNSTORED, WATCHER, cycle_revision, refusals, schedule, watch};
 
     /// Publishes without the reference checks, as a publication before them did.
     fn publish(store: &Store, source: &str) -> crate::model::ApplyResponse {

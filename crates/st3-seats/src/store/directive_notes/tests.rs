@@ -1,11 +1,14 @@
 #![allow(unused_imports)]
+use crate::AttentionSnapshotStore;
+use crate::AttentionStore;
+use crate::SeatsAttentionStore;
 use crate::TracePrincipalStore;
 use super::*;
 use crate::fleet::MemberKey;
 use crate::model::PersonStepResponse;
 use rusqlite::StatementStatus;
-use st3_store::store::directive_notes::tests_shared_seats::*;
-use st3_store::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
+use st3_attention::store::directive_notes::tests_shared_seats::*;
+use st3_attention::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 
 
 #[test]

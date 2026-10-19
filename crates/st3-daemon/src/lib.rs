@@ -14,13 +14,14 @@ pub use st3_kernel::accounts;
 pub use st3_api::api;
 pub use st3_kernel::archive;
 pub mod attach_image;
-pub use st3_store::backup;
+pub use st3_attention::backup;
 pub use st3_store::blobs;
 pub use st3_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
 pub use st3_github::changes;
 pub use st3_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
 pub use st3_seats::{AccountsStore, EvidenceSeatsStore, HarnessQuestionsStore, LimitsStore, RetirementsStore, RevisionSeatsStore, RolloutsStore, RosterAdmissionStore, RuntimeStartsStore, SeatStatusStore, SeatsStore, SeatsStoreCore, SekretsDaemonStore, StopDeferralStore, SubagentsStore, TracePrincipalStore};
+pub use st3_attention::{AccountsAttentionStore, AttentionListStore, AttentionSnapshotStore, AttentionStore, AttentionStoreCore, CardFoldStore, CheckpointRulesStore, ClientSummaryStore, CustomStore, OperationsStore, OwnedSetsAttentionStore, OwnerListsStore, PublishedListStore, PublishedViewsAttentionStore, SeatStatusAttentionStore, SeatsAttentionStore, StopDeferralAttentionStore, SummaryListStore};
 pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use st3_api::claude_channel;
 pub use st3_store::client;
@@ -90,7 +91,7 @@ pub use st3_telemetry::recorder_report;
 /// Finds references a publication or the graph names that do not resolve.
 /// Attaches a local terminal to a terminal another fleet host owns.
 pub use st3_store::remote_terminal;
-pub use st3_store::render;
+pub use st3_attention::render;
 pub use st3_store::resource;
 pub use st3_seats::rollout;
 pub use st3_kernel::seat_queue;

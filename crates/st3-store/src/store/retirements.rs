@@ -77,24 +77,6 @@ pub fn refuse_declaration(
     Ok(())
 }
 
-/// Terminal identity supersedes owned membership too. An effect prepared from the old
-/// declaration must fail its authority check; only the canonical terminal stop is current.
-pub fn terminal_selection(
-    connection: &Connection,
-    desired: &DesiredSubject,
-) -> Result<Option<bool>, St3Error> {
-    if !desired.subject.starts_with("agent/") {
-        return Ok(None);
-    }
-    Ok(record(connection, &desired.subject, None)?.map(|claim| {
-        desired.kind == "stop"
-            && desired.member.is_none()
-            && desired.desired
-                == json!({"name":"stop", "arguments":[desired.subject],
-                "properties":{}, "children":[], "retirement":claim.id})
-    }))
-}
-
 pub fn admit_recipient(
     connection: &Connection,
     recipient: Option<&str>,

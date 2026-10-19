@@ -1,19 +1,20 @@
 //! The part of `store::person_work` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::AttentionStore;
 use super::*;
 use crate::model::{MessageAttachment, PersonAskRequest, PersonStepResponse};
 use crate::person_request::{StructuredRequest, answer_summary};
-pub use st3_store::store::person_work::*;
-pub use st3_store::store::person_work::{AskImages, current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
+pub use st3_attention::store::person_work::*;
+pub use st3_attention::store::person_work::{AskImages, current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod reconcile_candidates_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
     use super::*;
-    use st3_store::store::person_work_tests_shared_seats::*;
-    use st3_store::store::person_work_tests_shared_seats::{TEST_FLEET, gateway_decision, receive_exchange};
-    pub use st3_store::store::person_work::tests::*;
+    use st3_attention::store::person_work_tests_shared_seats::*;
+    use st3_attention::store::person_work_tests_shared_seats::{TEST_FLEET, gateway_decision, receive_exchange};
+    pub use st3_attention::store::person_work::tests::*;
 
     pub fn fixture() -> (Store, StepRunView, PersonAskRequest) {
         let store = Store::open_memory("alder").unwrap();

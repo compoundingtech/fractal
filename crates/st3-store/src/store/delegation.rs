@@ -4,7 +4,7 @@ use crate::model::{DelegationPolicyRequest, DelegationProof};
 
 pub const ACTIONS: &[&str] = &["answer-ask", "close-item", "record-go-stop"];
 
-fn denied(message: impl Into<String>) -> St3Error {
+pub fn denied(message: impl Into<String>) -> St3Error {
     St3Error::new("delegation-refused", message)
 }
 

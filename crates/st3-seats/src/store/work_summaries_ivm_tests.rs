@@ -1,9 +1,9 @@
 #![allow(unused_imports)]
 use super::*;
 use smallclaims::ivm::{SourceCut, events};
-use st3_store::store::tests_shared::{exchange_from, receive_and_project};
-use st3_store::store::work_summaries_ivm::tests_shared_seats::*;
-use st3_store::store::work_summaries_ivm::tests_shared_seats::{ResetClock, advance, append, append_at, capture, fixture, freeze, parity, register};
+use st3_attention::store::tests_shared::{exchange_from, receive_and_project};
+use st3_attention::store::work_summaries_ivm::tests_shared_seats::*;
+use st3_attention::store::work_summaries_ivm::tests_shared_seats::{ResetClock, advance, append, append_at, capture, fixture, freeze, parity, register};
 
 
 fn mission(store: &Store) -> MissionRunView {
@@ -191,7 +191,7 @@ fn signed_replication_permutations_and_duplicates_match_canonical_reader() {
         for chunk in order.chunks(width) {
             let mut batch = chunk.to_vec();
             batch.extend(previous.iter().cloned());
-            receive_and_project(&target, "cedar", &st3_store::store::tests_shared_seats::exchange_of("cedar", batch));
+            receive_and_project(&target, "cedar", &st3_attention::store::tests_shared_seats::exchange_of("cedar", batch));
             parity(&target, &views, &run.steps, at);
             previous = chunk.to_vec();
         }

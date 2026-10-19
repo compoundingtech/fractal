@@ -1,4 +1,5 @@
 #![cfg(unix)]
+use st3::AttentionStoreCore;
 use serde_json::Value;
 use st3::api::AppState;
 use st3::model::MemberSpec;

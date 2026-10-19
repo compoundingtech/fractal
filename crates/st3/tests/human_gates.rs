@@ -1,6 +1,7 @@
 //! A person answers a mission's human gate from every surface: client-v0 actions (stui, iOS),
 //! the CLI, and the HTTP API. Each test drives a real reconciler and an in-process API.
 
+use st3::AttentionStore;
 use st3::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

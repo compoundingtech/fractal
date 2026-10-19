@@ -1,3 +1,4 @@
+use st3::AttentionStore;
 use st3::SeatsStoreCore;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};

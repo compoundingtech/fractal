@@ -2,8 +2,8 @@
 use crate::HarnessQuestionsStore;
 use super::*;
 use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
-use st3_store::store::fleet_admission_tests_shared_seats::*;
-pub use st3_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
+use st3_attention::store::fleet_admission_tests_shared_seats::*;
+pub use st3_attention::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 
 
 #[test]

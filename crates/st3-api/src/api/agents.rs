@@ -1,3 +1,4 @@
+use crate::AttentionStoreCore;
 use crate::RolloutsStore;
 use crate::SeatsStore;
 use crate::OwnedSetsStore;

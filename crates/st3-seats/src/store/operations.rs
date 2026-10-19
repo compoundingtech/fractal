@@ -1,13 +1,14 @@
 //! The part of `store::operations` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::AttentionStore;
 use super::*;
-pub use st3_store::store::operations::*;
+pub use st3_attention::store::operations::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::operations_tests_shared_seats::*;
-    use st3_store::store::operations_tests_shared_seats::{clock_run};
+    use st3_attention::store::operations_tests_shared_seats::*;
+    use st3_attention::store::operations_tests_shared_seats::{clock_run};
 
     fn publish_overview_mission(store: &Store) {
         let source = "version 2\nmission \"example/overview\" state=\"ready\" { goal \"Build.\"; step \"build\" { goal \"Build.\"; }; }\n";

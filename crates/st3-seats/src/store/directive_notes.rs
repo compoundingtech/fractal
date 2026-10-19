@@ -3,8 +3,8 @@
 use super::*;
 use smallclaims::store::canonical;
 use st3_schema::directive_notes::KIND;
-pub use st3_store::store::directive_notes::*;
-pub use st3_store::store::directive_notes::{DirectiveNote, create_schema, current, flush, rebuild, validate_publication};
+pub use st3_attention::store::directive_notes::*;
+pub use st3_attention::store::directive_notes::{DirectiveNote, create_schema, current, flush, rebuild, validate_publication};
 #[cfg(test)]
 mod tests;
 
