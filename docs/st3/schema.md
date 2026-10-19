@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `5a773ab229f6840a044c37d88812f64af0179542bff88ba67994415efd4cf6c3`
+Storage digest: `b0615c71ded03b34c11349eacf89e30b660ed25713207561b92eaa301abcf3ae`
 
 ## Subject families
 
@@ -308,6 +308,20 @@ Admission retains full original physical and optional requester-control receipt 
 Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
 
 The old version-18 binary refuses version 19. Do not lower `user_version` for rollback: drain starts, revoke pending operations and verify that all producers and operation-owned runtimes have ended, preserve the ledger and runtime generation records as evidence, then restore a consistent pre-upgrade database and runtime state with their matching binary under Operations supervision. New exec generation records contain operation provenance that older runtimes cannot read; restoring only SQLite is insufficient. A claim-only restore does not carry cancellation tombstones and cannot safely authorize starting old unresolved producers. Roll forward if closure cannot be proved. See [seat lifecycle](../seat-lifecycle.md#pending-runtime-starts).
+
+## Immutable claim positions
+
+`claim_positions` holds each claim's position in its batch, the canonical order's fifth
+component. Admission stores it: a replicated claim takes its record's wire position before the
+claim row is inserted, and a local claim takes the number of claims its batch already holds,
+which is where sealing places its record. A later record of the same claim can only lower the
+value, so the stored position is the least position over every record the member has held and
+does not depend on arrival order. For claims stored before this table existed, triggers store
+the legacy value (least record position, else arrival count among surviving siblings) just
+before deleting an earlier sibling, deleting a record or changing a record's claim or position
+could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
+never deleted. No history backfill runs at open; a claim without a row and without any removal
+since keeps the legacy value, which equals what would be stored.
 
 ## Retired identity ledger
 

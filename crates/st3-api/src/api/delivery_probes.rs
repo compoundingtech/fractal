@@ -13,7 +13,7 @@ const FORMAT: &str = "st3.delivery-probes.v1";
 const HEARTBEAT_STALE_MS: u128 = 15 * 60_000;
 
 #[derive(Deserialize)]
-struct Report {
+pub struct Report {
     format: String,
     source: String,
     agent: String,
@@ -24,7 +24,7 @@ struct Report {
 }
 
 #[derive(Deserialize)]
-struct Route {
+pub struct Route {
     target: String,
     to: String,
     status: String,
@@ -38,7 +38,7 @@ struct Route {
 }
 
 #[derive(Deserialize)]
-struct PreviousRead {
+pub struct PreviousRead {
     late: bool,
     latency_ms: u128,
 }

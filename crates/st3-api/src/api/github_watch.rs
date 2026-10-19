@@ -62,7 +62,7 @@ fn bad(code: &'static str, message: impl Into<String>) -> ApiError {
 const DEFAULT_WATCH_DURATION_MS: u128 = 14 * 24 * 60 * 60 * 1_000;
 
 /// GitHub alias policy only; existing declarations retain their stored deadline.
-fn deadline(until: Option<&str>) -> Result<Option<u128>, ApiError> {
+pub fn deadline(until: Option<&str>) -> Result<Option<u128>, ApiError> {
     deadline_at(until, smallclaims::store::now_ms())
 }
 
