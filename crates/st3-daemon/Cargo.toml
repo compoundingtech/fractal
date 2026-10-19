@@ -40,9 +40,9 @@ opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "c5e19e6f6a866cd5cbe0431755e6db38d6f17646" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4b823084a16a39610e1bcb835973c2c4a0d4f88e" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "4b823084a16a39610e1bcb835973c2c4a0d4f88e" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "4b823084a16a39610e1bcb835973c2c4a0d4f88e" }
 resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"

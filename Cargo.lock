@@ -1180,7 +1180,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3362,7 +3362,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=c5e19e6f6a866cd5cbe0431755e6db38d6f17646#c5e19e6f6a866cd5cbe0431755e6db38d6f17646"
+source = "git+https://github.com/compoundingtech/pty?rev=4b823084a16a39610e1bcb835973c2c4a0d4f88e#4b823084a16a39610e1bcb835973c2c4a0d4f88e"
 dependencies = [
  "libc",
  "pty-core",
@@ -3373,7 +3373,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=c5e19e6f6a866cd5cbe0431755e6db38d6f17646#c5e19e6f6a866cd5cbe0431755e6db38d6f17646"
+source = "git+https://github.com/compoundingtech/pty?rev=4b823084a16a39610e1bcb835973c2c4a0d4f88e#4b823084a16a39610e1bcb835973c2c4a0d4f88e"
 dependencies = [
  "indexmap",
  "libc",
@@ -3388,7 +3388,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=c5e19e6f6a866cd5cbe0431755e6db38d6f17646#c5e19e6f6a866cd5cbe0431755e6db38d6f17646"
+source = "git+https://github.com/compoundingtech/pty?rev=4b823084a16a39610e1bcb835973c2c4a0d4f88e#4b823084a16a39610e1bcb835973c2c4a0d4f88e"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -3507,7 +3507,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4064,7 +4064,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5620,7 +5620,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6988,7 +6988,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
