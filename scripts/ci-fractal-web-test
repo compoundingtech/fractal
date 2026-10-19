@@ -62,6 +62,7 @@ web_inputs = (
     "clients/typescript/st3-client/tsconfig.schema.json",
     "clients/typescript/st3-client/types.test.ts",
     "clients/typescript/st3-client/BUCK",
+    "docs/st3/client-v0/schemas/client-v0.schema.json",
     "fixtures/clients/device-signing-v1.json",
     "fixtures/clients/transcripts/example.json",
     "fixtures/scenarios/example.json",
@@ -75,7 +76,6 @@ non_web_inputs = (
     "crates/st3-client-codegen/src/main.rs",
     "crates/st3-schema/x.rs",
     "docs/st3/client-v0/x.md",
-    "docs/st3/client-v0/schemas/client-v0.schema.json",
     "nested/megarepo.kdl",
     "nested/megarepo.lock",
     "nested/flake.lock",
@@ -118,6 +118,7 @@ workspace_fixture = json.loads('{"devDependencies":{"@smalltalk/st3-scenarios":"
 guard_workspace_dependencies(workspace_fixture)
 assert detector_contract["kit_paths"](["clients/typescript/st3-scenarios/src/index.ts"])
 assert detector_contract["kit_paths"](["clients/typescript/st3-client/index.ts"])
+assert detector_contract["kit_paths"](["docs/st3/client-v0/schemas/client-v0.schema.json"])
 packages["@fixture/uncovered"] = ("packages/uncovered-fixture", {})
 try:
     guard_workspace_dependencies({"dependencies": {"@fixture/uncovered": "workspace:*"}})
@@ -447,8 +448,9 @@ with tempfile.TemporaryDirectory() as scratch:
         path.write_text(json.dumps({"modules": [{"id": identifier} for identifier in ids]}))
         return subprocess.run([str(graph_check), str(path)], capture_output=True, text=True)
     covered = graph("./src/Composer.stories.tsx", "./.storybook/preview.ts?v=1", "./../../node_modules/react/index.js",
-                    "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx")
-    assert covered.returncode == 0 and "3 repository files, 0 outside" in covered.stdout, covered
+                    "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx",
+                    "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
+    assert covered.returncode == 0 and "4 repository files, 0 outside" in covered.stdout, covered
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):

@@ -124,6 +124,7 @@ first_shard() { [ "${KIT_SHARD_INDEX:-0}" -eq 0 ]; }
 stream_kit() {
   if first_shard; then
     lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
+    lane "UI kit scenario story check" pnpm --filter @smalltalk/fractal-ui test:stories
   fi
   case "${KIT_INPUTS:-true}" in
     true)

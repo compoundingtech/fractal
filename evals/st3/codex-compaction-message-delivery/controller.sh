@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 readonly REQUESTER=person/eval-requester
-readonly AGENT="agent/$ST_MISSION_RUN/compact.codex"
-readonly RUN_TAG="mission-run:$ST_MISSION_RUN"
-readonly NONCE="${ST_MISSION_RUN##*/}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+readonly AGENT="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/compact.codex"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+readonly RUN_TAG="mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+fractal_selected=${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}
+readonly NONCE="${fractal_selected##*/}"
 readonly STATE="$PWD/controller-state.json"
 
 state="$(jq -n --arg agent "$AGENT" --arg nonce "$NONCE" \
@@ -39,7 +45,8 @@ is_harness_state() {
 }
 
 target_work_claimed() {
-  st3 missions show "mission-run/$ST_MISSION_RUN" --json 2>/dev/null \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  st3 missions show "mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" --json 2>/dev/null \
     | jq -e --arg agent "$AGENT" '
         any(.steps[];
           .step == "message-target"

@@ -1705,7 +1705,7 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
 /// Every route `api.rs` and the route families above it declare is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let mut declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let mut declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
     declared.extend(family_routes(include_str!(
         "../../st3-api-mailbox/src/api/mailbox.rs"
     )));
@@ -2007,7 +2007,7 @@ fn routes_in(router: &str) -> BTreeSet<String> {
 
 #[test]
 fn the_cost_route_inventory_resolves_the_client_read_forward_constant() {
-    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
     assert!(declared.contains("POST /v1/internal/client-read/forward"));
 }
 
