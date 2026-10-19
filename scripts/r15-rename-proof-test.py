@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -143,6 +144,17 @@ let socket = "/state/st3.sock";
         # Deliberately no skip/mock: missing Nix or evaluation errors fail the guard.
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)
+            subprocess.run(['git', 'init', '--quiet', str(tree)], check=True)
+
+            def evaluate_committed_fixture():
+                subprocess.run(['git', 'add', '--all'], cwd=tree, check=True)
+                # Use the configured author and normal policy hooks, including
+                # in isolated fixtures. Never replace the caller's identity.
+                subprocess.run(['git', 'commit', '--quiet', '--allow-empty',
+                                '-m', 'Record Nix proof fixture'], cwd=tree, check=True)
+                revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=tree, text=True).strip()
+                return proof.nix_output_names(tree, revision, repository=tree)
+
             (tree / 'flake.lock').write_text(
                 '{"nodes":{"root":{}},"root":"root","version":7}\n')
             source = '''{
@@ -155,7 +167,7 @@ let socket = "/state/st3.sock";
             }'''
             flake = tree / 'flake.nix'
             flake.write_text(source)
-            baseline = proof.nix_output_names(tree)
+            baseline = evaluate_committed_fixture()
             self.assertEqual(baseline, {
                 'packages': {'x86_64-linux': ['stable-output'], 'aarch64-darwin': ['other']},
                 'apps': {'aarch64-linux': ['stable-output']},
@@ -168,13 +180,13 @@ let socket = "/state/st3.sock";
                 for replacement in (kind + '.' + system + '.renamed', kind + '.riscv64-linux.${name}'):
                     with self.subTest(kind=kind, replacement=replacement):
                         flake.write_text(source.replace(attribute, replacement))
-                        self.assertNotEqual(baseline[kind], proof.nix_output_names(tree)[kind])
+                        self.assertNotEqual(baseline[kind], evaluate_committed_fixture()[kind])
             flake.write_text('{ outputs = { self }: throw "intentional evaluation error"; }')
             with self.assertRaisesRegex(RuntimeError, 'Nix output evaluation failed'):
-                proof.nix_output_names(tree)
+                evaluate_committed_fixture()
             (tree / 'flake.lock').unlink()
             with self.assertRaisesRegex(ValueError, 'flake.lock is missing'):
-                proof.nix_output_names(tree)
+                evaluate_committed_fixture()
 
 
 if __name__ == '__main__':

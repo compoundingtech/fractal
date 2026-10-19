@@ -154,20 +154,20 @@ def symlink_guard(tree):
     return {'checked': len(links), 'dangling': dangling}
 
 
-def nix_output_names(tree):
+def nix_output_names(tree, revision, repository=ROOT):
     if not (tree / 'flake.lock').is_file():
         raise ValueError(f'committed flake.lock is missing in {tree}')
-    # getFlake resolves this immutable archive using its committed flake.lock.
-    # --impure permits only the local snapshot reference; lock updates are forbidden.
+    # Evaluate the exact tracked Git revision, never a whole-worktree path copy.
+    # The revision locks the root source; its committed flake.lock locks inputs.
     # attrNames is lazy in derivation values: this evaluates names on every system,
     # without instantiating/building packages or depending on source-text spelling.
-    reference = json.dumps('path:' + str(tree.resolve()))
+    reference = json.dumps('git+' + repository.resolve().as_uri() + '?rev=' + revision)
     expression = f'''let flake = builtins.getFlake {reference}; in
       builtins.listToAttrs (map (kind: {{
         name = kind;
         value = builtins.mapAttrs (_: outputs: builtins.attrNames outputs) (flake.${{kind}} or {{}});
       }}) [ "packages" "apps" "checks" ])'''
-    command = ['nix', 'eval', '--json', '--impure', '--no-write-lock-file',
+    command = ['nix', 'eval', '--json', '--no-write-lock-file',
                '--no-update-lock-file', '--expr', expression]
     result = subprocess.run(command, cwd=tree, text=True, capture_output=True)
     if result.returncode:
@@ -338,7 +338,7 @@ def main():
                            for link in guards['head_symlinks']['dangling'])
         for category, collect in (
             ('wit_generated_namespaces', lambda tree: wit_namespaces(tree, crates, packages)),
-            ('nix_output_attributes', nix_output_names),
+            ('nix_output_attributes', lambda tree: nix_output_names(tree, base if tree == trees[0] else head)),
         ):
             try:
                 before, after = [collect(tree) for tree in trees]
