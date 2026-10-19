@@ -6374,6 +6374,9 @@ impl Store {
                 ..if same {
                     ReplicationInventory {
                         digest: snapshot.inventory.digest.clone(),
+                        // Equality is only true for this snapshot. Keep range proofs so a
+                        // concurrent write cannot turn this answer into a full-inventory query.
+                        buckets: snapshot.buckets.clone(),
                         ..Default::default()
                     }
                 } else {
