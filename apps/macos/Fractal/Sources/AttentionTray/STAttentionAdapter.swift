@@ -64,11 +64,13 @@ actor STAttentionAdapter: AttentionAdapter {
       let page = try await client.attentionList(cursor: cursor, limit: 100).value
       for resource in page.items {
         guard case .attention(let item) = resource, Self.isWaitingForAnswer(item) else { continue }
-        let agentRef =
-          ([item.conversationID] + (item.conversationIDs ?? []).map(Optional.some)
-          + [item.requesterID, item.sourceID])
-          .compactMap { $0 }.first { $0.hasPrefix("agent/") }
-        let url = try FractalAskURL.make(base: fractalURL, askID: item.id, agentRef: agentRef)
+        // Same association rule as pinned st3-views/homeView.ts alertConversations.
+        let conversations = [item.conversationID].compactMap { $0 } + (item.conversationIDs ?? [])
+        let candidates =
+          conversations.isEmpty
+          ? [item.requesterID, item.sourceID].compactMap { $0 } : conversations
+        let agentRef = candidates.first { $0.hasPrefix("agent/") }
+        let url = try FractalAskURL.make(base: fractalURL, agentRef: agentRef)
         asks.append(Ask(id: item.id, title: item.title, detail: item.detail, url: url))
       }
       if page.page.hasMore {

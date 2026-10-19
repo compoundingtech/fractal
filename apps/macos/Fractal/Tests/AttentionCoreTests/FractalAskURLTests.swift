@@ -4,36 +4,36 @@ import XCTest
 @testable import AttentionCore
 
 final class FractalAskURLTests: XCTestCase {
-  func testRoutesAssociatedAgentAndAttentionResourcePane() throws {
+  func testRoutesAssociatedAgentToThreadWithAnswerAffordances() throws {
     let url = try FractalAskURL.make(
       base: XCTUnwrap(URL(string: "https://fractal.example")),
-      askID: "attention/ask-123", agentRef: "agent/example/builder")
+      agentRef: "agent/example/builder")
     XCTAssertEqual(
       url.absoluteString,
-      "https://fractal.example/w/agent/example/builder?open=attention%2Fask-123%3Adetail")
+      "https://fractal.example/w/agent/example/builder")
   }
 
-  func testEncodesPathSegmentsAndEntirePaneSelectorWithoutQueryInjection() throws {
-    let askID = "attention/ask +&?#%/日本語"
+  func testEncodesPathSegmentsWithoutInjectingQueryOrFragment() throws {
     let agentRef = "agent/team +&?#%/日本語"
     let url = try FractalAskURL.make(
       base: XCTUnwrap(URL(string: "https://fractal.example/")),
-      askID: askID, agentRef: agentRef)
+      agentRef: agentRef)
     let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
     XCTAssertEqual(
       components.percentEncodedPath,
       "/w/agent/team%20%2B%26%3F%23%25/%E6%97%A5%E6%9C%AC%E8%AA%9E")
-    XCTAssertEqual(components.queryItems, [URLQueryItem(name: "open", value: askID + ":detail")])
+    XCTAssertNil(components.queryItems)
     XCTAssertNil(components.fragment)
     XCTAssertEqual(String(url.path.dropFirst(3)), agentRef)
   }
 
-  func testAskWithoutAgentUsesDefaultWorkspaceResourcePane() throws {
+  func testAskWithoutAgentUsesRootWorkspaceAndSidebarNotAnUnsupportedPane() throws {
     let url = try FractalAskURL.make(
-      base: XCTUnwrap(URL(string: "https://fractal.example")),
-      askID: "attention/mission-ask", agentRef: nil)
+      base: XCTUnwrap(
+        URL(string: "https://fractal.example/w/agent/previous?open=attention%2Fold%3Adetail")),
+      agentRef: nil)
     XCTAssertEqual(
       url.absoluteString,
-      "https://fractal.example/?open=attention%2Fmission-ask%3Adetail")
+      "https://fractal.example/")
   }
 }
