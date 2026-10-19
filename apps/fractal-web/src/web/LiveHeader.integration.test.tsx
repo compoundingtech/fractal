@@ -162,7 +162,9 @@ describe('live header parity', () => {
     expect([...dialog!.querySelectorAll('[data-line] code')].map(line => line.textContent).join('\n')).toBe(kdl.trimEnd())
     expect(dialog!.querySelector('[data-testid="declaration-language"]')?.textContent).toBe('KDL')
     expect(dialog!.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('revision rev-1')
-    expect(dialog!.contains(document.activeElement)).toBe(true)
+    // A programmatic click is a virtual interaction, so React Aria moves focus into the dialog on the next
+    // animation frame (after any running transition) instead of synchronously; wait for that move itself.
+    await vi.waitFor(() => expect(dialog!.contains(document.activeElement)).toBe(true))
     await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
     expect(document.querySelector('[data-testid="declaration-dialog"]')).toBeNull()
   })
