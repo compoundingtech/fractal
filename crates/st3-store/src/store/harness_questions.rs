@@ -41,7 +41,7 @@ impl HarnessQuestion {
     }
 }
 
-fn field<T: for<'de> serde::Deserialize<'de>>(claim: &ClaimRecord, name: &str) -> Result<T> {
+pub fn field<T: for<'de> serde::Deserialize<'de>>(claim: &ClaimRecord, name: &str) -> Result<T> {
     serde_json::from_value(claim.body.pointer(&format!("/fields/{name}")).cloned().unwrap_or(Value::Null))
         .with_context(|| format!("{} `{}` has no valid {name}", claim.kind, claim.id))
 }
@@ -83,16 +83,4 @@ pub fn question_at(
         observed_at_unix_ms: observed.accepted_at_unix_ms,
         resolution,
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::harness_questions_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::harness_questions_tests_shared_seats::{DAY, answer};
-
-
 }

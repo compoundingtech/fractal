@@ -374,9 +374,9 @@ impl Store {
         envelopes: u64,
         checkpoint: Option<&CheckpointManifest>,
     ) -> Result<RestoreReport> {
-        self.validate_replication_backlog()?;
+        self.admit_restored_backlog()?;
         self.apply_replication_repairs()?;
-        // Reject any held or undecodable envelope rather than silently restoring a partial log.
+        // Reject any undecodable or invalid envelope rather than silently restoring a partial log.
         {
             let connection = self.readers.get();
             let unresolved: u64 = connection.query_row(
@@ -748,51 +748,149 @@ mod tests {
 
     #[test]
     fn restore_keeps_history_admitted_before_a_later_keyed_membership() {
-        let root = tempfile::tempdir().unwrap();
-        let legacy = Store::open_memory("alder").unwrap();
-        diagnostic(&legacy, "history already admitted");
-        let source = Store::open_memory("birch").unwrap();
-        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
-        source.bind_fleet("test-fleet").unwrap();
-        source.pin_fleet_anchor(key.public()).unwrap();
-        source.set_member_key(Some(key.clone())).unwrap();
-        source
-            .admit_fleet_anchor("test-fleet", key.public(), "listening")
-            .unwrap();
-        let exchange = legacy
-            .export_replication_exchange("test-fleet", &ReplicationInventory::default())
-            .unwrap();
-        source
-            .receive_replication_exchange("alder", "test-fleet", &exchange)
-            .unwrap();
-        source.validate_replication_backlog().unwrap();
-        source.project_replication_backlog().unwrap();
-        let later_key = crate::fleet::MemberKey::generate().unwrap().0;
-        source
-            .append_claim(&ClaimInput {
-                subject: "host/alder".into(),
-                kind: "fleet.member-admitted".into(),
-                actor: None,
+        // Restore receives the log in writer order. The legacy writer's history must survive
+        // whether it sorts before the member that later keys it or after, when that member's
+        // admission claim is replayed first.
+        for name in ["alder", "cedar"] {
+            let root = tempfile::tempdir().unwrap();
+            let legacy = Store::open_memory(name).unwrap();
+            diagnostic(&legacy, "history already admitted");
+            let source = Store::open_memory("birch").unwrap();
+            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            source.bind_fleet("test-fleet").unwrap();
+            source.pin_fleet_anchor(key.public()).unwrap();
+            source.set_member_key(Some(key.clone())).unwrap();
+            source
+                .admit_fleet_anchor("test-fleet", key.public(), "listening")
+                .unwrap();
+            let exchange = legacy
+                .export_replication_exchange("test-fleet", &ReplicationInventory::default())
+                .unwrap();
+            source
+                .receive_replication_exchange(name, "test-fleet", &exchange)
+                .unwrap();
+            source.validate_replication_backlog().unwrap();
+            source.project_replication_backlog().unwrap();
+            let later_key = crate::fleet::MemberKey::generate().unwrap().0;
+            source
+                .append_claim(&ClaimInput {
+                    subject: format!("host/{name}"),
+                    kind: "fleet.member-admitted".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("fleet_id".into(), json!("test-fleet")),
+                        ("member_key".into(), json!(later_key.public())),
+                        ("via".into(), json!("invite")),
+                        ("sponsor".into(), json!("host/birch")),
+                        ("mode".into(), json!("listening")),
+                        ("writer_floor".into(), json!(0)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            source.replication_snapshot().unwrap();
+            assert!(
+                !source.fleet_admission_residue().unwrap().is_empty(),
+                "{name}"
+            );
+            let archive_path = root.path().join("history.jsonl");
+            let header = archive(&source, &archive_path);
+            let report = backup::restore(&archive_path, &root.path().join("restored.db"))
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert!(report.projections_match, "{name}");
+            assert_eq!(report.log_digest, header.log_digest, "{name}");
+        }
+    }
+
+    #[test]
+    fn version_one_backup_resumes_a_simulated_old_reader_reference_rejection() {
+        // v0.3.17 (f4cec96e414fee2a780910730b019fe6bdbddc1d) used this same v1
+        // Header/Envelope/Signatures/End wire shape. This is NOT an old-binary archive:
+        // keep the real source_build and simulate only the interrupted reader's registry.
+        for case in ["ack", "invalid-reference", "undecodable"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = Store::open_memory("alder").unwrap();
+            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            source.bind_fleet("test-fleet").unwrap();
+            source.set_member_key(Some(key.clone())).unwrap();
+            let claim = source.append_claim(&ClaimInput {
+                subject: "message/ack".into(), kind: "message.sent".into(), actor: None,
                 fields: BTreeMap::from([
-                    ("fleet_id".into(), json!("test-fleet")),
-                    ("member_key".into(), json!(later_key.public())),
-                    ("via".into(), json!("invite")),
-                    ("sponsor".into(), json!("host/birch")),
-                    ("mode".into(), json!("listening")),
-                    ("writer_floor".into(), json!(0)),
+                    ("from".into(), json!("agent/example/worker")),
+                    ("to".into(), json!("assistant/chatgpt")),
+                    ("content".into(), json!("ACK")), ("status".into(), json!("sent")),
                 ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        source.replication_snapshot().unwrap();
-        assert!(!source.fleet_admission_residue().unwrap().is_empty());
-        let archive_path = root.path().join("history.jsonl");
-        let header = archive(&source, &archive_path);
-        let report = backup::restore(&archive_path, &root.path().join("restored.db")).unwrap();
-        assert!(report.projections_match);
-        assert_eq!(report.log_digest, header.log_digest);
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let archive_path = root.path().join("version-one.jsonl");
+            let header = archive(&source, &archive_path);
+            assert_eq!(header.version, 1);
+            backup::verify_file(&archive_path).unwrap();
+            let mut envelopes: Vec<ReplicaEnvelope> = fs::read_to_string(&archive_path).unwrap()
+                .lines().filter_map(|line| match serde_json::from_str::<Record>(line).unwrap() {
+                    Record::Envelope(envelope) => Some(envelope),
+                    Record::Header(_) | Record::Signatures(_) | Record::End { .. } => None,
+                    _ => panic!("fixture must use the v0.3.17 version-one record vocabulary"),
+                }).collect();
+            let envelope = envelopes.iter_mut().find(|envelope| {
+                let payload: smallclaims::claim::ReplicaEnvelopePayload =
+                    ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+                payload.batch.claims.iter().any(|candidate| candidate.id == claim.id)
+            }).unwrap();
+            if case == "invalid-reference" {
+                *envelope = crate::store::tests::rewrite_envelope(envelope, |payload| {
+                    let candidate = &mut payload.batch.claims[0];
+                    candidate.body["fields"]["to"] = json!("future/unknown");
+                    candidate.id = smallclaims::hash::claim_hash(&candidate.batch_id,
+                        &candidate.subject, &candidate.kind, &candidate.origin,
+                        candidate.actor.as_deref(), &candidate.body, &candidate.predecessors).unwrap();
+                });
+            } else if case == "undecodable" {
+                let bytes = b"not a CBOR envelope".to_vec();
+                envelope.hash = smallclaims::hash::replica_envelope_hash(&envelope.writer,
+                    envelope.sequence, envelope.previous_hash.as_deref(),
+                    envelope.accepted_at_unix_ms, &bytes);
+                envelope.payload = bytes.into();
+            }
+            envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+                "test-fleet", &envelope.writer, envelope.sequence, &envelope.hash)));
+            let path = root.path().join("interrupted-restore.db");
+            let older = Store::open(&path, "restored").unwrap();
+            let mut registry = st3_schema::registry().clone();
+            registry.subjects.remove("assistant");
+            older.set_claim_registry(registry);
+            older.prepare_backup_restore(&header, "restored").unwrap();
+            older.receive_backup_page(&header, &envelopes).unwrap();
+            assert_eq!(older.admit_restored_backlog().unwrap().invalid, 1, "{case}");
+            let marker = fleet_meta(&older.readers.get(), "subject_reference_retry_schema")
+                .unwrap().unwrap();
+            drop(older);
+            let upgraded = Store::open(&path, "restored").unwrap();
+            let admission = upgraded.admit_restored_backlog().unwrap();
+            assert_eq!(admission.held, 0, "{case}: restore must not reopen membership holds");
+            assert_eq!(admission.valid, usize::from(case == "ack"), "{case}");
+            assert_eq!(admission.invalid, usize::from(case == "invalid-reference"), "{case}");
+            let completed = fleet_meta(&upgraded.readers.get(), "subject_reference_retry_schema")
+                .unwrap().unwrap();
+            assert_ne!(completed, marker, "{case}: the upgraded schema completes its own pass");
+            let result = upgraded.finish_backup_restore(&header, "restored",
+                envelopes.len() as u64, None);
+            if case == "ack" {
+                assert!(result.unwrap().projections_match);
+                assert_eq!(upgraded.latest_claim(&claim.subject, Some(&claim.kind))
+                    .unwrap().unwrap().id, claim.id);
+            } else {
+                assert!(result.unwrap_err().to_string().contains("unadmitted envelopes"), "{case}");
+            }
+            drop(upgraded);
+            let reopened = Store::open(&path, "restored").unwrap();
+            let converged = reopened.admit_restored_backlog().unwrap();
+            assert_eq!((converged.valid, converged.invalid, converged.held), (0, 0, 0), "{case}");
+            assert_eq!(fleet_meta(&reopened.readers.get(), "subject_reference_retry_schema")
+                .unwrap().as_deref(), Some(completed.as_str()));
+        }
     }
 
     #[test]
