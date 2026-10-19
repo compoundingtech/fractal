@@ -243,7 +243,10 @@ it('renders the RM1 two-line facts and freezes age without replacing the working
   const now = Atom.make(5000)
   const connection = Atom.make<ConnectionState>({ _tag: 'Live' })
   source = { ...source, now, connection }
-  registry.set(agents, observed({ value: [{ ...agent, harness_state: Option.some('working'), last_activity_at: Option.some(DateTime.makeUnsafe(1000)) }] }))
+  const snapshot = [{ ...agent, harness_state: Option.some('working'), last_activity_at: Option.some(DateTime.makeUnsafe(1000)) }]
+  registry.set(agents, observed({ value: snapshot }))
+  // Main's shared snapshot clock uses the actual roster observation, not the disconnect instant.
+  source = { ...source, sync: { ...source.sync!, agents: Atom.make({ ...initialFeedSync<readonly Agent[]>(5000), last: Option.some({ value: snapshot, observedAt: 5000 }) }) } }
   await mount(1440)
   const row = roster().querySelector('[data-testid="taste-agent-row"]')!
   expect(row.querySelector('[data-row-column="title"]')?.textContent).toContain(agent.name)
