@@ -3,9 +3,9 @@
 
 use super::*;
 use smallclaims::ivm::{Definition, LocalChange, Readiness, View, Views, source_cut};
-pub use st3_store::store::mission_ivm::*;
-pub use st3_store::store::mission_ivm::SCHEMA;
-pub use st3_store::store::mission_ivm::{SOURCE, VIEW, flush, ready, row, rows};
+pub use st3_delivery::store::mission_ivm::*;
+pub use st3_delivery::store::mission_ivm::SCHEMA;
+pub use st3_delivery::store::mission_ivm::{SOURCE, VIEW, flush, ready, row, rows};
 
 pub fn definitions() -> Vec<Box<dyn View>> {
     vec![Box::new(MissionSelection)]

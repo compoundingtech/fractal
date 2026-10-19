@@ -1,9 +1,10 @@
 #![allow(unused_imports)]
 pub use st3_store::store::work_summaries_ivm::tests_shared_seats::*;
 use crate::store::work_summaries_ivm::*;
+pub use st3_delivery::store::work_summaries_ivm::tests_shared_seats::{append_at, capture};
 use smallclaims::ivm::{SourceCut, events};
 use crate::store::attention_ivm::tests_shared_seats::*;
-use st3_store::store::directive_notes::tests_shared_seats::*;
+
 use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::*;
 
 

@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{DelegationPolicyRequest, DelegationProof};
-pub use st3_store::store::delegation::*;
-pub use st3_store::store::delegation::{ACTIONS, message_sent, policy_actions, validate_write};
+pub use st3_delivery::store::delegation::*;
+pub use st3_delivery::store::delegation::{ACTIONS, message_sent, policy_actions, validate_write};
 
 pub fn add_fields(fields: &mut BTreeMap<String, Value>, proof: &DelegationProof) {
     fields.insert("acted_for".into(), json!(proof.person));

@@ -1,5 +1,11 @@
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
+pub use crate::store::fleet_admission_tests_shared_delivery::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::fleet_admission_tests_shared_delivery::{fleet};
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
 pub use crate::store::fleet_admission_tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -362,22 +368,6 @@ fn the_first_local_commit_after_a_cut_skips_claims_another_node_wrote() {
         Some(local.accepted_at_unix_ms)
     );
     assert_eq!(b.first_local_commit_after(through, through).unwrap(), None);
-}
-
-/// The anchor `a` founds the fleet and admits each named member.
-fn fleet(members: &[(&str, &Arc<MemberKey>)]) -> (Arc<MemberKey>, Store, Vec<Store>) {
-    let anchor = key();
-    let a = node("a", Some(&anchor), Some(&anchor));
-    admit(&a, "a", &anchor, "anchor", None);
-    let mut stores = Vec::new();
-    for (name, member) in members {
-        admit(&a, name, member, "invite", None);
-        stores.push(node(name, Some(member), Some(&anchor)));
-    }
-    for store in &stores {
-        sync(&a, store);
-    }
-    (anchor, a, stores)
 }
 
 #[test]

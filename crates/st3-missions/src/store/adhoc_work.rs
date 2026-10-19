@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{WorkAcknowledgeRequest, WorkHandoffRequest, WorkStartRequest};
-pub use st3_store::store::adhoc_work::*;
-pub use st3_store::store::adhoc_work::{enrich_handoff, pending_handoff, project_start};
+pub use st3_delivery::store::adhoc_work::*;
+pub use st3_delivery::store::adhoc_work::{enrich_handoff, pending_handoff, project_start};
 
 pub fn validate_recipient(
     tx: &Transaction<'_>,

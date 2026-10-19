@@ -16,8 +16,8 @@ use crate::model::{
     ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType,
     RuntimeResetOperation, ScheduleSpec, St3Error, SubscriptionConditionSpec, SubscriptionSpec,
 };
-pub use st3_store::graph::*;
-pub use st3_store::graph::{agent_under, observer_spec, parse_execution_intent, parse_intent, parse_internal_intent, planning_planner_request, planning_planner_subject, runtime_id, runtime_proof_variables, schedule_spec, subscription_spec, validate_mission_runtimes};
+pub use st3_delivery::graph::*;
+pub use st3_delivery::graph::{agent_under, observer_spec, parse_execution_intent, parse_intent, parse_internal_intent, planning_planner_request, planning_planner_subject, runtime_id, runtime_proof_variables, schedule_spec, subscription_spec, validate_mission_runtimes};
 
 /// Empty membership is meaningful only on the owned-set route; apply still requires explicit intent.
 pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, St3Error> {

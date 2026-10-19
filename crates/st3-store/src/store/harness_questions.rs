@@ -41,7 +41,7 @@ impl HarnessQuestion {
     }
 }
 
-fn field<T: for<'de> serde::Deserialize<'de>>(claim: &ClaimRecord, name: &str) -> Result<T> {
+pub fn field<T: for<'de> serde::Deserialize<'de>>(claim: &ClaimRecord, name: &str) -> Result<T> {
     serde_json::from_value(claim.body.pointer(&format!("/fields/{name}")).cloned().unwrap_or(Value::Null))
         .with_context(|| format!("{} `{}` has no valid {name}", claim.kind, claim.id))
 }

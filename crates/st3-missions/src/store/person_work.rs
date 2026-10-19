@@ -3,8 +3,8 @@
 use super::*;
 use crate::model::{MessageAttachment, PersonAskRequest, PersonStepResponse};
 use crate::person_request::{StructuredRequest, answer_summary};
-pub use st3_store::store::person_work::*;
-pub use st3_store::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
+pub use st3_delivery::store::person_work::*;
+pub use st3_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod revision_provenance_tests;
 
@@ -707,7 +707,7 @@ pub use crate::store::person_work_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::person_work_tests_shared_seats::{TEST_FLEET, gateway_decision, receive_exchange};
     use super::*;
-    pub use st3_store::store::person_work::tests::*;
+    pub use st3_delivery::store::person_work::tests::*;
 
     #[test]
     fn empty_person_ask_reconciliation_does_not_wait_for_the_writer() {

@@ -58,7 +58,7 @@ pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
 use crate::store::*;
 use crate::store::{ACTUAL_CACHE_LIMIT, AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow, EffectiveStepOwner};
-use crate::store::{GATE_BROKEN_CONDITION, HumanAttention, INCARNATION_OF_CLAIM, IdempotencyConflict, LOCAL_OBSERVATION_COLUMNS, MailboxWatermark, MessageCacheEntry, PinnedDefinitions, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUNTIME_SUBJECTS};
+use crate::store::{GATE_BROKEN_CONDITION, HumanAttention, INCARNATION_OF_CLAIM, IdempotencyConflict, LOCAL_OBSERVATION_COLUMNS, MessageCacheEntry, PinnedDefinitions, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUNTIME_SUBJECTS};
 use crate::store::{RecordedSeatMove, ReferenceGraph, SeatQueueInputs, StatusEntry, StepLabel, StepTiming, Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM};
 use crate::store::{USAGE_BUCKETS, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx, append_claim_with_commit_context, append_claim_with_fences};
 use crate::store::{append_latest_observation_publication, append_receipt_claim_tx, apply_effective_step_state, apply_effective_step_state_with_owner, carried_revision_step_paths, check_mailbox_fence, claim_append_error, claim_by_id_tx, claim_log_order, classify_replicated_claim_with_registry, compatible_step_paths, current_desired_row};

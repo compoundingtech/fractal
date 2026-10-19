@@ -1,8 +1,8 @@
 //! The part of `store::usage_period` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::usage_period::*;
-pub use st3_store::store::usage_period::{INDEX, PREDICATE, create_schema, observed_sql, series_sql};
+pub use st3_delivery::store::usage_period::*;
+pub use st3_delivery::store::usage_period::{INDEX, PREDICATE, create_schema, observed_sql, series_sql};
 
 #[cfg(test)]
 mod tests {

@@ -3,7 +3,7 @@
 use super::*;
 use crate::lane::{self, Change, Event};
 use crate::model::{LaneChangeRequest, LaneChangeResponse, LaneSpec, LaneView};
-pub use st3_store::store::lanes::*;
+pub use st3_delivery::store::lanes::*;
 
 /// How many joins, leaves, moves, and approvals a lane view lists.
 const LANE_RECENT_LIMIT: usize = 20;

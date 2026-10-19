@@ -6,11 +6,11 @@ pub use crate::store::resource_preparation_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::resource_preparation_shared_seats::{BEFORE_VALIDATE};
-pub use super::*;
-pub use st3_store::store::resource_preparation::*;
+use super::*;
+pub use st3_delivery::store::resource_preparation::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use st3_store::store::resource_preparation::tests_shared_seats;
-pub use st3_store::store::resource_preparation::{Fence, NativeCut, Prepared};
+pub use st3_delivery::store::resource_preparation::{Fence, NativeCut, Prepared};
 #[cfg(test)]
 #[allow(hidden_glob_reexports)] // st3-store's module of the same name is private; this one holds the tests that moved
 mod tests;

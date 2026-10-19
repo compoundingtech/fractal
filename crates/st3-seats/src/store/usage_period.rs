@@ -1,5 +1,6 @@
 //! The part of `store::usage_period` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::AgentMessagesStore;
 use super::*;
 pub use st3_missions::store::usage_period::*;
 pub use st3_missions::store::usage_period::{create_schema};

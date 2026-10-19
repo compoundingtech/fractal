@@ -22,6 +22,7 @@ pub use st3_github::changes;
 pub use st3_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
 pub use st3_seats::{AccountsStore, EvidenceSeatsStore, HarnessQuestionsStore, LimitsStore, RetirementsStore, RevisionSeatsStore, RolloutsStore, RosterAdmissionStore, RuntimeStartsStore, SeatStatusStore, SeatsStore, SeatsStoreCore, SekretsDaemonStore, StopDeferralStore, SubagentsStore, TracePrincipalStore};
 pub use st3_missions::{AdhocWorkStore, ArrangementsStore, CoordinationStore, DeclarationsStore, DelegationStore, LanesStore, MissionEligibilityStore, MissionListStore, MissionsStore, MissionsStoreCore, PersonWorkStore, WorkListStore};
+pub use st3_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore};
 pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use st3_api::claude_channel;
 pub use st3_store::client;
@@ -54,8 +55,7 @@ pub use st3_kernel::instance;
 pub use st3_kernel::lane;
 pub use st3_store::mailbox;
 pub use st3_store::message_body;
-/// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
-pub use st3_store::maintenance;
+pub use st3_delivery::maintenance;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod malloc_trim;
 pub use st3_kernel::read_cache;

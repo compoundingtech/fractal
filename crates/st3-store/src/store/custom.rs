@@ -76,25 +76,13 @@ pub struct RegistrationRequest {
     pub manifest: Manifest,
     pub actor: String,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReplyRequest {
-    pub subject: String,
-    pub registration: String,
-    pub revision: String,
-    pub episode: String,
-    pub fields: BTreeMap<String, Value>,
-    pub actor: String,
-    pub idempotency_key: String,
-}
-
 pub fn typed(e: st3_schema::ValidationError) -> St3Error {
     St3Error::new(e.code, e.message)
 }
-fn fail(message: impl Into<String>) -> St3Error {
+pub fn fail(message: impl Into<String>) -> St3Error {
     St3Error::new("invalid-custom-claim", message)
 }
-fn fields(claim: &ClaimRecord) -> BTreeMap<String, Value> {
+pub fn fields(claim: &ClaimRecord) -> BTreeMap<String, Value> {
     claim
         .body
         .get("fields")
@@ -102,7 +90,7 @@ fn fields(claim: &ClaimRecord) -> BTreeMap<String, Value> {
         .map(|v| v.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default()
 }
-fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>> {
+pub fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>> {
     connection.prepare(/* sqlite-large-value: allow-for-now lv-hc2de6c8b2f4d owner=st3_store::store::custom TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.id,claims.store_index,claims.batch_id,claims.subject,claims.kind,claims.origin,claims.actor,claims.body,claims.predecessors,claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.subject=?1
@@ -110,7 +98,7 @@ fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>> {
          ORDER BY CANONICAL_ASC(claims)"))?
         .query_map([subject],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
-fn registration(
+pub fn registration(
     connection: &Connection,
     subject: &str,
 ) -> Result<Option<(String, Manifest, String)>> {
@@ -418,7 +406,7 @@ fn validate_documents_connection(connection: &Connection, reference: &str) -> Re
     anyhow::ensure!(found, "document reference is not available");
     Ok(())
 }
-fn eval(expr: &Expr, slots: &BTreeMap<String, ClaimRecord>) -> Value {
+pub fn eval(expr: &Expr, slots: &BTreeMap<String, ClaimRecord>) -> Value {
     match expr {
         Expr::Field { slot, field } => slots
             .get(slot)
@@ -448,7 +436,7 @@ fn predicate(p: &Predicate, slots: &BTreeMap<String, ClaimRecord>) -> bool {
         Predicate::Not { arg } => !predicate(arg, slots),
     }
 }
-fn slots(m: &Manifest, history: &[ClaimRecord]) -> BTreeMap<String, ClaimRecord> {
+pub fn slots(m: &Manifest, history: &[ClaimRecord]) -> BTreeMap<String, ClaimRecord> {
     m.slots
         .iter()
         .filter_map(|(name, s)| {
@@ -836,49 +824,6 @@ impl Store {
             })
             .collect()
     }
-    pub fn reply_custom_subject(&self, request: &ReplyRequest) -> Result<ClaimRecord, St3Error> {
-        self.reply_custom_subject_authorized(request, None)
-    }
-
-    pub fn reply_custom_subject_authorized(&self, request: &ReplyRequest,
-        authorization: Option<&super::assistant_write::AssistantWriteAuthorization>) -> Result<ClaimRecord, St3Error> {
-        validate_actor(&request.actor)?;
-        if request.idempotency_key.is_empty() || request.idempotency_key.len() > 256 {
-            return Err(fail("reply needs a bounded idempotency key"));
-        }
-        let digest = canonical_hash(request).map_err(internal)?;
-        let key = canonical_hash(&("custom.reply", &request.actor, &request.idempotency_key))
-            .map_err(internal)?;
-        self.connection.batched(|tx|->Result<ClaimRecord,St3Error>{
-            if let Some(authorization) = authorization {
-                super::assistant_write::authorize(tx, &self.origin, authorization)?;
-            }
-            let prior=claims(tx,&request.subject).map_err(internal)?.into_iter().filter(|c|c.body.pointer("/_custom_reply/key")==Some(&json!(key))).collect::<Vec<_>>();
-            if let Some(c)=prior.first() {
-                if prior.iter().any(|c|c.body.pointer("/_custom_reply/digest")!=Some(&json!(digest))) { return Err(St3Error::new("idempotency-conflict","reply key identifies competing requests")); }
-                return Ok(c.clone());
-            }
-            flush(tx).map_err(internal)?;
-            let view=source(tx,&request.subject).map_err(internal)?.ok_or_else(||fail("custom source is unavailable"))?;
-            if view["registration"]!=request.registration||view["revision"]!=request.revision||view["state"]!="ready"||view["attention"]["active"]!=true||view["attention"]["episode"]!=request.episode {return Err(St3Error::new("stale-fence","custom source revision/episode changed"));}
-            if view["attention"]["recipient"]!=request.actor {return Err(St3Error::new("forbidden","only the addressed person may reply"));}
-            let (_,m,_)=registration(tx,&request.subject).map_err(internal)?.ok_or_else(||fail("registration disappeared"))?;
-            let reply=&m.attention.as_ref().ok_or_else(||fail("no reply action"))?.reply;
-            if request.fields.keys().any(|name|!reply.fields.contains_key(name)) { return Err(fail("reply contains undeclared or reserved input fields")); }
-            schema::validate_fields(&schema::ClaimSchema{authority:Authority::Recipient,fields:reply.fields.clone(),additional_fields:false},&request.fields).map_err(typed)?;
-            let history=claims(tx,&request.subject).map_err(internal)?.into_iter().filter(|c|fields(c).get("_registration")==Some(&json!(request.registration))).collect::<Vec<_>>();
-            let slots=slots(&m,&history);
-            let mut f=request.fields.clone();
-            for(n,e)in &reply.bindings {f.insert(n.clone(),eval(e,&slots));}
-            let input=ClaimInput{subject:request.subject.clone(),kind:reply.kind.clone(),actor:Some(request.actor.clone()),fields:f,evidence:vec![],expected_subject:None,idempotency_key:None};
-            let f=prepare(tx,&input)?.ok_or_else(||fail("registration disappeared"))?;
-            smallclaims::store::principals::rules_gate_tx(tx,&self.origin,&request.actor,&reply.kind,&request.subject).map_err(internal)?;
-            let predecessor=latest_claim_id_tx(tx,&request.subject).map_err(internal)?.into_iter().collect::<Vec<_>>();
-            let c=append_claim_tx(tx,&self.origin,&request.subject,&reply.kind,Some(&request.actor),&json!({"fields":f,"_custom_reply":{"revision":request.revision,"episode":request.episode,"key":key,"digest":digest}}),&predecessor,None).map_err(internal)?;
-            flush(tx).map_err(internal)?;
-            Ok(c)
-        }).map_err(internal)?
-    }
 }
 /// One canonical custom source, shared by the collection reader and keyed maintenance.
 pub fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
@@ -953,3 +898,6 @@ fn timestamp(at: u128) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_delivery;

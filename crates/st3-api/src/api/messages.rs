@@ -1,3 +1,4 @@
+use crate::DeliveryStore;
 use crate::DelegationStore;
 use super::*;
 

@@ -1,6 +1,6 @@
 //! Person asks are runtime steps. The immutable asking claim supplies their ownership fence;
 //! step_runs supplies their state. No separate attention record is created.
-pub use super::*;
+use super::*;
 
 use crate::person_request::StructuredRequest;
 

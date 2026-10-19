@@ -1,5 +1,6 @@
 //! The part of `store::mailbox_lease` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::DeliveryStore;
 use super::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};

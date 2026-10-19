@@ -1,8 +1,8 @@
 //! The part of `store::work_list` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::work_list::*;
-pub use st3_store::store::work_list::{ACTOR_ORDERS, ActorEntry, ActorOrders, OrderCell, SeatQueue, WorkRow, WorkRows, run_key, work_state_rank};
+pub use st3_delivery::store::work_list::*;
+pub use st3_delivery::store::work_list::{ACTOR_ORDERS, ActorEntry, ActorOrders, OrderCell, SeatQueue, WorkRow, WorkRows, run_key, work_state_rank};
 
 /// Every leased step's lease end, by the lease index.
 pub const WORK_LEASES: &str = "SELECT subject, CAST(lease_expires_at_unix_ms AS INTEGER) FROM step_runs
