@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Never reuse a writer's sequence after a trim deletes its newest batch",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or backfill."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds the WITHOUT ROWID table writer_heads(writer, sequence, hash), one row per writer ever seen, and two triggers on batches (AFTER INSERT raises the head; BEFORE DELETE stores it). Rows are never deleted. Storage version stays 20; earlier binaries keep the triggers firing, which is harmless."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule, admission or digest change. Local sequence allocation now also respects the stored head and the writer's own envelope tombstones, which changes the allocated sequence only when a trim had deleted the writer's newest batch: before this change that reused a sequence peers had already seen."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Wire format is unchanged. A returning member that previously would have reused a trimmed sequence now continues after it."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal restart; the table and triggers are created empty at open. Each batch insert and batch delete adds one small upsert."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back to an earlier binary is supported; the table and triggers remain. An earlier binary allocates from batches and the writer floor only."
+  }
+}
