@@ -8,8 +8,10 @@ executables in that directory. Python 3 is required on macOS.
 The app path and bundle identifier stay stable across updates. The installer registers
 the app with Launch Services and points existing daemon and replication LaunchAgent
 plists at its executable. It preserves their arguments and does not restart services
-or agent seats. For a first daemon install, run `st service install` from the installed
-app executable; for an update, restart the daemon and replication services when ready.
+or agent seats. If an existing plist needs a different executable path, stop its loaded
+service before installing; the installer refuses to rewrite a loaded definition.
+For a first daemon install, run `st service install` from the installed app executable;
+for an update, restart the daemon and replication services when ready.
 
 When the `--from` directory also holds `StListen.app` (the terminal UI's speech helper, built by
 `apps/macos/listen/build.sh DIR` with Xcode's Swift and the macOS 26 SDK), the installer
@@ -71,6 +73,22 @@ certificate fingerprint checks the embedded signature without requiring its priv
 on the receiving machine. Building/signing a candidate still requires the explicitly
 configured keychain identity. The helper restores installation files, not
 application databases; schema compatibility must be checked by the deployment caller.
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
+For the default-host Fractal cutover, `st service install --stage-fractal` installs
+`com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
+disabled without loading or starting them. On Linux the same command stages
+`fractal.service` and `fractal-replication.service` disabled. Existing legacy service
+definitions and drop-ins remain untouched. The future definitions use the XDG
+`fractal` config/state directories and retain legacy socket paths; the host migration
+must move state/config, provide the legacy socket symlink bridge, create the target
+log directory, and activate services. Staging rejects loaded macOS targets or active
+Linux targets, named instances, and state/config paths outside the default migration roots.
+The Python bundle helper also accepts `--stage-fractal`: it leaves legacy plists
+unchanged and invokes native staging from the installed app, never bootstrapping it.
+Use the same flag for `--backup-only` when preparing a staged bundle transaction.
+Normal installers retain legacy service names until cutover.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
 
 A second install for testing: `scripts/install --instance NAME` (or `install.sh --instance NAME`) puts
 the app, commands, bundle identifier and launchd services below `~/.st-instance/NAME` and never

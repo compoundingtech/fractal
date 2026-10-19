@@ -106,6 +106,46 @@ cat "${archive%.tar.gz}/BUILD.json"
 so an installed CLI and a running daemon can be compared. All versions use metadata baked at
 compile time, independent of the caller's directory or environment.
 
+## Per-host Fractal name cutover
+
+This is an explicit, default-host-only operation, not part of a normal installation or
+Home Manager activation. Coordinate **one host at a time**, while checkpoints and sync
+are idle. Preserve the backups above. Do not move named instances or workspace roots.
+
+1. Install the migration-capable build without restarting the running daemon. For native
+   services, run `fractal service install --stage-fractal`; the macOS installer also accepts
+   `--stage-fractal`. For Home Manager, select
+   `services.smalltalk.fractalMigration.phase = "stage"` and activate the same package and
+   service settings as the running generation. Staging writes disabled Fractal definitions;
+   legacy definitions, state, memory drop-ins, sockets and running processes stay in place.
+2. Run `fractal migrate host --dry-run`. It requires a running legacy daemon, disabled and
+   stopped target definitions, idle checkpoint/replication status, free destinations, and
+   same-filesystem renames. Both service families running is a hard error. A populated
+   `~/.config/fractal` or `~/.local/state/fractal` is never merged or overwritten, even if it
+   has a receipt. Move the unrelated dotfiles Fractal TUI data to `fractalite` first.
+3. Run `fractal migrate host --json` and retain its host receipt. It stops legacy services,
+   waits for their state-directory lock, renames config/state and each **whole** service
+   `.d` directory, then leaves the old config/state paths as symlinks. Both destinations
+   receive `.fractal-migration-completed` containing exactly
+   `arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` and a newline.
+4. The target daemon must answer the local health API as the same node: `Type=simple` alone
+   is not readiness. The receipt reports **local API listening**, the measured gap and,
+   on Linux, effective `memory.swap.max` and `MemoryLow` read from the daemon's cgroup.
+   Changed memory protection or failure before readiness triggers automatic rollback.
+   Only after readiness are legacy definitions disabled/removed and target workers enabled.
+5. For Home Manager, select `fractalMigration.phase = "completed"` before the next
+   activation. Reactivating the staging generation after receipts exist is deliberately
+   refused, so it cannot bootstrap a legacy launchd job again.
+
+The write-ahead journal lives at
+`${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`, recording the service plan,
+moves, readiness commit and before/after memory protection. If the CLI is interrupted before
+readiness, use `fractal migrate host --rollback` and then retry the cutover. If readiness
+already committed, rerun `fractal migrate host` to finish retirement; rollback is refused.
+The gap has a five-minute startup budget (individual manager calls are bounded at 30 seconds,
+and the API probe at 30 seconds); an exhausted pre-start budget restores legacy state.
+The old-path symlinks remain for already-running seats during the migration bridge.
+
 ## Config keys and clients on an old PATH
 
 After an install adds configuration keys, replace stale `st` clients on session PATHs and

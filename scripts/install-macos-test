@@ -46,6 +46,8 @@ class Installer(unittest.TestCase):
     def command(self, args):
         args = list(map(str, args))
         self.calls.append(args)
+        if args[:2] == ['launchctl', 'print']:
+            raise subprocess.CalledProcessError(113, args, 'service absent')
         if 'find-identity' in args:
             return '  1) ' + CERT + ' "Developer ID Application: Example Developer (EXAMPLE123)"\n'
         if 'find-certificate' in args:
@@ -201,6 +203,42 @@ class Installer(unittest.TestCase):
             alias.write_text('new foreign owner')
             m.restore(self.home, self.job, had_app)
         self.assertEqual(alias.read_text(), 'new foreign owner')
+
+    def test_fractal_staging_preserves_legacy_and_never_bootstraps(self):
+        service = self.home / 'Library/LaunchAgents' / (m.SERVICES[0] + '.plist')
+        service.parent.mkdir(parents=True)
+        original = plistlib.dumps({'ProgramArguments': ['legacy-st3', 'up']})
+        service.write_bytes(original)
+        with patch.object(m, 'command', side_effect=self.command), \
+                patch.object(m, 'exchange', side_effect=self.exchange):
+            app, _, _ = m.prepare(self.home, self.job, self.built)
+            m.backup(self.home, self.job, stage_fractal=True)
+            m.install(app, self.home, self.job, stage_fractal=True)
+        self.assertEqual(service.read_bytes(), original)
+        self.assertFalse((self.job / 'previous-launchd' / service.name).exists())
+        self.assertTrue(any(call[-3:] == ['service', 'install', '--stage-fractal'] for call in self.calls))
+        self.assertFalse(any('bootstrap' in call or 'kickstart' in call or 'bootout' in call for call in self.calls))
+
+    def test_loaded_target_refuses_staging_before_app_or_definition_change(self):
+        service = self.home / 'Library/LaunchAgents' / (m.FRACTAL_SERVICES[0] + '.plist')
+        service.parent.mkdir(parents=True)
+        service.write_bytes(b'unchanged definition')
+        with patch.object(m, 'command', return_value='loaded'):
+            with self.assertRaisesRegex(RuntimeError, 'loaded launchd service'):
+                m.install(self.source, self.home, self.job, stage_fractal=True)
+        self.assertEqual(service.read_bytes(), b'unchanged definition')
+        self.assertFalse(m.fixed(self.home).exists())
+
+    def test_normal_install_rejects_rewriting_a_loaded_definition(self):
+        service = self.home / 'Library/LaunchAgents' / (m.SERVICES[0] + '.plist')
+        service.parent.mkdir(parents=True)
+        original = plistlib.dumps({'ProgramArguments': ['legacy-st3', 'up']})
+        service.write_bytes(original)
+        with patch.object(m, 'command', return_value='loaded'):
+            with self.assertRaisesRegex(RuntimeError, 'loaded launchd service'):
+                m.install(self.source, self.home, self.job)
+        self.assertEqual(service.read_bytes(), original)
+        self.assertFalse(m.fixed(self.home).exists())
 
     def test_full_bundle_plists_cli_restore_and_unchanged_payload(self):
         bin_dir = m.bin_dir(self.home)

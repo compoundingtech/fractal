@@ -74,6 +74,8 @@
                 xdg.configFile = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 home.activation = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                home.file = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                assertions = lib.mkOption { type = lib.types.listOf lib.types.anything; default = [ ]; };
                 systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
@@ -1052,6 +1054,65 @@
           assert (!pkgs.stdenv.hostPlatform.isLinux)
             || rendered.systemd.user.services.smalltalk.Service.MemoryMax == "8G";
           pkgs.runCommand "smalltalk-hm-module-eval" { } "touch $out";
+        checks.hm-module-fractal-prestage-eval =
+          let
+            rendered = (mkHmModuleEval { fractalMigration.phase = "stage"; }).config;
+            completed = (mkHmModuleEval { fractalMigration.phase = "completed"; }).config;
+            unstaged = hmModuleEval.config;
+            noApply = (mkHmModuleEval {
+              fractalMigration.phase = "stage";
+              declarationsApply.enable = false;
+            }).config;
+            receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
+            preflight = rendered.home.activation.fractalMigrationPreflight;
+          in
+          assert builtins.all (item: item.assertion) rendered.assertions;
+          assert preflight.before == [ "writeBoundary" ];
+          assert preflight.after == [ ];
+          assert pkgs.lib.hasInfix receipt preflight.data;
+          assert pkgs.lib.hasInfix "exit 1" preflight.data;
+          assert pkgs.lib.hasInfix ''phase = "completed"'' preflight.data;
+          assert !(pkgs.lib.hasInfix "systemctl --user start" preflight.data);
+          assert !(pkgs.lib.hasInfix "launchctl bootstrap" preflight.data);
+          assert pkgs.lib.hasInfix "Run fractal migrate host first" completed.home.activation.fractalMigrationPreflight.data;
+          assert (if pkgs.stdenv.hostPlatform.isLinux then
+            let
+              daemon = rendered.systemd.user.services.fractal;
+              apply = rendered.systemd.user.services.fractal-apply;
+            in
+            !(unstaged.systemd.user.services ? fractal)
+            && daemon.Service.Type == "simple"
+            && (daemon.Install.WantedBy or [ ]) == [ ]
+            && (apply.Install.WantedBy or [ ]) == [ ]
+            && daemon.Unit.ConditionPathExists == receipt
+            && rendered.systemd.user.services.smalltalk == unstaged.systemd.user.services.smalltalk
+            && rendered.systemd.user.services.smalltalk-apply == unstaged.systemd.user.services.smalltalk-apply
+            && !(completed.systemd.user.services ? smalltalk)
+            && !(completed.systemd.user.services ? smalltalk-apply)
+            && completed.systemd.user.services.fractal.Install.WantedBy == [ "default.target" ]
+            && daemon.Service.ExecCondition == apply.Service.ExecCondition
+            && pkgs.lib.hasInfix "/home/example/.local/state/fractal/bin/st3" daemon.Service.ExecStart
+            && pkgs.lib.hasInfix "/home/example/.config/fractal/config.toml" daemon.Service.ExecStart
+            && !(noApply.systemd.user.services ? fractal-apply)
+          else
+            let
+              daemon = rendered.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              apply = rendered.home.file."Library/LaunchAgents/com.compoundingtech.fractal-apply.plist".text;
+            in
+            !(unstaged.home.file ? "Library/LaunchAgents/com.compoundingtech.fractal.plist")
+            && !(rendered.launchd.agents ? fractal)
+            && pkgs.lib.hasInfix "<string>com.compoundingtech.fractal</string>" daemon
+            && pkgs.lib.hasInfix "<string>com.compoundingtech.fractal-apply</string>" apply
+            && !(pkgs.lib.hasInfix "RunAtLoad" daemon)
+            && !(pkgs.lib.hasInfix "KeepAlive" daemon)
+            && !(pkgs.lib.hasInfix "RunAtLoad" apply)
+            && rendered.launchd.agents == unstaged.launchd.agents
+            && !(completed.launchd.agents ? smalltalk)
+            && !(completed.launchd.agents ? smalltalk-apply)
+            && completed.launchd.agents.fractal.config.Label == "com.compoundingtech.fractal"
+            && completed.launchd.agents.fractal.config.RunAtLoad
+            && !(noApply.home.file ? "Library/LaunchAgents/com.compoundingtech.fractal-apply.plist"));
+          pkgs.runCommand "smalltalk-hm-module-fractal-prestage-eval" { } "touch $out";
         checks.fractal-aliases =
           let
             rendered = (mkHmModuleEval { fractalBinary = true; }).config;

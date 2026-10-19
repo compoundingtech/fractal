@@ -64,6 +64,67 @@ the same `st3` executable; install `#st3` alongside it if you also want the exis
 commands in your profile. Unlike module activation, Nix profile collision handling
 governs profile-installed commands.
 
+## Opt-in host cutover staging
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
+Updating the module alone retains the legacy service names and state directories.
+For an existing installation using the default `stateDir`, explicitly stage the
+replacement before performing the host cutover:
+
+```nix
+services.smalltalk.fractalMigration.phase = "stage";
+programs.smalltalk.fractalBinary.enable = true;
+```
+
+Apply that Home Manager configuration first. It installs `fractal.service` and,
+when declarations are configured, `fractal-apply.service` on Linux. Neither unit
+has `WantedBy`; staging does not enable or start them. On macOS it writes
+`~/Library/LaunchAgents/com.compoundingtech.fractal.plist` and the optional
+`com.compoundingtech.fractal-apply.plist` without loading them. These plists have
+neither `RunAtLoad` nor `KeepAlive`, and are deliberately outside Home Manager's
+automatic launchd agent lifecycle. This module does not manage replication;
+retain your existing replication setup and include it in the host cutover.
+
+Staging retains the existing legacy service definitions unchanged, so it does
+not intentionally restart or stop the legacy daemon. Stage the same package
+and service settings as the running generation; changing those settings still
+has Home Manager's normal upgrade behavior. Staging does not rename directories,
+move drop-ins, or stop services.
+
+After staging, run `fractal migrate host` for the deliberate per-host cutover.
+That command owns stopping legacy services, renaming configuration and state,
+writing the receipt, creating migration symlinks, starting the replacement,
+probing its API, and retiring legacy service files and whole drop-in directories.
+Do not start the target units manually before this handoff.
+
+Target commands use `~/.config/fractal/config.toml` and
+`~/.local/state/fractal`; their stable binary is in the migrated state's `bin`
+directory. The migration's `st3 -> fractal` directory symlinks keep old binary
+and socket paths accessible. External `binary.path` ownership remains unchanged.
+The target refuses to run without the exact state-migration marker followed by
+a newline in **both** `~/.config/fractal/.fractal-migration-completed` and
+`~/.local/state/fractal/.fractal-migration-completed`, while either legacy
+directory is a real directory rather than a symlink, or while a legacy daemon
+is active. The old service definition may remain during the API probe for
+rollback; its mere presence does not block the deliberate target start.
+
+After the cutover succeeds, set:
+
+```nix
+services.smalltalk.fractalMigration.phase = "completed";
+```
+
+Apply Home Manager again to complete the declarative ownership handoff. This
+phase removes legacy definitions and manages only the Fractal services. It
+requires valid migration receipts, migrated directories, and an inactive legacy
+daemon **before** activation's write boundary. The stage phase also fails before
+that boundary once a completed receipt exists, requiring the explicit completed
+configuration instead of resurrecting the legacy service. Completed services
+can start normally on subsequent activation/login; their runtime guards remain
+in force. Do not return to the legacy phase or a pre-staging module generation
+after migrating the host.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
+
 ## Externally deployed binary
 
 If another deployer updates your Nix profile or installs the executable, set

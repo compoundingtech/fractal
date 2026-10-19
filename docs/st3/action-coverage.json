@@ -1410,6 +1410,16 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st migrate host",
+      "description": "Migrate the default host after its Fractal services have been staged disabled",
+      "tests": [
+        "crates/st3/src/main.rs::host_migration_cli_tests::parses_host_cutover_modes_and_rejects_conflicting_modes",
+        "crates/st3/src/migrate_cli/tests.rs::swaps_authority_by_rename_preserving_all_dropins_and_receipting_memory",
+        "crates/st3/src/migrate_cli/tests.rs::dry_run_has_no_filesystem_or_service_mutations"
+      ],
+      "verification": "clap parsing and host cutover with temporary paths and a fake service manager; no live service mutation"
+    },
+    {
       "command": "st missions cancel",
       "description": "Cancel one exact running mission and stop its owned work and runtimes",
       "tests": [

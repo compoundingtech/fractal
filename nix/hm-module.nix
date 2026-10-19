@@ -72,6 +72,66 @@ let
     + "\n"
   );
   hasDeclarations = applyCommands != [ ];
+  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+  staging = cfg.fractalMigration.phase != "legacy";
+  completed = cfg.fractalMigration.phase == "completed";
+  targetState = "${config.xdg.stateHome}/fractal";
+  receipt = "${targetState}/.fractal-migration-completed";
+  receiptMarker = "arn:lmig:smalltalk:2026-10-16-state-dirs-fractal";
+  targetExecutable = if externallyManaged then cfg.binary.path else "${targetState}/bin/st3";
+  targetArgs = lib.replaceStrings [ cfg.stateDir ] [ targetState ];
+  targetUpArgs = map targetArgs upArgs ++ [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
+  targetEnvironment = lib.mapAttrs (_: targetArgs) environment;
+  migrationReady = ''
+    for receipt in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" ]}; do
+      printf '%s\n' ${lib.escapeShellArg receiptMarker} | ${pkgs.diffutils}/bin/cmp -s - "$receipt" || exit 1
+    done
+    for legacy in ${lib.escapeShellArgs [ "${config.xdg.configHome}/st3" "${config.xdg.stateHome}/st3" ]}; do
+      if [ -e "$legacy" ] && [ ! -L "$legacy" ]; then exit 1; fi
+    done
+  '';
+  targetGuard = pkgs.writeShellScript "fractal-migration-ready" (''
+    set -eu
+  '' + migrationReady + (if pkgs.stdenv.hostPlatform.isLinux then ''
+    for unit in smalltalk.service st3.service; do
+      status=$(${pkgs.systemd}/bin/systemctl --user show "$unit" --property=ActiveState --value) || exit 1
+      case "$status" in inactive|failed) ;; *) exit 1 ;; esac
+    done
+  '' else ''
+    for label in org.nix-community.home.smalltalk com.compoundingtech.st3; do
+      if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then exit 1
+      elif [ "$?" -ne 113 ]; then exit 1
+      fi
+    done
+  ''));
+  targetApplyScript = pkgs.writeShellScript "fractal-apply" (
+    "set -eu\n${targetGuard}\n"
+    + lib.concatMapStringsSep "\n" (args:
+      lib.escapeShellArgs ([ targetExecutable "--daemon-wait" "30" ]
+        ++ lib.optionals (cfg.socket != null) [ "--endpoint" (targetArgs cfg.socket) ]
+        ++ args)
+    ) applyCommands + "\n"
+  );
+  targetLaunchScript = pkgs.writeShellScript "fractal-daemon" ''
+    set -eu
+    ${targetGuard}
+    exec ${lib.escapeShellArgs ([ targetExecutable ] ++ targetUpArgs)}
+  '';
+  targetPlist = {
+    Label = "com.compoundingtech.fractal";
+    ProgramArguments = [ (toString targetLaunchScript) ];
+    EnvironmentVariables = targetEnvironment;
+    ProcessType = "Interactive";
+    SoftResourceLimits.NumberOfFiles = 8192;
+    StandardOutPath = "${targetState}/logs/st3.stdout.log";
+    StandardErrorPath = "${targetState}/logs/st3.stderr.log";
+  };
+  targetApplyPlist = {
+    Label = "com.compoundingtech.fractal-apply";
+    ProgramArguments = [ (toString targetApplyScript) ];
+    EnvironmentVariables = targetEnvironment;
+  };
+  # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
 in
 {
   options.programs.smalltalk.fractalBinary.enable = mkEnableOption ''
@@ -79,8 +139,20 @@ in
     Requires services.smalltalk.enable; ignored when services.smalltalk.binary.path is set
   '';
 
+
   options.services.smalltalk = {
     enable = mkEnableOption "the smalltalk user daemon";
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    fractalMigration.phase = mkOption {
+      type = types.enum [ "legacy" "stage" "completed" ];
+      default = "legacy";
+      description = ''
+        Legacy preserves existing service defaults. Stage installs disabled Fractal
+        definitions without moving state. After fractal migrate host succeeds, select
+        completed before the next activation to hand service ownership to Fractal.
+      '';
+    };
+    # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
     package = mkOption {
       type = types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.st3;
@@ -164,6 +236,51 @@ in
   };
 
   config = mkIf cfg.enable {
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    assertions = lib.optional staging {
+      assertion = cfg.stateDir == "${config.xdg.stateHome}/st3";
+      message = "services.smalltalk.fractalMigration requires the default st3 stateDir.";
+    };
+    home.file = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin) {
+      "Library/LaunchAgents/com.compoundingtech.fractal.plist".text =
+        lib.generators.toPlist { } targetPlist;
+      "Library/LaunchAgents/com.compoundingtech.fractal-apply.plist" =
+        mkIf (cfg.declarationsApply.enable && hasDeclarations) {
+          text = lib.generators.toPlist { } targetApplyPlist;
+        };
+    };
+    home.activation.fractalMigrationPreflight = mkIf staging (lib.hm.dag.entryBetween
+      [ "writeBoundary" ] [ ] ''
+        ${if completed then ''
+          if ! ${targetGuard}; then
+            echo "Fractal completed phase requires migration receipts, migrated directories, and an inactive legacy daemon. Run fractal migrate host first." >&2
+            exit 1
+          fi
+        '' else ''
+          for receipt in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" ]}; do
+            if printf '%s\n' ${lib.escapeShellArg receiptMarker} | ${pkgs.diffutils}/bin/cmp -s - "$receipt"; then
+              echo 'Fractal host cutover has completed. Set services.smalltalk.fractalMigration.phase = "completed" before activating Home Manager.' >&2
+              exit 1
+            fi
+          done
+        ''}
+      '');
+    home.activation.fractalStageDisabled = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin)
+      (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        if [[ -z "''${DRY_RUN_CMD:-}" ]]; then
+          for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
+            if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+              echo "Refusing to stage an already loaded Fractal launchd job: $label" >&2
+              exit 1
+            elif [ "$?" -ne 113 ]; then
+              echo "Cannot establish launchd staging state for $label" >&2
+              exit 1
+            fi
+            /bin/launchctl disable "gui/$(id -u)/$label"
+          done
+        fi
+      '');
+    # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
     home.packages = lib.optional (!externallyManaged) effectivePackage;
     home.activation.smalltalkBinary = mkIf (!externallyManaged) (lib.hm.dag.entryBetween
       [ (if pkgs.stdenv.hostPlatform.isLinux then "reloadSystemd" else "setupLaunchAgents") ]
@@ -216,7 +333,7 @@ in
       + lib.optionalString (cfg.clientGatewaySocket != null) "client_gateway_socket = ${builtins.toJSON cfg.clientGatewaySocket}\n";
 
     # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk.service.
-    systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux ({
+    systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux (lib.optionalAttrs (!completed) {
       smalltalk = {
         Unit = {
           Description = "st claims graph daemon";
@@ -243,7 +360,7 @@ in
           // lib.optionalAttrs (cfg.memoryHigh != null) { MemoryHigh = cfg.memoryHigh; };
         Install.WantedBy = [ "default.target" ];
       };
-    } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+    } // lib.optionalAttrs (!completed && cfg.declarationsApply.enable && hasDeclarations) {
       # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
       smalltalk-apply = {
         Unit = {
@@ -260,7 +377,46 @@ in
         };
         Install.WantedBy = [ "default.target" ];
       };
-    });
+    } // lib.optionalAttrs staging ({
+      fractal = {
+        Unit = {
+          Description = "Fractal claims graph daemon";
+          ConditionPathExists = receipt;
+          After = [ "network.target" ];
+        };
+        Service = {
+          Type = "simple";
+          ExecCondition = toString targetGuard;
+          ExecStart = lib.concatStringsSep " " (map systemdArg ([ targetExecutable ] ++ targetUpArgs))
+            + lib.optionalString (cfg.clientGatewaySocket == null)
+              '' "--client-gateway-socket" "%t/st3-client.sock"'';
+          Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (targetEnvironment // { MALLOC_ARENA_MAX = "2"; });
+          Restart = "on-failure";
+          RestartSec = "5s";
+          Nice = 0;
+          CPUWeight = 1000;
+          IOWeight = 1000;
+          KillMode = "control-group";
+        } // lib.optionalAttrs (cfg.memoryMax != null) { MemoryMax = cfg.memoryMax; }
+          // lib.optionalAttrs (cfg.memoryHigh != null) { MemoryHigh = cfg.memoryHigh; };
+        Install = lib.optionalAttrs completed { WantedBy = [ "default.target" ]; };
+      };
+    } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      fractal-apply = {
+        Unit = {
+          Description = "Apply Fractal KDL declarations";
+          After = [ "fractal.service" ];
+          Requires = [ "fractal.service" ];
+        };
+        Service = {
+          Type = "oneshot";
+          ExecCondition = toString targetGuard;
+          ExecStart = toString targetApplyScript;
+          Environment = lib.mapAttrsToList (name: value: "${name}=${value}") targetEnvironment;
+        };
+        Install = lib.optionalAttrs completed { WantedBy = [ "default.target" ]; };
+      };
+    }));
 
     home.activation.smalltalkLogs = mkIf pkgs.stdenv.hostPlatform.isDarwin (
       lib.hm.dag.entryAfter [ "writeBoundary" ] ''
@@ -268,7 +424,7 @@ in
       ''
     );
     # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain Home Manager launchd labels.
-    launchd.agents = mkIf pkgs.stdenv.hostPlatform.isDarwin ({
+    launchd.agents = mkIf pkgs.stdenv.hostPlatform.isDarwin (lib.optionalAttrs (!completed) {
       smalltalk = {
         enable = true;
         config = {
@@ -285,7 +441,7 @@ in
           };
         };
       };
-    } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+    } // lib.optionalAttrs (!completed && cfg.declarationsApply.enable && hasDeclarations) {
       # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain apply agent label.
       smalltalk-apply = {
         enable = true;
@@ -298,6 +454,19 @@ in
           StandardErrorPath = "${cfg.stateDir}/logs/st3-apply.stderr.log";
         };
       };
-    });
+    } // lib.optionalAttrs completed ({
+      fractal = {
+        enable = true;
+        config = targetPlist // {
+          RunAtLoad = true;
+          KeepAlive.SuccessfulExit = false;
+        };
+      };
+    } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      fractal-apply = {
+        enable = true;
+        config = targetApplyPlist // { RunAtLoad = true; };
+      };
+    }));
   };
 }

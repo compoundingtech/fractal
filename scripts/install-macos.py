@@ -30,6 +30,22 @@ IDENTIFIER = os.environ.get('ST_MACOS_BUNDLE_ID') or (
 # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — service writers retain old labels.
 SERVICES = (['com.compoundingtech.st3.instance.' + INSTANCE, 'com.compoundingtech.st3.instance.' + INSTANCE + '.replication']
             if INSTANCE else ['com.compoundingtech.st3', 'com.compoundingtech.st3.replication'])
+FRACTAL_SERVICES = ['com.compoundingtech.fractal', 'com.compoundingtech.fractal.replication']
+
+
+def service_labels(stage_fractal=False):
+    return FRACTAL_SERVICES if stage_fractal else SERVICES + ([] if INSTANCE else FRACTAL_SERVICES)
+
+
+def require_unloaded(label):
+    target = 'gui/' + str(os.getuid()) + '/' + label
+    try:
+        command(['launchctl', 'print', target])
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 113:
+            return
+        raise
+    raise RuntimeError('refusing to replace or stage loaded launchd service: ' + target)
 LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 
 
@@ -201,7 +217,7 @@ def foreign_fractal_on_path(destination):
 
 
 
-def backup(home, job):
+def backup(home, job, stage_fractal=False):
     previous = Path(job) / 'previous-app'
     current = fixed(home)
     if current.exists():
@@ -210,7 +226,7 @@ def backup(home, job):
         command(['/usr/bin/ditto', current, previous])
     plists = Path(job) / 'previous-launchd'
     plists.mkdir(exist_ok=True)
-    for service in SERVICES:
+    for service in service_labels(stage_fractal):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
         if path.exists():
             shutil.copy2(path, plists / path.name)
@@ -265,7 +281,23 @@ def swap(app, home, job, suffix, expected=None):
         shutil.rmtree(staged)
 
 
-def install(app, home, job):
+def install(app, home, job, stage_fractal=False):
+    if stage_fractal:
+        if INSTANCE:
+            raise RuntimeError('--stage-fractal supports only the default host, not --instance')
+        for label in FRACTAL_SERVICES:
+            require_unloaded(label)
+    else:
+        # A fixed app swap does not restart a process, but rewriting its loaded
+        # definition would make disk and launchd disagree. Require an explicit stop.
+        for label in service_labels():
+            path = Path(home) / 'Library/LaunchAgents' / (label + '.plist')
+            if not path.exists():
+                continue
+            plist = plistlib.loads(path.read_bytes())
+            executable = (plist.get('ProgramArguments') or [plist.get('Program')])[0]
+            if executable != str(binaries(fixed(home))['st3']):
+                require_unloaded(label)
     retired = bin_dir(home) / 'stui'
     if retired.is_dir():
         raise RuntimeError('refusing to remove directory: ' + str(retired))
@@ -293,7 +325,7 @@ def install(app, home, job):
             alias.symlink_to('st3')
         except FileExistsError:
             print('install: leaving fractal unchanged: destination ' + str(alias) + ' or PATH contains a foreign command; use st, or move the foreign fractal and reinstall to enable the alias.', file=sys.stderr)
-    for service in SERVICES:
+    for service in ([] if stage_fractal else service_labels()):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
         if not path.exists():
             continue
@@ -306,6 +338,13 @@ def install(app, home, job):
             raise RuntimeError('launchd service has no executable: ' + str(path))
         write_atomic(path, plistlib.dumps(plist))
     command([LSREGISTER, '-f', fixed(home)])
+    if stage_fractal:
+        # Native staging renders complete future-state definitions and disables
+        # their labels. It never bootstraps; host cutover exclusively owns that.
+        command(['/usr/bin/env', 'HOME=' + str(home),
+                 'XDG_CONFIG_HOME=' + str(home / '.config'),
+                 'XDG_STATE_HOME=' + str(home / '.local/state'),
+                 binaries(fixed(home))['st3'], 'service', 'install', '--stage-fractal'])
 
 
 def restore(home, job, had_app):
@@ -321,8 +360,8 @@ def restore(home, job, had_app):
             if moved.exists():
                 shutil.rmtree(moved)
             os.replace(current, moved)
-    for service in SERVICES:
-        original = Path(job) / 'previous-launchd' / (service + '.plist')
+    for original in (Path(job) / 'previous-launchd').glob('*.plist'):
+        # Only definitions captured by this transaction are eligible for restore.
         if original.exists():
             write_atomic(Path(home) / 'Library/LaunchAgents' / original.name, original.read_bytes())
 
@@ -352,6 +391,8 @@ def main():
     parser.add_argument('--identity', default=CERTIFICATE)
     parser.add_argument('--team-id', default=TEAM)
     parser.add_argument('--identifier', default=IDENTIFIER)
+    parser.add_argument('--stage-fractal', action='store_true',
+                        help='stage default-host Fractal service labels disabled, without loading them')
     parser.add_argument('--job', type=Path)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--prepare-only', action='store_true')
@@ -360,6 +401,8 @@ def main():
     modes.add_argument('--backup-only', action='store_true')
     modes.add_argument('--restore-app', action='store_true')
     args = parser.parse_args()
+    if args.stage_fractal and INSTANCE:
+        parser.error('--stage-fractal supports only the default host, not --instance')
     CERTIFICATE, TEAM, APP, BIN_DIR, IDENTIFIER = args.identity or None, args.team_id or None, args.app, args.bin_dir, args.identifier
     home = args.home.expanduser().absolute() if args.home is not None else Path.home()
     lock_root = state_root(home)
@@ -384,7 +427,7 @@ def main():
             args.job = Path(tempfile.mkdtemp(prefix='install-', dir=root))
         args.job.mkdir(parents=True, exist_ok=True)
         if args.backup_only:
-            had_app = backup(home, args.job)
+            had_app = backup(home, args.job, args.stage_fractal)
             write_atomic(args.job / 'previous.json', json.dumps({'had_app': had_app}).encode())
             print(json.dumps({'had_app': had_app}))
             return
@@ -394,7 +437,7 @@ def main():
             return
         if args.install_app:
             identity = verify(args.install_app)
-            install(args.install_app, home, args.job)
+            install(args.install_app, home, args.job, args.stage_fractal)
             print(json.dumps(identity, sort_keys=True))
             return
         if args.source is None:
@@ -409,10 +452,10 @@ def main():
         if args.prepare_only:
             print(json.dumps({'app': str(app), 'identity': identity, 'payload_hashes': payload}, sort_keys=True))
             return
-        had_app = backup(home, args.job)
+        had_app = backup(home, args.job, args.stage_fractal)
         write_atomic(args.job / 'previous.json', json.dumps({'had_app': had_app}).encode())
         try:
-            install(app, home, args.job)
+            install(app, home, args.job, args.stage_fractal)
         except Exception:
             restore(home, args.job, had_app)
             raise
