@@ -1301,7 +1301,7 @@ mod tests {
                 .find(|(file, _)| *file == script)
                 .unwrap_or_else(|| panic!("{script} is not in the hook set"));
             let text = std::str::from_utf8(bytes).unwrap();
-            assert!(text.contains(&format!("exec \"$ST3_BIN\" {SUBCOMMAND} {name}")));
+            assert!(text.contains(&format!("exec \"${{FRACTAL_BIN-${{ST3_BIN-}}}}\" {SUBCOMMAND} {name}")));
         }
     }
     #[test]

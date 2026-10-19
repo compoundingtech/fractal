@@ -14,15 +14,15 @@ use super::{
 };
 use crate::model::{MessageSendReceipt, MessageSendRequest, MessageView};
 use crate::tile_registry::{DEFAULT_REGISTRY, Registry, Tile};
-pub use st3_api::api::tile_endpoint::*;
-pub use st3_api::api::tile_endpoint::{Kernel, SOCKET, TileCaller, router, serve_listener, spawn, spawn_from};
+pub use st3_api_core::api::tile_endpoint::*;
+pub use st3_api_core::api::tile_endpoint::{Kernel, SOCKET, TileCaller, router, serve_listener, spawn, spawn_from};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read as _, Write as _};
     use std::sync::Mutex;
-    use st3_api::api::tile_endpoint_tests_shared_client_v0_tests::{call, caller, get, message};
+    use st3_api_core::api::tile_endpoint_tests_shared_client_v0_tests::{call, caller, get, message};
 
     #[tokio::test]
     async fn a_tile_acts_only_as_its_own_agent() {
