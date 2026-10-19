@@ -1112,6 +1112,12 @@ async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
     assert_eq!(serde_json::from_value::<FleetView>(encoded).unwrap(), view);
     assert!(store.verify_fleet_pairing_admission("b", member.public(), &"b".repeat(64)).is_err());
     assert!(store.verify_fleet_pairing_admission("b", anchor.public(), &node_id).is_err());
+    let mut wrong_fleet = body.clone();
+    wrong_fleet["expected_fleet_id"] = serde_json::json!("3b241101-e2bb-4255-8caf-4136c566a963");
+    let refused = receive_pairing_admission(
+        State(state.clone()), Bytes::from(serde_json::to_vec(&wrong_fleet).unwrap()),
+    ).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
     let mut wrong_node = body;
     wrong_node["node_id"] = serde_json::json!("b".repeat(64));
     let refused = receive_pairing_admission(State(state), Bytes::from(serde_json::to_vec(&wrong_node).unwrap())).await;

@@ -3406,25 +3406,54 @@ impl Store {
                 first: false,
             });
         }
-        let floor =
+        // A new pairing permit may replace an expired/rejected one after st already
+        // admitted the joiner. Reuse only the verified incarnation's exact signed
+        // identity; never turn a fresh invite into permission to take another name.
+        let membership = self.fleet_membership()?;
+        let reused = match membership.state(&request.name) {
+            crate::fleet::MemberState::Current(member)
+                if !migrate
+                    && member.via == "invite"
+                    && member.member_key == request.member_key
+                    && member.mode == request.mode
+                    && request.node_id.is_some()
+                    && member.node_id == request.node_id =>
+            {
+                self.verify_fleet_pairing_admission(
+                    &request.name, &request.member_key,
+                    request.node_id.as_deref().unwrap_or_default(),
+                )?;
+                Some((member.admitted_claim.clone(), member.start.checked_sub(1).filter(|floor| *floor != 0)))
+            }
+            _ => None,
+        };
+        let floor = if let Some((_, floor)) = &reused {
+            *floor
+        } else {
             match self.fleet_name_floor(&request.name, request.writer_head.is_some(), migrate)? {
                 Ok(floor) => floor,
                 Err(reason) => return Ok(FleetRedemption::Refused(reason)),
-            };
+            }
+        };
         let bound = {
             let connection = self.connection.write();
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hb2eb7457a31f owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_invite_tokens SET bound_key=?2, bound_name=?3, writer_floor=?4
+                /* sqlite-large-value: allow-for-now lv-hb2eb7457a31f owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_invite_tokens SET bound_key=?2, bound_name=?3, writer_floor=?4, admitted_claim=?5
                  WHERE invite_id=?1 AND bound_key IS NULL AND token IS NOT NULL",
-                params![request.invite, request.member_key, request.name, floor],
+                params![request.invite, request.member_key, request.name, floor, reused.as_ref().map(|(claim, _)| claim)],
             )?
         };
         if bound == 0 {
             // Another request bound it first.
             return Ok(FleetRedemption::Refused("bound-to-another-key"));
         }
-        let admitted =
-            self.append_fleet_admission(request, migrate, floor, created_by.as_deref())?;
+        let admitted = if let Some((claim, _)) = reused {
+            self.append_fleet_invite_redemption(request)?;
+            self.replication_snapshot()?;
+            claim
+        } else {
+            self.append_fleet_admission(request, migrate, floor, created_by.as_deref())?
+        };
         Ok(FleetRedemption::Admitted {
             token,
             writer_floor: floor,
@@ -3485,6 +3514,25 @@ impl Store {
         Ok(Ok(Some(held.unwrap_or(0).max(ended_end))))
     }
 
+    fn append_fleet_invite_redemption(
+        &self,
+        request: &crate::fleet::handshake::JoinRequest,
+    ) -> Result<()> {
+        self.append_claim(&ClaimInput {
+            subject: format!("fleet-invite/{}", request.invite),
+            kind: "fleet.invite-redeemed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("name".into(), Value::String(request.name.clone())),
+                ("member_key".into(), Value::String(request.member_key.clone())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("fleet-invite-redeemed:{}", request.invite)),
+        })?;
+        Ok(())
+    }
+
     pub fn append_fleet_admission(
         &self,
         request: &crate::fleet::handshake::JoinRequest,
@@ -3497,21 +3545,7 @@ impl Store {
             fleet_meta(&connection, "fleet_id")?.context("this store is not in a fleet")?
         };
         let invite_subject = format!("fleet-invite/{}", request.invite);
-        self.append_claim(&ClaimInput {
-            subject: invite_subject.clone(),
-            kind: "fleet.invite-redeemed".into(),
-            actor: None,
-            fields: BTreeMap::from([
-                ("name".into(), Value::String(request.name.clone())),
-                (
-                    "member_key".into(),
-                    Value::String(request.member_key.clone()),
-                ),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(format!("fleet-invite-redeemed:{}", request.invite)),
-        })?;
+        self.append_fleet_invite_redemption(request)?;
         let mut fields = BTreeMap::from([
             ("fleet_id".into(), Value::String(fleet_id)),
             (

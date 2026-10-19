@@ -349,7 +349,28 @@ pub async fn tick(client: &reqwest::Client, socket: &Path, state: &Path) -> Resu
             record(&journal, &mut result);
             continue;
         }
-        let reply = local(socket, json!({"operation":"query","owner":owner(&journal.fleet),"creation_id":journal.creation})).await?;
+        let reply = control(
+            socket,
+            &json!({"type":"pairing","request":{"operation":"query","owner":owner(&journal.fleet),"creation_id":journal.creation}}),
+        )
+        .await?;
+        // Fabric prunes terminal receipts after 24 hours and reports this exact
+        // invalid_argument for an absent creation selector. Other failures (or
+        // absence before our deadline) remain uncertain and fence reconciliation.
+        if reply["type"] == "pairing"
+            && reply["reply"]["error"]["code"] == "invalid_argument"
+            && reply["reply"]["error"]["message"] == "unknown or expired creation_id"
+            && journal.deadline <= (super::now_ms() / 1000) as u64
+        {
+            journal.terminal = true;
+            journal.confirmed = false;
+            // A missing receipt cannot prove an uncertain confirmation committed.
+            // Retain the authenticated identity so admission stays fenced.
+            super::save(&path, &journal)?;
+            record(&journal, &mut result);
+            continue;
+        }
+        let reply = pairing_reply(reply)?;
         let status = &reply["status"];
         if status.is_null() {
             bail!("pairing attempt status unavailable; reconciliation fenced");

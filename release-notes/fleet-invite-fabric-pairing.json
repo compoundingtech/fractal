@@ -7,5 +7,5 @@
   "compatibility": {"status": "changed", "detail": "Pairing requires coordinated st and st-fabric-adapter builds plus Fabric pairing and pairing_remote support. Existing non-pairing HTTP joins remain supported."},
   "downtime": {"status": "none", "detail": "No claim-store reset or history migration is required."},
   "manual": {"status": "changed", "detail": "Run Fabric with --runtime-peers on both machines, install st-fabric-adapter, and run the adapter on the sponsor. Then use st fleet invite NAME and st fleet join CODE; no manual peer configuration is needed."},
-  "recovery": {"status": "changed", "detail": "Preserve adapter state across restarts. Expired, rejected or restart-lost pending attempts require a fresh invitation and never fall back to unverified trust."}
+  "recovery": {"status": "changed", "detail": "Preserve adapter state across restarts. Expired, rejected or restart-lost pending attempts require a fresh invitation and never fall back to unverified trust. A replacement invite can retain the same machine name and verified member identity. Pruned historical permits terminate their journal without blocking other reconciliation or discarding unconfirmed identity fences."}
 }

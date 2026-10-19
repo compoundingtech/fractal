@@ -10,7 +10,7 @@
     pty.url = "github:compoundingtech/pty/4f703c7d7f9cbff5d713b1234d1db98223881bca";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Published pairing stack, including the daemon-identity restricted client.
-    fabric.url = "github:compoundingtech/fabric/a926de61b0b8fa2599fba6fe022eb5f11ef73bb6";
+    fabric.url = "github:compoundingtech/fabric/852105ddc03ff18699972348b299c92f9331b41c";
     fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.

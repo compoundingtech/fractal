@@ -966,15 +966,30 @@ mod tests {
                 assert!(load_pairing_recovery(&joining_dir, &code, "wrong-name", &member).is_err());
                 let wrong_member = MemberKey::generate().unwrap().0;
                 assert!(load_pairing_recovery(&joining_dir, &code, name, &wrong_member).is_err());
-                let fresh_invite = invite(&store, &founded.fleet_id, "sponsor", &InviteOptions {
-                    name: Some("replacement".into()), lifetime: std::time::Duration::from_secs(600),
-                    via: "fabric".into(), person: "person/test".into(), migrate: false,
-                }).unwrap();
-                let mut fresh_code = JoinCode::decode(&fresh_invite.code).unwrap();
-                fresh_code.pairing = Some(PairingData {
-                    gateway: gateway.clone(), attempt: "replacement".into(), secret: "new-permit".into(),
-                });
                 for state in ["pending", "confirmed", "unknown", "network-error", "expired", "rejected"] {
+                    let fresh_invite = invite(&store, &founded.fleet_id, "sponsor", &InviteOptions {
+                        name: Some(name.into()), lifetime: std::time::Duration::from_secs(600),
+                        via: "fabric".into(), person: "person/test".into(), migrate: false,
+                    }).unwrap();
+                    let mut fresh_code = JoinCode::decode(&fresh_invite.code).unwrap();
+                    fresh_code.pairing = Some(PairingData {
+                        gateway: gateway.clone(), attempt: format!("replacement-{state}"), secret: "new-permit".into(),
+                    });
+                    // A fresh token cannot take the name with another key/node, or by
+                    // omitting the Fabric binding from the signed request.
+                    for (candidate, fabric_node) in [
+                        (&wrong_member, Some(node_id.clone())),
+                        (&member, Some("c".repeat(64))),
+                        (&member, None),
+                    ] {
+                        let unrelated = Joiner::start_bound(
+                            &fresh_code, candidate, name, settings.mode.as_str(), None, "test", fabric_node,
+                        ).unwrap();
+                        assert!(matches!(
+                            store.redeem_fleet_invite(unrelated.request()).unwrap(),
+                            crate::store::FleetRedemption::Refused("name-in-use"),
+                        ));
+                    }
                     let fresh_dir = root.path().join(format!("supersede-{state}"));
                     write_private(&fresh_dir.join("fleet/node.key"), &fs::read(joining_dir.join("fleet/node.key")).unwrap()).unwrap();
                     let recovery_bytes = serde_json::to_vec(&recovery).unwrap();
@@ -997,14 +1012,21 @@ mod tests {
                     write_private(&fresh_helper, fresh_script.as_bytes()).unwrap();
                     fs::set_permissions(&fresh_helper, fs::Permissions::from_mode(0o700)).unwrap();
                     let fresh_options = JoinOptions {
-                        state_dir: fresh_dir.clone(), configured_node: "replacement".into(),
+                        state_dir: fresh_dir.clone(), configured_node: name.into(),
                         code: fresh_code.encode().unwrap(), ..options.clone()
                     };
                     let replaced = join_inner(&fresh_options, Some(&fresh_helper)).await;
                     if matches!(state, "expired" | "rejected") {
-                        assert_eq!(replaced.unwrap().name, "replacement");
+                        assert_eq!(replaced.unwrap().name, name);
                         assert!(FleetFile::load(&fresh_dir).unwrap().is_some());
                         assert!(!pairing_recovery_path(&fresh_dir).exists());
+                        let membership = store.fleet_membership().unwrap();
+                        let crate::fleet::MemberState::Current(current) = membership.state(name) else {
+                            panic!("supersession must retain one verified current incarnation");
+                        };
+                        assert_eq!(current.admitted_claim, recovery.resume.authenticated.admitted_claim.as_deref().unwrap());
+                        assert_eq!(current.member_key, member.public());
+                        assert_eq!(current.node_id.as_deref(), Some(node_id.as_str()));
                     } else {
                         assert!(replaced.is_err());
                         assert!(FleetFile::load(&fresh_dir).unwrap().is_none());

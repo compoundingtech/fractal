@@ -291,6 +291,142 @@ async fn rejected_admitted_identity_stays_fenced_from_reconciliation() {
     assert_eq!(blocked.blocked, BTreeSet::from(["node".into()]));
 }
 
+#[tokio::test]
+async fn pruned_receipts_terminalize_durably_without_blocking_other_fleets() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("fabric.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    for creation in ["pruned-issued", "pruned-confirmation", "healthy"] {
+        let mut journal = journal();
+        journal.creation = creation.into();
+        journal.fleet = creation.into();
+        if creation == "pruned-confirmation" {
+            journal.bound_node = Some("uncertain-node".into());
+            journal.request = Some(request("uncertain-node"));
+            journal.confirmation = Some(json!({"operation":"confirm","request_id":"uncertain"}));
+        } else if creation == "healthy" {
+            journal.request = Some(request("healthy-node"));
+        }
+        super::super::save(&journal_path(dir.path(), creation), &journal).unwrap();
+    }
+    let server = tokio::spawn(async move {
+        let mut seen = BTreeSet::new();
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let query: Value = serde_json::from_str(&line).unwrap();
+            let creation = query["request"]["creation_id"].as_str().unwrap();
+            assert_eq!(
+                query,
+                local_request(json!({
+                    "operation":"query","owner":owner(creation),"creation_id":creation
+                }))
+            );
+            assert!(seen.insert(creation.to_owned()));
+            let reply = if creation == "healthy" {
+                json!({"type":"pairing","reply":{"error":null,"status":{
+                    "state":"confirmed","bound_node_id":"healthy-node"
+                }}})
+            } else {
+                assert!(matches!(creation, "pruned-issued" | "pruned-confirmation"));
+                json!({"type":"pairing","reply":{"status":null,"error":{
+                    "code":"invalid_argument","class":"usage",
+                    "message":"unknown or expired creation_id"
+                }}})
+            };
+            let mut bytes = serde_json::to_vec(&reply).unwrap();
+            bytes.push(b'\n');
+            stream.get_mut().write_all(&bytes).await.unwrap();
+        }
+    });
+    let pairing = tick(&reqwest::Client::new(), &socket, dir.path())
+        .await
+        .unwrap();
+    assert_eq!(pairing.blocked, BTreeSet::from(["uncertain-node".into()]));
+    assert_eq!(
+        pairing.confirmed,
+        BTreeSet::from([("healthy".into(), "member-key".into(), "healthy-node".into())])
+    );
+    server.await.unwrap();
+    for creation in ["pruned-issued", "pruned-confirmation", "healthy"] {
+        let persisted: Journal = serde_json::from_slice(
+            &std::fs::read(journal_path(dir.path(), creation)).unwrap(),
+        )
+        .unwrap();
+        assert!(persisted.terminal);
+        assert_eq!(persisted.confirmed, creation == "healthy");
+        if creation == "pruned-confirmation" {
+            assert_eq!(persisted.bound_node.as_deref(), Some("uncertain-node"));
+            assert!(persisted.confirmation.is_some());
+            assert!(persisted.request.is_some());
+        }
+    }
+    // Terminal receipts no longer need Fabric, and restart retains both the
+    // uncertain identity fence and the independent fleet's confirmed binding.
+    let recovered = tick(
+        &reqwest::Client::new(),
+        &dir.path().join("absent.sock"),
+        dir.path(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.blocked, pairing.blocked);
+    assert_eq!(recovered.confirmed, pairing.confirmed);
+    let mut snapshot = serde_json::from_value::<super::super::LeaveSnapshot>(json!({
+        "fleet_id":"healthy","own_member_key":"sponsor-key","persistence_error":null,"members":[],
+        "membership":{"anchor":"anchor","legacy_removed":[],"members":[{
+            "name":"joining","member_key":"member-key","node_id":"healthy-node",
+            "state":"current","mode":"listening","endpoints":[],"start":1
+        }]}
+    }))
+    .unwrap();
+    super::super::fence_pairing(&mut snapshot, &recovered);
+    assert_eq!(snapshot.membership.members[0].endpoints.len(), 1);
+}
+
+#[tokio::test]
+async fn missing_receipt_before_deadline_or_unrelated_error_remains_uncertain() {
+    for (deadline, code, message) in [
+        (u64::MAX, "invalid_argument", "unknown or expired creation_id"),
+        (1, "invalid_argument", "invalid creation_id"),
+        (1, "runtime_state_unavailable", "unknown or expired creation_id"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fabric.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut journal = journal();
+        journal.deadline = deadline;
+        journal.bound_node = Some("uncertain-node".into());
+        journal.confirmation = Some(json!({"request_id":"uncertain"}));
+        let path = journal_path(dir.path(), "creation");
+        super::super::save(&path, &journal).unwrap();
+        let server = tokio::spawn(fabric(
+            listener,
+            vec![(
+                local_request(json!({
+                    "operation":"query","owner":"st/fleet/fleet","creation_id":"creation"
+                })),
+                json!({"type":"pairing","reply":{"status":null,"error":{
+                    "code":code,"message":message
+                }}}),
+            )],
+        ));
+        assert!(
+            tick(&reqwest::Client::new(), &socket, dir.path())
+                .await
+                .is_err()
+        );
+        let persisted: Journal =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(!persisted.terminal);
+        assert_eq!(persisted.bound_node, journal.bound_node);
+        assert_eq!(persisted.confirmation, journal.confirmation);
+        server.await.unwrap();
+    }
+}
+
 #[test]
 fn admission_binding_requires_exact_signed_node_even_before_endpoints_exist() {
     let mut snapshot: super::super::LeaveSnapshot = serde_json::from_value(json!({

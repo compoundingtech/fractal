@@ -297,6 +297,16 @@ observes an authenticated expired or rejected receipt for the old attempt and
 the same Fabric NodeID. Pending, confirmed, unknown, and unreachable outcomes
 preserve the recovery journal; use the original code rather than discarding a
 possibly confirmed admission.
+The replacement invitation can retain the same machine name and local member
+key: the sponsor reuses the existing verified invite admission only when its
+member key, machine name, Fabric NodeID and mode match, without migration. It
+does not remove that member or append another incarnation; unrelated identities
+still receive the normal name-collision refusal.
+
+If Fabric has pruned an old permit record after receipt retention, the sponsor
+adapter terminates that expired journal while retaining its unconfirmed identity
+fence. Historical journal expiry does not stop other invitations or membership
+policy reconciliation.
 
 ### Loopback and plain HTTP
 
