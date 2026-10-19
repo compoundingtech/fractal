@@ -272,6 +272,8 @@ export interface DataSource {
   /** One explicit reconnect attempt, bypassing the current countdown. */
   readonly reconnect?: () => void
   readonly agents: Atom.Atom<Feed<readonly AgentRow[]>>
+  /** Explicit recovery for a failed or ended roster follow; a healthy follow is untouched. */
+  readonly retryAgents?: () => void
   readonly missions: Atom.Atom<Feed<readonly Mission[]>>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>

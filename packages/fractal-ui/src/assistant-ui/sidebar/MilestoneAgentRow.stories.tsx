@@ -194,7 +194,7 @@ export const TwoLineAndNesting: Story = {
 export const RowActions: Story = {
   tags: ['critical'], name: 'Row actions · shared menu and reported details',
   args: { row: base },
-  render: () => <main {...stylex.props(styles.root)}><TreeWithActions /></main>,
+  render: () => <main {...stylex.props(styles.root)}><ThemePortal><div {...stylex.props(styles.clipped)}><TreeWithActions /></div></ThemePortal></main>,
   play: async ({ canvasElement }) => {
     const host = canvasElement.querySelector<HTMLElement>('[data-host="actions"]')!
     const root = await waitFor(() => { const row = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(element => element.closest('[inert]') === null); expect(row).toBeDefined(); return row! })
@@ -232,6 +232,15 @@ export const RowActions: Story = {
       const reason = within(childMenu).getByText('No session reported for this subagent')
       await waitFor(() => expect(reason).toBeVisible())
       await expect(reason.scrollWidth).toBeLessThanOrEqual(reason.clientWidth + 1)
+      // The overlay must escape sidebar clipping and remain fully visible in the viewport.
+      await waitFor(() => {
+        const box = childMenu.getBoundingClientRect()
+        expect(box.left).toBeGreaterThanOrEqual(0)
+        expect(box.top).toBeGreaterThanOrEqual(0)
+        expect(box.right).toBeLessThanOrEqual(window.innerWidth)
+        expect(box.bottom).toBeLessThanOrEqual(window.innerHeight)
+        expect(childMenu.contains(document.elementFromPoint(box.right - 2, box.top + box.height / 2))).toBe(true)
+      })
       await expect(within(childMenu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAccessibleDescription('No session reported for this subagent')
       await userEvent.click(within(childMenu).getByRole('menuitem', { name: 'Reported agent details' }))
       await waitFor(() => expect(document.querySelector(`[role="dialog"][aria-label="Reported details for ${noSessionChild.title}"]`)).not.toBeNull())
@@ -289,6 +298,7 @@ const styles = stylex.create({
   // The live default sidebar: the app's aside opens at `sidebarDefault` and its roster insets rows by `s.md` with 2px gaps.
   column: { display: 'flex', flexDirection: 'column', gap: s.xs2, width: g.sidebarDefault, boxSizing: 'border-box', padding: s.md, backgroundColor: surface.sidebar },
   tree: { height: '320px' },
+  clipped: { width: g.sidebarDefault, overflow: 'hidden', transform: 'translateX(0)' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).
   toneProbe: { position: 'absolute', width: s.zero, height: s.zero, overflow: 'hidden', color: ink.fgSoft, backgroundColor: ink.fgMuted, borderTopColor: tone.dangerFg },

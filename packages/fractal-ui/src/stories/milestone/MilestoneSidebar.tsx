@@ -117,6 +117,7 @@ function AgentItem({ row, frozen, ...props }: AgentItemProps) {
   </TreeItem>
 }
 
+
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
 const styles = stylex.create({
   sidebar: { display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0, minHeight: 0, backgroundColor: surface.sidebar, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },

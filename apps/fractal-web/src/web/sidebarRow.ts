@@ -20,7 +20,7 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
   children: [],
 })
 
-/** Presentation of one actual roster observation. No per-row reads or inferred usage. */
+/** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
 export const sidebarRow = ({ agent, stale, needsMe }: {
   readonly agent: Agent; readonly stale: boolean; readonly needsMe?: boolean
 }): SidebarAgentRowData => {

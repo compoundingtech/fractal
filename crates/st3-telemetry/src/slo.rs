@@ -658,8 +658,9 @@ mod tests {
     fn every_route_path_in_the_targets_file_is_a_route_the_daemon_serves() {
         // api.rs's route table and the route families the daemon adds to it (st3-daemon's `api::router`).
         let source = [
-            include_str!("../../st3-api/src/api.rs"),
+            include_str!("../../st3-api-core/src/api.rs"),
             include_str!("../../st3-api-mailbox/src/api/mailbox.rs"),
+            include_str!("../../st3-api-client-v0/src/api/client_v0.rs"),
         ]
         .concat();
         for latency in &targets().latency {
