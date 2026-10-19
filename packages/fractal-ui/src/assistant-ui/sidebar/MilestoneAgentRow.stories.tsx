@@ -227,7 +227,7 @@ export const RowActions: Story = {
       await expect(within(childMenu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAttribute('aria-disabled', 'true')
       await expect(childMenu).toHaveTextContent('No session reported for this subagent')
       const reason = within(childMenu).getByText('No session reported for this subagent')
-      await expect(reason).toBeVisible()
+      await waitFor(() => expect(reason).toBeVisible())
       await expect(reason.scrollWidth).toBeLessThanOrEqual(reason.clientWidth + 1)
       await expect(within(childMenu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAccessibleDescription('No session reported for this subagent')
       await userEvent.click(within(childMenu).getByRole('menuitem', { name: 'Reported agent details' }))
