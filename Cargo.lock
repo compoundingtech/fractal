@@ -4837,6 +4837,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-api-mailbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-api",
+ "st3-api-mailbox",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+]
+
+[[package]]
 name = "st3-attention"
 version = "0.1.0"
 dependencies = [
@@ -4982,6 +5013,7 @@ dependencies = [
  "st-drivers",
  "st-runtime",
  "st3-api",
+ "st3-api-mailbox",
  "st3-attention",
  "st3-client",
  "st3-daemon",

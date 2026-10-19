@@ -24,7 +24,7 @@ pub enum Control {
     },
 }
 
-struct Clock {
+pub struct Clock {
     idle: Instant,
     absolute: Instant,
     proof: Instant,
@@ -177,7 +177,7 @@ pub fn authorization_epoch(
         .map(|authority| credential_digest(&authority))
         .map_err(ApiError::internal)
 }
-struct MembershipAuthority {
+pub struct MembershipAuthority {
     node: String,
     local_key: Option<String>,
     peers: Vec<String>,
