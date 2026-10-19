@@ -1636,6 +1636,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wire_alias_schemas_keep_the_deployed_sender_constant() -> Result<()> {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let output = models(&schema)?;
+        assert!(output.contains("export const API_VERSION = \"st3.client.v0\" as const"));
+        for values in [
+            "[\"st3.client.v0\",\"fractal.client.v0\"]",
+            "[\"st3.client.error.v0\",\"fractal.client.error.v0\"]",
+            "[\"st3.visualization.v0\",\"fractal.visualization.v0\"]",
+        ] {
+            assert!(output.contains(&format!("Schema.Literals({values})")));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn disjoint_object_unions_support_forbidden_fields_and_documented_defaults() {
         let schema = json!({
             "x-st-integers": "json-safe",

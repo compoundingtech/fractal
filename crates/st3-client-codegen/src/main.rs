@@ -1475,6 +1475,26 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn wire_alias_types_keep_the_deployed_sender_constant() -> Result<()> {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
+        assert!(models.contains("export const API_VERSION = 'st3.client.v0' as const;"));
+        for field in [
+            "api_version: \"st3.client.v0\" | \"fractal.client.v0\";",
+            "error_version: \"st3.client.error.v0\" | \"fractal.client.error.v0\";",
+            "version: \"st3.visualization.v0\" | \"fractal.visualization.v0\";",
+        ] {
+            assert!(models.contains(field), "missing receiver union: {field}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn untagged_union_validation_checks_every_named_member() {
         let schema = serde_json::json!({ "$defs": {
             "Pair": { "oneOf": [{ "$ref": "#/$defs/Person" }, { "$ref": "#/$defs/Assistant" }] },
