@@ -27,6 +27,18 @@ use crate::api::{client_attention_resources_at, published_attention_rows, refres
 
 const PEOPLE: &[&str] = &["person/avery", "person/robin", "person/lichen"];
 
+#[test]
+fn owner_index_preserves_each_owners_order_without_other_owners() {
+    let rows = vec![
+        json!({"id":"attention/a","person_id":PEOPLE[0]}),
+        json!({"id":"attention/b","person_id":PEOPLE[1]}),
+        json!({"id":"attention/c","person_id":PEOPLE[0]}),
+    ];
+    let owners = AttentionPublication::index_owners(&rows);
+    assert_eq!(owners[PEOPLE[0]].as_ref(), &vec![rows[0].clone(), rows[2].clone()]);
+    assert_eq!(owners[PEOPLE[1]].as_ref(), &vec![rows[1].clone()]);
+    assert!(!owners.contains_key(PEOPLE[2]));
+}
 fn input(subject: &str, kind: &str, actor: Option<&str>, fields: Value) -> ClaimInput {
 ClaimInput {
     subject: subject.into(),
@@ -324,6 +336,7 @@ store.publish_attention_list(
         due_at_unix_ms: None,
         future_after: None,
         published_at_unix_ms: now_ms(),
+        owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
     },
     false,
@@ -397,6 +410,7 @@ store.publish_attention_list(
         due_at_unix_ms: None,
         future_after: None,
         published_at_unix_ms: before.published_at_unix_ms,
+        owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
     },
     false,
@@ -469,6 +483,7 @@ let shared_at = |publication: &AttentionPublication, cut: u64| {
         due_at_unix_ms: None,
         future_after: None,
         published_at_unix_ms: now_ms(),
+        owners: AttentionPublication::index_owners(&rows),
         rows: Arc::new(rows),
     }
 };
@@ -479,6 +494,7 @@ let without_at = |publication: &AttentionPublication, cut: u64| AttentionPublica
     due_at_unix_ms: None,
     future_after: None,
     published_at_unix_ms: now_ms(),
+    owners: publication.owners.clone(),
     rows: Arc::clone(&publication.rows),
 };
 let delta = |publication: &AttentionPublication| {
@@ -534,6 +550,7 @@ let at = |publication: &AttentionPublication, cut: u64, rows: Vec<Value>| Attent
     due_at_unix_ms: None,
     future_after: None,
     published_at_unix_ms: now_ms(),
+    owners: AttentionPublication::index_owners(&rows),
     rows: Arc::new(rows),
 };
 // A seat blocked on a person is a new prompt: its observation folds.
