@@ -39,6 +39,10 @@ class Fixture:
         self.root = Path(self.tmp.name)
         self.repo = self.root / 'repo'
         run('git', 'init', '-q', f'--object-format={object_format}', str(self.repo))
+        # No automatic gc or maintenance: git starts it detached after a commit once loose objects pile up, and it then writes into
+        # objects/pack while the temporary directory is being removed (seen in CI as "Directory not empty: 'pack'" at cleanup).
+        run('git', '-C', str(self.repo), 'config', 'gc.auto', '0')
+        run('git', '-C', str(self.repo), 'config', 'maintenance.auto', 'false')
         self.allowed = []
         self.keys = self.root / 'allowed-signers'
         self.counter = 0
