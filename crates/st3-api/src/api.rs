@@ -25,7 +25,7 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, to_bytes};
@@ -142,7 +142,10 @@ pub mod work;
 // The tests call these handlers directly.
 #[cfg(test)]
 use client_reads::{
-    client_agents, client_agents_detail, client_history, client_history_detail, client_work,
+    client_agents, client_agents_detail, client_history, client_history_detail,
+    client_message_envelope_size, client_messages_detail,
+    client_messages_sql_page, client_messages_sql_page_at, client_messages_sql_page_with_envelope,
+    client_work,
 };
 #[cfg(test)]
 use operations::events;
@@ -188,9 +191,6 @@ pub const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 pub const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
 pub const CLIENT_MAX_PAGE_ITEMS: usize = 200;
 pub const CLIENT_MAX_RESPONSE_BYTES: usize = 1_048_576;
-// Keep complete result sets briefly so fleet writes cannot reorder or invalidate a traversal.
-// Cursors expire after this bounded window or if the daemon restarts/evicts their snapshot.
-pub const CLIENT_PAGE_TTL_MS: u128 = 300_000;
 const CLIENT_PAGE_CACHE_CAPACITY: usize = 32;
 
 pub struct CachedClientPage {
@@ -222,7 +222,7 @@ impl ClientTransportBoundary {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ClientSnapshot {
     pub id: String,
     host_id: String,
@@ -236,6 +236,9 @@ pub struct ClientSnapshot {
 
 /// A client page and the snapshot it was read in, which the envelope names.
 pub type ClientPageResponse = (Extension<ClientSnapshot>, Json<ClientResourcePage>);
+
+#[derive(Clone)]
+pub struct ClientMessageRequestId(String);
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ClientListQuery {
@@ -262,7 +265,7 @@ pub struct ClientListQuery {
     pub min_cut: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ClientPageCursor {
     pub snapshot: ClientSnapshot,
     pub collection: String,
@@ -286,6 +289,20 @@ pub struct ClientPageCursor {
     pub after_key: Option<(u128, String)>,
     pub expires_at_unix_ms: u128,
 }
+
+// Each receipt binds one server-issued continuation, not the message bodies. Bounding
+// receipts also bounds replay retention; eviction explicitly requires a fresh traversal.
+const CLIENT_MESSAGE_CUT_CAPACITY: usize = 256;
+
+struct IssuedClientMessageCut {
+    store: std::sync::Weak<Store>,
+    cursor: ClientPageCursor,
+    cut_epoch: u64,
+    request_time: u128,
+}
+
+static CLIENT_MESSAGE_CUTS: LazyLock<parking_lot::Mutex<VecDeque<Arc<IssuedClientMessageCut>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(VecDeque::new()));
 
 pub fn signal_changed(state: &AppState) {
     crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::Api, None);
@@ -371,7 +388,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
-            "database-busy" | "database-locked" => StatusCode::SERVICE_UNAVAILABLE,
+            "database-busy" | "database-locked" | "message-selectors-not-ready" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -854,6 +871,9 @@ async fn response_envelope_unbounded(
     } else {
         new_request_id()
     };
+    if request.uri().path() == "/v1/client/messages" {
+        request.extensions_mut().insert(ClientMessageRequestId(request_id.clone()));
+    }
     let request_path = request.uri().path().to_owned();
     let request_query = request.uri().query().map(str::to_owned);
     let long_poll = request_query.as_deref().is_some_and(asks_to_wait);
@@ -1450,24 +1470,14 @@ fn record_request_latency(
 pub use crate::model::new_request_id;
 
 /// Milliseconds the client-facing clock runs ahead of the wall clock. Only the test-support
-/// build has it, so a test can cross a real freshness horizon without sleeping through it.
-#[cfg(feature = "test-support")]
-static CLIENT_CLOCK_SKEW_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
+/// build sets it, so a test can cross a real freshness horizon without sleeping through it.
 #[cfg(feature = "test-support")]
 pub fn set_client_clock_skew_ms(skew_ms: u64) {
-    CLIENT_CLOCK_SKEW_MS.store(skew_ms, std::sync::atomic::Ordering::SeqCst);
+    crate::client_values::set_client_clock_skew_ms(skew_ms);
 }
 
-pub fn client_now_ms() -> u128 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    #[cfg(feature = "test-support")]
-    let now = now + u128::from(CLIENT_CLOCK_SKEW_MS.load(std::sync::atomic::Ordering::SeqCst));
-    now
-}
+pub use crate::client_values::CLIENT_PAGE_TTL_MS;
+pub use crate::client_values::client_now_ms;
 
 pub fn client_snapshot_time(snapshot: &ClientSnapshot) -> u128 {
     chrono::DateTime::parse_from_rfc3339(&snapshot.created_at)
@@ -1643,6 +1653,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "rate-limited"
         | "mission-list-not-ready"
         | "mission-list-ended"
+        | "message-selectors-not-ready"
+        | "response-too-large"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
         | "runtime-list-not-ready"
@@ -3565,8 +3577,8 @@ pub fn managed_session_owner_for_subject_at(
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
     crate::performance::task("conversation/owner", || {
-        let owners = store.conversation_owners_at(snapshot_index)?;
-        let Some(owner) = owners.get(owner) else {
+        let owner = store.conversation_owner_at(owner, snapshot_index)?;
+        let Some(owner) = owner else {
             return Ok(None);
         };
         let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
@@ -3575,7 +3587,7 @@ pub fn managed_session_owner_for_subject_at(
         if managed_session_id(&owner.subject, identity) != session_id {
             return Ok(None);
         }
-        Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())))
+        Ok(Some((owner.subject, owner.incarnation, owner.origin)))
     })
 }
 
@@ -4068,11 +4080,64 @@ fn client_attachment(attachment: &crate::model::MessageAttachment) -> Value {
     })
 }
 
+fn client_message_resource(
+    store: &Store,
+    message: crate::model::MessageView,
+    metadata: &Value,
+    current: bool,
+    now: u128,
+) -> anyhow::Result<Value> {
+    let sent_at = metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?;
+    let updated_at = metadata["updated_at"].as_str().unwrap_or("0").parse::<u128>()?;
+    let reasons = if message.status == "closed" {
+        vec!["closed"]
+    } else if !current {
+        vec!["superseded"]
+    } else {
+        Vec::new()
+    };
+    let current = reasons.is_empty();
+    let mut resource = json!({
+        "id": message.subject,
+        "kind": "message",
+        "revision": metadata["revision"],
+        "updated_at": client_timestamp(updated_at),
+        "from": message.from,
+        "to": message.to,
+        "title": message.title,
+        "content": message.content,
+        "state": message.status,
+        "delivery": message_delivery_for(store, &message, sent_at, now)?,
+        "sent_at": client_timestamp(sent_at),
+        "session_id": metadata["session_id"],
+        "in_reply_to": message.in_reply_to,
+        "tags": message.tags,
+        "attachments": message.attachments.iter().map(client_attachment).collect::<Vec<_>>(),
+        "operational": { "layer": if current { "current" } else { "history" }, "actionable": current, "reasons": reasons }
+    });
+    // Forward the folded envelope's body reference, never the on-demand body text.
+    if let (Some(reference), Some(bytes)) = (&message.body_ref, message.body_bytes) {
+        resource["body_ref"] = json!(reference);
+        resource["body_bytes"] = json!(bytes);
+    }
+    Ok(resource)
+}
+
 pub fn client_message_resources(
     store: &Store,
     person: Option<&str>,
     history: bool,
     peer: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
+    client_message_resources_at(store, person, history, peer, client_now_ms())
+}
+
+fn client_message_resources_at(
+    store: &Store,
+    person: Option<&str>,
+    history: bool,
+    peer: Option<&str>,
+    now: u128,
 ) -> anyhow::Result<Vec<Value>> {
     let current = store.operational_messages(person, false)?;
     let current_ids = current
@@ -4125,7 +4190,7 @@ pub fn client_message_resources(
             "title": message.title,
             "content": message.content,
             "state": message.status,
-            "delivery": message_delivery_for(store, &message, sent_at, client_now_ms())?,
+            "delivery": message_delivery_for(store, &message, sent_at, now)?,
             "sent_at": client_timestamp(sent_at),
             "session_id": session_id,
             "in_reply_to": message.in_reply_to,
@@ -10306,6 +10371,12 @@ pub mod tests_shared;
 
 #[cfg(test)]
 mod work_incarnation_tests;
+#[cfg(test)]
+mod client_messages_tests;
+#[cfg(test)]
+mod client_messages_cursor_tests;
+#[cfg(test)]
+mod client_messages_selector_tests;
 #[cfg(test)]
 mod message_bodies_tests;
 

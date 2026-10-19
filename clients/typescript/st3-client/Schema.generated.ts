@@ -1422,7 +1422,8 @@ export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals([
   "read.assistant.conversation",
   "read.assistant.terminal",
   "write.assistant.messages",
-  "write.assistant.custom-reply"
+  "write.assistant.custom-reply",
+  "write.assistant.answers"
 ]).annotate({ identifier: "AssistantScope" }))()
 export type AssistantScope = typeof AssistantScope.Type
 export type AssistantScopeEncoded = typeof AssistantScope.Encoded
@@ -1447,7 +1448,8 @@ export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
   "principal": AssistantPrincipal,
   /** Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied. */
   "read_trust": optionalKey(AssistantReadTrust),
-  "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))),
+  /** Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person. */
+  "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))).annotate({ description: "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." }),
   "revoked": Schema.Boolean,
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
   "sender_class": AssistantSenderClass,
@@ -1462,7 +1464,8 @@ export const AssistantGrantPolicy = /*#__PURE__*/ (() => Schema.Struct({
   "disclosure_consent": Schema.Literal(true),
   "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(2592000))),
   "minimal_read_mode": AssistantMinimalReadMode,
-  "recipient_allowlist": optionalKey(Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u"))))),
+  /** Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person. */
+  "recipient_allowlist": optionalKey(Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u"))))).annotate({ description: "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." }),
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique())
 }).annotate({ identifier: "AssistantGrantPolicy" }))()
 export type AssistantGrantPolicy = typeof AssistantGrantPolicy.Type
@@ -2838,14 +2841,28 @@ export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonAnswer = typeof PersonAnswer.Type
 export type PersonAnswerEncoded = typeof PersonAnswer.Encoded
 
+/** Message sender, including an authorized external assistant principal. Not a recipient or actor. */
+export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef", description: "Message sender, including an authorized external assistant principal. Not a recipient or actor." }))()
+export type SenderRef = typeof SenderRef.Type
+export type SenderRefEncoded = typeof SenderRef.Encoded
+
 export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   /** The person whose prior instruction the agent respondent recorded. */
   "acted_for": optionalKey(Id),
   "answer": optionalKey(PersonAnswer),
   "answered_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "ask": Id,
+  /** The assistant grant that authorized the response. */
+  "assistant_grant_id": optionalKey(Id),
+  /** Server-owned provenance naming the person who owns the assistant grant, not the respondent or delegated person authority. */
+  "assistant_owner": optionalKey(PersonId),
+  /** Server-owned grant-bound assistant session audit actor, separate from the answering principal. */
+  "assistant_session_actor": optionalKey(Schema.String).annotate({ description: "Server-owned grant-bound assistant session audit actor, separate from the answering principal." }),
   "evidence": optionalKey(Schema.Array(Id)),
-  "respondent": Id,
+  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. */
+  "respondent": SenderRef,
+  /** External assistant attribution when the response was submitted through an assistant grant. */
+  "sender_class": optionalKey(Schema.String).annotate({ description: "External assistant attribution when the response was submitted through an assistant grant." }),
   "status": Schema.Literals(["completed","cancelled"]),
   "summary": Schema.String
 }).annotate({ identifier: "PersonAnswerRecord" }))()
@@ -3511,11 +3528,6 @@ export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
 export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 
-/** Message sender, including an authorized external assistant principal. Not a recipient or actor. */
-export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef", description: "Message sender, including an authorized external assistant principal. Not a recipient or actor." }))()
-export type SenderRef = typeof SenderRef.Type
-export type SenderRefEncoded = typeof SenderRef.Encoded
-
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   /** The assistant grant that authorized the send, with sender_class. */
   "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
@@ -3903,7 +3915,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
-/** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
+/** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
 export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "recipient-retired",
   "lifecycle-unavailable",
@@ -3935,6 +3947,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "cursor-gap",
   "page-cursor-expired",
   "agent-roster-cut-not-ready",
+  "message-selectors-not-ready",
   "rate-limited",
   "runtime-not-local",
   "runtime-authority-indeterminate",
@@ -3960,7 +3973,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "response-budget-exceeded",
   "content-not-text",
   "internal"
-]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
+]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
