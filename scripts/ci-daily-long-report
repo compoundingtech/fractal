@@ -39,7 +39,9 @@ def rows(lanes, needs, jobs):
         out.append({
             'lane': name,
             'result': result,
-            'seconds': seconds(job.get('started_at'), job.get('completed_at')),
+            # The report can read a job that just finished before the API sets its completed_at; its last step's end stands in.
+            'seconds': seconds(job.get('started_at'), job.get('completed_at') or max(
+                (step['completed_at'] for step in steps if step.get('completed_at')), default=None)),
             'longest': max(timed, default=None),
             'failed': [step.get('name') for step in steps if step.get('conclusion') == 'failure'],
             'url': job.get('html_url'),

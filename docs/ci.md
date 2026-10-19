@@ -965,6 +965,12 @@ no `pick-runner`, because that job reads a secret, and it does no evidence signi
 dependency cache that the warm-up jobs own. Its checks are named `daily-*`, so nothing on `main`
 looks like a required check.
 
+Two `daily-tests` shards run the whole selection the Workspace CI shards run, from the same test
+archive, with `ST_TEST_SCALE=full`. A test that keeps a smaller population, fewer proptest cases or a
+fixed seed on pull requests reads that variable and runs its original size here. Each one says in a
+comment why its invariant holds at the smaller size. Run one locally at full scale with
+`ST_TEST_SCALE=full cargo nextest run ...`.
+
 The `daily-report` job (`scripts/ci-daily-long-report`) writes each lane's result, time, longest
 step and failed steps to the run summary. On red, it opens or comments on the one open issue
 titled `Daily long-lane run failed`. The workflow is not a required check and changes no pull
@@ -1308,7 +1314,7 @@ repo-settings changes have merged.
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
-| `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
+| `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 

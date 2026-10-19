@@ -4,6 +4,7 @@ import { useLocale } from 'react-aria'
 import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
+import { Icon } from '../composition/Icons'
 
 export interface SidebarTreeItem<T> {
   readonly id: Key
@@ -416,7 +417,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   }
   const row = (item: T, expanded: boolean, pinned: boolean) => <div {...stylex.props(styles.row)} style={{ paddingInlineStart: `calc(${s.lg} * ${item.depth})` }}>
     {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${s.lg} * ${depth} + ${s.sm})` }} />)}
-    {item.children?.length ? pinned ? <span data-pinned-chevron {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</span> : <Button slot="chevron" {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</Button> : null}
+    {item.children?.length ? pinned ? <span data-pinned-chevron {...stylex.props(styles.chevron, direction === 'rtl' && styles.mirrored)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} /></span> : <Button slot="chevron" {...stylex.props(styles.chevron, direction === 'rtl' && styles.mirrored)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button> : null}
     <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
     {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
   </div>
@@ -458,6 +459,8 @@ const styles = stylex.create({
   row: { position: 'relative', display: 'flex', alignItems: 'center', minHeight: g.controlSm, minWidth: 0, boxSizing: 'border-box' },
   guide: { position: 'absolute', top: 0, bottom: 0, width: g.hairline, backgroundColor: border.borderStrong, pointerEvents: 'none' },
   chevron: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
+  // The SVG chevron does not bidi-mirror like the former glyph did; mirror it so collapsed rows point toward the inline end.
+  mirrored: { transform: 'scaleX(-1)' },
   content: { flex: 1, minWidth: 0 },
   stack: { position: 'absolute', top: 0, insetInline: 0, zIndex: 1, pointerEvents: 'none', overflow: 'hidden', maxHeight: '40%' },
   pinSlot: { position: 'relative', overflow: 'hidden', pointerEvents: 'none' },

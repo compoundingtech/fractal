@@ -2868,7 +2868,15 @@ jobs:
         run: |
           git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
-            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
+      - name: Shadow-verify the published notes
+        if: ${{ always() && steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+          [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+          python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
+            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true
@@ -3470,6 +3478,8 @@ jobs:
               "apps/fractal-web/src/web/liveSidebarTree.ts",
               "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/perfMarks.ts",
+              "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
+              "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
               "apps/fractal-web/src/web/sidebarAttention.ts",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
@@ -3646,20 +3656,6 @@ jobs:
           name: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}"
           path: "${{ runner.temp }}/kit-play-receipts/receipt.json"
           if-no-files-found: ignore
-      - name: Fill the web shell closure
-        shell: bash
-        run: bash scripts/ci-web-shell fill
-        env:
-          CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
-        continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
-      - name: Save the web shell closure
-        uses: actions/cache/save@v4
-        with:
-          path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
-        continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
       - name: Report job cache coverage
         if: always()
         shell: bash

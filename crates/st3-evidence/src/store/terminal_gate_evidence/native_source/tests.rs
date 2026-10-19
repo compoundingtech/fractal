@@ -15,7 +15,11 @@ use st3_attention::store::terminal_gate_evidence::native_source_tests_shared::{F
 
 #[test]
 fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
-    for n in [0, 1024, 100_000] {
+    // The largest population only has to outgrow the bounds below: an unrelated INSERT may take at most
+    // 20,000 VM steps and no full scan, so any work per prior row fails at 25,000 rows as it would at
+    // 100,000. Pull requests seed 25,000; the daily run (ST_TEST_SCALE=full, docs/ci.md) seeds 100,000.
+    let largest = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") { 100_000 } else { 25_000 };
+    for n in [0, 1024, largest] {
         let f = Fixture::seeded();
         if n > 0 {
             f.populate_foreign(n);
