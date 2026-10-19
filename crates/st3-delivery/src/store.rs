@@ -120,6 +120,7 @@ pub use st3_store::store::{usage_period, usage_slot, validate_claim_input, valid
 pub mod agent_messages;
 pub mod agent_queue_values;
 pub mod assistant_write;
+#[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
 pub mod conversation_reads;
 pub mod coordination;
