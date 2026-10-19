@@ -34,6 +34,7 @@ nix develop .#web
 pnpm install --frozen-lockfile  # repository root
 pnpm --filter @smalltalk/fractal-ui storybook        # http://127.0.0.1:53705
 pnpm --filter @smalltalk/fractal-ui typecheck
+pnpm --filter @smalltalk/fractal-ui test:stories     # real-story scenario consumption check
 pnpm --filter @smalltalk/fractal-ui build-storybook  # packages/fractal-ui/storybook-static/
 ```
 
@@ -41,6 +42,24 @@ The package is an explicit member of the root pnpm workspace and uses its pinned
 The kit keeps TypeScript 6.0.3 and declares the Node types used by its Storybook configuration explicitly.
 
 The dev server binds to localhost on a fixed port (53705). To view it from another machine, forward the port, for example `ssh -L 53705:localhost:53705 <host>`, and open http://localhost:53705.
+
+### Scenario data
+
+The **Scenario** toolbar uses the shared `@smalltalk/st3-scenarios` catalog.
+`scenario` selects the world and `scenarioNow` fixes its clock. Only Markdown's
+`AllStates` story currently declares a slice (`conversation`) and renders that
+slice's prose through the real `Markdown` component. Other stories retain their
+existing fixtures. Theme, density and Markdown's rendering picker remain
+independent of scenario data.
+
+For example, open
+`?path=/story/fractal-ui-markdown--all-states&globals=scenario:fleet-mid-refactor&args=conversation:empty`.
+Slice overrides use `args=<slice>:<variant>`; the world uses
+`globals=scenario:<world>`. The `test:stories` CI lane runs the kit's
+`scenarioStoryCheck` over this real story, checking declared reads, visible data
+dependence, toolbar world changes and URL-state roundtripping. World-pin
+invariance is intentionally skipped because the story follows the toolbar.
+
 
 ## Strict play gate
 
