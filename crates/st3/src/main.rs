@@ -3,6 +3,8 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::CoordinationStore;
+use st3::MissionsStore;
 use st3::LimitsStore;
 use st3::SeatsStore;
 use st3::StopDeferralStore;
@@ -122,6 +124,8 @@ use presentation::{
 struct Cli {
     #[arg(long, global = true, hide = true)]
     read_contract_inventory_json: bool,
+    #[arg(long, global = true, hide = true)]
+    checkpoint_space_gate_capabilities: bool,
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate st on this machine: its own state, config, sockets, node
@@ -4282,6 +4286,15 @@ fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<b
     present.then(|| arguments.len() == 2 && arguments[1] == FLAG)
 }
 
+fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
+    const FLAG: &str = "--checkpoint-space-gate-capabilities";
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == FLAG)
+        .then(|| arguments.len() == 2 && arguments[1] == FLAG)
+}
+
 fn main() -> ExitCode {
     cli_output::finish(cli_main())
 }
@@ -4292,6 +4305,23 @@ fn cli_main() -> ExitCode {
         st3::recorder::run(program);
     }
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    match checkpoint_space_gate_capabilities_request(&arguments) {
+        Some(true) => {
+            println!(
+                "{}",
+                json!({
+                    "kind": "checkpoint-space-gate-capabilities",
+                    "version": st3::store::CHECKPOINT_SPACE_GATE_VERSION,
+                })
+            );
+            return ExitCode::SUCCESS;
+        }
+        Some(false) => {
+            eprintln!("st: --checkpoint-space-gate-capabilities must be used alone");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
     if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
         return fractal::web(&arguments);
     }
@@ -18261,6 +18291,28 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
             Ok(Err(error)) => eprintln!("st3: local observation trim failed: {error:#}"),
             Err(error) => eprintln!("st3: local observation trim stopped: {error}"),
         }
+        // What these trims, checkpoints and response expiry freed goes back to the filesystem,
+        // one short write at a time so other writes run between them.
+        let mut released = 0;
+        loop {
+            let vacuum_store = store.clone();
+            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(pages)) => released += pages,
+                Ok(Err(error)) => {
+                    eprintln!("st3: giving free pages back failed: {error:#}");
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("st3: giving free pages back stopped: {error}");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if released > 0 {
+            eprintln!("st3: gave {released} free pages back to the filesystem");
+        }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
         match size_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
@@ -18273,17 +18325,17 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
 }
 
 /// Seal and verify checkpoints every ten minutes. The proof copies the store and replays it, so
-/// it runs on a blocking thread, and a copy left by a crash is removed first.
+/// it runs on a blocking thread, and an owned copy left by a crash is swept first.
 async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    // A proof copy is only ever useful to the proof that made it. A staged capture is kept: it
-    // resumes where it stopped while its store-index cut still holds (#2492).
-    if let Ok(entries) = std::fs::read_dir(&context.scratch) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("proof-") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+    // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
+    // proof or a cleanup error stays visible and prevents a later proof from consuming space.
+    let sweep_store = store.clone();
+    let sweep_dir = context.scratch.clone();
+    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("st3: checkpoint proof startup cleanup failed: {error:#}"),
+        Err(error) => eprintln!("st3: checkpoint proof startup cleanup stopped: {error}"),
     }
     loop {
         let store = store.clone();

@@ -1,10 +1,10 @@
 //! Bounded recording of a person's prior instruction. The actor remains the agent.
 use super::*;
-use crate::model::{DelegationPolicyRequest, DelegationProof};
+use crate::model::DelegationProof;
 
 pub const ACTIONS: &[&str] = &["answer-ask", "close-item", "record-go-stop"];
 
-fn denied(message: impl Into<String>) -> St3Error {
+pub fn denied(message: impl Into<String>) -> St3Error {
     St3Error::new("delegation-refused", message)
 }
 
@@ -23,66 +23,6 @@ pub fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<String>, S
         ));
     }
     Ok(actions)
-}
-
-impl Store {
-    pub fn delegated_update_request(
-        &self,
-        proof: &DelegationProof,
-    ) -> Result<ClaimRecord, St3Error> {
-        let request = claim_by_id_tx(&self.readers.get(), &proof.episode)
-            .map_err(internal)?
-            .filter(|claim| {
-                claim.kind == "work.person-asked"
-                    && claim.body["fields"]["person"] == proof.person
-                    && person_work::is_update(claim)
-            })
-            .ok_or_else(|| {
-                denied("only an informational update may be closed through attention")
-            })?;
-        Ok(request)
-    }
-
-    pub fn delegation_evidence(
-        &self,
-        evidence: &mut Vec<String>,
-        proof: &DelegationProof,
-    ) -> Result<(), St3Error> {
-        add_evidence(&self.readers.get(), evidence, proof)
-    }
-    pub fn set_delegation_policy(
-        &self,
-        input: &DelegationPolicyRequest,
-    ) -> Result<ClaimRecord, St3Error> {
-        self.append_claim(&ClaimInput {
-            subject: input.person.clone(),
-            kind: "person.delegation-set".into(),
-            actor: Some(input.actor.clone()),
-            fields: BTreeMap::from([("actions".into(), json!(input.actions))]),
-            evidence: input.evidence.clone(),
-            expected_subject: None,
-            idempotency_key: Some(input.idempotency_key.clone()),
-        })
-    }
-}
-
-pub fn add_fields(fields: &mut BTreeMap<String, Value>, proof: &DelegationProof) {
-    fields.insert("acted_for".into(), json!(proof.person));
-    fields.insert("delegation".into(), json!(proof));
-}
-
-pub fn add_evidence(
-    connection: &Connection,
-    evidence: &mut Vec<String>,
-    proof: &DelegationProof,
-) -> Result<(), St3Error> {
-    let instruction = message_sent(connection, &proof.message)?;
-    for reference in [&instruction.id, &proof.policy] {
-        if !evidence.contains(reference) {
-            evidence.push(reference.clone());
-        }
-    }
-    Ok(())
 }
 
 pub fn message_sent(connection: &Connection, subject: &str) -> Result<ClaimRecord, St3Error> {
@@ -262,17 +202,4 @@ pub fn validate_write(
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::delegation_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::delegation_tests_shared_seats::{policy, proof, sent};
-
-    
-
 }

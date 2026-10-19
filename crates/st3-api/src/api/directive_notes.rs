@@ -1,3 +1,4 @@
+use crate::DirectiveNotesStore;
 use super::*;
 use axum::http::HeaderMap;
 

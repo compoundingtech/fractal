@@ -2,6 +2,7 @@
 
 #![allow(unused_imports, dead_code)]
 
+use crate::MissionsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
