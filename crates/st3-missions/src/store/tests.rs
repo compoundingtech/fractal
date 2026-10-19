@@ -10671,6 +10671,11 @@ fn work_orphaning_requires_terminal_or_replacement_runtime_evidence() {
     assert!(store.work_claim_is_orphaned(&work).unwrap());
 }
 
+mod seat_queue_purity_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-hb8ba0ece1dda owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("seat_queue_purity_tests.rs");
+}
+
 mod declarative_revision_timestamp_tests {
     use super::*;
 
