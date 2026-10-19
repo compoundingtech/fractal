@@ -922,6 +922,7 @@ impl Store {
             runtime.open_projections(&transaction, false)?;
             transaction.commit()?;
         }
+        runtime.finish_open_projections(&mut connection)?;
         let readers = ReadPool::new(&path, false)?;
         Self::from_connection(
             connection,
@@ -957,6 +958,7 @@ impl Store {
             runtime.open_projections(&transaction, true)?;
             transaction.commit()?;
         }
+        runtime.finish_open_projections(&mut connection)?;
         let readers = ReadPool::new(&uri, true)?;
         Self::from_connection(connection, readers, origin, uri, true, runtime)
     }
@@ -1062,13 +1064,18 @@ impl Store {
             [index.to_string()],
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
+        let connection = match runtime.writer_observer() {
+            Some(observer) => WriterConnection::new_with_observer(
+                connection, committed_index.clone(), observer,
+            )?,
+            None => WriterConnection::new(connection, committed_index.clone()),
+        };
+        let finalizing_runtime = runtime.clone();
+        connection.install_runtime_finalizer(move |transaction| {
+            finalizing_runtime.before_commit(transaction)
+        })?;
         Ok(Self {
-            connection: match runtime.writer_observer() {
-                Some(observer) => WriterConnection::new_with_observer(
-                    connection, committed_index.clone(), observer,
-                )?,
-                None => WriterConnection::new(connection, committed_index.clone()),
-            },
+            connection,
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,
@@ -7310,15 +7317,14 @@ impl Store {
                     error
                 })?;
             stages.enter("chunk-read");
-            let frontier: u64 = transaction
+            let health: Option<(Option<u64>, String)> = transaction
                 .query_row(
-                    "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                    "SELECT last_good_store_index,status FROM projection_health WHERE aggregate='graph'",
                     [],
-                    |row| row.get::<_, Option<u64>>(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .optional()?
-                .flatten()
-                .unwrap_or(0);
+                .optional()?;
+            let frontier = health.as_ref().and_then(|(frontier, _)| *frontier).unwrap_or(0);
             let (through, count) = transaction
                 .query_row(
                     "SELECT MAX(store_index), COUNT(*) FROM (
@@ -7328,6 +7334,12 @@ impl Store {
                     |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, u64>(1)?)),
                 )?;
             let through = through.unwrap_or(target.max(frontier));
+            // A healthy, already-projected source needs no projection transaction.
+            // In particular, an empty peer wake must not spend another runtime's
+            // deferred maintenance allowance. Missing/stale health still retries.
+            let source_empty = count == 0 && frontier == target
+                && !self.verdicts_due.load(Ordering::Acquire)
+                && health.as_ref().is_some_and(|(frontier, status)| frontier.is_some() && status == "healthy");
             progress_staged(ProjectionProgress {
                 phase: "project-incremental",
                 frontier,
@@ -7336,6 +7348,9 @@ impl Store {
                 total: None,
             });
             let result = (|| -> Result<bool, St3Error> {
+                if source_empty {
+                    return Ok(false);
+                }
                 // Non-contention incremental failures retain the full replay fallback,
                 // which quarantines claims it cannot project. SQLite contention defers below.
                 stages.enter("incremental");
@@ -7438,20 +7453,24 @@ impl Store {
                     } else {
                         through
                     };
-                    transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h377ef061fd10 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
-                     VALUES ('graph', 'healthy', ?1, ?2)
-                     ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
-                        error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
-                    params![through, now_ms().to_string()],
-                )?;
-                    stages.enter("commit");
-                    transaction.commit()?;
+                    if source_empty {
+                        transaction.rollback()?;
+                    } else {
+                        transaction.execute(
+                            /* sqlite-large-value: allow-for-now lv-h50cb263d1821 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+                             VALUES ('graph', 'healthy', ?1, ?2)
+                             ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
+                                error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
+                            params![through, now_ms().to_string()],
+                        )?;
+                        stages.enter("commit");
+                        transaction.commit_with_deferred_runtime()?;
+                    }
                     if !replayed {
                         processed += count;
                     }
                     progress_staged(ProjectionProgress {
-                        phase: "projection-committed",
+                        phase: if source_empty { "projection-current" } else { "projection-committed" },
                         frontier: through,
                         target,
                         processed: (!replayed).then_some(processed),
