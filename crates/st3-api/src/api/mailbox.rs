@@ -13,6 +13,37 @@ use crate::mailbox::{Fence, Frame, Receipt};
 
 mod authority;
 
+/// The mailbox routes, added to the API router as a [`RouteFamily`].
+pub fn routes(app: Router<AppState>) -> Router<AppState> {
+    app.route("/v1/mailbox", get(subscribe))
+        .route("/v1/mailbox/bind", post(bind))
+        .route("/v1/mailbox/attachment", get(attachment))
+        .route("/v1/mailbox/receipts", post(receipt))
+}
+
+/// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
+/// into this router: real native custody controls and the daemon use `router`.
+#[cfg(feature = "test-support")]
+pub fn admitted_mailbox_protocol_router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/mailbox/bind", post(bind_admitted_fixture))
+        .route("/v1/mailbox", get(subscribe_admitted_fixture))
+        .fallback_service(router(state.clone()))
+        .with_state(state)
+}
+
+/// Synthetic private-store transport controls; never physical native admission.
+#[cfg(feature = "test-support")]
+pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
+    assert!(subject.starts_with("agent/example/"));
+    admitted_mailbox_protocol_router(state).layer(Extension(NativeDeliveryPeer {
+        agent: subject.into(),
+        transport: "omp-channel",
+        pid: std::process::id(),
+        archives_inbox: false,
+    }))
+}
+
 pub async fn subscribe(
     State(state): State<AppState>,
     Query(fence): Query<Fence>,

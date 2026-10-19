@@ -468,41 +468,33 @@ impl IntoResponse for ApiError {
 /// Build routes only. The owner starts background publications with
 /// [`start_published_lists`]; a bare router refuses unpublished current runtime reads.
 pub fn router(state: AppState) -> Router {
+    router_with(state, &[])
+}
+
+/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// the route table before the envelope and leave layers wrap it, so it is served exactly as the
+/// routes listed here. `router` without them is the route table this crate alone answers.
+pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
+
+/// [`router`] with the route families of the crates above.
+pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
     delivery_presence::start();
-    router_for_transport(state, ClientTransportBoundary::Unix)
-}
-
-/// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
-/// into this router: real native custody controls and the daemon use `router`.
-#[cfg(feature = "test-support")]
-pub fn admitted_mailbox_protocol_router(state: AppState) -> Router {
-    Router::new()
-        .route("/v1/mailbox/bind", post(mailbox::bind_admitted_fixture))
-        .route("/v1/mailbox", get(mailbox::subscribe_admitted_fixture))
-        .fallback_service(router(state.clone()))
-        .with_state(state)
-}
-
-/// Synthetic private-store transport controls; never physical native admission.
-#[cfg(feature = "test-support")]
-pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
-    assert!(subject.starts_with("agent/example/"));
-    admitted_mailbox_protocol_router(state).layer(Extension(NativeDeliveryPeer {
-        agent: subject.into(),
-        transport: "omp-channel",
-        pid: std::process::id(),
-        archives_inbox: false,
-    }))
+    router_for_transport(state, ClientTransportBoundary::Unix, families)
 }
 
 /// Build the loopback-only client gateway. Unlike the local Unix boundary, every ordinary
 /// client request on this router requires a paired bearer credential.
 pub fn fabric_router(state: AppState) -> Router {
-    router_for_transport(state, ClientTransportBoundary::FabricLoopback)
+    fabric_router_with(state, &[])
 }
 
-fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> Router {
+/// [`fabric_router`] with the route families of the crates above.
+pub fn fabric_router_with(state: AppState, families: &[RouteFamily]) -> Router {
+    router_for_transport(state, ClientTransportBoundary::FabricLoopback, families)
+}
+
+fn router_for_transport(state: AppState, transport: ClientTransportBoundary, families: &[RouteFamily]) -> Router {
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -789,13 +781,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
-        .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
         .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
-        .route("/v1/mailbox/bind", post(mailbox::bind))
-        .route("/v1/mailbox/attachment", get(mailbox::attachment))
-        .route("/v1/mailbox/receipts", post(mailbox::receipt))
         .route("/v1/messages/{message_id}/claims", post(messages::post_message_claim))
         .route("/v1/messages/read/{*subject}", get(messages::read_message))
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
@@ -954,6 +942,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             "/v1/hosts/{host}/agent-workspace",
             get(host_agent_workspace),
         );
+    let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
             (state.clone(), transport),
