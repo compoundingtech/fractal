@@ -9244,7 +9244,11 @@ mod tests {
 
     #[tokio::test]
     async fn published_runtimes_page_cost_is_flat_with_historical_population() {
-        for historical in [10, 2000] {
+        // Zero SQLite work is zero at any population, and the stopped rows stay outside the 100-row page at
+        // 200 as at 2000. Pull requests build 200; the daily run (ST_TEST_SCALE=full, docs/ci.md) builds 2000
+        // and also holds the read to its 100 ms wall-clock budget, which a loaded PR runner cannot promise.
+        let full = std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full");
+        for historical in [10, if full { 2000 } else { 200 }] {
             let root = tempfile::tempdir().unwrap();
             let state = test_state(root.path());
             for index in 0..historical {
@@ -9268,7 +9272,9 @@ mod tests {
                 "published reads must execute zero SQLite VM steps or status queries at population {historical}");
             assert_eq!(page.items.len(), 100);
             assert!(page.page.has_more);
-            assert!(elapsed < Duration::from_millis(100), "published read took {elapsed:?}");
+            if full {
+                assert!(elapsed < Duration::from_millis(100), "published read took {elapsed:?}");
+            }
             println!("published runtimes historical={historical} page=100 elapsed_us={} sqlite={cost:?}", elapsed.as_micros());
         }
     }
