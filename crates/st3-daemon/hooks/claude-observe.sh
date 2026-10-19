@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # st3 Claude hook: hand one lifecycle event (name in $1, payload on stdin) to the st3 binary that
 # launched this seat. It never looks a program up on PATH. A seat without its binary can neither
 # record its turns nor bind its transcript, so this says so on stderr and exits non-zero instead
@@ -6,10 +7,13 @@
 
 set -u
 
-if [[ -z "${ST3_BIN:-}" || ! -x "$ST3_BIN" ]]; then
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if [[ -z "${FRACTAL_BIN-${ST3_BIN:-}}" || ! -x "${FRACTAL_BIN-${ST3_BIN-}}" ]]; then
   cat >/dev/null
-  echo "st: cannot record Claude ${1:-hook}: this seat's st3 binary is missing (ST3_BIN=${ST3_BIN:-unset})" >&2
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  echo "st: cannot record Claude ${1:-hook}: this seat's st3 binary is missing (ST3_BIN=${FRACTAL_BIN-${ST3_BIN:-unset}})" >&2
   exit 1
 fi
 
-exec "$ST3_BIN" driver-hook claude-observe "$@"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+exec "${FRACTAL_BIN-${ST3_BIN-}}" driver-hook claude-observe "$@"
