@@ -1558,6 +1558,80 @@ fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     );
 }
 
+/// The per-PR contract for the messaging-faults `handoff_failed` case: once the recipient's
+/// provider refuses a native handoff, its channel's delivery report makes the seat stale, doctor's
+/// `message-delivery` check warns about it, and the sender's node shows the unread message as
+/// `waiting`. `repeated_negative_handoffs_keep_retrying_and_resume_the_backoff` covers the retry.
+#[tokio::test]
+async fn a_refused_handoff_warns_in_doctor_and_shows_the_message_waiting_to_its_sender() {
+    let root = tempfile::tempdir().unwrap();
+    let recipient = state(root.path());
+    // The sender's node: a store of its own. The shared fixture names every node `node`.
+    let sender_root = tempfile::tempdir().unwrap();
+    let sender = state(sender_root.path());
+    let source = r#"version 2
+agent "fixture" { workspace "/tmp"; harness "omp" {} }
+"#;
+    let intent = parse_intent(source, "node").unwrap();
+    let plan = recipient.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    recipient.store.apply(&intent, &plan.subject_tokens, "refused-handoff").unwrap();
+    let seat = "agent/node.fixture";
+    let append = |store: &Store, subject: &str, kind: &str, actor: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append(&recipient.store, seat, "runtime.observed", seat, json!({
+        "status": "running", "runtime_id": "fixture", "incarnation_id": "first"
+    }));
+    append(&recipient.store, seat, "harness.observed", seat, json!({
+        "state": "idle", "driver": "omp", "incarnation_id": "first"
+    }));
+    // The message is on both nodes, as replication leaves it, and the recipient has not read it.
+    let message = "message/refused-handoff";
+    for store in [&sender.store, &recipient.store] {
+        append(store, message, "message.sent", "person/eval", json!({
+            "from": "person/eval", "to": seat, "status": "sent", "content": "probe"
+        }));
+    }
+    // The case reads every view once the message is over 10 s old. The clock is process-wide,
+    // and nextest runs this test in its own process.
+    crate::test_support::skew_client_clock(11_000);
+    // Delivery presence is process memory, as it is each daemon's. Read the sender node's view
+    // before the recipient's channel reports, so it sees what a remote sender sees: no recipient
+    // process, only an unread message older than 10 s.
+    let (status, view) = get_request(router(sender.clone()), &format!("/v1/messages/delivery/{message}")).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["delivery"]["state"], "waiting", "{view}");
+    assert_eq!(view["delivery"]["phase"], "sent", "{view}");
+    // The omp channel polls its mailbox with the report it attaches after the provider refused
+    // a handoff.
+    let report = json!({
+        "transport": "omp-channel", "pid": 4242, "ready": false,
+        "reason": "the provider rejected a native handoff; the channel keeps retrying",
+    });
+    let (status, page) = get_request(router(recipient.clone()), &format!(
+        "/v1/messages/page?to={seat}&delivery={}", urlencoding::encode(&report.to_string())
+    )).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let index = recipient.store.index().unwrap();
+    let agents = client_agent_resources(&recipient.store, false, "snapshot", index).unwrap();
+    let card = agents.iter().find(|agent| agent["id"] == seat).unwrap();
+    assert_eq!(card["delivery"]["state"], "stale", "{card}");
+    assert_eq!(card["state"], "waiting", "{card}");
+    let report = doctor_report(&recipient).unwrap().0;
+    let delivery = report.checks.iter().find(|check| check.name == "message-delivery").unwrap();
+    assert_eq!(delivery.status, "warn", "{delivery:?}");
+    assert!(delivery.message.contains(&format!("{seat}: the provider rejected a native handoff")), "{delivery:?}");
+    // A sender on the recipient's own node also sees why it waits.
+    let (_, view) = get_request(router(recipient.clone()), &format!("/v1/messages/delivery/{message}")).await;
+    assert_eq!(view["delivery"]["state"], "waiting", "{view}");
+    assert!(view["delivery"]["reason"].as_str().unwrap().contains("rejected a native handoff"), "{view}");
+    crate::test_support::skew_client_clock(0);
+}
+
 pub use crate::api::tests_shared::{probe_claim, state};
 
 #[test]
@@ -7433,8 +7507,11 @@ fn roster_fixture_random(state: &mut u64) -> u64 {
 }
 
 proptest::proptest! {
+    // Each round shuffles the whole 27-operation deck, so one case already exercises every
+    // operation; more cases only change the order. Pull requests run one; the daily long-lane
+    // run (ST_TEST_SCALE=full, docs/ci.md) runs four.
     #![proptest_config(proptest::test_runner::Config {
-        cases: 4,
+        cases: if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") { 4 } else { 1 },
         rng_seed: proptest::test_runner::RngSeed::Fixed(0x51a7_2026),
         ..proptest::test_runner::Config::default()
     })]

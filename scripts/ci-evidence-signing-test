@@ -243,6 +243,10 @@ with tempfile.TemporaryDirectory() as directory:
     shards = {**needs, 'linux-tests-shard-3': {'result': 'skipped'}}
     assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(shards), GITHUB_EVENT_NAME='pull_request')).returncode == 0, 'merge-only shards may be skipped outside merge groups'
     assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(shards), GITHUB_EVENT_NAME='merge_group')).returncode == 1
+    # A path-sensitive lane of its own (fractal-web) is skipped whenever no web path changed: it is not part of the verdict.
+    web = {**needs, 'fractal-web-execution': {'result': 'skipped'}}
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(web), GITHUB_EVENT_NAME='merge_group')).returncode == 0, 'a skipped fractal-web job does not stop the linux-gate note'
+    assert json.loads(out.read_text())['command'] == ['linux-gate', 'aggregate', 'linux-clippy', 'linux-gate', 'linux-tests'], 'and it is not recorded in the command'
     missing = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({'linux-tests': {'result': 'success'}})))
     assert missing.returncode == 1 and 'no verdict' in missing.stdout
     print('passed: the aggregate note records the needed jobs and the gate job\'s own verdict, and refuses to invent one')
@@ -286,6 +290,16 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='not json')).returncode == 1
     assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='{}')).returncode == 1
     print('passed: a step-based job note records each step outcome; a skipped, cancelled or missing step means no note, a failed one a failure')
+
+    # --- STEP_INPUTS: extra named inputs (a shard, a test set) are recorded; they never replace a fixed one
+    outcomes = json.dumps({'driver': 'success'})
+    more = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=outcomes, STEP_INPUTS=json.dumps({'kit_shard': '1', 'kit_shard_count': '2', 'play_set': 'all'})))
+    got = json.loads(out.read_text())
+    assert more.returncode == 0 and got['inputs']['kit_shard'] == '1' and got['inputs']['play_set'] == 'all' and got['inputs']['job'] == 'isolation-vm', got
+    for bad in ('not json', '[]', json.dumps({'job': 'other'}), json.dumps({'Kit': '1'}), json.dumps({'kit_shard': 1}), json.dumps({'kit_shard': ''})):
+        refused = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=outcomes, STEP_INPUTS=bad))
+        assert refused.returncode == 1, (bad, refused.stdout)
+    print('passed: extra step inputs are recorded as named strings; a malformed set or one that replaces a fixed input makes no note')
 
     # --- source_inputs: recorded only when the BASE evidence-verify projects the check's declared inputs
     stub_dir = tmp / 'stub-scripts'
