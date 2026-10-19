@@ -13,6 +13,7 @@
 //! so it is `outdated` rather than stale; its reason says whether it will follow the daemon's
 //! binary or needs a seat restart.
 
+use crate::DeliveryStore;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};

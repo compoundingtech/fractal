@@ -6,6 +6,8 @@
 //! preview, the fleet), and carries out the actions the screens queue. A refresh replaces
 //! data in place: it never empties a list or a conversation while the fresh copy is on its way.
 
+#[cfg(test)]
+use st3::MissionsStore;
 use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;

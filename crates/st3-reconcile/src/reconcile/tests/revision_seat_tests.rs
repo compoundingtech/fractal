@@ -1,3 +1,4 @@
+use crate::RevisionSeatsStore;
 use super::*;
 
 fn publish(store: &Store, source: &str, key: &str) -> MissionSpec {

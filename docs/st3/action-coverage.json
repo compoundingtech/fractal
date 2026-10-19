@@ -64,8 +64,8 @@
         "crates/st3-api/src/api/client_v0/arrangements.rs::arrangement_create_race_returns_typed_exists_and_exact_retry_receipt",
         "crates/st3-api/src/api/client_v0/arrangements.rs::arrangement_folder_race_and_validation_refusals_stay_typed",
         "crates/st3-api/src/api/client_v0/arrangements.rs::selected_arrangement_survives_byte_window_edits_and_retirement",
-        "crates/st3-store/src/store/arrangements_tests.rs::owner_admission_real_agent_and_atomic_identity_fences",
-        "crates/st3-store/src/store/arrangements_tests.rs::heads_survive_reopen_and_an_upgrade_backfills_once"
+        "crates/st3-missions/src/store/arrangements_tests.rs::owner_admission_real_agent_and_atomic_identity_fences",
+        "crates/st3-missions/src/store/arrangements_tests.rs::heads_survive_reopen_and_an_upgrade_backfills_once"
       ],
       "behavior": "real API handler and store tests: stale layout fences merge; fenced retirement compares the current revision and refuses concurrent edits without writes; unfenced retirement remains unconditional; stale authority and launch fences refuse without edits; replay preserves receipts and rejects changed action identity; fenced retirement recovers receipt gaps; agent attribution preserves person ownership; projected heads survive reopen, upgrade backfill and replication"
     },
@@ -419,6 +419,16 @@
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st actor-contract",
+      "description": "Print the generated CLI actor contract and optional effective instance paths",
+      "tests": [
+        "crates/st3/tests/actor_contract.rs::actor_contract_prints_without_daemon_or_config",
+        "crates/st3/tests/actor_contract.rs::actor_contract_effective_uses_real_config_resolution",
+        "crates/st3/tests/actor_contract.rs::actor_contract_effective_uses_selected_instance"
+      ],
+      "verification": "real CLI with a private home; no daemon; configured state directory and selected instance"
     },
     {
       "command": "st admission override",

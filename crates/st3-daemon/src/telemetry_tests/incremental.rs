@@ -1,5 +1,8 @@
 //! The incremental pass's tests that need the store, the graph or the model's request types.
 
+use crate::AdhocWorkStore;
+use crate::MissionsStore;
+use crate::SeatsStoreCore;
 use std::collections::BTreeSet;
 
 use serde_json::Value;
