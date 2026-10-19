@@ -50,15 +50,15 @@ use smallclaims::read_budget::{self, ReadBudget};
 
 use super::{ApiError, AppState, ClientTransportBoundary};
 
-const ORDINARY: Duration = Duration::from_secs(15);
-const MAX_WAIT_MS: u64 = 30_000;
+pub const ORDINARY: Duration = Duration::from_secs(15);
+pub const MAX_WAIT_MS: u64 = 30_000;
 #[cfg(any(test, feature = "test-support"))]
 pub const EVENT: Duration = Duration::from_secs(45);
-const BULK: Duration = Duration::from_secs(120);
+pub const BULK: Duration = Duration::from_secs(120);
 
 /// Only explicit read operations are cancellable. Writes and their acknowledgement
 /// keep their existing semantics; a WebSocket's deadline ends when its upgrade completes.
-fn deadline(request: &Request<Body>) -> Option<Duration> {
+pub fn deadline(request: &Request<Body>) -> Option<Duration> {
     let path = request.uri().path();
     let forwarded = path == crate::peer::CLIENT_READ_FORWARD_PATH;
     let export = path == "/v1/internal/replication/export";
@@ -837,7 +837,10 @@ pub fn error(error: &WorkError) -> Option<ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::api::read_deadline_tests_shared_client_v0_tests::{idle_long_poll_keeps_its_normal_empty_answer, request};
+use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -1922,63 +1925,6 @@ mod tests {
         assert!(envelope["value"]["facts"].is_null());
     }
 
-    fn request(method: Method, path: &str) -> Request<Body> {
-        Request::builder()
-            .method(method)
-            .uri(path)
-            .body(Body::empty())
-            .unwrap()
-    }
-
-    #[test]
-    fn deadlines_classify_reads_without_cancelling_writes_or_shortening_event_waits() {
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/mission-runs?root=r")),
-            Some(ORDINARY)
-        );
-        assert_eq!(
-            deadline(&request(Method::HEAD, "/v1/client/agents")),
-            Some(ORDINARY)
-        );
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/events?wait=true")),
-            Some(EVENT)
-        );
-        assert_eq!(deadline(&request(Method::GET, "/v1/events")), Some(EVENT));
-        assert_eq!(
-            deadline(&request(
-                Method::GET,
-                "/v1/client/events?wait%5fms=%33%30%30%30%30"
-            )),
-            Some(EVENT)
-        );
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/sessions/logs/seat?wait=%74rue")),
-            Some(EVENT)
-        );
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/events?wait=%66alse")),
-            Some(ORDINARY)
-        );
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/events?wait=false")),
-            Some(ORDINARY)
-        );
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/checkpoint/plan")),
-            Some(BULK)
-        );
-        assert_eq!(
-            deadline(&request(Method::POST, "/v1/internal/replication/export")),
-            Some(BULK)
-        );
-        assert_eq!(deadline(&request(Method::POST, "/v1/messages/send")), None);
-        assert_eq!(
-            deadline(&request(Method::POST, "/v1/internal/replication/receive")),
-            None
-        );
-    }
-
     #[test]
     fn forwarded_reads_use_operation_budgets_and_terminal_actions_keep_acknowledgements() {
         use crate::peer::ClientReadOperation;
@@ -2396,61 +2342,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn synchronous_stream_queries_have_fresh_budgets_and_long_polls_have_query_children() {
-        let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
-        assert!(read_budget::current().is_none());
-        query(&state.store, "/stream/conversation", || {
-            let current = read_budget::current().unwrap();
-            assert_eq!(current.route(), "/stream/conversation");
-            assert!(current.remaining() <= ORDINARY);
-            assert!(state.store.readers.get().is_autocommit());
-            Ok(())
-        })
-        .unwrap();
-        assert!(read_budget::current().is_none());
-        let poll = ReadBudget::new("/v1/client/events", EVENT);
-        read_budget::with(Some(poll.clone()), || {
-            query(&state.store, "/unused-fallback", || {
-                let current = read_budget::current().unwrap();
-                assert_eq!(current.route(), poll.route());
-                assert!(current.remaining() <= ORDINARY);
-                Ok(())
-            })
-            .unwrap();
-            assert!(read_budget::current().unwrap().remaining() > ORDINARY);
-        });
-        assert!(read_budget::current().is_none());
-    }
-
-    #[test]
-    fn synchronous_queries_refuse_expired_work_and_reject_late_success() {
-        let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
-        let ran = AtomicUsize::new(0);
-        let expired = ReadBudget::new("/v1/client/events", Duration::ZERO);
-        let error = read_budget::with(Some(expired), || {
-            query(&state.store, "/events", || {
-                ran.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            })
-        })
-        .unwrap_err();
-        assert_eq!(error.status, StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(ran.load(Ordering::Relaxed), 0);
-        let parent = ReadBudget::new("/v1/client/events", ORDINARY);
-        let error = read_budget::with(Some(parent.clone()), || {
-            query(&state.store, "/events", || {
-                parent.cancel();
-                Ok(())
-            })
-        })
-        .unwrap_err();
-        assert_eq!(error.code, "read-deadline");
-        assert!(state.store.readers.get().is_autocommit());
-    }
-
     #[tokio::test]
     async fn an_ordinary_completed_http_read_is_not_cancelled_by_future_drop() {
         use axum::{Router, middleware::from_fn_with_state, routing::get};
@@ -2473,97 +2364,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// The handler idles for the longest wait on the paused clock (callers run `start_paused`), so
-    /// the ordinary 15 s deadline still has to give way to the 30 s wait, without 30 real seconds.
-    /// The handler runs on a blocking poll, which keeps the paused clock from advancing by itself,
-    /// so the test advances it once the handler has started.
-    async fn idle_long_poll_keeps_its_normal_empty_answer(
-        path: &'static str,
-        route: &'static str,
-        paused: bool,
-    ) {
-        use axum::{Router, middleware::from_fn_with_state, routing::get};
-        use tower::ServiceExt;
-        let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let started = Arc::new(std::sync::Mutex::new(Some(started_tx)));
-        let app = Router::new()
-            .route(
-                route,
-                get(move || {
-                    let started = started.clone();
-                    async move {
-                        // The wait starts counting when it is created, so create it before
-                        // signalling: the test advances the clock as soon as it hears.
-                        let wait = tokio::time::sleep(Duration::from_millis(MAX_WAIT_MS));
-                        let _ = started.lock().unwrap().take().unwrap().send(());
-                        wait.await;
-                        Json(json!({ "items": [] }))
-                    }
-                }),
-            )
-            .layer(from_fn_with_state(
-                (state, ClientTransportBoundary::Unix),
-                super::super::response_envelope,
-            ));
-        let response = tokio::spawn(app.oneshot(request(Method::GET, path)));
-        started_rx.await.unwrap();
-        if paused {
-            let past_ordinary = ORDINARY + Duration::from_secs(1);
-            tokio::time::advance(past_ordinary).await;
-            assert!(!response.is_finished(), "{path} was cut at the ordinary deadline");
-            tokio::time::advance(Duration::from_millis(MAX_WAIT_MS) - past_ordinary).await;
-        }
-        let response = response.await.unwrap().unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let value = body.get("value").unwrap_or(&body);
-        assert_eq!(value["items"], json!([]), "{body}");
-    }
-
-    /// The one idle read-deadline test on the real clock: 30 real seconds, so the paused-clock
-    /// tests below are not the only proof that the envelope really waits past the ordinary deadline.
-    #[tokio::test]
-    async fn an_idle_conversation_poll_is_not_cut_at_the_ordinary_deadline_on_the_real_clock() {
-        idle_long_poll_keeps_its_normal_empty_answer(
-            "/v1/client/conversations/test/changes?wait_ms=30000",
-            "/v1/client/conversations/{id}/changes",
-            false,
-        )
-        .await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_idle_conversation_poll_is_not_cut_at_the_ordinary_deadline() {
-        idle_long_poll_keeps_its_normal_empty_answer(
-            "/v1/client/conversations/test/changes?wait_ms=30000",
-            "/v1/client/conversations/{id}/changes",
-            true,
-        )
-        .await;
-    }
-    #[tokio::test(start_paused = true)]
-    async fn an_idle_client_event_poll_is_not_cut_at_the_ordinary_deadline() {
-        idle_long_poll_keeps_its_normal_empty_answer(
-            "/v1/client/events?wait_ms=30000",
-            "/v1/client/events",
-            true,
-        )
-        .await;
-    }
-    #[tokio::test(start_paused = true)]
-    async fn an_idle_screen_poll_is_not_cut_at_the_ordinary_deadline() {
-        idle_long_poll_keeps_its_normal_empty_answer(
-            "/v1/client/terminals/test/screen?after=cursor&wait_ms=30000",
-            "/v1/client/terminals/{id}/screen",
-            true,
-        )
-        .await;
-    }
     #[tokio::test(start_paused = true)]
     async fn an_idle_log_poll_is_not_cut_at_the_ordinary_deadline() {
         idle_long_poll_keeps_its_normal_empty_answer(
@@ -2624,27 +2424,6 @@ mod tests {
         );
         assert!(long_poll_route("/v1/events/page"));
     }
-    #[test]
-    fn wait_budgets_follow_handler_defaults_caps_and_nonwaiting_requests() {
-        for path in [
-            "/v1/client/events",
-            "/v1/client/conversations/test/changes",
-            "/v1/client/terminals/test/screen?after=cursor",
-            "/v1/sessions/logs/test?wait=false",
-        ] {
-            assert_eq!(deadline(&request(Method::GET, path)), Some(ORDINARY));
-        }
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/client/events?wait_ms=999999")),
-            Some(EVENT)
-        );
-        assert_eq!(
-            deadline(&request(Method::GET, "/v1/events?timeout_ms=1234")),
-            Some(ORDINARY + Duration::from_millis(1234))
-        );
-        assert_eq!(deadline(&request(Method::GET, "/v1/doctor")), Some(BULK));
-    }
-
     #[tokio::test]
     async fn completed_nested_work_does_not_cancel_its_parent_or_next_query() {
         let parent = ReadBudget::new("/ordinary", ORDINARY);

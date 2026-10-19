@@ -1872,7 +1872,8 @@ def apply_cut(args, nodes, files, tfiles, order):
             continue
         cur = open(path).read()
         base = cur
-        if rel in removed and removed[rel]:
+        # an earlier step may have rewritten the file (a test moved out of it): parse what is there now
+        if rel in removed and removed[rel] or cur != text0:
             items_now = ri.parse(cur)
         else:
             items_now = items0

@@ -236,7 +236,7 @@ mod tests {
 
     // The real st3 wrapper exercises Borrow<GraphStore>. Source maintenance is explicit
     // in this transport fixture; it does not certify the production card dependencies.
-    struct Fixture {
+    pub struct Fixture {
         store: Arc<crate::store::Store>,
         views: Arc<Views>,
         publisher: Arc<events::Publisher>,

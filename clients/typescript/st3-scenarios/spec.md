@@ -196,7 +196,7 @@ after it (see [Store versions](#store-versions)).
 
 | Slice | State | Timeline events |
 | --- | --- | --- |
-| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `order: Id[]` | `changes {upserts, removes, order?}` |
+| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `order: Id[]`, optional `arrangements: Arrangement[]` (omission means empty) | `changes {upserts, removes, order?}` for roster resources; arrangements are snapshot-only |
 | `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them) | `changes {upserts, removes, order?}` |
 | `attention` | `attention: Attention[]`, `messages: Message[]` (sources the cards load) | `changes {upserts, removes, order?}` |
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
@@ -223,6 +223,62 @@ without dropping their fields. Every client-v0 known kind, including kinds this 
 model in a slice, still requires its proper collection; unsupported known kinds fail the fold.
 Their schema-declared header timestamps
 participate in `times`; opaque future payload timestamps do not.
+
+### Arrangement inventory
+
+`roster.arrangements` owns the world's complete arrangement inventory; there is no separate
+arrangements slice or transport-only fixture table. The optional array is empty when omitted;
+worlds with no saved organization have an empty inventory. Arrangement placements
+reference existing roster agents from the same cast, never additional agents, runtimes or sessions.
+Roster variants preserve coherence with their resulting agent membership rather than retaining
+placements for removed agents. Arrangements do not enter the agents collection or its order.
+
+Healthy worlds advertise capability `arrangements` version 1 with `state: 'granted'` and scope
+`read.arrangements` version 0 with `state: 'granted'`, scoped implicitly to the person named by
+`capabilities.session_actor` (no extra capability-row field). They do not grant
+`control.arrangements`. An empty inventory is a supported empty state, not an absent capability.
+The inventory is read-only: no arrangement timeline events or simulated edits are introduced.
+List, detail and subscription requests for another person are forbidden for person-authority
+sessions, matching the daemon's delegated-authority boundary rather than returning empty data.
+Arrangement-specific HTTP validation failures use `validation-failed` with HTTP 422.
+
+All arrangements are synthetic, including those in worlds with recorded conversations and
+terminals. Their provenance stays with the synthetic roster, not the recording. Arrangement
+subjects use `arrangement/person/<name>/<lowercase-UUIDv7>` and folder identifiers are lowercase
+UUIDv7 values. IDs and register claim revisions are deterministic from the world's seed and
+stable labels; UUIDv7 generation uses a forked seeded generator and the fixed anchor minus
+60 seconds, not the load-time clock. Loading at a different `now` never changes identity.
+Resource `updated_at` is authored at offset -60,000 ms and participates in normal timestamp rebasing.
+Register revision identifiers are provenance, not timestamps to rebase. No wall-clock UUID
+generation or live daemon claim is passed off as synthetic provenance.
+Huge's initial name and folders share one synthetic claim revision; placements use subsequent
+claim revisions in batches of at most 256 operations, below the daemon's 1,024-operation limit.
+
+The catalog's default inventory is:
+
+| World | Arrangement inventory |
+| --- | --- |
+| `fleet-mid-refactor` | One live arrangement named exactly `Sidebar`: the `atlas` project root with `Implementation` and `Review` child folders (three folders total). It places the first three existing roster agents; the final agent stays unfiled. |
+| `ci-failing-fix` | Empty. |
+| `long-debug-rabbit-hole` | Empty. |
+| `first-run-onboarding` | Empty throughout onboarding, including after its first agent appears. |
+| `merge-conflict-standoff` | Empty. |
+| `offline-reconnect-storm` | Empty. |
+| `release-candidate-polish` | Empty. |
+| `empty` | Empty. |
+| `loading` | Empty; ordinary first-reply hold behavior remains independent of inventory. |
+| `unknown-fields` | Empty. |
+| Every `failed-sync-<cause>` world listed in the catalog, including `failed-sync-arrangements-absent` | Empty; reusing the refactor cast does not inherit its saved arrangement. |
+| `replication-diverged` | Empty. |
+| `huge` | One live `Sidebar` arrangement with 57 folders: one project root, eight `Migration` group children, and six role grandchildren per group. All 1,000 existing roster agents are placed; bounded folder structure does not truncate roster membership. |
+| `unicode` | Empty. |
+
+The `sync.arrangements-absent` variant advertises both `read.arrangements` and the
+`arrangements` feature as ungranted, matching the daemon's derivation of the feature from
+the scope grant. Inventory is unchanged; discovery disables the optional surface, and
+direct arrangement list, detail and subscription reads are forbidden.
+
+### Slice selection and variants
 
 `selector` names a subscription by its collection and filter, for example
 `{ collection: 'conversation', conversation: 'agent/example/atlas/builder' }`.
@@ -706,6 +762,17 @@ replay.actions  // actions the client submitted, in order, for test assertions
   socket accepts. Other actions are recorded in `replay.actions` and answered with an accepted
   `ActionResult` and an operation that completes; a world may declare a different answer per
   action. Replay does not simulate the effects of actions.
+- **Arrangements:** `GET /v1/client/arrangements?person=…`, the arrangement detail route, and
+  `collection: 'arrangements'` subscriptions all read `roster.arrangements`. Lists and
+  subscriptions require an explicit person selector; they never infer an owner from an agent.
+  Person and optional exact subject selectors filter the same inventory before pagination or
+  subscription limits. Detail reads resolve the same resource by its person-scoped subject.
+  HTTP lists return the typed `ArrangementPage` envelope (`collection: 'arrangements'`, filters,
+  items and page metadata); every listed or subscribed item equals its detail resource.
+  Collection subscriptions send authoritative snapshots with ordinary fences and no arrangement
+  `changes` frames. Unrelated roster changes cannot manufacture arrangement invalidations.
+  The scenario kit adds no arrangement editing support; its generic action handling does not
+  imply a `control.arrangements` grant or mutate this inventory.
 - **Seeded history:** conversation pages first serve committed entries, then generate only the
   requested older range from `ConversationThread.history`, using its seed and world at
   `world.now`. Each turn is independently seeded; generation uses neither `Math.random` nor
@@ -744,7 +811,7 @@ over the event union (a `never` check), and each row has a test through the real
 | roster, details, attention | `changes` | Updates the state. For every open subscription whose filtered, limited window changes: one `changes` frame with `upserts`, `removes` (including rows leaving the window), the complete new `order`, `has_more` and a new fence. Unaffected subscriptions get nothing. |
 | conversation | `entries` | One `conversation` frame with `replace: false` and those entries, without `has_more`, to subscribers of that agent or session. |
 | conversation | `replace` | One `conversation` frame with `replace: true`, the newest page (`page_size`) and `has_more`. |
-| conversation | `thread-create {thread}` / `thread-remove {agent}` | Introduces / removes full thread membership. Creating an existing agent sends ready subscribers a replacement frame and retains their agent binding across session changes; pending first replies obey hold/loading policies. Removal sends `not-found` to every matching subscriber and later reads. |
+| conversation | `thread-create {thread}` / `thread-remove {agent}` | Introduces / removes full thread membership. A follower that already received an empty pending-thread snapshot receives creation items as a delta (no frame for empty creation), then later entries. Creating an existing agent otherwise sends ready subscribers a replacement frame and retains their agent binding across session changes; pending first replies obey hold/loading policies. Removal sends `not-found` to every matching subscriber and later reads. |
 | terminal | `terminal-create {record}` / `terminal-remove {terminal}` | Introduces / removes full terminal membership. Runtime reads, attaches and subscriptions see new metadata. Existing ready subscriptions get the replacement screen for an unchanged incarnation, `stale-fence` for a changed incarnation, or `terminal-ended` for an exited runtime. Removal sends `not-found` even to held/loading subscriptions, and later reads/attaches. |
 | terminal | `screen` | One `screen` frame with the `TerminalScreen` to subscribers holding the current incarnation. |
 | terminal | `unavailable` | An `error` frame, code `terminal-unavailable`, `retryable: true`. A fresh `terminal.attach` returns the current incarnation and a capability, and a subscribe with it resumes with the current screen. A subscribe that reuses the earlier lease also resumes while the lease is valid (a separate protocol test; the SDK always attaches afresh). |
@@ -766,6 +833,26 @@ over the event union (a `never` check), and each row has a test through the real
 Events marked "same activation" are rejected by the emitter until the client-v0 schema defines
 those frames, so no scenario sends a frame the strict decode gate cannot check.
 
+A thread missing from the current conversation fold is still followable when the current roster
+contains its agent and an associated running agent runtime. Resolve agent selectors and full or
+prefixless session selectors through the roster's `current_session_id`: it is the scenario's
+published managed identity (the server derives this identity from agent plus incarnation, falling
+back to runtime id), not a lookup in future thread events or the cast. An unrelated session id
+remains terminal `not-found`, even when that agent will later create a thread. The first reply is
+`conversation`, `replace: true`, `items: []`, `has_more: false`, with that session id; it has no
+collection window, snapshot or sync fields, just like the server's conversation frame. The
+subscription remains registered. HTTP timeline reads for that known session return an empty
+`timeline-page` in the normal fenced envelope; recorded HTTP reconstruction uses the same
+current-roster identity if its thread and explicit recorded session id are absent.
+HTTP timeline selectors are full or prefixless session ids only, never agent ids. Removal
+terminates pending followers through their canonical agent binding, including session selectors.
+An authoritative `replace` event after the empty snapshot retains replacement semantics,
+newest-page slicing and `has_more`; it is not converted to a delta.
+
+Explicit limitation: pending-thread resolution covers running agent runtimes only. The server's
+observed-incarnation owner inventory can also resolve stopped or retired agents; that broader
+subset is not modeled here.
+
 ### Consumer folds
 
 Each stream is checked with the consumer that really folds it, at every clock step of every
@@ -786,6 +873,9 @@ frames in order, and each frame decodes as a `CollectionFrame` in strict mode, i
 screen frame's `snapshot`. `huge` checks protocol-sized windows and scripted older conversation
 pages, including deterministic generation beyond committed history, not a full 1,000-agent
 socket window. The normal roster slice still commits all 1,000 agents.
+The first-run-onboarding proof subscribes at +3s, folds the empty successful conversation frame,
+then creation/entry deltas from +5s without resubscribing; unknown and not-yet-visible targets
+remain terminal not-found.
 
 ## Sync matrix
 
@@ -821,6 +911,7 @@ client-v0 schema; until then they are excluded from committed fixtures and the g
 | `quiet` (pending PR A) | Live, then `silence {15000}` | `Stale{Quiet{lastFrameAt}}`; at 25 s close and reconnect |
 | `progress` (pending PR B) | `progress` queued → resolving → routing{host} → reading{done,total} | `Progress{stage, elapsedMs, stageSince, reportedAt, host?, done?, total?}` per stage |
 | `progress-absent` | no `sync-status.v1` capability, slow first snapshot | `Requested` → `Live`; no invented stage; quiet detection off |
+| `arrangements-absent` | `arrangements` version 1 and `read.arrangements` version 0 are both advertised ungranted | Transport remains `Live`; consumers omit the optional arrangement surface. Direct arrangement reads are forbidden. Inventory is unchanged. |
 
 In every `Failed{Server}` expectation, `code` and `message` equal the triggering envelope's
 `code` and `message`. The SDK never replaces a server code.
@@ -873,6 +964,11 @@ The kit hands out **wire state**, not decoded values:
 - **Conformance:** for every world, the consumer tests that its story projection and its app
   projection (through replay and the real data layer) produce equal props for each component
   that has both.
+- **Arrangements:** sidebar and arrangement stories declare consumption of `roster`; projections
+  read its arrangement inventory rather than importing private fixtures. Arrangement projections
+  use the same person and subject selection as replay. `ArrangementPage` decoding, item equality
+  across list/detail/snapshot reads, empty inventories and the `arrangements-absent` feature gate
+  are part of story/app coherence, not independent consumer-authored demo data.
 - The provider owns a manual or real clock, so a story can advance time (streaming text, a
   reconnect) without timers in components.
 - Components under the provider never import the kit's factories; they receive props.
@@ -970,6 +1066,7 @@ Edge states:
 | `loading` | Discovery succeeds; every first reply is held. |
 | `unknown-fields` | Future enum values, extra keys, unknown resource and entry kinds. Decoded tolerant; strict decoding fails exactly at the declared paths. |
 | `failed-sync-<cause>` | One world per failed or stale [sync matrix](#sync-matrix) row that is not pending and needs no local condition: `socket-dropped`, `open-fail`, `resync-coded`, `forbidden`, `non-client-response`, `subscription-error`, `subscription-limit-legacy`, `capability-absent`, `rate-limited`, `cursor-gap`, `page-cursor-expired`. Each uses the authored synthetic refactor cast and slices, not the recording-adopted narrative. Pending rows become worlds when their frames land. |
+| `failed-sync-arrangements-absent` | Healthy transport with the `arrangements` feature and `read.arrangements` scope both advertised ungranted. Uses the authored synthetic refactor cast with an empty arrangement inventory; consumers omit the optional surface and direct arrangement reads are forbidden. |
 | `replication-diverged` | Healthy transport; page responses carry a `diverged` sync notice for one peer. |
 | `huge` | Full 1,000-agent roster across many hosts and missions in the normal slice; the first cast agent has 10,000 logical turns (40,000 entries). Commits the newest 400 turns (1,600 entries), including a 50-entry live window; scripted replay pages reach older entries generated deterministically from seed metadata. Native readers see committed pages only. |
 | `unicode` | RTL, CJK, emoji, combining marks, zero-width joiners, 200-character names and long paths in every slice. |

@@ -399,7 +399,7 @@ async fn serve_tile(
     }
 }
 
-fn bind(directory: &Path, uid: u32) -> anyhow::Result<tokio::net::UnixListener> {
+pub fn bind(directory: &Path, uid: u32) -> anyhow::Result<tokio::net::UnixListener> {
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
     let metadata = std::fs::symlink_metadata(directory)?;
     if !metadata.is_dir() || metadata.uid() != uid {
@@ -478,7 +478,10 @@ impl Change {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::api::tile_endpoint_tests_shared_client_v0_tests::{call, caller, get, message};
+use super::*;
     use std::io::{Read as _, Write as _};
     use std::sync::Mutex;
 
@@ -488,45 +491,6 @@ mod tests {
         fn cgroup(&self, _pid: i32) -> Option<String> {
             Some(self.0.lock().unwrap().clone())
         }
-    }
-
-    fn caller() -> TileCaller {
-        TileCaller {
-            tile: "atlas".into(),
-            agent: "agent/fleet/fixture-example/atlas".into(),
-            person: "person/ada".into(),
-            pid: 7,
-        }
-    }
-
-    async fn call(
-        app: &Router,
-        method: &str,
-        path: &str,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        let mut request = axum::http::Request::builder()
-            .method(method)
-            .uri(path)
-            .header("content-type", "application/json")
-            .body(Body::from(body.map(|b| b.to_string()).unwrap_or_default()))
-            .unwrap();
-        request.extensions_mut().insert(caller());
-        let response = tower::ServiceExt::oneshot(app.clone(), request)
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        )
-    }
-
-    fn message(from: &str, to: &str, key: &str) -> Value {
-        json!({"idempotency_key": key, "from": from, "to": to, "content": "hello"})
     }
 
     /// Sets its flag when dropped, as a listener closes when its task is.
@@ -621,86 +585,6 @@ mod tests {
         assert!(serving.is_empty());
     }
 
-    #[tokio::test]
-    async fn a_tile_acts_only_as_its_own_agent() {
-        let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
-        let app = router(state.clone());
-        let me = "agent/fleet/fixture-example/atlas";
-        let other = "agent/fleet/fixture-example/birch";
-
-        let (status, seen) = call(&app, "GET", "/v1/tile/whoami", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(seen["agent"], me);
-        assert_eq!(seen["tile"], "atlas");
-
-        // Sending as itself works, with or without naming itself.
-        let (status, sent) =
-            call(&app, "POST", "/v1/messages", Some(message(me, other, "a"))).await;
-        assert_eq!(status, StatusCode::OK, "{sent}");
-        assert_eq!(sent["from"], me);
-        let (status, sent) =
-            call(&app, "POST", "/v1/messages", Some(message("", other, "b"))).await;
-        assert_eq!(status, StatusCode::OK, "{sent}");
-        assert_eq!(sent["from"], me);
-        // Naming anyone else is refused, not rewritten.
-        for from in [other, "person/ada", "fleet/fixture-example/birch"] {
-            let (status, refused) =
-                call(&app, "POST", "/v1/messages", Some(message(from, me, "c"))).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{from}: {refused}");
-            assert_eq!(refused["code"], "tile-forbidden");
-        }
-        let mut attached = message(me, other, "d");
-        attached["attachments"] = json!([{"blob": "blob/x", "media_type": "image/png"}]);
-        let (status, _) = call(&app, "POST", "/v1/messages", Some(attached)).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // Its own mailbox, never another's.
-        let (status, mail) = call(&app, "GET", "/v1/messages", None).await;
-        assert_eq!(status, StatusCode::OK, "{mail}");
-        let (status, _) = call(&app, "GET", &format!("/v1/messages?to={other}"), None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // A message between others is not found; its own are.
-        let between_others = {
-            let state = state.clone();
-            let request: MessageSendRequest =
-                serde_json::from_value(message(other, "agent/fleet/fixture-example/cedar", "e"))
-                    .unwrap();
-            super::super::accept_message_receipt(&state, request, None, None).unwrap()
-        };
-        let (status, _) = call(
-            &app,
-            "GET",
-            &format!("/v1/messages/read/{}", between_others.message.subject),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, own) = call(
-            &app,
-            "GET",
-            &format!("/v1/messages/read/{}", sent["subject"].as_str().unwrap()),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{own}");
-
-        // Everything else the daemon serves is refused.
-        for (method, path) in [
-            ("GET", "/v1/agents"),
-            ("POST", "/v1/intent/apply"),
-            ("POST", "/v1/work/ask"),
-            ("GET", "/v1/documents"),
-            ("GET", "/v1/client/terminals"),
-            ("POST", "/v1/sekrets/attest"),
-            ("GET", "/v1/status"),
-        ] {
-            let (status, _) = call(&app, method, path, Some(json!({}))).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
-        }
-    }
-
     fn registry(uid: u32) -> Registry {
         Registry::parse(&format!(
             "uids = {{ first = {uid}, last = {} }}\n[tiles.atlas]\n\
@@ -711,21 +595,6 @@ mod tests {
         .unwrap()
         .with_uids(&format!("atlas = {uid}\nbirch = {}\n", uid + 1))
         .unwrap()
-    }
-
-    /// One raw HTTP request over the socket; `None` when the endpoint closed without a reply.
-    fn get(socket: &Path, path: &str) -> Option<String> {
-        let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .unwrap();
-        let _ = write!(
-            stream,
-            "GET {path} HTTP/1.1\r\nHost: tile\r\nConnection: close\r\n\r\n"
-        );
-        let mut response = String::new();
-        let _ = stream.read_to_string(&mut response);
-        (!response.is_empty()).then_some(response)
     }
 
     #[tokio::test(flavor = "multi_thread")]
