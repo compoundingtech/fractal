@@ -4,12 +4,12 @@
 mod ci_test_paths;
 
 use st3::CoordinationStore;
-use st3::GitChangesStore;
-use st3::LimitsStore;
 use st3::MissionsStore;
-use st3::PublicationFactsStore;
+use st3::LimitsStore;
 use st3::SeatsStore;
 use st3::StopDeferralStore;
+use st3::PublicationFactsStore;
+use st3::GitChangesStore;
 use st3::cli_output;
 use st3::{cli_print as print, cli_println as println};
 
@@ -42,27 +42,26 @@ use st3::model::{
     LaunchStartRequest, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
     MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
     MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
-    MissionRunReportRequest, MissionRunReportView, MissionRunView, MissionSpec, MissionState,
-    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult,
-    PersonAskRequest, PersonStepResponse, PlannerSpec, PlanningApprovalRequest,
-    PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningSessionView,
-    ReplicaRecordView, ReplicationPeerStatus, ReplicationRepairRequest, ReplicationStatus,
-    ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionProposalView,
-    RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode,
-    SessionInputRequest, SessionScreen, SessionSignalRequest, StatusResponse, StepRunView,
-    SubscriptionRequestDecision, SubscriptionRequestView, WorkExtendRequest, WorkRequest,
-    WorkRetryRequest, WorkWakeRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunView, MissionSpec, MissionState, OperationalRepairApplyRequest,
+    OperationalRepairPlan, OperationalRepairResult, PersonAskRequest, PersonStepResponse,
+    PlannerSpec, PlanningApprovalRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest,
+    PlanningSessionView, ReplicaRecordView, ReplicationPeerStatus, ReplicationRepairRequest,
+    ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest,
+    RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse,
+    SessionInputMode, SessionInputRequest, SessionScreen, SessionSignalRequest, StatusResponse,
+    StepRunView, SubscriptionRequestDecision, SubscriptionRequestView, WorkExtendRequest,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use st3::reconcile::Reconciler;
 use st3::store::Store;
 use st3_client::{
-    API_VERSION as CLIENT_V0_API_VERSION, AssistantGrantPolicy, AssistantMinimalReadMode,
-    AssistantPairingBegin, AssistantPrincipal, AssistantReadTrustRequest, AssistantScope,
-    Client as GeneratedClient, ClientError as GeneratedClientError, Envelope as ClientEnvelope,
-    ErrorCode as ClientErrorCode, EventPage as ClientEventPage, EventType as ClientEventType,
-    Fence as ClientFence, Page as ClientPage, PairingBegin, PersonPairingBegin,
-    Resource as ClientResource, TargetParameters as ClientTargetParameters,
-    TerminalInputMode as ClientTerminalInputMode,
+    API_VERSION as CLIENT_V0_API_VERSION, Client as GeneratedClient,
+    ClientError as GeneratedClientError, Envelope as ClientEnvelope, ErrorCode as ClientErrorCode,
+    EventPage as ClientEventPage, EventType as ClientEventType, Fence as ClientFence,
+    Page as ClientPage, PairingBegin, PersonPairingBegin, AssistantGrantPolicy, AssistantReadTrustRequest,
+    AssistantMinimalReadMode, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
+    Resource as ClientResource,
+    TargetParameters as ClientTargetParameters, TerminalInputMode as ClientTerminalInputMode,
     TerminalInputParameters as ClientTerminalInputParameters,
     TerminalScreen as ClientTerminalScreen, TimelineBody as ClientTimelineBody,
     TimelineEntry as ClientTimelineEntry, TimelinePage as ClientTimelinePage, catch_up_estimate,
@@ -73,18 +72,18 @@ use tokio::sync::{Notify, watch};
 use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
-mod actor_contract;
-mod change_cli;
 mod cli_help;
-mod completion;
+mod setup;
+mod onboarding;
+mod change_cli;
 mod directive_note;
+mod completion;
 mod doctor_cli;
+mod fractal;
 #[cfg(test)]
 mod follow_tests;
-mod fractal;
-mod onboarding;
 mod presentation;
-mod setup;
+mod actor_contract;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -169,7 +168,9 @@ fn cli_command() -> clap::Command {
     // Resolve each family once, not once per argument, to warn once per conflict.
     // Leave legacy bindings untouched unless the preferred alias is actually present.
     let bindings = CLI_ENVIRONMENT_NAMES.map(|(old, new)| {
-        std::env::var_os(new).map(|_| (old, st_drivers::contracts::env(old).map(|_| new)))
+        std::env::var_os(new).map(|_| {
+            (old, st_drivers::contracts::env(old).map(|_| new))
+        })
     });
     cli_command_with_bindings(Cli::command(), &bindings)
 }
@@ -896,6 +897,7 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
     removals
 }
 
+
 #[derive(Args)]
 struct FleetModeArgs {
     /// listening or dial-out.
@@ -1278,12 +1280,7 @@ struct MissionReportToArgs {
     agent: Option<String>,
     /// How long the run may go without progress before it counts as stalled, such as `1h`.
     /// Defaults to the mission's `stalled-after`, else 30 minutes.
-    #[arg(
-        long,
-        value_name = "DURATION",
-        requires = "agent",
-        conflicts_with = "clear"
-    )]
+    #[arg(long, value_name = "DURATION", requires = "agent", conflicts_with = "clear")]
     #[arg(value_parser = parse_stalled_after)]
     stalled_after: Option<u64>,
     /// Report stalls (true or false). Defaults to the mission's policy, else true.
@@ -2264,8 +2261,7 @@ enum BlobCommand {
 }
 
 #[derive(Subcommand)]
-#[command(
-    after_help = "A seat keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
+#[command(after_help = "A seat keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
 st restarts a seat for an account or model change, a declaration change, or an operator's or agent's \
 request; every session that starts after a restart is given the handoff and the live state of the \
 seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
@@ -2273,8 +2269,7 @@ the branches and pull requests you own, what you wait on, what to do next, and a
 that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.\n\n\
 Before a planned restart st sends the seat a \"Prepare for restart\" message with a deadline. Writing the \
 handoff acknowledges it; `ready` acknowledges a handoff that is already current. The restart goes ahead \
-at the acknowledgement or the deadline, whichever comes first."
-)]
+at the acknowledgement or the deadline, whichever comes first.")]
 enum HandoffCommand {
     /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
     Write {
@@ -2734,7 +2729,9 @@ enum OwnedSetsCommand {
     /// List selected owned sets and their source receipts.
     Ls,
     /// Show a set's live membership, retirements and blockers.
-    Show { name: String },
+    Show {
+        name: String,
+    },
     /// Inspect publication and rollout for one source commit.
     Status {
         name: String,
@@ -4384,8 +4381,8 @@ fn cli_main() -> ExitCode {
     // Cargo bakes the target name into each executable. The installed st3 binary cannot
     // enable this with an argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell =
-        (env!("CARGO_BIN_NAME") == "st3-fixture").then(st3::test_support::initialize_fixture);
+    let _fixture_shell = (env!("CARGO_BIN_NAME") == "st3-fixture")
+        .then(st3::test_support::initialize_fixture);
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { st_drivers::reexec::take_resume_environment() };
     if st_drivers::reexec::resume_path(st_drivers::reexec::DRIVER_RESUME_ENV).is_some() {
@@ -4667,7 +4664,8 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             let message = if native_driver {
                 plain_error(&error)
             } else {
-                doctor_cli::human_outage_message(&error).unwrap_or_else(|| plain_error(&error))
+                doctor_cli::human_outage_message(&error)
+                    .unwrap_or_else(|| plain_error(&error))
             };
             eprintln!("st: {message}");
             if refused_command(&error) {
@@ -4909,9 +4907,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
     let immediate = Client::new(endpoint.clone());
     match cli.command {
-        Command::ActorContract { .. } => {
-            unreachable!("the actor contract runs before the CLI runtime")
-        }
+        Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
@@ -4982,9 +4978,7 @@ async fn run(cli: Cli) -> Result<()> {
                     .map_err(anyhow::Error::msg)?,
                 };
                 let Endpoint::Unix(socket) = &endpoint else {
-                    anyhow::bail!(
-                        "Git change control commands require the trusted local Unix socket"
-                    );
+                    anyhow::bail!("Git change control commands require the trusted local Unix socket");
                 };
                 let named = if actor.starts_with("agent/") {
                     Client::unix_agent(socket, actor)?
@@ -5095,19 +5089,22 @@ async fn run(cli: Cli) -> Result<()> {
             clap_complete::env::Shells::builtins()
                 .completer(shell)
                 .context("clap_complete lacks a built-in shell")?
-                .write_registration("COMPLETE", "st", "st", "st", &mut cli_output::stdout())?;
+                .write_registration(
+                    "COMPLETE",
+                    "st",
+                    "st",
+                    "st",
+                    &mut cli_output::stdout(),
+                )?;
             Ok(())
         }
         Command::Driver(args) => run_driver(&immediate, args, cli.catalog.as_deref()).await,
         Command::Gate { command } => {
-            if matches!(
-                &command,
-                GateCommand::Merged { .. } | GateCommand::CiPassed { .. }
-            ) {
+            if matches!(&command, GateCommand::Merged { .. } | GateCommand::CiPassed { .. }) {
                 st3::resource::configure_github(&config)?;
             }
             run_gate(command).await
-        }
+        },
     }
 }
 
@@ -5606,8 +5603,7 @@ fn gateway_path_for_comparison(socket: &Path) -> Result<PathBuf> {
                                 missing_depth = 1;
                             }
                             Ok(_) => {
-                                return Err(error)
-                                    .context("resolve existing gateway socket ancestor");
+                                return Err(error).context("resolve existing gateway socket ancestor");
                             }
                             Err(error) => {
                                 return Err(error).context("inspect gateway socket ancestor");
@@ -5733,11 +5729,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let identity_duration = startup_started.elapsed();
     let mut telemetry = st3::otel::Telemetry::init(
         st3::otel::Unit::Daemon,
-        Some(if state_identity.is_ok() {
-            &config.node
-        } else {
-            &configured_node
-        }),
+        Some(if state_identity.is_ok() { &config.node } else { &configured_node }),
     );
     if st3::otel::metrics_enabled() {
         st3::reconcile::init_metrics();
@@ -5787,9 +5779,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup.phase("open-store");
     startup_telemetry.phase("open-store");
     let store = Arc::new(startup_telemetry.task("startup.open_store", || {
-        st3::task_cpu::blocking("startup.open_store", || {
-            Store::open(&config.state_dir.join("claims.sqlite3"), &config.node)
-        })
+        st3::task_cpu::blocking("startup.open_store", || Store::open(&config.state_dir.join("claims.sqlite3"), &config.node))
     })?);
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
@@ -5810,52 +5800,40 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
-    startup_telemetry.task("startup.judge_claims", || {
-        st3::task_cpu::blocking("startup.judge_claims", || store.judge_claims(true))
-    })?;
+    startup_telemetry.task("startup.judge_claims", || st3::task_cpu::blocking("startup.judge_claims", || store.judge_claims(true)))?;
     startup_phases.judge_claims_ms = phase_elapsed_ms();
     startup.phase("validate-replication-backlog");
     startup_telemetry.phase("validate-replication-backlog");
     let admission = startup_telemetry.task("startup.validate_replication_backlog", || {
-        st3::task_cpu::blocking("startup.validate_replication_backlog", || {
-            store.validate_replication_backlog()
-        })
+        st3::task_cpu::blocking("startup.validate_replication_backlog", || store.validate_replication_backlog())
     })?;
     startup_phases.validate_replication_backlog_ms = phase_elapsed_ms();
     startup.phase("apply-replication-repairs");
     startup_telemetry.phase("apply-replication-repairs");
     startup_telemetry.task("startup.apply_replication_repairs", || {
-        st3::task_cpu::blocking("startup.apply_replication_repairs", || {
-            store.apply_replication_repairs()
-        })
+        st3::task_cpu::blocking("startup.apply_replication_repairs", || store.apply_replication_repairs())
     })?;
     startup_phases.apply_replication_repairs_ms = phase_elapsed_ms();
     startup.phase("settle-runs");
     startup_telemetry.phase("settle-runs");
     for run in startup_telemetry.task("startup.settle_runs", || {
-        st3::task_cpu::blocking("startup.settle_runs", || {
-            store.settle_runs_for_canonical_replay()
-        })
+        st3::task_cpu::blocking("startup.settle_runs", || store.settle_runs_for_canonical_replay())
     })? {
         eprintln!("st: mission run `{run}` stays over as this node's graph showed it");
     }
     startup.phase("project-replication-backlog");
     startup_telemetry.phase("project-replication-backlog");
-    let projected = startup_telemetry
-        .task("startup.project_replication_backlog", || {
-            st3::task_cpu::blocking("startup.project_replication_backlog", || {
-                store.project_replication_backlog_with_progress(
-                    "startup/project-replication-backlog",
-                    |progress| {
-                        startup_telemetry.progress(progress);
-                        startup.progress(progress);
-                    },
-                )
-            })
+    let projected = startup_telemetry.task("startup.project_replication_backlog", || {
+        st3::task_cpu::blocking("startup.project_replication_backlog", || {
+        store.project_replication_backlog_with_progress(
+            "startup/project-replication-backlog",
+            |progress| {
+                startup_telemetry.progress(progress);
+                startup.progress(progress);
+            },
+        )
         })
-        .context(
-            "startup projection failed; stopping before daemon.started and runtime initialization",
-        )?;
+    }).context("startup projection failed; stopping before daemon.started and runtime initialization")?;
     if !projected {
         eprintln!(
             "st: the replicated projection remains deferred; the daemon will use its last good graph"
@@ -5913,13 +5891,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let login_environment = st3::environment::snapshot_at_startup()?;
     startup_phases.login_environment_ms = phase_elapsed_ms();
     let isolation_environment = login_environment.clone();
-    tokio::task::spawn_blocking(move || {
-        st3::task_cpu::blocking("startup.isolation", || {
-            st_runtime::initialize_isolation(&isolation_environment)
-        })
-    })
-    .await
-    .context("probe task isolation during daemon startup")?;
+    tokio::task::spawn_blocking(move || st3::task_cpu::blocking("startup.isolation", || st_runtime::initialize_isolation(&isolation_environment)))
+        .await
+        .context("probe task isolation during daemon startup")?;
     let pty_binary = match args.pty_binary.clone() {
         Some(pty_binary) => pty_binary,
         None => st_runtime::resolve_executable("pty", &login_environment)?,
@@ -5939,10 +5913,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.state_dir.clone(),
         st3::sekrets::client::socket_path(),
     );
-    store.install_git_change_registry(Arc::new(st3::changes::service::Registry::new(
-        &config.changes,
-        &config.node,
-    )?))?;
+    store.install_git_change_registry(Arc::new(st3::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
         owning_person: config.person.clone(),
         store: store.clone(),
@@ -5964,126 +5935,70 @@ async fn run_up(args: UpArgs) -> Result<()> {
     st3::api::spawn_tile_endpoints(state.clone());
     st3::gate_check::set_endpoint(config.socket.display().to_string());
     startup_phases.app_state_ms = phase_elapsed_ms();
-    let reconciler = Arc::new(
-        Reconciler::native(
-            store.clone(),
-            &config.state_dir,
-            Some(&pty_root),
-            &pty_binary,
-            config.node.clone(),
-            config.socket.display().to_string(),
-            notify.clone(),
-            event_notify.clone(),
-            recorder.map(|installation| installation.directory),
-        )?
-        .with_access_mode(config.active_access_mode())
-        .with_seat_priority(config.active_seat_priority())
-        .with_codex_asks(config.codex_work_without_asking == Some(false))
-        .with_schedule_peers(state.configured_peers.clone())
-        .with_client_relay(state.client_relay.clone())
-        .with_person(config.person.clone()),
-    );
+    let reconciler = Arc::new(Reconciler::native(
+        store.clone(),
+        &config.state_dir,
+        Some(&pty_root),
+        &pty_binary,
+        config.node.clone(),
+        config.socket.display().to_string(),
+        notify.clone(),
+        event_notify.clone(),
+        recorder.map(|installation| installation.directory),
+    )?.with_access_mode(config.active_access_mode()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
-    tokio::spawn(st3::task_cpu::account(
-        "reconcile.supervise",
-        reconciler.clone().supervise(),
-    ));
-    tokio::spawn(st3::task_cpu::account(
-        "profile.runtime_lag",
-        st3::profile::watch_runtime_lag(),
-    ));
+    tokio::spawn(st3::task_cpu::account("reconcile.supervise", reconciler.clone().supervise()));
+    tokio::spawn(st3::task_cpu::account("profile.runtime_lag", st3::profile::watch_runtime_lag()));
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     st3::config::set_daemon_config(args_config.as_deref());
-    tokio::spawn(st3::task_cpu::account(
-        "account_limits.enforce",
-        enforce_account_limits(store.clone(), config.limits.clone(), reconciler),
-    ));
+    tokio::spawn(st3::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
-    let _contention_retry = retry_projection_contention(
-        Arc::downgrade(&store),
-        notify.clone(),
-        event_notify.clone(),
-        config.state_dir.clone(),
-    );
-    tokio::spawn(st3::task_cpu::account(
-        "maintenance.signature_candidates",
-        migrate_signature_candidates(store.clone()),
-    ));
-    tokio::spawn(st3::task_cpu::account(
-        "maintenance.envelope_payloads",
-        convert_envelope_payloads(store.clone()),
-    ));
-    tokio::spawn(st3::task_cpu::account(
-        "maintenance.event_payloads",
-        migrate_event_payloads(store.clone()),
-    ));
-    tokio::spawn(st3::task_cpu::account(
-        "maintenance.coordination_counts",
-        catch_up_coordination_counts(store.clone()),
-    ));
-    tokio::spawn(st3::task_cpu::account(
-        "maintenance.stop_deferral_history",
-        copy_stop_deferral_history(store.clone()),
-    ));
+    let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    tokio::spawn(st3::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     if let Some(interval) = st3::maintenance::divergence_check_interval(
-        std::env::var(st3::maintenance::DIVERGENCE_CHECK_ENV)
-            .ok()
-            .as_deref(),
+        std::env::var(st3::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
-        tokio::spawn(st3::maintenance::check_projection_divergences(
-            store.clone(),
-            interval,
-        ));
+        tokio::spawn(st3::maintenance::check_projection_divergences(store.clone(), interval));
     }
     spawn_response_expiry(store.clone());
-    tokio::spawn(st3::task_cpu::account(
-        "observations.trim",
-        trim_local_observations(store.clone(), config.observations.clone()),
-    ));
-    tokio::spawn(st3::task_cpu::account(
-        "account_limits.catch_up",
-        catch_up_account_limits(store.clone(), notify.clone()),
-    ));
+    tokio::spawn(st3::task_cpu::account("observations.trim", trim_local_observations(
+        store.clone(),
+        config.observations.clone(),
+    )));
+    tokio::spawn(st3::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     {
         let store = store.clone();
-        tokio::spawn(st3::task_cpu::account(
-            "slo.history",
-            st3::slo_history::run(st3::slo_history::dir(&config.state_dir), move || {
-                st3::api::slo_rows(&store)
-            }),
-        ));
+        tokio::spawn(st3::task_cpu::account("slo.history", st3::slo_history::run(
+            st3::slo_history::dir(&config.state_dir),
+            move || st3::api::slo_rows(&store),
+        )));
     }
-    tokio::spawn(st3::task_cpu::account(
-        "recorder.receipts",
-        st3::recorder_receipts::run(
-            store.clone(),
-            st3::recorder::receipt_path(&config.state_dir),
-            notify.clone(),
-            event_notify.clone(),
-        ),
-    ));
+    tokio::spawn(st3::task_cpu::account("recorder.receipts", st3::recorder_receipts::run(
+        store.clone(),
+        st3::recorder::receipt_path(&config.state_dir),
+        notify.clone(),
+        event_notify.clone(),
+    )));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = st3::otlp::OtlpExporter::new(otlp, &config.node)?;
         eprintln!(
             "st3: exporting local observations to OpenTelemetry at {}",
             otlp.endpoint
         );
-        tokio::spawn(st3::task_cpu::account(
-            "observations.export",
-            st3::otlp::run(store.clone(), exporter),
-        ));
+        tokio::spawn(st3::task_cpu::account("observations.export", st3::otlp::run(store.clone(), exporter)));
         // The live SLO windows go out as gauges, once a minute, on a timer of their own.
-        tokio::spawn(st3::task_cpu::account(
-            "slo.export",
-            st3::otlp::run_slo(
-                st3::otlp::OtlpExporter::new(otlp, &config.node)?,
-                st3::api::request_latency_target_windows,
-            ),
-        ));
+        tokio::spawn(st3::task_cpu::account("slo.export", st3::otlp::run_slo(
+            st3::otlp::OtlpExporter::new(otlp, &config.node)?,
+            st3::api::request_latency_target_windows,
+        )));
     }
     #[cfg(target_os = "macos")]
     tokio::spawn(st3::task_cpu::account("maintenance.malloc_relief", async {
@@ -6091,11 +6006,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         // Give the system a chance to reclaim those pages without making request handling wait.
         loop {
             tokio::time::sleep(Duration::from_secs(120)).await;
-            let _ = tokio::task::spawn_blocking(|| {
-                st3::task_cpu::blocking("maintenance.malloc_relief", || unsafe {
-                    malloc_zone_pressure_relief(std::ptr::null_mut(), 0)
-                })
-            })
+            let _ = tokio::task::spawn_blocking(|| st3::task_cpu::blocking("maintenance.malloc_relief", || unsafe {
+                malloc_zone_pressure_relief(std::ptr::null_mut(), 0)
+            }))
             .await;
         }
     }));
@@ -6103,40 +6016,30 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // audit current state independently; no request waits for this startup report.
     if let Some(audit) = st3::api::start_operation_report(&state) {
         let store = store.clone();
-        tokio::spawn(st3::task_cpu::account(
-            "operations.repair_drift",
-            async move {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                let drift = match audit.await {
-                    Ok(Ok(drift)) => drift,
-                    Ok(Err(error)) => {
-                        eprintln!("st3: operation projection check failed: {error:#}");
-                        return;
-                    }
-                    Err(error) => {
-                        eprintln!("st3: operation projection check stopped: {error}");
-                        return;
-                    }
-                };
-                match store
-                    .connection
-                    .write_workers()
-                    .spawn_blocking(move || {
-                        st3::task_cpu::blocking("operations.repair_drift", || {
-                            store.repair_operation_projection_drift_from_audit(&drift)
-                        })
-                    })
-                    .await
-                {
-                    Ok(Ok(true)) => eprintln!("st3: rebuilt an operation projection that drifted"),
-                    Ok(Ok(false)) => {}
-                    Ok(Err(error)) => {
-                        eprintln!("st3: operation projection check failed: {error:#}")
-                    }
-                    Err(error) => eprintln!("st3: operation projection check stopped: {error}"),
+        tokio::spawn(st3::task_cpu::account("operations.repair_drift", async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let drift = match audit.await {
+                Ok(Ok(drift)) => drift,
+                Ok(Err(error)) => {
+                    eprintln!("st3: operation projection check failed: {error:#}");
+                    return;
                 }
-            },
-        ));
+                Err(error) => {
+                    eprintln!("st3: operation projection check stopped: {error}");
+                    return;
+                }
+            };
+            match store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("operations.repair_drift", || {
+                store.repair_operation_projection_drift_from_audit(&drift)
+            }))
+            .await
+            {
+                Ok(Ok(true)) => eprintln!("st3: rebuilt an operation projection that drifted"),
+                Ok(Ok(false)) => {}
+                Ok(Err(error)) => eprintln!("st3: operation projection check failed: {error:#}"),
+                Err(error) => eprintln!("st3: operation projection check stopped: {error}"),
+            }
+        }));
     }
     // Nor does the first session list wait to read every native transcript's header.
     st3::api::start_native_session_discovery(&state);
@@ -6155,9 +6058,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let terminal_socket = st3::config::terminal_socket(&config.state_dir);
     let _terminal_socket = match std::path::absolute(&state.pty_root)
         .map_err(anyhow::Error::from)
-        .and_then(|pty_root| {
-            st3::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root)
-        }) {
+        .and_then(|pty_root| st3::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root))
+    {
         Ok(service) => {
             eprintln!(
                 "st: Fabric terminal socket listening at {}",
@@ -6177,36 +6079,24 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
             let activation_store = store.clone();
-            let checkpoint_context =
-                config
-                    .checkpoint
-                    .enabled
-                    .then(|| st3::store::CheckpointContext {
-                        now_unix_ms: 0,
-                        configured_peers: config
-                            .peers
-                            .iter()
-                            .map(|peer| peer.name.clone())
-                            .collect(),
-                        scratch: config.state_dir.join("checkpoint"),
-                        reviewer: config
-                            .person
-                            .clone()
-                            .unwrap_or_else(|| "person/operator".into()),
-                    });
+            let checkpoint_context = config
+                .checkpoint
+                .enabled
+                .then(|| st3::store::CheckpointContext {
+                    now_unix_ms: 0,
+                    configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
+                    scratch: config.state_dir.join("checkpoint"),
+                    reviewer: config
+                        .person
+                        .clone()
+                        .unwrap_or_else(|| "person/operator".into()),
+                });
             tokio::spawn(st3::task_cpu::account("replication.activate", async move {
-                match activation_store
-                    .connection
-                    .write_workers()
-                    .spawn_blocking({
-                        let store = activation_store.clone();
-                        move || {
-                            st3::task_cpu::blocking("replication.activate", || {
-                                store.complete_replication_activation()
-                            })
-                        }
-                    })
-                    .await
+                match activation_store.connection.write_workers().spawn_blocking({
+                    let store = activation_store.clone();
+                    move || st3::task_cpu::blocking("replication.activate", || store.complete_replication_activation())
+                })
+                .await
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
@@ -6219,10 +6109,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     }
                 }
                 if let Some(context) = checkpoint_context {
-                    tokio::spawn(st3::task_cpu::account(
-                        "maintenance.checkpoint",
-                        run_checkpoints(activation_store, context),
-                    ));
+                    tokio::spawn(st3::task_cpu::account("maintenance.checkpoint", run_checkpoints(activation_store, context)));
                 }
             }));
             spawn_publication_evidence(store.clone());
@@ -6247,12 +6134,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             true,
             ready
         ),
-        st3::api::serve_reserved_unix_with_ready(
-            gateway_reserved,
-            fabric_router(state),
-            false,
-            ready
-        ),
+        st3::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), false, ready),
     )?;
     telemetry.shutdown();
     Ok(())
@@ -6774,15 +6656,8 @@ async fn follow_mission_run(
         None
     };
     follow_mission_run_to(
-        client,
-        run,
-        json_output,
-        interactive,
-        limit,
-        OutputStyle::stdout(),
-        &mut cli_output::stdout(),
-    )
-    .await
+        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
+    ).await
 }
 
 async fn follow_mission_run_to(
@@ -6817,9 +6692,7 @@ async fn follow_mission_run_to(
         } else {
             String::new()
         };
-        if summary != prior
-            && let Some(page) = &page
-        {
+        if summary != prior && let Some(page) = &page {
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
@@ -6877,7 +6750,9 @@ async fn load_mission_run_tree(
         query.push_str("&after=");
         query.push_str(&urlencoding::encode(after));
     }
-    client.get(&query).await
+    client
+        .get(&query)
+        .await
 }
 
 fn mission_run_follow_succeeded(status: &str) -> bool {
@@ -7095,9 +6970,7 @@ async fn attach_terminal(
                 return terminal_exit(code);
             }
             (None, _) if budget.is_some() => {
-                anyhow::bail!(
-                    "st terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`"
-                );
+                anyhow::bail!("st terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`");
             }
             (None, Some(root)) => {
                 eprintln!(
@@ -7751,11 +7624,7 @@ async fn run_devices(
             );
             print!(
                 "{}",
-                with_device_presence(
-                    &rendered,
-                    clients.as_ref().map(|found| &found.value),
-                    now_ms()
-                )
+                with_device_presence(&rendered, clients.as_ref().map(|found| &found.value), now_ms())
             );
             note_partial_page(&response.value);
             Ok(())
@@ -7836,13 +7705,8 @@ async fn run_devices(
                 AssistantGrantCommand::Revoke { grant } => {
                     client.assistant_grant_revoke(&grant).await?
                 }
-                AssistantGrantCommand::Policy {
-                    grant,
-                    terms,
-                    recipients,
-                } => {
-                    let terms =
-                        SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
+                AssistantGrantCommand::Policy { grant, terms, recipients } => {
+                    let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
                     let mut policy = terms.into_policy();
                     policy.recipient_allowlist = Some(recipients);
                     client.assistant_grant_policy(&grant, &policy).await?
@@ -7873,29 +7737,13 @@ async fn run_devices(
                     policy.recipient_allowlist = Some(current.value.recipient_allowlist);
                     client.assistant_grant_policy(&grant, &policy).await?
                 }
-                AssistantGrantCommand::ReadTrust {
-                    grant,
-                    issuer,
-                    key_id,
-                    attestor_public_key,
-                    shim_public_key,
-                    default_response_bytes,
-                    max_response_bytes,
-                } => {
-                    client
-                        .assistant_grant_read_trust(
-                            &grant,
-                            &AssistantReadTrustRequest {
-                                api_version: CLIENT_V0_API_VERSION.into(),
-                                issuer,
-                                key_id,
-                                attestor_public_key,
-                                shim_public_key,
-                                default_response_bytes: Some(default_response_bytes),
-                                max_response_bytes: Some(max_response_bytes),
-                            },
-                        )
-                        .await?
+                AssistantGrantCommand::ReadTrust { grant, issuer, key_id, attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes } => {
+                    client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
+                        api_version: CLIENT_V0_API_VERSION.into(), issuer, key_id,
+                        attestor_public_key, shim_public_key,
+                        default_response_bytes: Some(default_response_bytes),
+                        max_response_bytes: Some(max_response_bytes),
+                    }).await?
                 }
             };
             print_client_value(&response, json_output)
@@ -8160,9 +8008,7 @@ fn ago(timestamp: &str, now_ms: u128) -> String {
     let Ok(then) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
         return timestamp.to_owned();
     };
-    let seconds = (now_ms as i64 / 1_000)
-        .saturating_sub(then.timestamp())
-        .max(0);
+    let seconds = (now_ms as i64 / 1_000).saturating_sub(then.timestamp()).max(0);
     match seconds {
         0..60 => "just now".into(),
         60..3_600 => format!("{}m ago", seconds / 60),
@@ -8249,8 +8095,8 @@ fn configured_actor(
     if let Some(explicit) = explicit {
         return parse_actor_subject(explicit).map_err(anyhow::Error::msg);
     }
-    if let Some(own) =
-        st_drivers::contracts::env("ST_AGENT").filter(|own| own.starts_with("agent/"))
+    if let Some(own) = st_drivers::contracts::env("ST_AGENT")
+        .filter(|own| own.starts_with("agent/"))
     {
         return Ok(own);
     }
@@ -8500,10 +8346,7 @@ fn attention_heading(item: &st3_client::Attention, now_unix_ms: u128) -> String 
     // The agent whose conversation it belongs to, which a gate or an approval names even though
     // no agent asked it; an older daemon names only the requester.
     if let Some(from) = item.conversation_id.as_ref().or(item.requester_id.as_ref()) {
-        about.push(format!(
-            "from {}",
-            from.strip_prefix("agent/").unwrap_or(from)
-        ));
+        about.push(format!("from {}", from.strip_prefix("agent/").unwrap_or(from)));
     }
     about.push(ago(&item.requested_at, now_unix_ms));
     if item.priority != "normal" {
@@ -8585,8 +8428,7 @@ fn render_alert_sections(
     continuation_command: &str,
 ) -> String {
     let attention = |item: &ClientResource| matches!(item, ClientResource::Attention(_));
-    let alert =
-        |item: &ClientResource| matches!(item, ClientResource::Attention(item) if is_alert(item));
+    let alert = |item: &ClientResource| matches!(item, ClientResource::Attention(item) if is_alert(item));
     let mut alerts = page.clone();
     alerts.items.retain(alert);
     alerts.page.next_cursor = None;
@@ -8604,11 +8446,7 @@ fn render_alert_sections(
         if !output.is_empty() {
             output.push('\n');
         }
-        output.push_str(&render_product_page(
-            "UPDATES",
-            &updates,
-            continuation_command,
-        ));
+        output.push_str(&render_product_page("UPDATES", &updates, continuation_command));
     }
     if let Some(cursor) = page.page.next_cursor.as_deref() {
         use std::fmt::Write as _;
@@ -8799,8 +8637,7 @@ fn render_product_page_headed(
                 );
                 if let Some(person) = &item.person_id {
                     let _ = writeln!(
-                        output,
-                        "  action: st devices --as {} revoke {}",
+                        output, "  action: st devices --as {} revoke {}",
                         person, item.header.id
                     );
                 } else if let Some(grant) = &item.grant_id {
@@ -8909,14 +8746,11 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             }
         }
         SloCommand::Chart { id, over, width } => {
-            let row =
-                st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
             let period_ms = parse_slo_period(&over)?;
             let until = current_unix_ms()? as u64;
             let since = until.saturating_sub(period_ms);
-            let columns = width
-                .unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7))
-                .clamp(10, 400);
+            let columns = width.unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7)).clamp(10, 400);
             let history: Value = client
                 .get(&format!(
                     "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
@@ -8930,8 +8764,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             }
         }
         SloCommand::Explain { id } => {
-            let row =
-                st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
             if json_output {
                 println!("{}", serde_json::to_string_pretty(row)?);
             } else {
@@ -8953,16 +8786,10 @@ fn render_slo_list(rows: &[Value]) -> String {
     };
     let mut output = String::new();
     for (kind, heading) in [
-        (
-            "objective",
-            "OBJECTIVES  a target with windows and an error budget",
-        ),
+        ("objective", "OBJECTIVES  a target with windows and an error budget"),
         ("budget", "BUDGETS  an allowance that resets"),
     ] {
-        let group = rows
-            .iter()
-            .filter(|row| row["kind"] == kind)
-            .collect::<Vec<_>>();
+        let group = rows.iter().filter(|row| row["kind"] == kind).collect::<Vec<_>>();
         if group.is_empty() {
             continue;
         }
@@ -9011,13 +8838,11 @@ fn render_slo_list(rows: &[Value]) -> String {
 
 /// A period such as `90m`, `24h` or `7d`, in milliseconds. The daemon keeps seven days.
 fn parse_slo_period(text: &str) -> Result<u64> {
-    let split = text
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len());
+    let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
     let (number, unit) = text.split_at(split);
-    let number: u64 = number.parse().map_err(|_| {
-        anyhow::anyhow!("--over takes a number then m, h or d, such as 24h; got {text:?}")
-    })?;
+    let number: u64 = number
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--over takes a number then m, h or d, such as 24h; got {text:?}"))?;
     let unit_ms = match unit {
         "m" => 60_000,
         "h" => 3_600_000,
@@ -9026,10 +8851,7 @@ fn parse_slo_period(text: &str) -> Result<u64> {
     };
     let period = number.saturating_mul(unit_ms);
     anyhow::ensure!(period >= 60_000, "--over must be at least a minute");
-    anyhow::ensure!(
-        period <= 7 * 86_400_000,
-        "the history keeps seven days; --over can be at most 7d"
-    );
+    anyhow::ensure!(period <= 7 * 86_400_000, "the history keeps seven days; --over can be at most 7d");
     Ok(period)
 }
 
@@ -9045,11 +8867,7 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
         .map(|steps| steps.iter().map(Value::as_f64).collect::<Vec<_>>())
         .unwrap_or_default();
     let id = row["id"].as_str().unwrap_or_default();
-    let what = if row["kind"] == "budget" {
-        "allowance left"
-    } else {
-        "error budget left"
-    };
+    let what = if row["kind"] == "budget" { "allowance left" } else { "error budget left" };
     let mut output = String::new();
     let _ = writeln!(output, "{id} · {what} · last {over}");
     let readings = history["samples"].as_u64().unwrap_or(0);
@@ -9072,14 +8890,9 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
             .iter()
             .map(|step| match step {
                 Some(percent) => {
-                    let eighths =
-                        (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
+                    let eighths = (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
                     // Even a spent budget shows its reading as the lowest sliver, never a gap.
-                    let eighths = if line == HEIGHT - 1 {
-                        eighths.max(1)
-                    } else {
-                        eighths
-                    };
+                    let eighths = if line == HEIGHT - 1 { eighths.max(1) } else { eighths };
                     LEVELS[eighths.saturating_sub((HEIGHT - 1 - line) * 8).min(8)]
                 }
                 None if line == HEIGHT - 1 => '·',
@@ -9096,22 +8909,11 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
             .map_or_else(|| "?".to_owned(), |at| at.format("%m-%d %H:%M").to_string())
     };
     let (from, to) = (time(&history["since_ms"]), time(&history["until_ms"]));
-    let gap = (steps.len() + 1)
-        .saturating_sub(from.chars().count() + to.chars().count() + 4)
-        .max(1);
+    let gap = (steps.len() + 1).saturating_sub(from.chars().count() + to.chars().count() + 4).max(1);
     let _ = writeln!(output, "      {from} UTC{}{to}", " ".repeat(gap));
     let low = known.iter().copied().fold(f64::INFINITY, f64::min);
-    let now = steps
-        .iter()
-        .rev()
-        .flatten()
-        .next()
-        .copied()
-        .unwrap_or_default();
-    let _ = writeln!(
-        output,
-        "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading"
-    );
+    let now = steps.iter().rev().flatten().next().copied().unwrap_or_default();
+    let _ = writeln!(output, "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading");
     output
 }
 
@@ -9120,25 +8922,11 @@ fn render_slo_explanation(row: &Value) -> String {
 
     let text = |field: &str| row[field].as_str().unwrap_or_default();
     let mut output = String::new();
-    let _ = writeln!(
-        output,
-        "{}  {} · {}",
-        text("id"),
-        text("kind"),
-        text("status")
-    );
+    let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
     let _ = writeln!(output, "TARGET   {}", text("target"));
     let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
     if let Some(left) = row["remaining_percent"].as_f64() {
-        let _ = writeln!(
-            output,
-            "LEFT     {left:.0}% of the {}",
-            if row["kind"] == "budget" {
-                "allowance"
-            } else {
-                "error budget"
-            }
-        );
+        let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
     }
     if let Some(at) = row["resets_at_unix_ms"]
         .as_u64()
@@ -9314,16 +9102,8 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 output,
                 "EXEMPT  never stopped at {}% · accounts: {} · harnesses: {}",
                 report["limits_policy"]["stop_at_weekly_percent"],
-                if accounts.is_empty() {
-                    "none"
-                } else {
-                    &accounts
-                },
-                if harnesses.is_empty() {
-                    "none"
-                } else {
-                    &harnesses
-                },
+                if accounts.is_empty() { "none" } else { &accounts },
+                if harnesses.is_empty() { "none" } else { &harnesses },
             );
         }
     }
@@ -9676,8 +9456,7 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&result, json_output)
         }
         SubjectCommand::Show(args) => {
-            if args.subject.starts_with("custom/")
-                && !args.kdl
+            if args.subject.starts_with("custom/") && !args.kdl
                 && let Ok(result) = client
                     .get::<Value>(&format!(
                         "/v1/client/custom-subjects/{}",
@@ -10218,14 +9997,11 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
         }
         Err(error) if st3::client::daemon_unreachable(&error).is_some() => {
             if json_output {
-                let message =
-                    doctor_cli::human_outage_message(&error).unwrap_or_else(|| plain_error(&error));
-                print_value(
-                    &json!({"status": "fail", "checks": [{
-                        "name": "daemon", "status": "fail", "message": message
-                    }]}),
-                    true,
-                )?;
+                let message = doctor_cli::human_outage_message(&error)
+                    .unwrap_or_else(|| plain_error(&error));
+                print_value(&json!({"status": "fail", "checks": [{
+                    "name": "daemon", "status": "fail", "message": message
+                }]}), true)?;
             }
             Err(error)
         }
@@ -10458,9 +10234,7 @@ fn render_caught_up(caught_up: &CaughtUp, now: u128) -> String {
 }
 
 /// Envelopes this node admitted beyond a writer's high water, which the fleet fenced, or None.
-fn render_fenced_admissions(
-    residue: &[smallclaims::store::FleetAdmissionResidue],
-) -> Option<String> {
+fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue]) -> Option<String> {
     let fenced = residue
         .iter()
         .filter(|item| item.reason == "admitted-beyond-high-water")
@@ -10754,9 +10528,7 @@ fn render_replication_peers(
 fn arrival_estimate(sync: &st3::model::ReplicationPeerSync) -> String {
     // The lower of the catch-up and receive rates: nothing arriving is not catching up either.
     if sync.peer_only_envelopes != 0
-        && sync
-            .closing_rate_per_second()
-            .is_some_and(|rate| rate <= 0.0)
+        && sync.closing_rate_per_second().is_some_and(|rate| rate <= 0.0)
     {
         return "not catching up".into();
     }
@@ -10774,10 +10546,7 @@ fn peer_graphs_equal(peer: &ReplicationPeerStatus, local_graph_digest: &str) -> 
 /// presented as current.
 fn compared_ago(peer: &ReplicationPeerStatus, now: u128) -> String {
     peer.projection_compared_at_unix_ms
-        .or(peer
-            .sync
-            .as_ref()
-            .and_then(|sync| sync.graph_compared_at_unix_ms))
+        .or(peer.sync.as_ref().and_then(|sync| sync.graph_compared_at_unix_ms))
         .map(|at| relative_time(at, now))
         .unwrap_or_else(|| "at the last exchange".into())
 }
@@ -10819,11 +10588,7 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
     for member in &status.participants {
         output.push_str(&format!(
             "  machine_version  {member}: {}\n",
-            status
-                .machine_version
-                .get(member)
-                .map(String::as_str)
-                .unwrap_or("not advertised")
+            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
         ));
     }
     if !status.excused.is_empty() {
@@ -10858,10 +10623,12 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
 
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
     match command {
-        ServiceCommand::Install { config } => st3::service::install_from_config_path(
-            Config::load_with_fleet(config.as_deref())?,
-            config.as_deref(),
-        ),
+        ServiceCommand::Install { config } => {
+            st3::service::install_from_config_path(
+                Config::load_with_fleet(config.as_deref())?,
+                config.as_deref(),
+            )
+        }
         ServiceCommand::Status => {
             let config = Config::load_unvalidated(None)?;
             let mut report = st3::service::status()?;
@@ -11020,7 +10787,10 @@ fn normalize_member_subject(subject: &str, namespace: &str) -> String {
 /// The identity an attachment command acts as: the one named, the seat's, or the configured person.
 fn blob_actor(named: Option<String>, configured_person: Option<&str>) -> Result<String> {
     let actor = named
-        .or_else(|| st_drivers::contracts::env("ST_AGENT").filter(|agent| !agent.is_empty()))
+        .or_else(|| {
+            st_drivers::contracts::env("ST_AGENT")
+                .filter(|agent| !agent.is_empty())
+        })
         .or_else(|| configured_person.map(str::to_owned))
         .context("name who acts with --as, or run inside a seat or with a configured person")?;
     reject_foreign_agent_actor(&actor)?;
@@ -11065,11 +10835,7 @@ async fn upload_attachment(
             if let Some(note) = &prepared.note {
                 eprintln!("{note}");
             }
-            (
-                prepared.bytes,
-                prepared.media_type.to_owned(),
-                prepared.name,
-            )
+            (prepared.bytes, prepared.media_type.to_owned(), prepared.name)
         }
     };
     let uploaded = generated_client(endpoint, Some(actor))?
@@ -11142,9 +10908,9 @@ async fn run_rules(
 ) -> Result<()> {
     use smallclaims::rules::{Mode, NamedRule};
     let person = |actor: Option<String>| -> Result<String> {
-        actor.or_else(|| config.person.clone()).context(
-            "rules are set by a person: set person in config.toml or pass --as person/NAME",
-        )
+        actor
+            .or_else(|| config.person.clone())
+            .context("rules are set by a person: set person in config.toml or pass --as person/NAME")
     };
     let set = |actor: &str, name: &str, rule: smallclaims::rules::Rule| {
         let request = st3::api::RuleSetRequest {
@@ -11164,9 +10930,7 @@ async fn run_rules(
                 return print_value(&rules, true);
             }
             if rules.is_empty() {
-                println!(
-                    "no rules: every principal may write what its person may (st rules lockdown sets the presets)"
-                );
+                println!("no rules: every principal may write what its person may (st rules lockdown sets the presets)");
             }
             for rule in rules {
                 println!(
@@ -11249,16 +11013,16 @@ async fn run_rules(
 fn render_document(bytes: &[u8], width: usize) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     let start = text.trim_start();
-    if text.contains('\0')
-        || start.starts_with('{')
-        || start.starts_with('[')
-        || start.starts_with("version ")
-    {
+    if text.contains('\0') || start.starts_with('{') || start.starts_with('[') || start.starts_with("version ") {
         return None;
     }
     let theme = st3_conversation_ui::Theme::default();
-    let lines =
-        st3_conversation_ui::text::markdown(text, width.saturating_sub(2), theme.text(), &theme);
+    let lines = st3_conversation_ui::text::markdown(
+        text,
+        width.saturating_sub(2),
+        theme.text(),
+        &theme,
+    );
     Some(
         lines
             .iter()
@@ -12321,15 +12085,12 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
             match introducer {
                 Some('[') => {
                     for next in characters.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&next) {
-                            break;
-                        }
+                        if ('\u{40}'..='\u{7e}').contains(&next) { break; }
                     }
                 }
                 Some(']') => {
                     while let Some(next) = characters.next() {
-                        if next == '\u{7}' || (next == '\u{1b}' && characters.next() == Some('\\'))
-                        {
+                        if next == '\u{7}' || (next == '\u{1b}' && characters.next() == Some('\\')) {
                             break;
                         }
                     }
@@ -12341,9 +12102,7 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
         if character.is_whitespace() {
             space = written;
         } else if !character.is_control() {
-            if space {
-                output.push(' ');
-            }
+            if space { output.push(' '); }
             output.push(character);
             written = true;
             space = false;
@@ -12361,11 +12120,7 @@ fn render_client_agent(
     let mut output = String::new();
     let _ = writeln!(output, "AGENT  {}", agent.header.id);
     let _ = writeln!(output, "NAME         {}", agent.name);
-    match agent
-        .down_since
-        .as_deref()
-        .filter(|_| agent.state == "down")
-    {
+    match agent.down_since.as_deref().filter(|_| agent.state == "down") {
         Some(since) => {
             let _ = writeln!(output, "STATE        down · no session since {since}");
         }
@@ -12380,16 +12135,15 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
-    if agent.blocked_on.as_deref() == Some("human") && agent.ask.as_deref() == Some("permission") {
+    if agent.blocked_on.as_deref() == Some("human")
+        && agent.ask.as_deref() == Some("permission")
+    {
         let _ = writeln!(output, "AWAITING     approval");
     }
     if let Some(todo) = &agent.todo {
         let snapshot = &todo.snapshot;
         let _ = write!(output, "Todo         ");
-        if let Some(active) = snapshot
-            .phases
-            .iter()
-            .flat_map(|phase| &phase.tasks)
+        if let Some(active) = snapshot.phases.iter().flat_map(|phase| &phase.tasks)
             .find(|task| task.status == st3_client::HarnessTaskStatus::InProgress)
         {
             output.push_str("▶ ");
@@ -12397,15 +12151,9 @@ fn render_client_agent(
             output.push_str(" · ");
         }
         let totals = &snapshot.totals;
-        let total = u128::from(totals.pending)
-            + u128::from(totals.in_progress)
-            + u128::from(totals.completed)
-            + u128::from(totals.blocked);
-        let _ = write!(
-            output,
-            "{}/{total} done · {} blocked",
-            totals.completed, totals.blocked
-        );
+        let total = u128::from(totals.pending) + u128::from(totals.in_progress)
+            + u128::from(totals.completed) + u128::from(totals.blocked);
+        let _ = write!(output, "{}/{total} done · {} blocked", totals.completed, totals.blocked);
         if totals.abandoned > 0 {
             let _ = write!(output, " · {} abandoned", totals.abandoned);
         }
@@ -12422,22 +12170,11 @@ fn render_client_agent(
         let _ = writeln!(output, "FAULT        {fault}");
     }
     if let Some(handoff) = &agent.handoff {
-        let pending = if handoff.pending_sources.is_empty() {
-            String::new()
-        } else {
-            format!(" · waiting for {}", handoff.pending_sources.join(", "))
-        };
-        let _ = writeln!(
-            output,
-            "HANDOFF      {} → {}{pending}",
-            handoff.phase, handoff.destination
-        );
+        let pending = if handoff.pending_sources.is_empty() { String::new() }
+            else { format!(" · waiting for {}", handoff.pending_sources.join(", ")) };
+        let _ = writeln!(output, "HANDOFF      {} → {}{pending}", handoff.phase, handoff.destination);
         if !handoff.overridden_sources.is_empty() {
-            let _ = writeln!(
-                output,
-                "SOURCE OFFLINE {} · override recorded",
-                handoff.overridden_sources.join(", ")
-            );
+            let _ = writeln!(output, "SOURCE OFFLINE {} · override recorded", handoff.overridden_sources.join(", "));
         }
     }
     if let Some(suspension) = &agent.suspension {
@@ -12517,27 +12254,14 @@ fn render_client_agent(
         let phase = operation["phase"].as_str().unwrap_or("unknown");
         let id = operation["operation_id"].as_str().unwrap_or("unknown");
         let running = operation["worker_running"] == true;
-        let _ = writeln!(
-            output,
-            "START        {phase} · {id}{}",
-            if running && phase == "revoked" {
-                " · launch worker still running"
-            } else {
-                ""
-            }
-        );
-        let _ = writeln!(
-            output,
-            "START JOBS   {} running · {} revoked and still running",
+        let _ = writeln!(output, "START        {phase} · {id}{}",
+            if running && phase == "revoked" { " · launch worker still running" } else { "" });
+        let _ = writeln!(output, "START JOBS   {} running · {} revoked and still running",
             operation["running_jobs"].as_u64().unwrap_or(0),
-            operation["revoked_running_jobs"].as_u64().unwrap_or(0)
-        );
-        let _ = writeln!(
-            output,
-            "START OPEN   {} unresolved · {} revoked and unresolved",
+            operation["revoked_running_jobs"].as_u64().unwrap_or(0));
+        let _ = writeln!(output, "START OPEN   {} unresolved · {} revoked and unresolved",
             operation["unresolved_jobs"].as_u64().unwrap_or(0),
-            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0)
-        );
+            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0));
     }
     if let Some(owner) = &agent.owner_run_id {
         let _ = writeln!(output, "MISSION      {owner}");
@@ -12785,8 +12509,8 @@ fn render_client_agents(
 /// The process may still act as a non-agent subject, such as its exec or a person its work names.
 fn reject_foreign_agent_actor(actor: &str) -> Result<()> {
     let own = st_drivers::contracts::env("ST_AGENT");
-    let mission_run =
-        st_drivers::contracts::env("ST_MISSION_RUN").filter(|value| !value.is_empty());
+    let mission_run = st_drivers::contracts::env("ST_MISSION_RUN")
+        .filter(|value| !value.is_empty());
     match foreign_agent_actor(actor, own.as_deref(), mission_run.as_deref()) {
         Some(message) => anyhow::bail!(message),
         None => Ok(()),
@@ -12815,8 +12539,8 @@ fn foreign_agent_actor(
 }
 
 fn normalize_message_subject(value: &str) -> String {
-    let mission_run =
-        st_drivers::contracts::env("ST_MISSION_RUN").filter(|value| !value.is_empty());
+    let mission_run = st_drivers::contracts::env("ST_MISSION_RUN")
+        .filter(|value| !value.is_empty());
     normalize_message_subject_in_run(value, mission_run.as_deref())
 }
 
@@ -14412,8 +14136,7 @@ fn harness_activity_state(activity: st_drivers::harness_state::Activity) -> &'st
     match activity {
         st_drivers::harness_state::Activity::Ready => "ready",
         st_drivers::harness_state::Activity::Idle => "idle",
-        st_drivers::harness_state::Activity::Active
-        | st_drivers::harness_state::Activity::Child => "working",
+        st_drivers::harness_state::Activity::Active | st_drivers::harness_state::Activity::Child => "working",
         st_drivers::harness_state::Activity::Ended => "ended",
         st_drivers::harness_state::Activity::Unknown => "indeterminate",
     }
@@ -14456,8 +14179,7 @@ impl NativeObservations {
                 .evidence_incarnation
         });
         let native_state_seen = snapshot.as_deref().is_some_and(|raw| {
-            let state =
-                st_drivers::harness_state::read_raw_at(raw, None, st_drivers::message::now_ms());
+            let state = st_drivers::harness_state::read_raw_at(raw, None, st_drivers::message::now_ms());
             !(state.state == st_drivers::harness_state::Activity::Unknown
                 && state.reason.as_deref() == Some("claimed"))
         });
@@ -14536,8 +14258,7 @@ impl NativeObservations {
         driver: &str,
         ready: &mut bool,
     ) -> Result<bool> {
-        self.drain_events(client, subject, driver, ready, true)
-            .await
+        self.drain_events(client, subject, driver, ready, true).await
     }
 
     async fn drain(
@@ -14569,18 +14290,11 @@ impl NativeObservations {
         for event in &mut events {
             // Account binding is outbox metadata, not part of the producer's observation.
             // Preserve it separately for the accounting claim builders below.
-            let account_ref = event
-                .payload
-                .as_object_mut()
+            let account_ref = event.payload.as_object_mut()
                 .and_then(|fields| fields.remove("account_ref"));
             let publisher = ObservationClient {
                 client,
-                event: Some((
-                    &self.runtime,
-                    event.sequence,
-                    &self.dir,
-                    account_ref.as_ref().and_then(Value::as_str),
-                )),
+                event: Some((&self.runtime, event.sequence, &self.dir, account_ref.as_ref().and_then(Value::as_str))),
             };
             let raw = serde_json::to_vec(&event.payload)?;
             let source_driver = event.payload["harness"]
@@ -14618,21 +14332,16 @@ impl NativeObservations {
                             && observed.state == st_drivers::harness_state::Activity::Ended
                             && observed.exit.is_some()
                             && observed.evidence_incarnation.is_some()
-                            && st_drivers::harness_events::read_runtime_state(
-                                &self.dir,
-                                &self.runtime,
-                            )?
-                            .is_some_and(|current| {
-                                let current = st_drivers::harness_state::read_raw_at(
-                                    &current,
-                                    None,
-                                    event.queued_at_ms,
-                                );
-                                current.evidence_incarnation == observed.evidence_incarnation
-                                    && current.ownership_sequence == observed.ownership_sequence
-                                    && current.transition_sequence == observed.transition_sequence
-                                    && current.exit == observed.exit
-                            })
+                            && st_drivers::harness_events::read_runtime_state(&self.dir, &self.runtime)?
+                                .is_some_and(|current| {
+                                    let current = st_drivers::harness_state::read_raw_at(
+                                        &current, None, event.queued_at_ms,
+                                    );
+                                    current.evidence_incarnation == observed.evidence_incarnation
+                                        && current.ownership_sequence == observed.ownership_sequence
+                                        && current.transition_sequence == observed.transition_sequence
+                                        && current.exit == observed.exit
+                                })
                         {
                             return Ok(true);
                         }
@@ -14733,39 +14442,33 @@ impl NativeObservations {
                     let mut fields: BTreeMap<String, Value> =
                         serde_json::from_value(event.payload.clone())?;
                     fields.remove("incarnation");
-                    fields.insert(
-                        "incarnation_id".into(),
-                        event.runtime_incarnation.clone().into(),
-                    );
-                    let _: ClaimRecord = publisher
-                        .post(
-                            "/v1/claims",
-                            &ClaimInput {
-                                subject: subject.into(),
-                                kind: "harness.todo.observed".into(),
-                                actor: Some(subject.into()),
-                                fields,
-                                evidence: Vec::new(),
-                                expected_subject: None,
-                                idempotency_key: Some(format!(
-                                    "harness-todo:{subject}:{}:{}",
-                                    event.runtime_incarnation, event.sequence,
-                                )),
-                            },
-                        )
-                        .await?;
+                    fields.insert("incarnation_id".into(), event.runtime_incarnation.clone().into());
+                    let _: ClaimRecord = publisher.post(
+                        "/v1/claims",
+                        &ClaimInput {
+                            subject: subject.into(),
+                            kind: "harness.todo.observed".into(),
+                            actor: Some(subject.into()),
+                            fields,
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: Some(format!(
+                                "harness-todo:{subject}:{}:{}", event.runtime_incarnation, event.sequence,
+                            )),
+                        },
+                    ).await?;
                 }
                 "harness-timeline" => {
                     let operation: st_drivers::harness_timeline::Operation =
                         serde_json::from_slice(&raw)?;
-                    let claim = native_timeline_claim(
-                        client,
-                        subject,
-                        &event.runtime_incarnation,
-                        operation,
-                    )
-                    .await?;
-                    let _: ClaimRecord = publisher.post("/v1/claims", &claim).await?;
+                    let claim = native_timeline_claim(client, subject,
+                        &event.runtime_incarnation, operation).await?;
+                    let _: ClaimRecord = publisher
+                        .post(
+                            "/v1/claims",
+                            &claim,
+                        )
+                        .await?;
                 }
                 other => anyhow::bail!("unsupported harness event `{other}`"),
             }
@@ -14807,19 +14510,14 @@ impl ObservationClient<'_> {
                     .fields
                     .get("semantics")
                     .and_then(Value::as_str)
-                    .unwrap_or(if claim.kind == "harness.todo.observed" {
-                        "normalized"
-                    } else {
-                        ""
-                    })
+                    .unwrap_or(if claim.kind == "harness.todo.observed" { "normalized" } else { "" })
             );
-            let claim: ClaimInput =
-                serde_json::from_value(st_drivers::harness_events::prepare_publication(
-                    dir,
-                    sequence,
-                    &slot,
-                    &serde_json::to_value(&claim)?,
-                )?)?;
+            let claim: ClaimInput = serde_json::from_value(st_drivers::harness_events::prepare_publication(
+                dir,
+                sequence,
+                &slot,
+                &serde_json::to_value(&claim)?,
+            )?)?;
             // Diagnostics are retained graph facts, not local observation slots. Preserve
             // their episode key; /harness-events replaces keys with its observation slot.
             if claim.kind == "harness.diagnostic" {
@@ -14905,13 +14603,7 @@ async fn publish_harness_activity(
             Value::String(observed.blocked_on.as_str().into()),
         ),
         ("ask".into(), Value::String(observed.ask.as_str().into())),
-        (
-            "background_jobs".into(),
-            observed
-                .background_jobs
-                .map(Value::from)
-                .unwrap_or(Value::Null),
-        ),
+        ("background_jobs".into(), observed.background_jobs.map(Value::from).unwrap_or(Value::Null)),
         (
             "input_buffer".into(),
             Value::String(observed.input_buffer.as_str().into()),
@@ -15224,35 +14916,22 @@ fn timeline_record_is_current(
 /// Bind a reported failure to the current ready wake before promoting it to a diagnostic.
 /// The CLI cannot report through the socket it was denied; the native driver can.
 async fn native_timeline_claim(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
+    client: &Client, subject: &str, incarnation: &str,
     operation: st_drivers::harness_timeline::Operation,
 ) -> Result<ClaimInput> {
     let mut failure = None;
     if operation.entry_type == "error"
         && operation.body["code"] == st_drivers::work_claim_failure::CODE
-        && let Ok(receipt) = serde_json::from_value::<st_drivers::work_claim_failure::Receipt>(
-            operation.body["details"].clone(),
-        )
-        && receipt.valid()
-        && receipt.actor == subject
+        && let Ok(receipt) = serde_json::from_value::<st_drivers::work_claim_failure::Receipt>(operation.body["details"].clone())
+        && receipt.valid() && receipt.actor == subject
     {
-        let work: Vec<StepRunView> = client
-            .get(&format!(
-                "/v1/work?actor={}&caller=timeline-binding",
-                urlencoding::encode(subject)
-            ))
-            .await?;
+        let work: Vec<StepRunView> = client.get(&format!(
+            "/v1/work?actor={}&caller=timeline-binding", urlencoding::encode(subject))).await?;
         if let Some(step) = work.into_iter().find(|step| {
-            step.subject == receipt.step_run
-                && step.status == "ready"
+            step.subject == receipt.step_run && step.status == "ready"
                 && step.wake.as_ref().is_some_and(|wake| {
-                    wake.incarnation_id == incarnation
-                        && wake.attempts > 0
-                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| {
-                            receipt.follows_wake(sent, operation.observed_at_unix_ms)
-                        })
+                    wake.incarnation_id == incarnation && wake.attempts > 0
+                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| receipt.follows_wake(sent, operation.observed_at_unix_ms))
                 })
         }) {
             failure = Some((receipt, step));
@@ -15260,48 +14939,27 @@ async fn native_timeline_claim(
     }
     if let Some((receipt, step)) = failure {
         return Ok(ClaimInput {
-            subject: subject.into(),
-            kind: "harness.diagnostic".into(),
-            actor: Some(subject.into()),
+            subject: subject.into(), kind: "harness.diagnostic".into(), actor: Some(subject.into()),
             fields: BTreeMap::from([
                 ("code".into(), st_drivers::work_claim_failure::CODE.into()),
-                ("status".into(), "failed".into()),
-                ("severity".into(), "error".into()),
+                ("status".into(), "failed".into()), ("severity".into(), "error".into()),
                 ("reason".into(), receipt.reason().into()),
                 ("incarnation_id".into(), incarnation.into()),
                 ("step_run".into(), step.subject.clone().into()),
                 ("attempt".into(), step.attempt.into()),
                 ("readiness_epoch".into(), step.readiness_epoch.into()),
-                (
-                    "matched_line".into(),
-                    serde_json::to_string(&receipt)?.into(),
-                ),
-                (
-                    "observed_since_ms".into(),
-                    receipt.observed_at_unix_ms.into(),
-                ),
+                ("matched_line".into(), serde_json::to_string(&receipt)?.into()),
+                ("observed_since_ms".into(), receipt.observed_at_unix_ms.into()),
                 ("driver".into(), operation.driver.into()),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(st_drivers::work_claim_failure::key(
-                subject,
-                &step.subject,
-                step.attempt,
-                step.readiness_epoch,
-                incarnation,
-            )),
+            ]), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(st_drivers::work_claim_failure::key(subject, &step.subject,
+                step.attempt, step.readiness_epoch, incarnation)),
         });
     }
     let fields = timeline_claim_fields(operation, incarnation);
     let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
-    Ok(ClaimInput {
-        subject: subject.into(),
-        kind: "harness.timeline".into(),
-        actor: Some(subject.into()),
-        fields,
-        evidence: Vec::new(),
-        expected_subject: None,
+    Ok(ClaimInput { subject: subject.into(), kind: "harness.timeline".into(),
+        actor: Some(subject.into()), fields, evidence: Vec::new(), expected_subject: None,
         idempotency_key: Some(format!("harness-timeline:{subject}:{digest}")),
     })
 }
@@ -15392,10 +15050,7 @@ fn accept_managed_channel_frame(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 ) -> Result<bool> {
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
-        let frame_type = frame
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
             "timeline" | "context" | "turn" | "subagent" => observer.is_some(),
@@ -15459,31 +15114,20 @@ fn prepare_channel_todo_outbox(root: &Path, subject: &str, incarnation: &str) ->
 
 fn todo_runtime_has_ended(actual: &Value, incarnation: &str) -> bool {
     let fields = actual.get("fields").unwrap_or(actual);
-    fields["incarnation_id"]
-        .as_str()
-        .is_some_and(|current| current != incarnation)
-        || matches!(
-            fields["status"].as_str(),
-            Some("absent" | "stopped" | "exited" | "vanished")
-        )
+    fields["incarnation_id"].as_str().is_some_and(|current| current != incarnation)
+        || matches!(fields["status"].as_str(), Some("absent" | "stopped" | "exited" | "vanished"))
 }
 
 // Wall-clock minute boundaries can be one second apart; confirmations need a full period.
 const CHANNEL_TODO_END_CONFIRMATION_GAP: Duration = Duration::from_secs(60);
 
 async fn remove_confirmed_ended_channel_todo_outbox(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
-    dir: &Path,
+    client: &Client, subject: &str, incarnation: &str, dir: &Path,
     end_seen: &mut Option<tokio::time::Instant>,
 ) -> Result<bool> {
-    let status: Result<StatusResponse> = client
-        .get(&format!(
-            "/v1/status?subject={}",
-            urlencoding::encode(subject),
-        ))
-        .await;
+    let status: Result<StatusResponse> = client.get(&format!(
+        "/v1/status?subject={}", urlencoding::encode(subject),
+    )).await;
     let status = match status {
         Ok(status) => status,
         Err(error) => {
@@ -15491,10 +15135,7 @@ async fn remove_confirmed_ended_channel_todo_outbox(
             return Err(error);
         }
     };
-    let ended = status
-        .subjects
-        .first()
-        .and_then(|seat| seat.actual.as_ref())
+    let ended = status.subjects.first().and_then(|seat| seat.actual.as_ref())
         .is_some_and(|actual| todo_runtime_has_ended(actual, incarnation));
     if !ended {
         *end_seen = None;
@@ -15509,21 +15150,16 @@ async fn remove_confirmed_ended_channel_todo_outbox(
 }
 
 async fn finish_channel_todo_outbox(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
-    dir: &Path,
+    client: &Client, subject: &str, incarnation: &str, dir: &Path,
     end_seen: &mut Option<tokio::time::Instant>,
 ) -> Result<bool> {
     loop {
-        if remove_confirmed_ended_channel_todo_outbox(client, subject, incarnation, dir, end_seen)
-            .await?
-        {
+        if remove_confirmed_ended_channel_todo_outbox(
+            client, subject, incarnation, dir, end_seen,
+        ).await? {
             return Ok(true);
         }
-        let Some(first_seen) = *end_seen else {
-            return Ok(false);
-        };
+        let Some(first_seen) = *end_seen else { return Ok(false); };
         // EOF is not an independent liveness confirmation until the same gap has elapsed.
         tokio::time::sleep_until(first_seen + CHANNEL_TODO_END_CONFIRMATION_GAP).await;
     }
@@ -15584,28 +15220,18 @@ impl PiChannelResume {
     }
 
     fn apply_ask_bridge_frame(&mut self, subject: &str, line: &str) {
-        let Ok(frame) = serde_json::from_str::<Value>(line) else {
-            return;
-        };
+        let Ok(frame) = serde_json::from_str::<Value>(line) else { return };
         let expected = std::env::var("ST3_OMP_PENDING_ASK").ok();
         if let Some(id) = self.take_pending_ask_retry(&frame, expected.as_deref()) {
             let sent = (|| -> Result<()> {
-                let root =
-                    std::env::var_os("PTY_ROOT").context("pending ask retry has no PTY_ROOT")?;
-                let session =
-                    std::env::var("PTY_SESSION").context("pending ask retry has no PTY_SESSION")?;
-                st_runtime::PtyRuntime::new(root.into()).send_raw_if(
-                    &session,
-                    b"\x1b[15~",
-                    None,
-                )?;
+                let root = std::env::var_os("PTY_ROOT").context("pending ask retry has no PTY_ROOT")?;
+                let session = std::env::var("PTY_SESSION").context("pending ask retry has no PTY_SESSION")?;
+                st_runtime::PtyRuntime::new(root.into()).send_raw_if(&session, b"\x1b[15~", None)?;
                 Ok(())
             })();
             let record = match sent {
                 Ok(()) => json!({"type":"omp_pending_ask_retry","toolCallId":id}),
-                Err(error) => {
-                    json!({"type":"omp_pending_ask_retry_failed","toolCallId":id,"error":format!("{error:#}")})
-                }
+                Err(error) => json!({"type":"omp_pending_ask_retry_failed","toolCallId":id,"error":format!("{error:#}")}),
             };
             let _ = write_driver_log(subject, &record.to_string());
         }
@@ -15622,10 +15248,7 @@ impl PiChannelResume {
         match frame.get("type").and_then(Value::as_str) {
             Some("todo") => {
                 let Some(fields) = st_drivers::pi_channel::todo_observation(
-                    &frame,
-                    "omp",
-                    self.native_session.as_deref(),
-                    &self.incarnation,
+                    &frame, "omp", self.native_session.as_deref(), &self.incarnation,
                 ) else {
                     return false;
                 };
@@ -15803,10 +15426,7 @@ impl PiFamilyReports {
                                     .map(Value::String)
                                     .unwrap_or(Value::Null),
                             ),
-                            (
-                                "background_jobs".into(),
-                                self.background_jobs.map(Value::from).unwrap_or(Value::Null),
-                            ),
+                            ("background_jobs".into(), self.background_jobs.map(Value::from).unwrap_or(Value::Null)),
                             ("input_buffer".into(), Value::Null),
                             ("exit".into(), Value::Null),
                         ])),
@@ -15854,15 +15474,7 @@ impl PiFamilyReports {
             // Both transports retain the native receipt until the graph acknowledges it.
             use tokio::io::AsyncWriteExt as _;
             let mut stdout = cli_output::async_stdout();
-            stdout
-                .write_all(
-                    format!(
-                        "{}\n",
-                        json!({"type":"settled","meta":{"messageId":message}})
-                    )
-                    .as_bytes(),
-                )
-                .await?;
+            stdout.write_all(format!("{}\n", json!({"type":"settled","meta":{"messageId":message}})).as_bytes()).await?;
             stdout.flush().await?;
             self.reads.remove(&message);
         }
@@ -16058,8 +15670,7 @@ fn native_delivery_control_report(
     let mut report: Value = serde_json::from_str(&native_delivery_report(transport, None))
         .expect("native delivery reports are JSON");
     // A deliberate graph hold is normal control, independent of mailbox readiness.
-    let unavailable = gate
-        .blocked_reason()
+    let unavailable = gate.blocked_reason()
         .filter(|reason| *reason == DeliveryBlockReason::ControlUnavailable);
     report["ready"] = json!(unavailable.is_none());
     report["reason"] = json!(unavailable.map(|reason| reason.description()));
@@ -16096,6 +15707,7 @@ async fn refresh_native_delivery_control(
     }
     refresh_graph_delivery_gate_with_report(client, subject, &paths.delivery_gate, report).await
 }
+
 
 const PROVIDER_CAPACITY_MAX_RETRIES: u32 = 6;
 const PROVIDER_CAPACITY_BASE_BACKOFF_MS: u64 = 30_000;
@@ -16185,10 +15797,7 @@ async fn publish_provider_capacity_diagnostic(
         fields.insert("retry_after_unix_ms".into(), Value::from(retry_after));
     }
     let work: Vec<StepRunView> = client
-        .get(&format!(
-            "/v1/work?actor={}&caller=capacity-diagnostics",
-            urlencoding::encode(subject)
-        ))
+        .get(&format!("/v1/work?actor={}&caller=capacity-diagnostics", urlencoding::encode(subject)))
         .await?;
     if let Some(step) = work.into_iter().find(|step| {
         matches!(step.status.as_str(), "claimed" | "working")
@@ -16288,10 +15897,7 @@ async fn renew_claimed_work(
     retry: &mut st3::client::DriverRetry,
 ) -> Result<()> {
     let work: Vec<StepRunView> = client
-        .get(&format!(
-            "/v1/work?actor={}&view=renewal",
-            urlencoding::encode(subject)
-        ))
+        .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     update_renewal_retry_lease(retry, &work, subject, current_unix_ms()?);
     // Most resident seats hold no work. Only a held claim needs the status reduction
@@ -16363,9 +15969,7 @@ fn update_renewal_retry_lease(
         retry.clear_lease_margin();
     } else if let Some(expiry) = held.filter_map(|step| step.claim_expires_at_unix_ms).min() {
         let remaining = expiry.saturating_sub(now_ms);
-        retry.lease_margin(Duration::from_millis(
-            remaining.min(u128::from(u64::MAX)) as u64
-        ));
+        retry.lease_margin(Duration::from_millis(remaining.min(u128::from(u64::MAX)) as u64));
     }
 }
 
@@ -16687,7 +16291,9 @@ async fn publish_claude_readiness_fallback(
         || !state
             .claude_readiness_fallback
             .initialized_at_ms
-            .is_some_and(|started| now_ms.saturating_sub(started) >= claude_readiness_grace_ms())
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) >= claude_readiness_grace_ms()
+            })
     {
         return Ok(false);
     }
@@ -16770,9 +16376,7 @@ async fn check_claude_attachment(
 ) -> Result<()> {
     let fence = &mailbox.fence;
     let mut checked = checked_claude_attachment(client, subject, incarnation, fence).await;
-    state
-        .claude_readiness_fallback
-        .observe_attachment(&checked, current_unix_ms()? as u64);
+    state.claude_readiness_fallback.observe_attachment(&checked, current_unix_ms()? as u64);
     // Readiness is independent of diagnostic publication. A rejected or uncertain
     // POST must not silence a current subscription's readiness report.
     report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
@@ -17160,9 +16764,7 @@ async fn provider_task_settled(task: &tokio::task::JoinHandle<Result<()>>) -> bo
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), settled)
-        .await
-        .is_ok()
+    tokio::time::timeout(Duration::from_secs(5), settled).await.is_ok()
 }
 
 struct NativeMailbox {
@@ -17175,12 +16777,7 @@ struct NativeMailbox {
 }
 impl NativeMailbox {
     /// A mailbox with no subscription, for a provider that ended before it could be bound.
-    fn unbound(
-        subject: &str,
-        incarnation: &str,
-        driver: &str,
-        state: &mut NativeLoopState,
-    ) -> Self {
+    fn unbound(subject: &str, incarnation: &str, driver: &str, state: &mut NativeLoopState) -> Self {
         let component = if matches!(driver, "codex" | "opencode") {
             "delivery"
         } else {
@@ -17225,13 +16822,9 @@ impl NativeMailbox {
             "opencode-server"
         };
         let report = if matches!(driver, "codex" | "opencode") {
-            native_delivery_control_report(
-                transport,
-                &st_drivers::session_control::DeliveryGate::default(),
-            )
+            native_delivery_control_report(transport, &st_drivers::session_control::DeliveryGate::default())
         } else {
-            serde_json::from_str(&native_delivery_report(transport, None))
-                .expect("native report is JSON")
+            serde_json::from_str(&native_delivery_report(transport, None)).expect("native report is JSON")
         };
         let subscription = push_mailbox_enabled()
             .then(|| st3::mailbox::Subscription::start(client.clone(), fence.clone(), report));
@@ -17253,9 +16846,7 @@ impl NativeMailbox {
     fn accept(&mut self, frame: Option<st3::mailbox::Frame>, runtime_id: &str) -> Result<()> {
         match frame {
             Some(st3::mailbox::Frame::Replay { nonce }) => {
-                if let Some(subscription) = &self.subscription {
-                    subscription.acknowledge_replay(nonce);
-                }
+                if let Some(subscription) = &self.subscription { subscription.acknowledge_replay(nonce); }
                 Ok(())
             }
             Some(st3::mailbox::Frame::Drain { operation }) => {
@@ -17273,10 +16864,9 @@ impl NativeMailbox {
                 }
                 if let Err(error) = update_native_title(&seat, runtime_id) {
                     let now = Instant::now();
-                    if self
-                        .last_title_warning
-                        .is_none_or(|prior| now.duration_since(prior) >= Duration::from_secs(10))
-                    {
+                    if self.last_title_warning.is_none_or(|prior| {
+                        now.duration_since(prior) >= Duration::from_secs(10)
+                    }) {
                         let _ = write_driver_log(
                             &self.fence.subject,
                             &format!("could not update seat title: {error:#}"),
@@ -17462,7 +17052,10 @@ async fn mailbox_receipt_claim(
 }
 
 fn seat_label(seat: &st3::model::DesiredSubject) -> String {
-    st3::mailbox::seat_label(seat, std::env::var("AGENT_PERSONA_SHORT").ok().as_deref())
+    st3::mailbox::seat_label(
+        seat,
+        std::env::var("AGENT_PERSONA_SHORT").ok().as_deref(),
+    )
 }
 fn update_native_title(seat: &st3::model::DesiredSubject, runtime_id: &str) -> Result<()> {
     let label = seat_label(seat);
@@ -17633,9 +17226,7 @@ async fn forward_projected_messages_reporting(
             state_dir,
             identity,
             runtime_id,
-        } => st_drivers::codex_app_server::consumed_delivery_filenames(
-            state_dir, identity, runtime_id,
-        ),
+        } => st_drivers::codex_app_server::consumed_delivery_filenames(state_dir, identity, runtime_id),
         NativeDeliveryReceipts::ClaudeChannel {
             agent_dir,
             incarnation,
@@ -17917,31 +17508,21 @@ fn idempotency(kdl: &str, tokens: &BTreeMap<String, Vec<String>>) -> String {
 /// never replicate, so this never changes what any peer holds.
 /// Apply this node's `[limits]` policy every two minutes: stop the seats it hosts on an account
 /// past its weekly limit, and notify operations once per weekly window.
-async fn enforce_account_limits(
-    store: Arc<Store>,
-    started_with: st3::config::LimitsConfig,
-    reconciler: Arc<Reconciler>,
-) {
+async fn enforce_account_limits(store: Arc<Store>, started_with: st3::config::LimitsConfig, reconciler: Arc<Reconciler>) {
     const LIMITS_INTERVAL: Duration = Duration::from_secs(2 * 60);
     let mut limits = started_with;
     let mut last_error = None::<String>;
     loop {
         // A config file that is missing, cannot be read or does not validate keeps the last
         // good policy. The reason is logged when it changes, not on every pass.
-        let reloaded = tokio::task::spawn_blocking(|| {
-            st3::task_cpu::blocking(
-                "config.reload_policies",
-                st3::config::reload_daemon_policies,
-            )
-        })
-        .await
-        .ok()
-        .flatten();
+        let reloaded = tokio::task::spawn_blocking(|| st3::task_cpu::blocking("config.reload_policies", st3::config::reload_daemon_policies))
+            .await
+            .ok()
+            .flatten();
         match reloaded {
             Some(Ok((reloaded, reconcile))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
-                reconciler
-                    .set_max_passes_per_minute(reconcile.max_passes_per_minute)
+                reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute)
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
                 limits = reloaded;
@@ -17961,18 +17542,15 @@ async fn enforce_account_limits(
             continue;
         };
         let pass = store.clone();
-        match pass
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::profiled_blocking("account_limits.enforce", || {
-                    let now = now_ms();
-                    let check = pass.account_limits_check(now, policy.fresh_ms)?;
-                    let outcome = pass.enforce_account_limits(&policy, now)?;
-                    Ok::<_, anyhow::Error>((outcome, check))
-                })
+        match pass.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("account_limits.enforce", || {
+                let now = now_ms();
+                let check = pass.account_limits_check(now, policy.fresh_ms)?;
+                let outcome = pass.enforce_account_limits(&policy, now)?;
+                Ok::<_, anyhow::Error>((outcome, check))
             })
-            .await
+        })
+        .await
         {
             Ok(Ok((outcome, check))) => {
                 if check.status == "warn" {
@@ -18059,91 +17637,77 @@ fn retry_projection_contention_observed(
     state_dir: PathBuf,
     mut on_poll: impl FnMut(bool) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(st3::task_cpu::account(
-        "replication.retry_projection",
-        async move {
-            let mut schedule = ProjectionContentionRetry::default();
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                let Some(store) = store.upgrade() else { break };
-                let generation = store.projection_contention_generation();
-                let attempt = schedule.poll(
-                    tokio::time::Instant::now(),
-                    generation,
-                    store.replication_projection_deferred(),
-                );
-                on_poll(schedule.due.is_some());
-                let Some(attempt) = attempt else { continue };
-                // Only this task schedules these attempts. The existing projection mutex also
-                // serializes them with receive/wake passes. Store ownership ends at attempt return.
-                let result = store
-                    .connection
-                    .write_workers()
-                    .spawn_blocking(move || {
-                        st3::task_cpu::profiled_blocking("replication.retry_projection", || {
-                            let result = store.project_replication_backlog_unless_catching_up();
-                            (
-                                result,
-                                store.projection_contention_generation(),
-                                store.replication_projection_deferred(),
-                            )
-                        })
-                    })
-                    .await;
-                let still_deferred = match &result {
-                    Ok((_, _, deferred)) => Some(*deferred),
-                    Err(_) => None,
-                };
-                let (recovered, retry, generation, outcome) = match result {
-                    // Own success cannot advance contention generation. Retain the pre-call
-                    // watermark, so an external contention racing the success is observed on
-                    // the next poll rather than cancelled as part of the completed episode.
-                    Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
-                    Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
-                    Ok((Ok(Some(false)), current, _)) => {
-                        (false, current != generation, current, "deferred")
-                    }
-                    Ok((Err(error), current, _)) => {
-                        let busy = error
-                            .downcast_ref::<smallclaims::Error>()
-                            .is_some_and(|error| error.is_sqlite_contention());
-                        (
-                            false,
-                            busy,
-                            current,
-                            if busy {
-                                "sqlite-contention"
-                            } else {
-                                "other-error"
-                            },
-                        )
-                    }
-                    Err(_) => (false, false, generation, "worker-failed"),
-                };
-                schedule.finish(tokio::time::Instant::now(), generation, retry);
-                eprintln!(
-                    "st3: projection contention retry {}",
-                    json!({
-                        "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
-                        "projection_deferred_after_attempt": still_deferred,
-                        "stop_reason": if schedule.due.is_some() { None } else if recovered {
-                            Some("recovered")
-                        } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
-                    })
-                );
-                if recovered {
-                    st3::performance::record_wake("projection-contention-retry", None);
-                    notify.notify_one();
-                    event_notify
-                        .send_modify(|generation| *generation = generation.saturating_add(1));
-                    let _ = fs::write(
-                        state_dir.join("replication.wake"),
-                        format!("{}\n", uuid::Uuid::now_v7()),
-                    );
+    tokio::spawn(st3::task_cpu::account("replication.retry_projection", async move {
+        let mut schedule = ProjectionContentionRetry::default();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(store) = store.upgrade() else { break };
+            let generation = store.projection_contention_generation();
+            let attempt = schedule.poll(
+                tokio::time::Instant::now(), generation, store.replication_projection_deferred());
+            on_poll(schedule.due.is_some());
+            let Some(attempt) = attempt else { continue };
+            // Only this task schedules these attempts. The existing projection mutex also
+            // serializes them with receive/wake passes. Store ownership ends at attempt return.
+            let result = store.connection.write_workers().spawn_blocking(move || {
+                st3::task_cpu::profiled_blocking("replication.retry_projection", || {
+                let result = store.project_replication_backlog_unless_catching_up();
+                (result, store.projection_contention_generation(), store.replication_projection_deferred())
+                })
+            })
+            .await;
+            let still_deferred = match &result {
+                Ok((_, _, deferred)) => Some(*deferred),
+                Err(_) => None,
+            };
+            let (recovered, retry, generation, outcome) = match result {
+                // Own success cannot advance contention generation. Retain the pre-call
+                // watermark, so an external contention racing the success is observed on
+                // the next poll rather than cancelled as part of the completed episode.
+                Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
+                Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
+                Ok((Ok(Some(false)), current, _)) => {
+                    (false, current != generation, current, "deferred")
                 }
+                Ok((Err(error), current, _)) => {
+                    let busy = error
+                        .downcast_ref::<smallclaims::Error>()
+                        .is_some_and(|error| error.is_sqlite_contention());
+                    (
+                        false,
+                        busy,
+                        current,
+                        if busy {
+                            "sqlite-contention"
+                        } else {
+                            "other-error"
+                        },
+                    )
+                }
+                Err(_) => (false, false, generation, "worker-failed"),
+            };
+            schedule.finish(tokio::time::Instant::now(), generation, retry);
+            eprintln!(
+                "st3: projection contention retry {}",
+                json!({
+                    "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
+                    "projection_deferred_after_attempt": still_deferred,
+                    "stop_reason": if schedule.due.is_some() { None } else if recovered {
+                        Some("recovered")
+                    } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
+                })
+            );
+            if recovered {
+                st3::performance::record_wake("projection-contention-retry", None);
+                notify.notify_one();
+                event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+                let _ = fs::write(
+                    state_dir.join("replication.wake"),
+                    format!("{}\n", uuid::Uuid::now_v7()),
+                );
             }
-        },
-    ))
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -18211,11 +17775,9 @@ struct WalPinTracker {
 impl WalPinTracker {
     /// Samples in a row, including this one, that made no backfill progress.
     fn observe(&mut self, report: Option<&smallclaims::sqlite::WalCheckpointReport>) -> u32 {
-        let Some(report) = report else {
-            return self.stuck;
-        };
-        let pinned =
-            report.frames > report.backfilled && self.last_backfilled == Some(report.backfilled);
+        let Some(report) = report else { return self.stuck };
+        let pinned = report.frames > report.backfilled
+            && self.last_backfilled == Some(report.backfilled);
         self.last_backfilled = Some(report.backfilled);
         self.stuck = if pinned { self.stuck + 1 } else { 0 };
         self.stuck
@@ -18359,28 +17921,15 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
     let result = tokio::task::spawn_blocking(move || -> Result<()> {
         let initial = worker.signature_migration()?;
         let mut phase = initial.phase.clone();
-        if !initial.done() {
-            eprintln!(
-                "st3: signature bootstrap starting (legacy selected={}, available={}): {}",
-                initial.serving_legacy,
-                initial.serving_legacy && initial.legacy_fault.is_none(),
-                initial.progress_description()
-            );
-        }
+        if !initial.done() { eprintln!("st3: signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description()); }
         loop {
             let page_started = std::time::Instant::now();
             let report = worker.advance_signature_migration()?;
             if report.phase != phase {
-                eprintln!(
-                    "st3: signature bootstrap phase {}: {}",
-                    report.phase,
-                    report.progress_description()
-                );
+                eprintln!("st3: signature bootstrap phase {}: {}",report.phase,report.progress_description());
                 phase = report.phase.clone();
             }
-            if let Some(reason) = report.unavailable_reason()
-                && report.fault.is_some()
-            {
+            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
                 anyhow::bail!("{reason}");
             }
             if report.phase == "judging" {
@@ -18392,30 +17941,18 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
             std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
             if worker.signature_migration()?.done() {
                 let complete = worker.signature_migration()?;
-                if !initial.done() {
-                    eprintln!(
-                        "st3: signature candidate authority activated: {}",
-                        complete.progress_description()
-                    );
-                }
+                if !initial.done() { eprintln!("st3: signature candidate authority activated: {}",complete.progress_description()); }
                 loop {
                     let retired_started = std::time::Instant::now();
-                    if !worker.retire_legacy_signature_page()? {
-                        break;
-                    }
-                    std::thread::sleep(
-                        retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK,
-                    );
+                    if !worker.retire_legacy_signature_page()? { break; }
+                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                 }
                 return Ok(());
             }
         }
-    })
-    .await;
+    }).await;
     if !matches!(result, Ok(Ok(()))) {
-        if let Err(error) =
-            store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}"))
-        {
+        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
             eprintln!("st3: signature migration fault could not be persisted: {error:#}");
         }
         eprintln!("st3: signature candidate migration stopped: {result:?}");
@@ -18427,15 +17964,7 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
 async fn convert_envelope_payloads(store: Arc<Store>) {
     loop {
         let store = store.clone();
-        let result = store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::blocking("maintenance.envelope_payloads", || {
-                    store.convert_envelope_payloads()
-                })
-            })
-            .await;
+        let result = store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("maintenance.envelope_payloads", || store.convert_envelope_payloads())).await;
         match result {
             Ok(Ok(report)) if report.done => return,
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -18452,15 +17981,11 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
 async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = page_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::profiled_blocking("maintenance.coordination_counts", || {
-                    page_store.advance_coordination_counts()
-                })
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("maintenance.coordination_counts", || {
+                page_store.advance_coordination_counts()
             })
-            .await;
+        }).await;
         match result {
             Ok(Ok(true)) => return,
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -18510,12 +18035,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
         loop {
             receiver.borrow_and_update();
             let read_store = store.clone();
-            match tokio::task::spawn_blocking(move || {
-                st3::task_cpu::blocking("publication.evidence_ready", || {
-                    read_store.publication_evidence_ready()
-                })
-            })
-            .await
+            match tokio::task::spawn_blocking(move || st3::task_cpu::blocking("publication.evidence_ready", || read_store.publication_evidence_ready())).await
             {
                 Ok(Ok(true)) => {
                     if receiver.changed().await.is_err() {
@@ -18524,15 +18044,10 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match page_store
-                        .connection
-                        .write_workers()
-                        .spawn_blocking(move || {
-                            st3::task_cpu::blocking("publication.advance_evidence", || {
-                                page_store.advance_publication_evidence()
-                            })
-                        })
-                        .await
+                    match page_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("publication.advance_evidence", || {
+                        page_store.advance_publication_evidence()
+                    }))
+                    .await
                     {
                         Ok(Ok(_)) => tokio::task::yield_now().await,
                         error => {
@@ -18581,13 +18096,10 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
             changed.send_replace(());
         }
     });
-    tokio::spawn(st3::task_cpu::account(
-        "maintenance.response_expiry",
-        async move {
-            let _observer = observer;
-            expire_completed_responses(store, receiver).await;
-        },
-    ))
+    tokio::spawn(st3::task_cpu::account("maintenance.response_expiry", async move {
+        let _observer = observer;
+        expire_completed_responses(store, receiver).await;
+    }))
 }
 
 async fn expire_completed_responses(
@@ -18601,25 +18113,22 @@ async fn expire_completed_responses(
         // commit between that read and the wait remains visible to changed().
         changed.borrow_and_update();
         let read_store = store.clone();
-        let deadline = match tokio::task::spawn_blocking(move || {
-            st3::task_cpu::blocking("maintenance.response_expiry_deadline", || {
-                read_store.next_idempotency_expiry()
-            })
-        })
-        .await
-        {
-            Ok(Ok(deadline)) => deadline,
-            Ok(Err(error)) if maintenance_contention(&error) => {
-                eprintln!("st3: response expiry read contention; retrying in {retry:?}: {error:#}");
-                tokio::time::sleep(retry).await;
-                retry = (retry * 2).min(Duration::from_secs(5));
-                continue;
-            }
-            error => {
-                eprintln!("st3: response expiry scheduler stopped: {error:?}");
-                return;
-            }
-        };
+        let deadline =
+            match tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+                Ok(Ok(deadline)) => deadline,
+                Ok(Err(error)) if maintenance_contention(&error) => {
+                    eprintln!(
+                        "st3: response expiry read contention; retrying in {retry:?}: {error:#}"
+                    );
+                    tokio::time::sleep(retry).await;
+                    retry = (retry * 2).min(Duration::from_secs(5));
+                    continue;
+                }
+                error => {
+                    eprintln!("st3: response expiry scheduler stopped: {error:?}");
+                    return;
+                }
+            };
         let now = now_ms().min(i64::MAX as u128) as i64;
         if deadline.is_none_or(|deadline| deadline > now) {
             match deadline {
@@ -18642,11 +18151,9 @@ async fn expire_completed_responses(
             continue;
         }
         let clock_store = store.clone();
-        let clock_limit = match tokio::task::spawn_blocking(move || {
-            st3::task_cpu::blocking("maintenance.response_expiry_clock", || {
-                clock_store.idempotency_clock_limit()
-            })
-        })
+        let clock_limit = match tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.response_expiry_clock", || {
+            clock_store.idempotency_clock_limit()
+        }))
         .await
         {
             Ok(Ok(limit)) => limit,
@@ -18677,15 +18184,12 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match clean_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::profiled_blocking("maintenance.response_expiry", || {
-                    clean_store.cleanup_idempotency(now)
-                })
+        match clean_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("maintenance.response_expiry", || {
+                clean_store.cleanup_idempotency(now)
             })
-            .await
+        })
+        .await
         {
             Ok(Ok(_)) => {
                 retry = Duration::from_millis(200);
@@ -18719,26 +18223,19 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
     let mut announced = false;
     loop {
         let page_store = store.clone();
-        let more = page_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::profiled_blocking("account_limits.catch_up", || {
-                    page_store.catch_up_account_limits(st3::store::LIMITS_CATCH_UP_PAGE)
-                })
+        let more = page_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("account_limits.catch_up", || {
+                page_store.catch_up_account_limits(st3::store::LIMITS_CATCH_UP_PAGE)
             })
-            .await;
+        })
+        .await;
         if !announced && matches!(more, Ok(Ok(_))) {
             let ready_store = store.clone();
-            let ready = tokio::task::spawn_blocking(move || {
-                st3::task_cpu::blocking("account_limits.ready", || {
-                    ready_store.account_limits_ready()
-                })
-            })
-            .await
-            .ok()
-            .and_then(|result| result.ok())
-            .unwrap_or(false);
+            let ready = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("account_limits.ready", || ready_store.account_limits_ready()))
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .unwrap_or(false);
             if ready {
                 announced = true;
                 notify.notify_one();
@@ -18763,32 +18260,24 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
     loop {
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
-        let trimmed = observation_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::profiled_blocking("observations.trim", || {
-                    observation_store.trim_local_observations(
-                        now_ms().saturating_sub(u128::from(retention_ms)),
-                        max_per_subject_kind,
-                        LOCAL_OBSERVATION_TRIM_CHUNK,
-                    )
-                })
+        let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("observations.trim", || {
+                observation_store.trim_local_observations(
+                    now_ms().saturating_sub(u128::from(retention_ms)),
+                    max_per_subject_kind,
+                    LOCAL_OBSERVATION_TRIM_CHUNK,
+                )
             })
-            .await;
+        })
+        .await;
         let usage_store = store.clone();
-        if let Ok(Err(error)) = usage_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::blocking("observations.trim_usage_responses", || {
-                    usage_store.trim_usage_responses(
-                        now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
-                        LOCAL_OBSERVATION_TRIM_CHUNK,
-                    )
-                })
-            })
-            .await
+        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.trim_usage_responses", || {
+            usage_store.trim_usage_responses(
+                now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
+                LOCAL_OBSERVATION_TRIM_CHUNK,
+            )
+        }))
+        .await
         {
             eprintln!("st3: usage response trim failed: {error:#}");
         }
@@ -18803,16 +18292,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         let mut released = 0;
         loop {
             let vacuum_store = store.clone();
-            match vacuum_store
-                .connection
-                .write_workers()
-                .spawn_blocking(move || {
-                    st3::task_cpu::blocking("observations.release_free_pages", || {
-                        vacuum_store.release_free_pages()
-                    })
-                })
-                .await
-            {
+            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(pages)) => released += pages,
                 Ok(Err(error)) => {
@@ -18831,16 +18311,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
-        match size_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::blocking("observations.database_size", || {
-                    size_store.record_database_size(now_ms())
-                })
-            })
-            .await
-        {
+        match size_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
             Ok(Ok(size)) => st3::slo::note_database_size(&size),
             Ok(Err(error)) => eprintln!("st3: database size sample failed: {error:#}"),
             Err(error) => eprintln!("st3: database size sample stopped: {error}"),
@@ -18868,15 +18339,10 @@ async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointConte
             now_unix_ms: now_ms(),
             ..context.clone()
         };
-        match store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                st3::task_cpu::profiled_blocking("maintenance.checkpoint", || {
-                    store.checkpoint_step(&context)
-                })
-            })
-            .await
+        match store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
+        })
+        .await
         {
             Ok(Ok(actions)) => {
                 for action in actions {
