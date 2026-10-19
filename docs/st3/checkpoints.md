@@ -130,7 +130,8 @@ only for a kind that was audited against every reader of that kind. Everything e
 A **slot** is the part of a claim that one reader answer depends on, such as (subject, incarnation)
 for a harness observation, or (subject, request) for a subscription deferral. Within a slot the
 claims form a sequence in **canonical order**: accepted time, writer, batch sequence, position in
-the batch, claim ID. The order never depends on when a claim reached a node.
+the batch, claim ID. The order never depends on when a claim reached a node, and removing a claim
+or record never renumbers a survivor's position (see `claim_positions` in schema.md).
 
 For each slot the rule names the claims to keep. Everything else in the slot is a candidate. A
 candidate is dropped only if it has a **witness**: a later claim of the slot that is kept and sets

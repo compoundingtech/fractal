@@ -320,6 +320,12 @@ pub struct TerminalQuery {
     capability: String,
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+// Sunset: 60 days after the first release shipping this bridge. Echo only an offered
+// spelling; clients offering no supported protocol retain the existing unselected upgrade.
+const TERMINAL_SUBPROTOCOLS: [&str; 2] = ["fractal.terminal.v1", "st3.terminal.v1"];
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
 pub async fn terminal_session(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -360,9 +366,8 @@ pub async fn terminal_session(
             "the terminal incarnation changed before attachment",
         )));
     }
-    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     Ok(websocket
-        .protocols(["st3.terminal.v1"])
+        .protocols(TERMINAL_SUBPROTOCOLS)
         .on_upgrade(move |socket| terminal_proxy(socket, state.pty_root, runtime_id)))
 }
 
@@ -404,5 +409,49 @@ async fn terminal_proxy(socket: WebSocket, pty_root: std::path::PathBuf, runtime
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    #[tokio::test]
+    async fn legacy_terminal_negotiates_offered_aliases_without_requiring_a_protocol() {
+        async fn upgrade(websocket: WebSocketUpgrade) -> Response {
+            websocket.protocols(TERMINAL_SUBPROTOCOLS).on_upgrade(|_| async {})
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/", axum::routing::get(upgrade)))
+                .await
+                .unwrap();
+        });
+        // Use a raw HTTP upgrade request so unknown/absent protocols can preserve the
+        // server's existing behavior independently of tungstenite's client-side guard.
+        for (offered, expected) in [
+            (Some("st3.terminal.v1"), Some("st3.terminal.v1")),
+            (Some("fractal.terminal.v1"), Some("fractal.terminal.v1")),
+            (Some("st3.terminal.v1, fractal.terminal.v1"), Some("fractal.terminal.v1")),
+            (Some("fractal.terminal.v2"), None),
+            (None, None),
+        ] {
+            let mut request = format!("ws://{address}/").into_client_request().unwrap();
+            if let Some(offered) = offered {
+                request.headers_mut().insert("sec-websocket-protocol", offered.parse().unwrap());
+            }
+            let response = reqwest::Client::new()
+                .get(format!("http://{address}/"))
+                .headers(request.headers().clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::SWITCHING_PROTOCOLS);
+            assert_eq!(response.headers().get("sec-websocket-protocol")
+                .map(|value| value.to_str().unwrap()), expected);
+        }
+        server.abort();
     }
 }

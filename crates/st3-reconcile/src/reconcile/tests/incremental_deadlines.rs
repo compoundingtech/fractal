@@ -1214,6 +1214,13 @@ fn mechanical_gate_reader_orders_positions_within_one_writer_batch() {
                 rusqlite::params![requested.id, completed.id],
             )
             .unwrap();
+        // Admission stored both claims' positions; this fixture replaces them.
+        connection
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h5c584ba9206d owner=st3_reconcile::reconcile::tests::incremental_deadlines TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_positions WHERE claim_id IN (?1,?2)",
+                rusqlite::params![requested.id, completed.id],
+            )
+            .unwrap();
         for (id, slot) in [(&requested.id, 1), (&completed.id, position)] {
             connection.execute(
                 /* sqlite-large-value: allow-for-now lv-h4d23d805f63f owner=st3_reconcile::reconcile::tests::incremental_deadlines TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)

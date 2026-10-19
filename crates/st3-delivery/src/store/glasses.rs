@@ -103,10 +103,22 @@ mod tests {
     fn dirty_canonical_record_correction_reads_and_prepares_the_correct_head() {
         let store = Store::open_memory("alder").unwrap();
         store.set_write_clock_at(1_800_000_000_000).unwrap();
-        let first = store.append_claim(&input(1, "First wire position")).unwrap();
-        let second = {
+        // Another glass opens the batch, so `first` sits at position 1, not 0.
+        let opener = store.append_claim(&input(2, "Opens the batch")).unwrap();
+        let (first, second) = {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
+            let first = append_claim_record_tx(
+                &transaction,
+                "alder",
+                &input(1, "").subject,
+                "glass.upserted",
+                Some("person/ada"),
+                &json!({"fields": input(1, "First wire position").fields}),
+                &[],
+                Some(&opener.batch_id),
+            )
+            .unwrap();
             let second = append_claim_record_tx(
                 &transaction,
                 "alder",
@@ -115,10 +127,10 @@ mod tests {
                 Some("person/ada"),
                 &json!({"fields": input(1, "Second wire position").fields}),
                 &[],
-                Some(&first.batch_id),
+                Some(&opener.batch_id),
             )
             .unwrap();
-            for (claim, position) in [(&first, 0), (&second, 1)] {
+            for (claim, position) in [(&opener, 0), (&first, 1), (&second, 2)] {
                 transaction.execute(
                     "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
                         position, raw, state, claim_id, updated_at_unix_ms)
@@ -128,11 +140,16 @@ mod tests {
             }
             super::super::glass_heads::flush(&transaction).unwrap();
             transaction.commit().unwrap();
-            second
+            (first, second)
         };
         assert_eq!(store.glasses("person/ada", u64::MAX).unwrap()[0]["revision"], second.id);
+        // A duplicate envelope carries `second` at position 0. A claim's position is the least
+        // over its records, so `second` now sorts before `first`.
         store.connection.write().execute(
-            "UPDATE replica_records SET position=2 WHERE claim_id=?1", [&first.id],
+            "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                position, raw, state, claim_id, updated_at_unix_ms)
+             VALUES (?1, 'alder', 1, 'duplicate', 0, X'', 'valid', ?2, '0')",
+            params![format!("record/duplicate/{}", second.id), second.id],
         ).unwrap();
         // The durable metadata changed, but no projection worker has flushed it yet.
         let corrected = store.glasses("person/ada", u64::MAX).unwrap();
