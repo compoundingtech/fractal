@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Expand Fractal UI Storybook scenario consumption to sync, conversation interaction and workspace examples, preserving wire tool lifecycle and operation summaries and pinning populated data for composer geometry checks",
+  "summary": "Expand Fractal UI Storybook scenario consumption with shared transcript projections that preserve active turns, tool operations and incomplete history, populated composer geometry checks, and bounded system-state geometry examples",
   "replay": {"status": "none", "detail": "Storybook-only scenario projections; no runtime replay change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rules change."},

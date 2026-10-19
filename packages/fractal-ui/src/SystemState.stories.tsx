@@ -106,13 +106,20 @@ function useCountdown(ticking: boolean) {
   return ticking ? `Next try in ${3 - (tick % 3)}s · attempt ${1 + Math.floor(tick / 3)}` : countdown
 }
 
-/** Every thread's content entries, oldest first per thread; user turns read as "You", others as their agent. */
-const conversationTranscript = ({ loading, state }: WireSlice<'conversation'>) => ({
-  agent: loading ? undefined : state.threads[0]?.agent,
-  turns: loading ? [] : state.threads.flatMap(thread => thread.items.flatMap(entry => entry.type === 'content' && 'text' in entry.body && typeof entry.body.text === 'string'
-    ? [{ id: `${thread.agent}/${entry.id}`, version: `${entry.revision}`, who: entry.role === 'user' ? 'You' : thread.agent, text: entry.body.text }]
-    : [])),
-})
+/** The geometry harness needs about 48 content rows, not the world's complete history. */
+const conversationTranscript = ({ loading, state }: WireSlice<'conversation'>) => {
+  const turns: { id: string; version: string; who: string; text: string }[] = []
+  if (!loading) {
+    for (let threadIndex = state.threads.length - 1; threadIndex >= 0 && turns.length < 48; threadIndex--) {
+      const thread = state.threads[threadIndex]!
+      for (let index = thread.items.length - 1; index >= 0 && turns.length < 48; index--) {
+        const entry = thread.items[index]!
+        if (entry.type === 'content' && typeof entry.body.text === 'string') turns.push({ id: `${thread.agent}/${entry.id}`, version: `${entry.revision}`, who: entry.role === 'user' ? 'You' : thread.agent, text: entry.body.text })
+      }
+    }
+  }
+  return { agent: loading ? undefined : state.threads[0]?.agent, turns: turns.reverse() }
+}
 /**
  * A populated conversation under the band, on the kit's transcript scroller. The band enters and leaves above the
  * history: a reader following the end stays at the end; a reader up in history keeps their place.
@@ -235,11 +242,11 @@ const dropAndRestore = async (canvasElement: HTMLElement, between: () => Promise
   await waitFor(() => expect(band(canvasElement)).toHaveLength(0))
   await geometryFrame()
 }
-/** The geometry plays need history several viewports tall, so they select the `long` conversation variant. */
+/** Geometry plays pin populated long history, bounded to 48 rows; they do not browse whole worlds. */
 const geometry = {
   args: { conversation: 'long' },
-  parameters: { scenario: { slices: ['conversation'] } },
-  argTypes: { ...scenarioArgTypes(['conversation']), roster: { table: { disable: true } } },
+  parameters: { scenario: { slices: ['conversation'], world: 'fleet-mid-refactor' } },
+  argTypes: { conversation: { control: false }, roster: { table: { disable: true } } },
   render: ({ scheme }) => <ConnectionGeometryStory scheme={scheme} />,
 } satisfies Story
 /** Following the end of a populated conversation: live → offline → live keeps the end in view (distance 0). */

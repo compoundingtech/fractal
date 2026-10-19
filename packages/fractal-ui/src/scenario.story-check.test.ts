@@ -1,4 +1,6 @@
 import { scenarioStoryCheck } from '@smalltalk/st3-scenarios/storybook'
+import { loadWorld } from '@smalltalk/st3-scenarios'
+import { scenarioSections } from './scenario-transcript.story-harness'
 import { expect, test } from 'vitest'
 import meta, { AllStates } from './Markdown.stories.tsx'
 import syncMeta, { Scenario, LocalFailure, UnknownFailure, ServerFailure } from './SyncLine.stories.tsx'
@@ -66,3 +68,31 @@ for (const [name, story] of Object.entries(pressStories)) {
     expect(result._tag).toBe('Passed')
   })
 }
+
+test('scenario transcript preserves the active migrator turn without a terminal status', () => {
+  const world = loadWorld('fleet-mid-refactor')
+  const section = scenarioSections(world.slices.conversation).sections.find(({ title }) => title.includes('/migrator'))
+  expect(section).toBeDefined()
+  expect(section?.turns.at(-1)?.work.running).toBe(true)
+})
+
+test('scenario transcript marks only the first huge section of each incomplete thread as having older history', () => {
+  const world = loadWorld('huge')
+  const sections = scenarioSections(world.slices.conversation).sections
+  expect(sections.some(({ history }) => history?._tag === 'HasOlder')).toBe(true)
+  for (const section of sections) {
+    const first = section.id.endsWith('/0')
+    expect(section.history?._tag).toBe(first ? 'HasOlder' : 'Complete')
+    expect(section.turns.every(({ work }) => work.commands === undefined && work.changedFiles === undefined)).toBe(true)
+  }
+})
+
+test('scenario transcript preserves tool operations and failed tool lifecycle', () => {
+  const world = loadWorld('fleet-mid-refactor')
+  const toolTurns = scenarioSections(world.with({ conversation: 'tool-heavy' }).slices.conversation).sections.flatMap(({ turns }) => turns)
+  expect(toolTurns.some(({ work }) => work.running && work.commands === 5 && work.changedFiles === 1)).toBe(true)
+  expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.kind === 'run' && call.command !== undefined)).toBe(true)
+  expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.kind === 'edit' && call.changedPath === 'src/session.ts')).toBe(true)
+  const failedTurns = scenarioSections(world.with({ conversation: 'failed-tools' }).slices.conversation).sections.flatMap(({ turns }) => turns)
+  expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
+})

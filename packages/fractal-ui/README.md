@@ -46,19 +46,22 @@ The dev server binds to localhost on a fixed port (53705). To view it from anoth
 ### Scenario data
 
 The **Scenario** toolbar uses the shared `@smalltalk/st3-scenarios` catalog.
-`scenario` selects the world and `scenarioNow` fixes its clock. Only Markdown's
-`AllStates` story currently declares a slice (`conversation`) and renders that
-slice's prose through the real `Markdown` component. Other stories retain their
-existing fixtures. Theme, density and Markdown's rendering picker remain
-independent of scenario data.
+`scenario` selects the world and `scenarioNow` fixes its clock. Markdown prose,
+SyncLine's scenario previews, SystemState's roster and connection geometry,
+TranscriptComposer's column examples, TranscriptPress's scenario examples and
+DeclarationPanel's structured mission fallback consume declared slices.
+Composer and connection geometry checks pin populated data; separate scenario
+stories follow the toolbar. Long interaction-contract specimens retain their fixtures because
+tail mounting and held-back replies do not satisfy the all-markers SSR check.
+Theme, density and rendering pickers remain independent of scenario data.
 
 For example, open
 `?path=/story/fractal-ui-markdown--all-states&globals=scenario:fleet-mid-refactor&args=conversation:empty`.
 Slice overrides use `args=<slice>:<variant>`; the world uses
 `globals=scenario:<world>`. The `test:stories` CI lane runs the kit's
-`scenarioStoryCheck` over this real story, checking declared reads, visible data
-dependence, toolbar world changes and URL-state roundtripping. World-pin
-invariance is intentionally skipped because the story follows the toolbar.
+`scenarioStoryCheck` over the converted stories, checking declared reads, visible
+data dependence, toolbar world changes, pinned-world invariance where applicable,
+and URL-state roundtripping.
 The SSR check uses StyleX's Rollup compiler adapter, without the Vite adapter's
 browser stylesheet refresh timer, so Vitest can close its middleware server cleanly.
 
