@@ -28,6 +28,35 @@ fn read(store: &Store) -> (Option<Value>, u64) {
 }
 
 #[test]
+fn terminal_authority_operation_conflict_wakes_without_subject_claim_changes() {
+    let store = Store::open_memory("owner").unwrap();
+    let subject = "agent/terminal-operation";
+    store.append_claim(&crate::model::ClaimInput {
+        subject: subject.into(), kind: "runtime.observed".into(),
+        actor: Some(subject.into()),
+        fields: serde_json::from_value(json!({
+            "status": "running", "runtime_id": "terminal-operation",
+            "incarnation_id": "one", "terminal": true,
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some("shared-operation".into()),
+    }).unwrap();
+    let mut changes = store.subscribe_runtime_authority(subject);
+    assert_eq!(store.runtime_authority(subject).unwrap().unwrap().reachability, "reachable");
+    changes.borrow_and_update();
+    let before = store.index().unwrap();
+    // A cross-subject idempotency collision repairs this shared operation projection.
+    // Reproduce just that repair: no new terminal claim or graph-index advance.
+    store.connection.write().execute(
+        "UPDATE operations SET state='conflict' WHERE id IN
+         (SELECT json_extract(body, '$._operation.id') FROM claims WHERE subject=?1)", [subject],
+    ).unwrap();
+    assert_eq!(store.index().unwrap(), before);
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(store.runtime_authority(subject).unwrap().unwrap().reachability, "indeterminate");
+}
+
+#[test]
 fn terminal_authority_idle_subscription_skips_reads_and_delivers_changes() {
     let store = Store::open_memory("owner").unwrap();
     store.set_write_clock_at(10).unwrap();
