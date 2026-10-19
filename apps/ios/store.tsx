@@ -283,7 +283,8 @@ function useAppStore(proof?: FabricProfile) {
   // What the phone measured goes to the member it is connected to, as one report at a time and never
   // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
   const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
-  const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
+  const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
   // Image bytes go up through Expo's fetch: React Native's cannot send a byte array as a body.
   useEffect(() => {
     if (proof || !client) { observations.ready = undefined; return; }
@@ -315,9 +316,10 @@ function useAppStore(proof?: FabricProfile) {
     observations.ready = state.send;
     return () => { if (observations.ready === state.send) observations.ready = undefined; };
   }, [proof, client, observations]);
-  const uploader = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  const uploader = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
 
-  // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_ST3_FABRIC_DEFAULT, set in an
+  // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT, set in an
   // ignored env file on the build host) opens on fabric until the person chooses otherwise.
   useEffect(() => {
     if (proof) return;
@@ -650,7 +652,8 @@ function useAppStore(proof?: FabricProfile) {
     let consumed = false;
     let deviceId = '';
     try {
-      const gatewayClient = new St3Client({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      const gatewayClient = new St3Client({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
       consumed = true; deviceId = result.value.device_id;
       if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');

@@ -4,8 +4,8 @@ use super::*;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 pub use lease::{Binding as LeaseBinding, Lease, ORIGIN_HEADER};
-pub use st3_api::api::client_v0::raw_terminal::*;
-pub use st3_api::api::client_v0::raw_terminal::{splice};
+pub use st3_api_core::api::client_v0::raw_terminal::*;
+pub use st3_api_core::api::client_v0::raw_terminal::{splice};
 pub mod lease;
 pub mod peek_capability;
 

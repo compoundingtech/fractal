@@ -659,7 +659,8 @@ test('phone observation schema keeps histogram pairs and live-share as separate 
 
 test('producer conformance fixtures decode strictly without losing tool results', async () => {
     const [{ Schema }, Rich] = await modules;
-    const replay = require(process.env.ST_TIMELINE_CONFORMANCE_OUTPUT
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    const replay = require(process.env.FRACTAL_TIMELINE_CONFORMANCE_OUTPUT ?? process.env.ST_TIMELINE_CONFORMANCE_OUTPUT
         ?? '../../../docs/st3/client-v0/fixtures/timeline-conformance.json');
     const fixtures = Array.isArray(replay) ? replay : replay.items;
     assert.ok(fixtures.length > 0);
