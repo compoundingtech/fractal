@@ -1,6 +1,7 @@
 /** Runtime-free workbench presentation. Conversation runtimes load with the thread surface. */
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
 export { ThreadHeader, ResizableSplit, TerminalDrawer } from './composition/Shell.tsx'
+export { NarrowSheet, NarrowActionRow } from './composition/NarrowLayout.tsx'
 export { SidebarAgentRow, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
 export { SidebarTree } from './sidebar/SidebarTree.tsx'
 export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'

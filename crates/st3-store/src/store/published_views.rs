@@ -114,22 +114,6 @@ impl Store {
         self.smalltalk.published_views.withdraw(collection);
     }
 
-    /// Say that `collection`'s running refresher governs its view while it has nothing to serve:
-    /// see [`PublishedViews::hold`].
-    pub fn hold_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.hold(collection);
-    }
-
-    /// Whether a refresher serves or governs `collection`'s view: its windows then reread only
-    /// when the view changes again.
-    pub fn collection_view_published(&self, collection: &str) -> bool {
-        self.smalltalk.published_views.published(collection)
-    }
-
-    /// Follows every collection's publication revision.
-    pub fn subscribe_collection_views(&self) -> tokio::sync::watch::Receiver<Revisions> {
-        self.smalltalk.published_views.subscribe()
-    }
 }
 
 #[cfg(test)]
