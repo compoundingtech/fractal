@@ -1215,7 +1215,8 @@ async fn dial_peer<B: Backend>(
             let failure = ReplicationExchangeFailure::from_error(
                 &error, ReplicationFailurePhase::Dial, attempt_started.elapsed(), None,
             );
-            error.context(failure)
+            let display = error.to_string();
+            error.context(failure).context(display)
         });
         let peer = PeerConfig {
             name: name.clone(),
@@ -1289,7 +1290,8 @@ async fn dial_peer<B: Backend>(
                     let failure = ReplicationExchangeFailure::from_error(
                         &refusal, ReplicationFailurePhase::Dial, attempt_started.elapsed(), None,
                     );
-                    error = refusal.context(failure);
+                    let display = refusal.to_string();
+                    error = refusal.context(failure).context(display);
                 }
                 if advance_failed_route(&mut route, &error) {
                     // A stalled or broken stream must not be reused on the next attempt.

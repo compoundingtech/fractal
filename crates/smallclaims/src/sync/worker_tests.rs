@@ -1898,6 +1898,9 @@ mod retry_tests {
                         .unwrap()
                         .contains("that member's Fabric grants")
                 );
+                let detail = failed.failure.as_ref().expect("retained Fabric refusal detail");
+                assert_eq!(detail.phase, ReplicationFailurePhase::Dial);
+                assert!(!detail.cause.contains("that member's Fabric grants"));
                 // Asleep: more time passes and the probe is not asked again.
                 tokio::time::sleep(Duration::from_millis(600)).await;
                 let asked = std::fs::read_to_string(&probes).unwrap().lines().count();
