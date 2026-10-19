@@ -3,6 +3,8 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::CoordinationStore;
+use st3::MissionsStore;
 use st3::LimitsStore;
 use st3::SeatsStore;
 use st3::StopDeferralStore;

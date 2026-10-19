@@ -3,12 +3,6 @@ use crate::store::attention_ivm::*;
 use crate::store::custom::RegistrationRequest;
 use smallclaims::ivm::{Readiness, SourceCut, events};
 
-pub fn views(store: &Store) -> Views {
-    let views = Views::new(definitions()).unwrap();
-    views.create_schema(&store.connection.write()).unwrap();
-    views
-}
-
 pub fn install(store: &Store, views: &Views) {
     store.project_replication_backlog().unwrap();
     let mut writer = store.connection.write();

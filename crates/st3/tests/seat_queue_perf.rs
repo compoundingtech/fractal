@@ -7,6 +7,7 @@
 //!   cargo test --release -p st3 --test integration seat_queue_perf:: -- --ignored --nocapture
 //! ```
 
+use st3::MissionsStore;
 use st3::SeatsStore;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

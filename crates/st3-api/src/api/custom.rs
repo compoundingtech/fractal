@@ -1,4 +1,5 @@
 //! Custom schema administration and generic client reads; paired devices cannot register kinds.
+use crate::CustomStore;
 use super::*;
 use crate::store::custom::{RegistrationRequest, ReplyRequest};
 

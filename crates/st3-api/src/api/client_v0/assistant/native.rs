@@ -1,4 +1,5 @@
 //! Daemon-owned approval asks and transaction-bound assistant write provenance.
+use crate::PersonWorkStore;
 use super::*;
 
 pub async fn propose(State(state): State<AppState>, Extension(snapshot): Extension<ClientSnapshot>,

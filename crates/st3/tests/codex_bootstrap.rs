@@ -2,6 +2,7 @@
 //! reconciler's runtime.running claim. No model or credentials are used in this proof.
 #![cfg(target_os = "linux")]
 
+use st3::MissionsStore;
 use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
