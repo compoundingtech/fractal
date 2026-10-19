@@ -366,7 +366,8 @@ fn next_selection_row(connection: &Connection, work: &FoldWork) -> Result<Option
                 format!("CASE WHEN {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM} THEN json_type(claims.body,{path}) IS NOT NULL ELSE 0 END,CASE WHEN {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM} AND json_type(claims.body,{path})='{kind}' THEN json_extract(claims.body,{path}) END")
             }).collect::<Vec<_>>().join(",");
         format!("SELECT claims.store_index,claims.accepted_at_unix_ms,batches.origin,batches.replica_sequence,claims.batch_id,
-            (SELECT MIN(position) FROM replica_records WHERE claim_id=claims.id),claims.id,{columns}
+            COALESCE((SELECT position FROM claim_positions WHERE claim_id=claims.id),
+                (SELECT MIN(position) FROM replica_records WHERE claim_id=claims.id)),claims.id,{columns}
             FROM claims INDEXED BY claims_subject_index JOIN batches ON batches.id=claims.batch_id
             WHERE claims.subject=?1 AND claims.store_index>?2 AND claims.store_index<=?3
             ORDER BY claims.store_index LIMIT 1")
@@ -381,7 +382,8 @@ fn next_selection_row(connection: &Connection, work: &FoldWork) -> Result<Option
     }).optional().map_err(Into::into)
 }
 
-/// Legacy position is a prefix count, but never an unbounded COUNT query.
+/// Stored admission positions take precedence over surviving wire records.
+/// Only claims without either use a prefix count, never an unbounded COUNT query.
 /// Cached batch prefixes also include other subjects' claims, preserving wire order.
 fn bounded_position(transaction: &Transaction<'_>, row: &SelectionRow, budget: &mut FoldBudget) -> Result<Option<u64>> {
     if let Some(position) = row.position { return Ok(Some(position)); }
@@ -1862,6 +1864,60 @@ mod tests {
         smallclaims::store::append_claim_record_tx(
             transaction, "node", subject, kind, Some("agent/filtered"), &json!({"fields":fields}), &[], batch,
         ).unwrap()
+    }
+
+    #[test]
+    fn selector_rebuild_preserves_frozen_position_after_least_duplicate_record_deletion() {
+        let store = Store::open_memory("node").unwrap();
+        store.set_write_clock_at(1_800_000_000_000).unwrap();
+        let subject = "message/frozen-selector-position";
+        let (first, update) = {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let first = deferred_claim(&transaction, subject, "message.sent",
+                json!({"from":"agent/old","to":"person/old","status":"closed","content":"old","tags":[]}), None);
+            let update = deferred_claim(&transaction, subject, "message.sent",
+                json!({"from":"agent/new","to":"person/new","status":"sent","content":"new","tags":[]}), Some(&first.batch_id));
+            assert_eq!(first.accepted_at_unix_ms, update.accepted_at_unix_ms);
+            transaction.commit().unwrap();
+            (first, update)
+        };
+        {
+            let connection = store.connection.write();
+            for (position, claim) in [(0, &first), (1, &update), (2, &first)] {
+                connection.execute(
+                    "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+                     VALUES(?1,'node',1,'selector-position-test',?2,X'','valid',?3,'0')",
+                    params![format!("selector-position-{position}"), position, claim.id],
+                ).unwrap();
+            }
+            // Exercise the real BEFORE DELETE trigger for a legacy claim whose
+            // admission position has not yet been materialized.
+            connection.execute("DELETE FROM claim_positions WHERE claim_id=?1", [&first.id]).unwrap();
+            connection.execute("DELETE FROM replica_records WHERE record_ref='selector-position-0'", []).unwrap();
+            let frozen: u64 = connection.query_row(
+                "SELECT position FROM claim_positions WHERE claim_id=?1", [&first.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(frozen, 0);
+        }
+        let canonical = serde_json::to_value(store.message(subject).unwrap().unwrap()).unwrap();
+        assert_eq!(canonical["from"], "agent/new");
+        assert_eq!(canonical["to"], "person/new");
+        assert_eq!(canonical["status"], "sent");
+        assert_eq!(canonical["content"], "new");
+        store.client_messages_selector_benchmark_rebuild().unwrap();
+        let rows = paged_backfill_rows(&store, Some("person/new"), Some("agent/new"), false);
+        assert_eq!(rows.len(), 1, "the canonical open message must remain in the filtered page");
+        assert_eq!(rows[0]["message"], canonical);
+        assert_eq!(rows[0]["current"], true);
+        assert!(paged_backfill_rows(&store, Some("person/old"), None, true).is_empty());
+        assert!(paged_backfill_rows(&store, None, Some("agent/old"), true).is_empty());
+        let header: (String, String, bool) = store.readers.get().query_row(
+            "SELECT sender,recipient,closed FROM local_client_message_selectors_v1
+             WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL",
+            [subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(header, ("agent/new".into(), "person/new".into(), false));
     }
 
     #[test]
