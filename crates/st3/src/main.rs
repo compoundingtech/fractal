@@ -17891,6 +17891,11 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 let duration_ms = started.elapsed().as_millis();
                 let report = result.as_ref().ok();
                 smallclaims::sqlite::telemetry::wal_checkpoint_observed(&store.readers, report);
+                smallclaims::sqlite::telemetry::checkpoint_finished(
+                    started.elapsed(),
+                    smallclaims::sqlite::telemetry::CheckpointOperation::Passive,
+                    smallclaims::sqlite::telemetry::CheckpointOutcome::from_report(report),
+                );
                 smallclaims::windows::wal::observe(
                     report,
                     std::fs::metadata(&wal_path).ok().map(|metadata| metadata.len()),
