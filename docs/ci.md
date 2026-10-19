@@ -185,8 +185,8 @@ real Cargo and benign stand-in commands; it compiles no Rust.
   model check, the [warning ratchet](#clippy-warning-ratchet), then
   `cargo run --locked -p st3-client-codegen -- --check`;
 - `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
-  pinned older st3. Building that baseline also runs the pinned pty's own unit tests, two of which
-  are timing-sensitive, so the build is retried up to three times.
+  previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
+  metadata before running it; it does not rebuild the baseline or its PTY dependency.
 
 The primary test job proves that the two actual nextest inventories are disjoint and their union
 equals the full selected suite. The explicit zero-retry mail canaries run in a parallel job. The primary also
@@ -233,7 +233,9 @@ fix if a merge group finds a raw path introduced by another PR; do not bypass th
 Main upkeep probes the exact Cargo and Nix cache keys for each stage before provisioning Nix
 or restoring build archives. When both entries exist it stops after the probes. A miss is flagged
 as P0 and fills the missing entries with builds only: selected test executables, Clippy artifacts,
-the fleet baseline and integration binary, the Genie shell, or the isolation archive and VM driver. Workspace tests and the isolation VM are not repeated on main. The TypeScript dependency cache is also kept on main without repeating its tests.
+the integration binary, the Genie shell, or the isolation archive and VM driver. The published
+fleet baseline is downloaded rather than compiled. Workspace tests and the isolation VM are not
+repeated on main. The TypeScript dependency cache is also kept on main without repeating its tests.
 Merge-group and PR caches have their own ref scope; they cannot replace these main-scope saves,
 which all PRs and Namespace overflow runs can restore. Manual Workspace CI dispatch on main
 remains available for a full run. Release and deployment workflows keep their own push triggers.
@@ -243,8 +245,8 @@ backend) holding Cargo's registry and the workspace `target/` directory, keyed o
 `flake.lock`, workspace manifests and linker configuration. A second keyed entry (`nix5-<job>-...`) holds a signed local Nix binary cache in
 `$RUNNER_TEMP/st-ci-cache`. Its key includes `flake.lock`, the flake, Nix expressions and both compatibility baseline pins.
 `scripts/ci-nix-cache use` makes it a preferred substituter. After a successful stage, `save`
-copies reference-free downloads and sources fetched by the run, plus the closures of the fleet
-baseline, historical messaging channel and provider components. It leaves the installer-managed
+copies reference-free downloads and sources fetched by the run, plus the closures of the
+previous-release messaging package and provider components. It leaves the installer-managed
 `/nix` directory intact. Cache failures emit a warning and let the job build normally.
 
 Genie uses a separate `nix6-genie-closure-...` entry keyed on its locked shell and cache policy.
@@ -284,13 +286,10 @@ the recipient's local message arrival; channel readiness records an observation,
 real multi-minute outages, first priority so their retries fit the CI test window. Failed tests
 retry twice with fixed 30-second delays; a retry pass is reported as flaky, not a gate failure.
 The messaging fault cases need the pinned historical st3 (`.github/messaging-compat-baseline.json`).
-CI builds it once per job and exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a
-separate nextest process, runs `scripts/messaging-compat-binary`. The script builds it once per
-baseline commit under a lock and caches the path in `${XDG_CACHE_HOME:-~/.cache}/st3`
-(`ST3_MESSAGING_COMPAT_CACHE` moves it), so the other cases read the cached path instead of each
-queuing its own `nix build`; a cached path that is no longer executable is rebuilt, and a caller
-that cannot get the lock within `ST3_MESSAGING_COMPAT_LOCK_WAIT` seconds (default 540, below the callers' 10 minute `timeout`) fails with
-the way out (set `ST3_MESSAGING_COMPAT_BIN`). `scripts/messaging-compat-binary-test` runs it against a fake `nix`.
+CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separate nextest process, runs
+`scripts/messaging-compat-binary`, which prints the checksum-verified previous-release executable from
+`target/compat-baselines/<sha256>`. The first caller downloads and extracts the archive; concurrent callers are
+safe and later ones reuse it, so nothing is built.
 Each run isolates test `HOME` and XDG state. The summary records the tested SHA,
 each stage's elapsed time, result and exit code; each stage job uploads `<job>-logs` with its log and `.time` file.
 Nextest's final summary retains flaky outcomes.
@@ -331,10 +330,71 @@ The separate `api_accept` target also supervises its descriptor-exhaustion subpr
 The remaining daemon fixtures serve their APIs in process or use fake runtime observations;
 their tasks end with their test runtime. New process-spawning fixtures should use this helper.
 
-The workspace suite still covers the token-free two-node messaging fault matrix. Its historical
-channel build remains independently pinned in `.github/messaging-compat-baseline.json`. Its
+The workspace suite still covers the token-free two-node messaging fault matrix. Its
+previous-release channel archive is pinned in `.github/messaging-compat-baseline.json`. Its
 provider stand-in runs the omp channel hook's TypeScript with Node 24's built-in type stripping;
 the default devShell supplies that `node`. See [the eval contract](../evals/st3/messaging-faults/README.md).
+
+### Rolling compatibility baselines
+
+The fleet and messaging pins in `.github/*-compat-baseline.json` track the latest
+published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
+`why`, `exception_reason` (`null` ordinarily), and both native archive URLs and hex SHA256
+checksums. Fleet CI downloads, verifies and extracts the published native archive instead of
+rebuilding an old workspace. Messaging consumes the pinned published archive too; Nix adjusts
+its Linux interpreter path for sandbox execution without recompiling the channel.
+`checks.st3-runtime-inputs` verifies that changing either the collector or the published
+archive wrapper changes the test derivation, but not the installed runtime. The baseline
+dimension substitutes the actual test-only native dependency; it no longer needs a
+historical baseline flake input.
+
+The public-repository workflow runs `python3 scripts/compat-baseline-release check` on ready
+PRs, merge groups and main pushes (and manual dispatch). It paginates the actual published release
+list and excludes drafts, prereleases and unpublished tags. A baseline more than one published
+stable release behind the newest publication fails unless `exception_reason` gives an explicit
+temporary older-hold reason. An ordinary policy `why` does not waive freshness; blank reasons
+are invalid. Holds should identify the boundary and the condition for removing them.
+Failures distinguish `baseline is stale` from `release API unreachable`; the latter means
+freshness could not be determined, not that a pin needs updating. Archive downloads have a
+60-second network timeout and still fail closed.
+
+Daily and tag publication verify that the candidate's unheld pins already name the latest
+published stable release. After publication, `compat-baseline-release advance TAG` verifies
+the published `RELEASE.json` source against the dereferenced Git tag, checks archive bytes
+against `SHA256SUMS` and embedded `BUILD.json`, and opens a labelled draft baseline maintenance PR with
+an upgrade-impact fragment. Explicit holds are preserved. The release source itself stays
+immutable; the new pins reach `main` only through human review and the existing merge queue.
+The upstream maintainers own review and merge of these maintenance PRs before the next stable
+release. No auto-merge or enrollment is enabled by publication. The next release waits until
+that PR lands, except for explicitly held pins. A baseline-only maintenance delta is not a new
+daily release candidate, avoiding an endless release/repin loop.
+
+The tag publisher's token needs only `contents: write`; daily publication also needs
+`actions: read` to retrieve verified workflow artifacts. Only the separate postpublish advance
+job receives `contents: write`, `pull-requests: write` and `actions: write`; the read-only
+freshness job needs only `contents: read`. Repository **Settings → Actions → General → Workflow
+permissions → Allow GitHub Actions to create and approve pull requests** must be enabled
+(and allowed by the organization policy). Because PRs created with `GITHUB_TOKEN` do not trigger
+PR workflows, automation explicitly dispatches Workspace CI and the public-repository workflow
+on the maintenance branch. A permission failure leaves the published release intact and fails
+the advance job; it never switches credentials or bypasses main protection.
+
+Focused commands (Python standard library, Git and authenticated `gh` only):
+
+```sh
+python3 scripts/compat-baseline-release-test
+python3 scripts/compat-baseline-release check
+python3 scripts/compat-baseline-release check --source HEAD --require-latest
+python3 scripts/compat-baseline-release repin v0.3.17
+python3 scripts/compat-baseline-release advance v0.3.17
+```
+
+`repin` rewrites the local unheld JSON pins only; review and commit them through a PR.
+`advance` opens or reuses the postpublish PR and dispatches its checks, without merging it.
+After a failed postpublish step, rerun `advance` for the latest stable tag; an unchanged daily
+run also repairs a missing postpublish PR. Remove a resolved `exception_reason` before repinning.
+Run `genie` after changing workflow generators, and `genie --check` to verify the generated
+workflows in the ordinary final validation.
 
 ### Boot canaries
 
@@ -583,8 +643,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   each stream is a sequence of mostly single-threaded lanes and its output is printed whole
   once all four have finished, in the job summary's lane table as the streams' wall time. The
   generated changelog registry is written atomically and only when it differs, so the streams'
-  parallel readers are safe. The SDK frame CPU budgets (which measure CPU time) and the strict
-  plays (which use every vCPU, and need the Storybook build) run alone afterwards.
+  parallel readers are safe. The kit stream contains only typecheck and play-index contracts.
+  Its browser controls and Storybook build run after all streams finish to avoid competing
+  with scenario, app and SDK tests. The SDK frame CPU budgets (which measure CPU time) and
+  strict plays (which use every vCPU) then also run alone.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them. The detector separately emits `kit-inputs`: app-only changes
   skip kit play-index contracts, Storybook and strict browser plays; kit source,
@@ -680,6 +742,49 @@ negative controls against real Chromium. The matrix receipt retains story/case/w
 counts and per-case seconds and adds reset, page-creation, guard, navigation-to-DOM,
 post-DOM readiness, assertion and close timings. The strict lifecycle assertions,
 story-identity checks, matrix size and job timeout are unchanged.
+
+Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
+out into two non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
+and the gate refuses shard options for any set but `all`. Each shard validates the
+**full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
+cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
+configures N. `KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
+Every shard generates and checks the app changelog registry after the frozen install,
+before starting any streams: Storybook imports it through the workspace stories.
+Every selected story still runs all four width/theme cases with the same runner and
+assertions. Empty shards fail unless N exceeds the story count. Shard 0 runs every
+stream in `scripts/ci-fractal-web`; the other shards run only the play index contracts,
+Storybook build and their strict plays. Browser controls and Storybook wait for every
+stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
+stay on shard 0. App-only
+changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
+
+Every shard publishes `receipt.json` in an artifact named
+`kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and
+adds a `kit i/N` summary row with completed/expected cases, passes, failures and play
+minutes. The semantic `fractal-web` gate requires matrix success **and** all N receipts:
+their full indexes must agree, and the union of unique story/width/theme cases
+must match exactly that index. Pull requests skip this aggregation. Missing, duplicate,
+failed or unexpected shards fail closed.
+Artifacts and receipts are bound to the workflow run ID, checked-out head SHA
+(`github.sha`, including a PR's tested merge SHA) and attempt. The gate downloads
+only this run/head's artifacts, checks each receipt against its artifact name and
+the current workflow provenance, and selects each shard's newest available attempt.
+An older successful attempt of the **same run and same SHA** is allowed so GitHub's
+“rerun failed jobs” need not rerun successful browser shards. A newer failure cannot
+fall back to an older success; duplicate attempts, future attempts, mixed heads,
+mixed runs and missing shards fail closed. A new head/run cannot reuse old receipts.
+
+Storybook builds once per shard rather than introducing a third, serialized build job
+and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/smalltalk/actions/runs/38651083493/job/116150585943),
+Storybook took 9.878 seconds (0.165 runner-minutes); runner initialization through the
+frozen install took 142.457 seconds (2.374 runner-minutes). Duplicating the small build
+is cheaper than another similarly prepared build job, even before artifact transfer.
+These are baseline observations, not promises about cold runners. The existing timed
+`UI kit Storybook` lane and receipt `storybookBuildSeconds` measure the new PR's actual
+cost: extra build runner-minutes are the sum of nonzero-shard build seconds / 60;
+play runner-minutes are the sum of all shards' `playMinutes`.
+Browser/build measurement is deliberately CI-only.
 
 Run SDK tests with their own `vitest.config.ts`, not the parent app's narrower test patterns.
 The rejected-mission diagnostic proof checks its fixture against the generated decoder:

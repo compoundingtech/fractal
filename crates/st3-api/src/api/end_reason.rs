@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::OwnedSetsStore;
 use serde_json::{Value, json};
 use crate::model::{ClaimRecord, CurrentHarnessView, SubjectStatus};
 use crate::suspension::Suspension;

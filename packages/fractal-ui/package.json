@@ -30,7 +30,8 @@
     "test:human-time": "node --test --test-force-exit src/time/human-time.unit.test.mjs",
     "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs",
     "check:sidebar-fitting": "node scripts/check-sidebar-fitting.mjs",
-    "check:transcript-skeleton-imports": "node scripts/check-transcript-skeleton-imports.mjs"
+    "check:transcript-skeleton-imports": "node scripts/check-transcript-skeleton-imports.mjs",
+    "test:declaration": "node --test --test-force-exit src/assistant-ui/declaration/declaration-tint.unit.test.mjs"
   },
   "dependencies": {
     "react": "19.2.3",

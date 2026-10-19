@@ -19,6 +19,11 @@ pub use st3_store::blobs;
 pub use st3_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
 pub use st3_github::changes;
+pub use st3_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
+pub use st3_seats::{AccountsStore, EvidenceSeatsStore, HarnessQuestionsStore, LimitsStore, RetirementsStore, RevisionSeatsStore, RolloutsStore, RosterAdmissionStore, RuntimeStartsStore, SeatStatusStore, SeatsStore, SeatsStoreCore, SekretsDaemonStore, StopDeferralStore, SubagentsStore, TracePrincipalStore};
+pub use st3_missions::{AdhocWorkStore, ArrangementsStore, CoordinationStore, DeclarationsStore, DelegationStore, LanesStore, MissionEligibilityStore, MissionListStore, MissionsStore, MissionsStoreCore, PersonWorkStore, WorkListStore};
+pub use st3_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore};
+pub use st3_attention::{AttentionListStore, AttentionSnapshotStore, AttentionStore, ClientSummaryStore, OwnerListsStore, PublishedListStore, PublishedViewsAttentionStore, SummaryListStore};
 pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use st3_api::claude_channel;
 pub use st3_store::client;
@@ -41,7 +46,7 @@ pub use st3_api::gate_check;
 pub use st3_kernel::gate_kinds;
 pub use st3_kernel::gate_report;
 pub use st3_store::github_watch;
-pub use st3_store::graph;
+pub use st3_missions::graph;
 pub use st3_reconcile::handoff;
 pub use st3_api::graph_watch_ivm;
 pub use st3_kernel::harness_events;
@@ -51,8 +56,7 @@ pub use st3_kernel::instance;
 pub use st3_kernel::lane;
 pub use st3_store::mailbox;
 pub use st3_store::message_body;
-/// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
-pub use st3_store::maintenance;
+pub use st3_delivery::maintenance;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod malloc_trim;
 pub use st3_kernel::read_cache;
@@ -90,21 +94,20 @@ pub use st3_telemetry::recorder_report;
 pub use st3_store::remote_terminal;
 pub use st3_store::render;
 pub use st3_store::resource;
-pub use st3_store::rollout;
+pub use st3_seats::rollout;
 pub use st3_kernel::seat_queue;
 /// Runs any CLI with credentials no seat can read, through a gateway the sekrets user owns.
 pub use st3_store::sekrets;
-pub use st3_store::sekrets_daemon;
+pub use st3_seats::sekrets_daemon;
 pub mod service;
 pub use st3_kernel::skill;
 pub use st3_telemetry::slo;
 pub use st3_telemetry::slo_history;
 pub use st3_store::startup;
 pub use st3_telemetry::startup_telemetry;
-pub use st3_store::store;
+pub use st3_evidence::store;
 pub mod subagents;
-/// Suspends a quiet seat and resumes its own native session.
-pub use st3_store::suspension;
+pub use st3_seats::suspension;
 pub use st3_reconcile::seat_snapshot;
 pub use st3_telemetry::telemetry;
 pub use smallclaims::task_cpu;
@@ -129,7 +132,9 @@ pub mod tiles;
 #[cfg(test)]
 pub(crate) use st3_telemetry::relay_trace;
 #[cfg(test)]
-pub(crate) use st3_store::{checkout, external_sessions};
+pub(crate) use st3_store::checkout;
+#[cfg(test)]
+pub(crate) use st3_seats::external_sessions;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, St3Error};
