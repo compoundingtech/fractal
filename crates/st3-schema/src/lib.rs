@@ -22,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use st_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h945ea5d71fa0 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hf9fd384bda92 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -85,6 +85,22 @@ before deleting an earlier sibling, deleting a record or changing a record's cla
 could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
 never deleted. No history backfill runs at open; a claim without a row and without any removal
 since keeps the legacy value, which equals what would be stored.
+
+## Retired identity ledger
+
+`retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
+checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
+`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
+background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
+per background writer loan with its cursor in `meta`, resting outside the loan for
+max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
+identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
+stays retired and is also labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
+the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
+would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
+equates with a BLOB.
 
 ## Repaired claim replacements
 
@@ -3888,6 +3904,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         .collect();
     if kind == "work.submitted" {
         fields.insert("submitted_incarnation".into(), string());
+    }
+    if kind == "work.person-done" {
+        fields.insert("sender_class".into(), enumeration(&["external-assistant"]));
+        fields.insert("assistant_grant_id".into(), string());
+        fields.insert("assistant_owner".into(), reference_to(&["person"]));
+        fields.insert("assistant_session_actor".into(), string());
     }
     if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
         fields.insert("acted_for".into(), reference_to(&["person"]));
