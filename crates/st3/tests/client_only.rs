@@ -1,4 +1,6 @@
 //! The actual stui binary on a daemon-less device, talking only to isolated members.
+use st3::PersonWorkStore;
+use st3::SeatsStoreCore;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -8,7 +10,7 @@ use alacritty_terminal::{
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use st3::{api::AppState, model::PersonAskRequest, store::Store};
-use st3_client::{Client, PairingBegin};
+use st3_client::{Client, PersonPairingBegin};
 use std::{
     io::{Read, Write},
     path::Path,
@@ -139,6 +141,7 @@ fn state(root: &Path, node: &str) -> AppState {
         ))
         .unwrap();
     AppState {
+        owning_person: None,
         store: Arc::new(store),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
@@ -230,14 +233,11 @@ fn carrier_with_loss(
 }
 
 async fn pair(root: &Path, local: &Client, url: &str) {
-    let challenge = local
-        .pairing_begin(&PairingBegin {
-            api_version: st3_client::API_VERSION.into(),
-            device_name: "Demo laptop".into(),
-            person_id: "person/avery".into(),
-            full_control: Some(true),
-            scopes: None,
-        })
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    device_name: "Demo laptop".into(),
+    person_id: "person/avery".into(),
+    full_control: Some(true),
+    scopes: None, })
         .await
         .unwrap()
         .value;
@@ -374,14 +374,11 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
         state.store.claim_verdict(&claim.id).unwrap(),
         smallclaims::principal::Verdict::Verified
     );
-    let challenge = local
-        .pairing_begin(&PairingBegin {
-            api_version: st3_client::API_VERSION.into(),
-            device_name: "Display".into(),
-            person_id: "person/avery".into(),
-            full_control: None,
-            scopes: Some(vec!["read.projections".into()]),
-        })
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    device_name: "Display".into(),
+    person_id: "person/avery".into(),
+    full_control: None,
+    scopes: Some(vec!["read.projections".into()]), })
         .await
         .unwrap()
         .value;
@@ -609,7 +606,34 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
 /// The designated timing client drives the actual binary against an isolated daemon. Both
 /// old timer intervals are exceeded; protocol pings keep the stream live without a read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn inventory_screens_send_no_request_after_their_first_frames_for_more_than_a_minute() {
+async fn the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute()
+{
+    inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
+        "4",
+        "inventory-fleet",
+        &["clients", "machines", "devices", "sessions"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute()
+{
+    inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
+        "5",
+        "inventory-usage",
+        &["usage-24"],
+    )
+    .await;
+}
+
+/// One screen of the real stui client. The two screens run as two tests, so they idle their
+/// minute side by side instead of one after the other.
+async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
+    key: &str,
+    label: &str,
+    windows: &[&str],
+) {
     use serde_json::Value;
     let member = tempfile::tempdir().unwrap();
     let mut state = state(member.path(), "inventory-idle");
@@ -628,135 +652,126 @@ async fn inventory_screens_send_no_request_after_their_first_frames_for_more_tha
     .await
     .unwrap();
     let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (key, label, windows) in [
-        (
-            "4",
-            "inventory-fleet",
-            vec!["clients", "machines", "devices", "sessions"],
-        ),
-        ("5", "inventory-usage", vec!["usage-24"]),
-    ] {
-        let device = tempfile::tempdir().unwrap();
-        let log = device.path().join("timing.jsonl");
-        let events = device.path().join("events.jsonl");
-        let mut command = Command::new("python3");
-        command
-            .arg(repo.join("scripts/stui-test-client"))
-            .args([
-                "--binary",
-                test_env!("CARGO_BIN_EXE_st3"),
-                "--classic",
-                "--seconds",
-                "72",
-                "--label",
-                label,
-                "--keys",
-                key,
-            ])
-            .arg("--timing")
-            .arg(&log)
-            .arg("--events")
-            .arg(&events)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap())
-            .env("HOME", device.path())
-            .env("XDG_CONFIG_HOME", device.path().join("config"))
-            .env("XDG_CACHE_HOME", device.path().join("cache"))
-            .env("XDG_STATE_HOME", device.path().join("state"))
-            .env("ST3_ENDPOINT", &socket)
-            .env("ST3_PERSON", "person/avery");
-        let output = tokio::task::spawn_blocking(move || command.output().unwrap())
-            .await
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let rows = std::fs::read_to_string(&log)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
-        let recorded = std::fs::read_to_string(&events)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
-        let origin = rows.iter().find(|row| row["type"] == "start").unwrap()["epoch_ms"]
-            .as_u64()
-            .unwrap();
-        let idle = recorded
+    let device = tempfile::tempdir().unwrap();
+    let log = device.path().join("timing.jsonl");
+    let events = device.path().join("events.jsonl");
+    let mut command = Command::new("python3");
+    command
+        .arg(repo.join("scripts/stui-test-client"))
+        .args([
+            "--binary",
+            test_env!("CARGO_BIN_EXE_st3"),
+            "--classic",
+            "--seconds",
+            "72",
+            "--label",
+            label,
+            "--keys",
+            key,
+        ])
+        .arg("--timing")
+        .arg(&log)
+        .arg("--events")
+        .arg(&events)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", device.path())
+        .env("XDG_CONFIG_HOME", device.path().join("config"))
+        .env("XDG_CACHE_HOME", device.path().join("cache"))
+        .env("XDG_STATE_HOME", device.path().join("state"))
+        .env("ST3_ENDPOINT", &socket)
+        .env("ST3_PERSON", "person/avery");
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let recorded = std::fs::read_to_string(&events)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let origin = rows.iter().find(|row| row["type"] == "start").unwrap()["epoch_ms"]
+        .as_u64()
+        .unwrap();
+    let idle = recorded
+        .iter()
+        .find(|row| row["type"] == "idle_start")
+        .unwrap()["epoch_ms"]
+        .as_u64()
+        .unwrap();
+    let end = recorded
+        .iter()
+        .find(|row| row["type"] == "idle_end")
+        .unwrap();
+    assert_eq!(
+        end["running"], true,
+        "the real client stayed alive throughout idle"
+    );
+    let mut ready = idle;
+    for &window in windows {
+        let frames = rows
             .iter()
-            .find(|row| row["type"] == "idle_start")
-            .unwrap()["epoch_ms"]
-            .as_u64()
-            .unwrap();
-        let end = recorded
-            .iter()
-            .find(|row| row["type"] == "idle_end")
-            .unwrap();
+            .filter(|row| {
+                row["type"] == "frame" && row["id"] == window && row["kind"] == "snapshot"
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            end["running"], true,
-            "the real client stayed alive throughout idle"
+            frames.len(),
+            1,
+            "{label} must subscribe {window} once, without polling or resubscription: {rows:?}"
         );
-        let mut ready = idle;
-        for window in windows {
-            let frames = rows
-                .iter()
-                .filter(|row| {
-                    row["type"] == "frame" && row["id"] == window && row["kind"] == "snapshot"
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                frames.len(),
-                1,
-                "{label} must subscribe {window} once, without polling or resubscription: {rows:?}"
-            );
-            ready = ready.max(origin + frames[0]["at_ms"].as_u64().unwrap());
-        }
-        assert!(
-            end["epoch_ms"].as_u64().unwrap() - ready > 60_000,
-            "the idle oracle exceeds the longest old interval after all first frames"
-        );
-        let requests = rows
-            .iter()
-            .filter(|row| {
-                row["type"] == "request"
-                    && origin + row["at_ms"].as_u64().unwrap() > ready
-                    && origin + row["at_ms"].as_u64().unwrap() <= end["epoch_ms"].as_u64().unwrap()
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            requests.is_empty(),
-            "idle {label} issued requests: {requests:?}"
-        );
-        let inventory_http = rows
-            .iter()
-            .filter(|row| row["type"] == "request")
-            .filter(|row| {
-                [
-                    "/v1/client/clients",
-                    "/v1/client/machines",
-                    "/v1/client/devices",
-                    "/v1/client/sessions",
-                    "/v1/client/terminals",
-                    "/v1/client/usage",
-                ]
-                .iter()
-                .any(|route| {
-                    row["route"]
-                        .as_str()
-                        .is_some_and(|actual| actual.starts_with(route))
-                })
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            inventory_http.is_empty(),
-            "a granted member uses the stream even on initial focus: {inventory_http:?}"
-        );
+        ready = ready.max(origin + frames[0]["at_ms"].as_u64().unwrap());
     }
+    assert!(
+        end["epoch_ms"].as_u64().unwrap() - ready > 60_000,
+        "the idle oracle exceeds the longest old interval after all first frames"
+    );
+    let requests = rows
+        .iter()
+        .filter(|row| {
+            row["type"] == "request"
+                && origin + row["at_ms"].as_u64().unwrap() > ready
+                && origin + row["at_ms"].as_u64().unwrap() <= end["epoch_ms"].as_u64().unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        requests.is_empty(),
+        "idle {label} issued requests: {requests:?}"
+    );
+    let inventory_http = rows
+        .iter()
+        .filter(|row| row["type"] == "request")
+        .filter(|row| {
+            [
+                "/v1/client/clients",
+                "/v1/client/machines",
+                "/v1/client/devices",
+                "/v1/client/sessions",
+                "/v1/client/terminals",
+                "/v1/client/usage",
+            ]
+            .iter()
+            .any(|route| {
+                row["route"]
+                    .as_str()
+                    .is_some_and(|actual| actual.starts_with(route))
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        inventory_http.is_empty(),
+        "a granted member uses the stream even on initial focus: {inventory_http:?}"
+    );
     server.abort();
 }
 

@@ -25,7 +25,7 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 
-use super::registry::{self, Registry, Tile};
+use crate::tile_registry::{self as registry, Registry, Tile};
 use super::uids;
 
 /// Where a tile's own directories appear inside it.
@@ -421,6 +421,13 @@ impl Setup {
             format!("ST_AGENT={}", tile.agent),
             format!("ST_TILE_ENDPOINT={TILE_ENDPOINT}"),
         ];
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        environment.extend([
+            format!("FRACTAL_TILE={name}"),
+            format!("FRACTAL_AGENT={}", tile.agent),
+            format!("FRACTAL_TILE_ENDPOINT={TILE_ENDPOINT}"),
+        ]);
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         if let Some(term) = std::env::var_os("TERM") {
             environment.push(format!("TERM={}", term.to_string_lossy()));
         }

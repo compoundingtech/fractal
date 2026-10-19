@@ -19,11 +19,14 @@ FIELDS = {
 }
 VERSIONS = {
     'schema': ('crates/smallclaims/src/store.rs', r'pub const SCHEMA_VERSION:.*?user_version\s*=\s*(\d+)'),
-    'rules': ('crates/st3-daemon/src/store/checkpoint_rules.rs', r'pub const RULES_VERSION:\s*u32\s*=\s*(\d+)'),
+    'rules': ('crates/st3-store/src/store/checkpoint_rules.rs', r'pub const RULES_VERSION:\s*u32\s*=\s*(\d+)'),
 }
 # Where a version constant lived before the file moved; a release range may start before the move.
 LEGACY_PATHS = {
-    'crates/st3-daemon/src/store/checkpoint_rules.rs': ('crates/st3/src/store/checkpoint_rules.rs',),
+    'crates/st3-store/src/store/checkpoint_rules.rs': (
+        'crates/st3-daemon/src/store/checkpoint_rules.rs',
+        'crates/st3/src/store/checkpoint_rules.rs',
+    ),
 }
 FRAGMENTS = 'release-notes/'
 SHA = re.compile(r'[0-9a-f]{40}')
@@ -243,7 +246,7 @@ def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
 def render(repo, previous, source, tag, repository='compoundingtech/smalltalk', since=None):
     report = collect(repo, since or previous, source)
     source, since = report['source'], report['previous_source']
-    lines = [f'Smalltalk {tag} at `{source}`. Artifacts identify this exact source in RELEASE.json.', '',
+    lines = [f'Fractal {tag} at `{source}`. Artifacts identify this exact source in RELEASE.json.', '',
              '## Upgrade impact', '',
              f'From **{previous}** (`{since}`) to **{tag}** (`{source}`).',
              'This classification covers the entire source interval. Earlier starting releases may have additional requirements.', '',

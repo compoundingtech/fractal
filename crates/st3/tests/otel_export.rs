@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 fn st3() -> &'static Path {
-    test_bin!("st3")
+    test_bin!("st3-fixture")
 }
 
 fn otelite(test: &str) -> Option<PathBuf> {
@@ -832,6 +832,13 @@ fn cli_request_and_daemon_server_share_one_trace() {
     };
     let root = tempfile::tempdir().unwrap();
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Socket readiness is not a roster publication; this fixture explicitly needs one.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(st3_client::Client::unix(&daemon.socket).agents_list_after(None, None, false, 0))
+        .expect("the fixture must publish its initial roster");
     let mut command = isolated_command(&collector, root.path());
     command
         .args(["run", "--out"])
@@ -1384,8 +1391,15 @@ async fn daemon_collection_stream_without_export_delivers_first_frame() {
     let client = st3_client::Client::unix_as(&daemon.socket, "person/ada");
     let mut stream = client.collection_stream().await.unwrap();
     stream.subscribe("missions", "missions", 2, None, None).await.unwrap();
-    let frame = tokio::time::timeout(Duration::from_secs(15), stream.next())
-        .await.unwrap().unwrap().unwrap();
+    // Readiness does not wait for the mission list's first publication. A window that subscribes
+    // before then resyncs once, is kept, and gets its snapshot when the list publishes.
+    let frame = tokio::time::timeout(Duration::from_secs(15), async {
+        let first = stream.next().await.unwrap().unwrap();
+        if first["kind"] != "resync" { return first; }
+        assert_eq!((first["id"].as_str(), first["code"].as_str(), first["retryable"].as_bool()),
+            (Some("missions"), Some("mission-list-not-ready"), Some(true)), "{first}");
+        stream.next().await.unwrap().unwrap()
+    }).await.unwrap();
     assert_eq!(frame["kind"], "snapshot", "{frame}");
     assert_eq!(frame["id"], "missions", "{frame}");
     assert!(frame["items"].is_array(), "{frame}");

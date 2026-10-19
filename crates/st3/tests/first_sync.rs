@@ -19,6 +19,7 @@
 //! The two stores take about 1.5 GB under `TMPDIR`. Point it at a disk with room and a short
 //! path, since the daemon sockets live there too.
 
+use st3::MissionsStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -63,7 +64,7 @@ async fn an_empty_node_syncs_its_peer_within_two_minutes() {
     if st3::test_support::supervise_test() {
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }

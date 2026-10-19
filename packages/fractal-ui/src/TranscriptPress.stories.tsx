@@ -10,7 +10,8 @@ import type { TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { committedTranscriptHistory } from './story-play'
 
 const now = Date.parse('2026-01-15T12:30:00Z')
 const minute = (index: number) => new Date(Date.parse('2026-01-15T12:00:00Z') + index * 60_000).toISOString()
@@ -66,11 +67,13 @@ async function settleFrames() {
   // The package lib is ES2022 (no Promise.withResolvers). Three frames cover the viewport's scheduled write and capture.
   for (let frame = 0; frame < 3; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
 }
-async function ready(canvasElement: HTMLElement) {
+async function ready(canvasElement: HTMLElement, abortSignal: AbortSignal) {
   await document.fonts.ready
-  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < initialTurns.length) throw new Error('History not committed'); return found })
-  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   const canvas = within(canvasElement)
+  // Press stability exercises older rows, which tail-first mounting deliberately defers.
+  await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
+  const viewport = await committedTranscriptHistory(canvasElement, initialTurns.length, abortSignal)
+  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   return { viewport, canvas, jump: canvas.getByText('New messages ↓'), retries: canvas.getByTestId('retry-count') }
 }
 /** A mouse press by coordinates: the release lands on whatever is under the pointer after `during`, and the click goes to the common ancestor, as in a browser. */
@@ -89,8 +92,8 @@ async function pressAcross(target: HTMLElement, during: () => Promise<void>) {
 }
 
 /** A republished snapshot mid-press neither reveals the jump nor steals the Retry click. */
-export const SameRowsDuringPress: Story = { play: async ({ canvasElement }) => {
-  const { canvas, jump, retries } = await ready(canvasElement)
+export const SameRowsDuringPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { canvas, jump, retries } = await ready(canvasElement, abortSignal)
   await pressAcross(canvas.getByRole('button', { name: 'Retry' }), async () => {
     canvas.getByRole('button', { name: 'Republish snapshot' }).click()
     await settleFrames()
@@ -104,8 +107,8 @@ export const SameRowsDuringPress: Story = { play: async ({ canvasElement }) => {
 export const SameRowsDuringPressLight: Story = { ...SameRowsDuringPress, args: { scheme: 'light' } }
 
 /** A genuinely new row during the press still lets Retry take the click; the jump appears only after release. */
-export const NewRowDuringPress: Story = { play: async ({ canvasElement }) => {
-  const { canvas, jump, retries } = await ready(canvasElement)
+export const NewRowDuringPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { canvas, jump, retries } = await ready(canvasElement, abortSignal)
   await pressAcross(canvas.getByRole('button', { name: 'Retry' }), async () => {
     canvas.getByRole('button', { name: 'Append agent reply' }).click()
     await settleFrames()
@@ -118,8 +121,8 @@ export const NewRowDuringPress: Story = { play: async ({ canvasElement }) => {
 export const NewRowDuringPressLight: Story = { ...NewRowDuringPress, args: { scheme: 'light' } }
 
 /** A scrolled-up reader is not told about rows that were already there. */
-export const SameRowsScrolledUp: Story = { play: async ({ canvasElement }) => {
-  const { viewport, canvas, jump } = await ready(canvasElement)
+export const SameRowsScrolledUp: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   await readerScrollsUp(viewport)
   await userEvent.click(canvas.getByRole('button', { name: 'Republish snapshot' }))
   await settleFrames()
@@ -138,8 +141,8 @@ async function readerScrollsUp(viewport: HTMLElement) {
 const pointer = (target: Element, type: 'pointerdown' | 'pointerup', pointerId: number, pointerType: 'mouse' | 'touch') => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, pointerId, pointerType, isPrimary: pointerType === 'mouse', button: 0, buttons: type === 'pointerdown' ? 1 : 0, width: 1, height: 1, pressure: type === 'pointerdown' ? 0.5 : 0 }))
 
 /** A press whose release the page never sees (the window blurs) does not keep the jump hidden. */
-export const BlurEndsPress: Story = { play: async ({ canvasElement }) => {
-  const { canvas, jump } = await ready(canvasElement)
+export const BlurEndsPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { canvas, jump } = await ready(canvasElement, abortSignal)
   pointer(canvas.getByRole('button', { name: 'Retry' }), 'pointerdown', 1, 'mouse')
   window.dispatchEvent(new Event('blur'))
   canvas.getByRole('button', { name: 'Append agent reply' }).click()
@@ -148,8 +151,8 @@ export const BlurEndsPress: Story = { play: async ({ canvasElement }) => {
 export const BlurEndsPressLight: Story = { ...BlurEndsPress, args: { scheme: 'light' } }
 
 /** With two pointers down, releasing one keeps the dock still; the reveal waits for the last release. */
-export const SecondPointerHoldsDock: Story = { play: async ({ canvasElement }) => {
-  const { viewport, canvas, jump } = await ready(canvasElement)
+export const SecondPointerHoldsDock: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
   pointer(retry, 'pointerdown', 1, 'mouse')
   pointer(viewport, 'pointerdown', 2, 'touch')
@@ -164,8 +167,8 @@ export const SecondPointerHoldsDock: Story = { play: async ({ canvasElement }) =
 export const SecondPointerHoldsDockLight: Story = { ...SecondPointerHoldsDock, args: { scheme: 'light' } }
 
 /** A same-length text revision is new content for a scrolled-up reader. */
-export const SameLengthRevision: Story = { play: async ({ canvasElement }) => {
-  const { viewport, canvas, jump } = await ready(canvasElement)
+export const SameLengthRevision: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   await readerScrollsUp(viewport)
   await userEvent.click(canvas.getByRole('button', { name: 'Revise answer' }))
   await waitFor(() => expect(jump, 'same-length revision not marked unread').toBeVisible())
@@ -173,8 +176,8 @@ export const SameLengthRevision: Story = { play: async ({ canvasElement }) => {
 export const SameLengthRevisionLight: Story = { ...SameLengthRevision, args: { scheme: 'light' } }
 
 /** A result arriving for an existing tool call is new content for a scrolled-up reader. */
-export const ToolResultArrives: Story = { play: async ({ canvasElement }) => {
-  const { viewport, canvas, jump } = await ready(canvasElement)
+export const ToolResultArrives: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   await readerScrollsUp(viewport)
   await userEvent.click(canvas.getByRole('button', { name: 'Attach tool result' }))
   await waitFor(() => expect(jump, 'tool result not marked unread').toBeVisible())
@@ -182,8 +185,8 @@ export const ToolResultArrives: Story = { play: async ({ canvasElement }) => {
 export const ToolResultArrivesLight: Story = { ...ToolResultArrives, args: { scheme: 'light' } }
 
 /** A reply inserted above the last failed send must not move Retry away from the pointer. */
-export const InsertAbovePressedRow: Story = { play: async ({ canvasElement }) => {
-  const { viewport, canvas, jump, retries } = await ready(canvasElement)
+export const InsertAbovePressedRow: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { viewport, canvas, jump, retries } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
   const row = retry.closest<HTMLElement>('[data-testid="user-message"]')!
   const top = row.getBoundingClientRect().top
@@ -209,8 +212,8 @@ export const InsertAbovePressedRow: Story = { play: async ({ canvasElement }) =>
 export const InsertAbovePressedRowLight: Story = { ...InsertAbovePressedRow, args: { scheme: 'light' } }
 
 /** Wheel scrolling during a press gives the reader ownership; compensation stays off. */
-export const ScrollDuringPress: Story = { play: async ({ canvasElement }) => {
-  const { viewport, canvas } = await ready(canvasElement)
+export const ScrollDuringPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { viewport, canvas } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
   pointer(retry, 'pointerdown', 1, 'mouse')
   viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
@@ -309,7 +312,7 @@ const styles = stylex.create({
   root: { height: '100vh', width: '100%', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
   transcript: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' },
   toolbar: { display: 'flex', alignItems: 'center', gap: s.md, padding: s.md, flexShrink: 0, fontSize: t.metaSize },
-  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   hostViewport: { flex: '1 1 0', minHeight: 0, overflowY: 'auto' },
   hostRow: { minHeight: 72, display: 'flex', alignItems: 'center', paddingInline: s.md },
   growingRoot: { height: 'auto', display: 'block' },

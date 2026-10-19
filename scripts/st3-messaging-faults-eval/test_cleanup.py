@@ -51,11 +51,20 @@ def descendants(pid):
     return result
 
 
+class StartupGraceTests(unittest.TestCase):
+    def test_only_a_shortened_grace_reaches_the_daemons_environment(self):
+        env = {'PATH': '/bin'}
+        self.assertEqual(runner.with_startup_grace(env, 20), env)
+        shortened = runner.with_startup_grace(env, 1.5)
+        self.assertEqual(shortened['ST3_TEST_DELIVERY_STARTUP_GRACE_MS'], '1500')
+        self.assertNotIn('ST3_TEST_DELIVERY_STARTUP_GRACE_MS', env)
+
+
 class CleanupTests(unittest.TestCase):
     def test_evidence_failure_still_cleans_both_nodes_and_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
-            args = SimpleNamespace(scratch=parent, keep=False, ready_seconds=60)
+            args = SimpleNamespace(scratch=parent, keep=False, ready_seconds=60, startup_grace_seconds=20)
             nodes = [SimpleNamespace(cleanup=AsyncMock(), name=name, root=parent / name) for name in ('amber', 'cobalt')]
             with patch.dict(os.environ, ST3_MESSAGING_ROOT=directory), \
                  patch.object(runner, 'Node', side_effect=nodes), \
@@ -67,6 +76,38 @@ class CleanupTests(unittest.TestCase):
             for node in nodes:
                 node.cleanup.assert_awaited_once()
             self.assertEqual(list(parent.iterdir()), [])
+
+    def test_a_slow_pty_registry_does_not_fail_cleanup_and_the_sweep_still_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stopped = []
+            process = SimpleNamespace(pid=0)
+            node = SimpleNamespace(name='amber', root=Path(directory), env={}, logs=[], processes=[process],
+                                   down=AsyncMock(), seats=lambda: [])
+            async def stop(target):
+                stopped.append(target)
+            with patch.object(runner, 'capture', new=AsyncMock(side_effect=asyncio.TimeoutError)), \
+                 patch.object(runner, 'stop', new=stop):
+                asyncio.run(runner.Node.cleanup(node))
+            node.down.assert_awaited_once()
+            self.assertEqual(stopped, [process])
+
+    def test_a_timeout_stopping_reconciliation_still_propagates_after_the_sweep(self):
+        # `down()` stops reconciliation; if it timed out, restart=always may still start a
+        # replacement, so the case must not pass as if cleanup had worked.
+        with tempfile.TemporaryDirectory() as directory:
+            stopped = []
+            process = SimpleNamespace(pid=0)
+            node = SimpleNamespace(name='amber', root=Path(directory), env={}, logs=[], processes=[process],
+                                   down=AsyncMock(side_effect=asyncio.TimeoutError), seats=lambda: [])
+            async def stop(target):
+                stopped.append(target)
+            capture = AsyncMock()
+            with patch.object(runner, 'capture', new=capture), \
+                 patch.object(runner, 'stop', new=stop):
+                with self.assertRaises(asyncio.TimeoutError):
+                    asyncio.run(runner.Node.cleanup(node))
+            capture.assert_not_awaited()
+            self.assertEqual(stopped, [process])
 
     def test_provider_shutdown_bounds_a_stuck_extension_and_kills_its_channel(self):
         with tempfile.TemporaryDirectory(prefix='mfe-provider-proof-') as directory:

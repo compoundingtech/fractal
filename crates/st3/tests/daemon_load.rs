@@ -35,6 +35,8 @@
 //!   `agents-v1`, holds the agents roster only. A report compares only with main's reports of
 //!   its own profile.
 
+use st3::MissionsStore;
+use st3::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -330,7 +332,7 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
         println!("skipped: set ST_LOAD_GATE=1 to run the load test");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -423,7 +425,7 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
         println!("skipped: set ST_LOAD_GATE=1 and ST_LOAD_HOG=1 to run the hog load test");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -711,7 +713,7 @@ fn a_cold_roster_rebuild_reads_the_fleet_in_few_statements() {
         println!("skipped: set ST_LOAD_GATE=1 to run the load test");
         return;
     }
-    if cfg!(debug_assertions) {
+    if !st3::test_support::optimized_build() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
@@ -1190,6 +1192,8 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
         ("seat work", "GET /v1/work"),
         ("person read /v1/client/now", "GET /v1/client/now"),
         ("person read /v1/client/agents", "GET /v1/client/agents"),
+        ("person read /v1/client/missions", "GET /v1/client/missions"),
+        ("missions snapshot", "stream missions"),
         (ROSTER_SNAPSHOT, "stream agents"),
         (ROSTER_CONNECT_SNAPSHOT, "stream agents"),
         ("work snapshot", "stream work"),
@@ -1200,24 +1204,19 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
             .unwrap_or_else(|| panic!("{path} has no target in slo/targets.toml"));
         assert_eq!(descriptive_target(name), Some(target.target(false)), "{name}");
     }
-    for name in [
-        "claim",
-        "replication exchange",
-        "person read /v1/client/missions",
-        "missions snapshot",
-        LONG_POLL,
-    ] {
+    for name in ["claim", "replication exchange", LONG_POLL] {
         assert_eq!(descriptive_target(name), None, "{name}");
     }
-    // Every path over its descriptive target but within its budget fails nothing.
+    // Include the existing measured fresh read: its 1000 ms budget is independent
+    // of its 300 ms target. A descriptive miss within that budget fails nothing.
     let mut report = Report {
         daemon_cores: cpu_budget(),
         long_poll_seats: SEATS,
         roster_subscribers: ROSTER_SUBSCRIBERS,
         ..Report::default()
     };
-    for (name, budget, count) in MIX
-        .iter()
+    for (name, budget, count) in mix(Conditions { measured: true, ..Conditions::default() })
+        .into_iter()
         .map(|load| (load.name, load.budget, 100))
         .chain([
             (ROSTER_SNAPSHOT, ROSTER_BUDGET, ROSTER_SUBSCRIBERS),
@@ -1670,6 +1669,7 @@ fn run(
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
@@ -2707,7 +2707,7 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             Ok(())
         }
         "person read fresh" => {
-            // What `st agents ls` always sends: it waits for one roster refresh by design.
+            // Explicit legacy freshness remains a separate load case; ordinary CLI lists no longer send it.
             match context.person.get::<Value>(&format!("/v1/client/agents?fresh=true&limit={ROSTER_LIMIT}")).await {
                 Ok(_) => Err("person read fresh".into()),
                 Err(error) => Err(format!("fresh agents: {error}")),

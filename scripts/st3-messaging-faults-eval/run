@@ -12,6 +12,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sys
 import secrets
 import tempfile
 import time
@@ -22,12 +23,20 @@ HERE = Path(__file__).resolve().parent
 CASES = ("baseline", "daemon-restart", "binary-swap", "path-deploy", "link-seconds", "link-minutes",
          "receiver-down", "harness-restart", "channel-killed", "old-channel", "handoff-failed")
 
+# delivery-presence's startup grace in the daemon (STARTUP_GRACE). The observation tail must
+# outlast it by this margin, which is what the 25 s tail always was at the real 20 s grace.
+DELIVERY_STARTUP_GRACE_SECONDS = 20
+OBSERVE_MARGIN_SECONDS = 5
 RECOVERY_CASES = ("daemon-restart", "binary-swap", "path-deploy", "receiver-down",
               "harness-restart", "channel-killed")
 
 
 def now_ms():
     return time.time_ns() // 1_000_000
+
+
+# A message must be read within this long after its fault clears (the cases' read oracle).
+READ_DEADLINE_MS = 10_000
 
 
 def write_json(path, value):
@@ -306,12 +315,21 @@ class Node:
         # launch a replacement while the registry is being drained.
         try:
             await self.down()
-            # PTY servers are detached, so first close the exact private registry.
-            stdout, _ = await capture("pty", "list", "--json",
-                env={**self.env, "PTY_ROOT": str(self.root / "pty")})
-            for row in json.loads(stdout):
-                await capture("pty", "kill", row["name"],
+            try:
+                # PTY servers are detached, so first close the exact private registry.
+                stdout, _ = await capture("pty", "list", "--json",
                     env={**self.env, "PTY_ROOT": str(self.root / "pty")})
+                for row in json.loads(stdout):
+                    await capture("pty", "kill", row["name"],
+                        env={**self.env, "PTY_ROOT": str(self.root / "pty")})
+            except asyncio.TimeoutError:
+                # Closing the registry is a courtesy ahead of the sweep below, which kills every
+                # process with this eval's endpoint, and the guardian removes the roots. A slow
+                # `pty` call (it waits for the seat's process tree to exit) is not the property
+                # under test and must not fail a case whose verdict is already decided. A
+                # timeout in `down()` above is not covered: it still propagates, because
+                # reconciliation may still be running and could start a replacement.
+                print(f"{self.name}: pty cleanup exceeded its 5 s bound; sweeping the node's processes instead", file=sys.stderr, flush=True)
         except (ValueError, KeyError):
             pass
         finally:
@@ -473,15 +491,16 @@ def judge(proof):
         if delay is None or not 0 <= delay <= 10_000:
             failures.append("recent unoffered recovery missed its 10000 ms deadline")
     delivery = proof["delivery_after"]
-    expected_delivery = "legacy" if proof["case"] == "old-channel" else "current"
-    if delivery.get("state") != expected_delivery:
+    if delivery.get("state") != "current":
         failures.append(f"delivery report is {delivery.get('state', 'unreported')}: {delivery.get('reason')}")
-    # The historical channel runs its own build on purpose; every other st process of the seat
-    # must run the executable the daemon runs once the fault clears.
-    if proof["case"] != "old-channel":
-        replaced = [image for image in proof["seat_images_after"] if image != proof["daemon_image"]]
-        if replaced:
-            failures.append(f"seat st processes still run a replaced binary: {', '.join(replaced)}")
+    replaced = [image for image in proof["seat_images_after"] if image != proof["daemon_image"]]
+    if replaced:
+        failures.append(f"seat st processes still run a replaced binary: {', '.join(replaced)}")
+    if proof["case"] == "old-channel":
+        if not proof.get("channel_pids_before") or proof["channel_pids_before"] != proof.get("channel_pids_after"):
+            failures.append("previous-release channel did not reexec in the same process")
+        if not proof.get("previous_release_channel_observed"):
+            failures.append("previous-release channel was not observed before the upgrade")
     if proof["graph_read_claims"] != 1:
         failures.append(f"graph contains {proof['graph_read_claims']} read claims (expected 1)")
     elif not proof["read_receipt_matches_graph"]:
@@ -489,6 +508,17 @@ def judge(proof):
     if proof["sender_message_status"] not in ("read", "closed"):
         failures.append("sender node has not converged to the read receipt")
     return failures
+
+
+def with_startup_grace(env, seconds):
+    """The nodes' environment, with the daemon's delivery-presence grace shortened to `seconds`.
+
+    Test-only and shorten-only: the daemon's own grace is 20 s unless this is set, so the real
+    value adds nothing to the environment.
+    """
+    if seconds >= DELIVERY_STARTUP_GRACE_SECONDS:
+        return env
+    return {**env, "ST3_TEST_DELIVERY_STARTUP_GRACE_MS": str(round(seconds * 1000))}
 
 
 async def run_case(args, case, directory, candidate, old, replacement):
@@ -515,6 +545,7 @@ async def run_case(args, case, directory, candidate, old, replacement):
                "LOGNAME": os.environ.get("USER", "eval"), "SHELL": "/bin/bash", "LANG": "C.UTF-8"}
         if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
             env["DBUS_SESSION_BUS_ADDRESS"] = os.environ["DBUS_SESSION_BUS_ADDRESS"]
+        env = with_startup_grace(env, args.startup_grace_seconds)
         source = Node(root, "amber", candidate, env, binary_root, args.ready_seconds)
         target = Node(root, "cobalt", candidate, env, binary_root, args.ready_seconds)
         nodes = [source, target]
@@ -555,18 +586,18 @@ url = "http://127.0.0.1:{proxies[1 - i]}"
         for outcome in await asyncio.gather(*(node.start() for node in nodes), return_exceptions=True):
             if isinstance(outcome, BaseException):
                 raise outcome
-        legacy_env = ""
+        release_env = ""
         if case == "old-channel":
-            legacy = target.binary.with_name("legacy-st3")
-            give_bytes(old, legacy)
-            legacy_env = f'  env {{ FAULT_OLD_CHANNEL_BIN "{legacy}"; }}\n'
+            release_channel = target.binary.with_name("previous-release-st3")
+            give_bytes(old, release_channel)
+            release_env = f'  env {{ FAULT_OLD_CHANNEL_BIN "{release_channel}"; }}\n'
         seats = target.root / "seats.kdl"
         seats.write_text(f'''version 2
 agent "fault-probe" {{
   identity "eval/fault-probe"
   workspace "{target.root / 'ws'}"
   restart "always"
-{legacy_env}\
+{release_env}\
   harness "omp" {{}}
 }}
 ''')
@@ -620,8 +651,11 @@ agent "fault-probe" {{
             os.replace(next_binary, target.binary)
             await target.down()
             if case == "old-channel":
-                # Ensure the historical poller observes the daemon outage instead of racing
-                # between one-second polls. The real extension owns channel recovery.
+                # Advance the channel's installed reference to the daemon's candidate
+                # inode. The actual release channel must exec it without a provider restart.
+                next_channel = release_channel.with_suffix(".next")
+                next_channel.symlink_to(target.binary)
+                os.replace(next_channel, release_channel)
                 await asyncio.sleep(args.short_seconds)
             await target.start()
             recovery_started = now_ms()
@@ -775,7 +809,16 @@ agent "fault-probe" {{
         trace_text = await target.cli("trace", "show", subject, "--json", "--limit", "100")
         claims = [json.loads(line) for line in trace_text.splitlines() if line]
         graph_reads = [claim for claim in claims if claim.get("kind") == "message.read"]
-        source_view = await source.api("/v1/messages/read/" + subject)
+        # The read receipt reaches the sender on an exchange after the read itself. Wait for it
+        # within the same read deadline, measured from this message's send, not one sample.
+        async def sender_converged():
+            view = await source.api("/v1/messages/read/" + subject)
+            return view if (view or {}).get("status") in ("read", "closed") else None
+        try:
+            source_view = await until(sender_converged,
+                                      max(0.0, (cleared + READ_DEADLINE_MS - now_ms()) / 1000))
+        except TimeoutError:
+            source_view = await source.api("/v1/messages/read/" + subject)
         result.update(
             warmup_received_copies=sum(1 for row in all_receipts
                 if row.get("subject") == warmup and row.get("event") == "received"),
@@ -789,6 +832,10 @@ agent "fault-probe" {{
             incarnation_before=before_card.get("incarnation_id"), incarnation_after=after_card.get("incarnation_id"),
             delivery_after=after_card.get("delivery", {}), sender_message_status=(source_view or {}).get("status"),
             seat_images_after=sorted({row["image"] for row in after if " driver " in row["argv"]}),
+            channel_pids_before=sorted(row["pid"] for row in before if " driver omp-channel " in row["argv"]),
+            channel_pids_after=sorted(row["pid"] for row in after if " driver omp-channel " in row["argv"]),
+            previous_release_channel_observed=case == "old-channel" and any(
+                row["image"] == str(release_channel) for row in before if " driver omp-channel " in row["argv"]),
             daemon_image=str(target.binary),
             delivered_during_outage=case in ("daemon-restart", "receiver-down", "binary-swap", "path-deploy", "old-channel", "link-seconds", "link-minutes")
                 and any(row["at_unix_ms"] < cleared for row in received),
@@ -902,8 +949,8 @@ async def main(args):
             probe_stdout, _ = await asyncio.wait_for(probe.communicate(), 5)
         finally:
             await stop(probe)
-        if "old-channel" in args.cases and probe.returncode == 0:
-            raise ValueError("--old-binary supports resume-probe; supply a pre-reexec channel build")
+        if "old-channel" in args.cases and probe.returncode != 0:
+            raise ValueError("--old-binary must be the previous release with the reexec contract")
         if not args.swap_binary:
             with replacement.open("ab") as stream:
                 stream.write(b"\nmessaging-faults replacement\n")
@@ -912,6 +959,7 @@ async def main(args):
                   "old_binary_resume_probe_exit_code": probe.returncode,
                   "old_binary_resume_probe_stdout": probe_stdout.decode().strip(),
                   "read_deadline_ms": 10000, "observe_seconds": args.observe_seconds,
+                  "startup_grace_seconds": args.startup_grace_seconds,
                   "short_seconds": args.short_seconds, "long_seconds": args.long_seconds,
                   "agent_tokens": 0, "judge_tokens": 0, "cases": []}
         # Copies, resume probe and digests of the three pinned executables, before any case.
@@ -940,7 +988,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("out", type=Path)
-    parser.add_argument("--old-binary", type=Path, required=True, help="actual pre-reexec build; not a simulated old client")
+    parser.add_argument("--old-binary", type=Path, required=True, help="actual pinned previous-release build")
     parser.add_argument("--swap-binary", type=Path)
     parser.add_argument("--scratch", type=Path, help="directory for large executable copies; defaults to out")
     parser.add_argument("--keep", action="store_true", help="keep private state and executable copies, including on failure")
@@ -948,11 +996,17 @@ if __name__ == "__main__":
     parser.add_argument("--short-seconds", type=float, default=3)
     parser.add_argument("--long-seconds", type=float, default=120)
     parser.add_argument("--observe-seconds", type=float, default=25)
+    parser.add_argument("--startup-grace-seconds", type=float, default=DELIVERY_STARTUP_GRACE_SECONDS,
+                        help="shorten the daemon's delivery-presence startup grace (test-only; the real value is 20)")
     parser.add_argument("--ready-seconds", type=float, default=60)
     args = parser.parse_args()
     args.scratch = (args.scratch or args.out).resolve()
-    if args.observe_seconds < 25 or args.long_seconds < 120 or args.short_seconds < 2:
-        parser.error("observe >=25s, long outage >=120s, short outage >=2s are required")
+    if not 0 <= args.startup_grace_seconds <= DELIVERY_STARTUP_GRACE_SECONDS:
+        parser.error("the startup grace can only be shortened from 20s")
+    if (args.observe_seconds < args.startup_grace_seconds + OBSERVE_MARGIN_SECONDS
+            or args.long_seconds < 120 or args.short_seconds < 2):
+        parser.error(f"observe >= startup grace + {OBSERVE_MARGIN_SECONDS:g}s (25s at the real 20s grace), "
+                     "long outage >=120s, short outage >=2s are required")
     if os.environ.get("ST_AGENT"):
         parser.error("run detached outside an st seat; see the eval README")
     if not shutil.which("node") or not shutil.which("pty"):

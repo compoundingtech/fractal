@@ -158,6 +158,22 @@ fn action_method(action: &str) -> String {
     action.replace(['.', '-'], "_")
 }
 
+/// Assistant read operations: `(projection route suffix, query model, response model)`.
+/// Each one is a single proof-carrying GET; no generic page/list renderer may claim it.
+fn assistant_read(read: &Value) -> Result<Option<(&str, &str, &str)>> {
+    let path = read["path"].as_str().context("read path")?;
+    let Some(projection) = path.strip_prefix("/v1/client/assistant/") else {
+        return Ok(None);
+    };
+    let id = read["id"].as_str().context("read id")?;
+    if id != format!("assistant.{projection}") || read["proof_header"] != "x-st3-scg-read-authorization" {
+        bail!("assistant read `{id}` must be `assistant.<projection>` and carry the SCG read proof header");
+    }
+    let request = read["query_model"].as_str().with_context(|| format!("assistant read `{id}` has no query_model"))?;
+    let response = read["response"].as_str().context("read response")?;
+    Ok(Some((projection, request, response)))
+}
+
 fn rust_action_constructors(actions: &serde_json::Map<String, Value>) -> Result<String> {
     let mut out = String::new();
     for (action, definition) in actions {
@@ -203,7 +219,9 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
             continue;
         }
-        if id == "capabilities.get" {
+        if let Some((projection, request, response)) = assistant_read(read)? {
+            writeln!(out, "    pub async fn {method}(&self, params: &{request}, proof: &ScgReadAuthorization) -> Result<Envelope<{response}>, ClientError> {{ self.assistant_read(\"{projection}\", params, proof).await }}")?;
+        } else if id == "capabilities.get" {
             writeln!(
                 out,
                 "    pub async fn capabilities(&self) -> Result<Envelope<Capabilities>, ClientError> {{ self.capabilities_internal().await }}"
@@ -370,7 +388,9 @@ fn swift_operation_methods(
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
             continue;
         }
-        if matches!(
+        if let Some((projection, request, response)) = assistant_read(read)? {
+            writeln!(out, "    public func {method}(_ params: {request}, proof: ScgReadAuthorization) async throws -> Envelope<{response}> {{ try await assistantRead(\"{projection}\", params, proof: proof) }}")?;
+        } else if matches!(
             id,
             "capabilities.get"
                 | "timeline.list"
@@ -555,6 +575,29 @@ fn validate_model(
     if model.is_null() {
         bail!("client schema has no `{definition}` definition");
     }
+    // Reference-only oneOf branches are untagged unions: their members own the
+    // existing wire shape, rather than acquiring a synthetic discriminator.
+    if let Some(branches) = model["oneOf"]
+        .as_array()
+        .filter(|branches| branches.iter().all(|branch| branch["$ref"].is_string()))
+    {
+        let rust_block = struct_block(rust, &format!("pub enum {rust_name} {{"))?;
+        let swift_block = struct_block(swift, &format!("public enum {swift_name}:"))?;
+        for branch in branches {
+            let member = branch["$ref"]
+                .as_str()
+                .and_then(|reference| reference.rsplit('/').next())
+                .with_context(|| format!("union `{definition}` requires named reference branches"))?;
+            // Large Rust members are boxed to keep the enum small.
+            let rust_member = rust_block.contains(&format!("({member})"))
+                || rust_block.contains(&format!("(Box<{member}>)"));
+            if !rust_member || !swift_block.contains(&format!("({member})")) {
+                bail!("union `{definition}` omits member `{member}`");
+            }
+            validate_model(schema, member, member, member, rust, swift)?;
+        }
+        return Ok(());
+    }
     let properties = schema_properties(model)
         .with_context(|| format!("client schema `{definition}` has no properties"))?;
     let rust_block = struct_block(rust, &format!("pub struct {rust_name} {{"))?;
@@ -706,6 +749,24 @@ fn validate_surfaces(
         "PairingChallenge",
         "PairingComplete",
         "PairedSession",
+        "AssistantGrant",
+        "AssistantGrantPolicy",
+        "AssistantReadTrust",
+        "AssistantReadTrustRequest",
+        "AssistantSummaryRequest",
+        "AssistantPageRequest",
+        "AssistantContentRequest",
+        "ScgReadAuthorization",
+        "ScgReadAuthorizationPayload",
+        "AssistantSummary",
+        "AssistantAttentionItem",
+        "AssistantMissionItem",
+        "AssistantAgentItem",
+        "AssistantAttentionPage",
+        "AssistantMissionPage",
+        "AssistantAgentPage",
+        "AssistantContentRange",
+        "AssistantContentPage",
         "TerminalAttachment",
         "TerminalScreen",
         "TerminalLine",
@@ -1023,6 +1084,9 @@ fn lower_camel(value: &str) -> String {
 }
 
 fn ts_type(value: &Value) -> Result<String> {
+    if let Some(allowed) = value.as_bool() {
+        return Ok(if allowed { "unknown" } else { "never" }.into());
+    }
     if let Some(reference) = value.get("$ref").and_then(Value::as_str) {
         return Ok(reference
             .rsplit('/')
@@ -1034,22 +1098,25 @@ fn ts_type(value: &Value) -> Result<String> {
         return Ok(constant.to_string());
     }
     if let Some(items) = value.get("enum").and_then(Value::as_array) {
-        return Ok(items
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join(" | "));
+        let cases = items.iter().map(Value::to_string).collect::<Vec<_>>();
+        // One case per line from the same size as the schema cases, so two additions merge.
+        if cases.len() >= rich::ONE_PER_LINE_FROM {
+            return Ok(format!("\n  {}\n", cases.join("\n  | ")));
+        }
+        return Ok(cases.join(" | "));
     }
     for union in ["oneOf", "anyOf"] {
         if let Some(items) = value.get(union).and_then(Value::as_array) {
-            return Ok(format!(
-                "({})",
-                items
-                    .iter()
-                    .map(ts_type)
-                    .collect::<Result<Vec<_>>>()?
-                    .join(" | ")
-            ));
+            let members = format!("({})", items.iter().map(ts_type).collect::<Result<Vec<_>>>()?.join(" | "));
+            if value.get("properties").is_some() || value.get("allOf").is_some() {
+                let mut base = value.clone();
+                base.as_object_mut().context("union schema")?.remove(union);
+                let base = ts_type(&base)?;
+                if base != "unknown" && !base.is_empty() {
+                    return Ok(format!("{base} & {members}"));
+                }
+            }
+            return Ok(members);
         }
     }
     if let Some(types) = value.get("type").and_then(Value::as_array) {
@@ -1169,6 +1236,7 @@ fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
 
 fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     let mut out = format!(
         "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n"
     );
@@ -1274,91 +1342,95 @@ fn typescript_operation_methods(
         if id == "capabilities.get" {
             continue;
         }
+        if let Some((projection, request, response)) = assistant_read(read)? {
+            writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
+            continue;
+        }
         let route = if path.contains("{id}") {
             path.replace("{id}", "${encodeURIComponent(routedId(id))}")
         } else {
             path.to_owned()
         };
         if id == "arrangements.list" {
-            writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }})); }}")?;
+            writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "arrangements.get" {
-            writeln!(out, "    async arrangementsGet(personName: string, uuid: string): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`); }}")?;
+            writeln!(out, "    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`, undefined, requestOptions); }}")?;
             continue;
         }
         if id == "conversation.search" {
             writeln!(
                 out,
-                "    async {method}(text: string, options: {{ agent?: string; since?: string; cursor?: string; limit?: number }} = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ text, ...options }})); }}"
+                "    async {method}(text: string, options: {{ agent?: string; since?: string; cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ text, ...options }}), undefined, requestOptions); }}"
             )?;
         } else if id == "events.list" {
             writeln!(
                 out,
-                "    async {method}(options: EventOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events'); }}"
+                "    async {method}(options: EventOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events', requestOptions); }}"
             )?;
         } else if id == "notes.list" {
-            writeln!(out, "    async notesList(): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes'); }}")?;
+            writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
-                "    async {method}(): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}'); }}"
+                "    async {method}(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}', undefined, requestOptions); }}"
             )?;
         } else if id == "slo.list" {
-            writeln!(out, "    async sloList(): Promise<EnvelopeOf<SloList>> {{ return this.get('/v1/client/slo'); }}")?;
+            writeln!(out, "    async sloList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloList>> {{ return this.get('/v1/client/slo', undefined, requestOptions); }}")?;
         } else if id == "slo.history" {
             writeln!(
                 out,
-                "    async sloHistory(id: string, options: {{ since_ms?: number; until_ms?: number; steps?: number }} = {{}}): Promise<EnvelopeOf<SloHistory>> {{ return this.get('/v1/client/slo/history' + query({{ id, ...options }})); }}"
+                "    async sloHistory(id: string, options: {{ since_ms?: number; until_ms?: number; steps?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloHistory>> {{ return this.get('/v1/client/slo/history' + query({{ id, ...options }}), undefined, requestOptions); }}"
             )?;
         } else if id == "mail-backlog.summary" {
-            writeln!(out, "    async mailBacklogSummary(): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog'); }}")?;
+            writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
-                "    async {method}(options: {{ since_ms?: number; until_ms?: number }} = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options)); }}"
+                "    async {method}(options: {{ since_ms?: number; until_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
         } else if id == "document.get" {
             writeln!(
                 out,
-                "    async {method}(name: string): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ name }})); }}"
+                "    async {method}(name: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ name }}), undefined, requestOptions); }}"
             )?;
         } else if id == "custom-subjects.list" {
             writeln!(
                 out,
-                "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options)); }}"
+                "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
         } else if id == "resources.list" {
             writeln!(
                 out,
-                "    async resourcesList(filters: ResourcesFilter = {{}}, options: PageOptions = {{}}): Promise<EnvelopeOf<ResourcesPage>> {{ return this.get('{route}' + query({{ ...filters, ...options }})); }}"
+                "    async resourcesList(filters: ResourcesFilter = {{}}, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ResourcesPage>> {{ return this.get('{route}' + query({{ ...filters, ...options }}), undefined, requestOptions); }}"
             )?;
         } else if id == "agent-declaration.get" {
             writeln!(
                 out,
-                "    async {method}(id: string, revision?: string, showEnvValues = false): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query({{ revision, show_env_values: showEnvValues }})); }}"
+                "    async {method}(id: string, revision?: string, showEnvValues = false, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query({{ revision, show_env_values: showEnvValues }}), undefined, requestOptions); }}"
             )?;
         } else if id == "host.repositories" {
             writeln!(
                 out,
-                "    async hostRepositories(id: string): Promise<EnvelopeOf<HostRepositories>> {{ return this.get(`{route}`); }}"
+                "    async hostRepositories(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HostRepositories>> {{ return this.get(`{route}`, undefined, requestOptions); }}"
             )?;
         } else if id == "publication.definition" {
-            writeln!(out, "    async publicationDefinition(subject: string): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }})); }}")?;
+            writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
-                "    async subjectDefinition(subject: string, showEnvValues = false): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ subject, show_env_values: showEnvValues }})); }}"
+                "    async subjectDefinition(subject: string, showEnvValues = false, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ subject, show_env_values: showEnvValues }}), undefined, requestOptions); }}"
             )?;
         } else if id == "conversation-content.chunk" {
             writeln!(
                 out,
-                "    async conversationContentChunk(id: string, reference: string, offset = 0): Promise<EnvelopeOf<ConversationContentChunk>> {{ return this.get(`/v1/client/conversations/${{encodeURIComponent(id)}}/content/${{encodeURIComponent(reference)}}/chunk` + query({{offset}})); }}"
+                "    async conversationContentChunk(id: string, reference: string, offset = 0, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ConversationContentChunk>> {{ return this.get(`/v1/client/conversations/${{encodeURIComponent(id)}}/content/${{encodeURIComponent(reference)}}/chunk` + query({{offset}}), undefined, requestOptions); }}"
             )?;
         } else if id == "conversation.changes" {
             writeln!(
                 out,
-                "    async {method}(id: string, options: {{ after?: string; wait_ms?: number }} = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query(options)); }}"
+                "    async {method}(id: string, options: {{ after?: string; wait_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query(options), undefined, requestOptions); }}"
             )?;
         } else if id == "timeline.list" || id == "terminal.screen" || id.ends_with(".get") {
             let query_suffix = if id == "timeline.list" {
@@ -1373,17 +1445,17 @@ fn typescript_operation_methods(
             };
             writeln!(
                 out,
-                "    async {method}(id: string{option_arg}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}`{query_suffix}); }}"
+                "    async {method}(id: string{option_arg}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}`{query_suffix}, undefined, requestOptions); }}"
             )?;
         } else if id.starts_with("launch-") {
             writeln!(
                 out,
-                "    async {method}(id: string, options: PageOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query(options)); }}"
+                "    async {method}(id: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query(options), undefined, requestOptions); }}"
             )?;
         } else {
             writeln!(
                 out,
-                "    async {method}(options: ListOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options)); }}"
+                "    async {method}(options: ListOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
         }
     }
@@ -1391,7 +1463,7 @@ fn typescript_operation_methods(
         let method = lower_camel(&pascal(action));
         writeln!(
             out,
-            "    async {method}(input: Omit<ActionOf<'{action}'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> {{ return this.submitAction({{ ...input, api_version: API_VERSION, type: '{action}' }} as ActionOf<'{action}'>); }}"
+            "    async {method}(input: Omit<ActionOf<'{action}'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ActionResult>> {{ return this.submitAction({{ ...input, api_version: API_VERSION, type: '{action}' }} as ActionOf<'{action}'>, requestOptions); }}"
         )?;
     }
     Ok(out.trim_end().into())
@@ -1402,6 +1474,35 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn untagged_union_validation_checks_every_named_member() {
+        let schema = serde_json::json!({ "$defs": {
+            "Pair": { "oneOf": [{ "$ref": "#/$defs/Person" }, { "$ref": "#/$defs/Assistant" }] },
+            "Person": { "type": "object", "properties": { "person_id": { "type": "string" } } },
+            "Assistant": { "type": "object", "properties": { "principal": { "type": "string" } } }
+        } });
+        let rust = "pub enum Pair { Person(Person), Assistant(Assistant) }\npub struct Person { pub person_id: String }\npub struct Assistant { pub principal: String }";
+        let swift = "public enum Pair: Codable { case person(Person), assistant(Assistant) }\npublic struct Person: Codable { let personID: String }\npublic struct Assistant: Codable { let principal: String }";
+        validate_model(&schema, "Pair", "Pair", "Pair", rust, swift).unwrap();
+        assert!(validate_model(&schema, "Pair", "Pair", "Pair", &rust.replace("pub principal:", "pub wrong:"), swift).is_err());
+    }
+
+    #[test]
+    fn typescript_inline_unions_retain_common_fields_and_forbidden_keys() {
+        let schema = serde_json::json!({
+            "type": "object", "required": ["kind"],
+            "properties": { "kind": { "type": "string" } },
+            "oneOf": [
+                { "properties": { "person_id": { "type": "string" } } },
+                { "properties": { "person_id": false } }
+            ]
+        });
+        let rendered = ts_type(&schema).unwrap();
+        assert!(rendered.contains("kind: string"));
+        assert!(rendered.contains("person_id?: never"));
+        assert!(rendered.contains(" & "));
+    }
+
     fn temporary_output(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1411,6 +1512,51 @@ mod tests {
             "st3-client-codegen-{}-{nonce}-{name}",
             std::process::id()
         ))
+    }
+
+    /// Two changes adding different cases to one enum conflict if the enum is one line, in the
+    /// schema and in every generated file; from `ONE_PER_LINE_FROM` cases each has its own line.
+    #[test]
+    fn large_enums_are_one_case_per_line_in_the_schema_and_the_generated_typescript() -> Result<()> {
+        let many = rich::ONE_PER_LINE_FROM;
+        let schema_text = include_str!("../../../docs/st3/client-v0/schemas/client-v0.schema.json");
+        for line in schema_text.lines() {
+            if let Some(start) = line.find("\"enum\": [") {
+                let list = line[start..].split(']').next().unwrap_or_default();
+                assert!(
+                    list.matches("\", \"").count() + 1 < many,
+                    "an enum of {many} or more cases shares one line: {}",
+                    &line[..line.len().min(120)]
+                );
+            }
+        }
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let schema: Value = serde_json::from_str(schema_text)?;
+        let models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
+        let rich = rich::models(&schema)?;
+        for line in models.lines() {
+            assert!(
+                line.matches("\" | \"").count() + 1 < many,
+                "Models.generated.ts puts {many} or more enum cases on one line: {}",
+                &line[..line.len().min(120)]
+            );
+        }
+        for line in rich.lines() {
+            for opener in ["openEnum([", "Schema.Literals(["] {
+                if let Some(start) = line.find(opener) {
+                    let list = line[start..].split(']').next().unwrap_or_default();
+                    assert!(
+                        list.matches(',').count() + 1 < many,
+                        "Schema.generated.ts puts {many} or more enum cases on one line: {}",
+                        &line[..line.len().min(120)]
+                    );
+                }
+            }
+        }
+        assert!(models.contains("export type ErrorCode = (\n  \"recipient-retired\"\n  | "));
+        Ok(())
     }
 
     #[test]

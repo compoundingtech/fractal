@@ -717,7 +717,7 @@ fn codex_context_recomputes_the_captured_reading_and_pins_its_verified_version()
     assert_eq!(CODEX_CONTEXT_VERIFIED_VERSION, "0.151.0");
     assert_eq!(CODEX_BASELINE_TOKENS, 12_000);
 
-    let frames = include_str!("../../tests/fixtures/codex_token_usage_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-h26ef19db4b45 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_token_usage_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -1135,7 +1135,7 @@ fn rollout_fallback_counts_only_new_context_compaction_completions() {
 /// reading from a turn boundary would break exactly the HC-R03 rule the record exists for.
 #[test]
 fn captured_delivery_frames_carrying_no_token_count_publish_no_record() {
-    let frames = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-h7fcfd979d0e8 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -1587,7 +1587,7 @@ fn captured_usage_limit_boundary_is_retryable_capacity_and_allows_next_native_de
     // observer never reads. The second capture has the same method sequence. The recorder
     // stops at turn completion, so this test pins the boundary state only. The provider
     // source establishes that no later idle notification follows the capacity error.
-    let frames = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-hd0ccf9c8bd00 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -1638,11 +1638,11 @@ fn captured_usage_limit_boundary_is_retryable_capacity_and_allows_next_native_de
 /// capacity rather than an authentication failure.
 #[test]
 fn a_rejected_codex_credential_reads_provider_auth_while_a_quota_failure_does_not() {
-    let rejected = include_str!("../../tests/fixtures/codex_provider_auth_inbound.jsonl")
+    let rejected = /* sqlite-large-value: allow-for-now lv-hdddd4464a507 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_provider_auth_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    let quota = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let quota = /* sqlite-large-value: allow-for-now lv-hb8f448e4cc6e owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -7096,6 +7096,33 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
 }
 
 #[test]
+fn fractal_mission_run_controls_unattended_codex_launch() {
+    for (old, new, expected) in [
+        (None, None, false),
+        (Some("mission-run/old"), None, true),
+        (None, Some("mission-run/new"), true),
+        (Some("mission-run/old"), Some("mission-run/new"), true),
+        (Some("mission-run/old"), Some(""), false),
+        (Some("mission-run/old"), Some("  \n"), false),
+        (Some(""), None, false),
+    ] {
+        let mission_run = crate::contracts::env_with("ST_MISSION_RUN", &|key| {
+            match key {
+                "ST_MISSION_RUN" => old,
+                "FRACTAL_MISSION_RUN" => new,
+                _ => None,
+            }
+            .map(str::to_owned)
+        });
+        assert_eq!(
+            mission_run_is_unattended(mission_run.as_deref()),
+            expected,
+            "old={old:?}, new={new:?}"
+        );
+    }
+}
+
+#[test]
 fn unattended_codex_defaults_only_after_provider_reports_no_policy() {
     assert!(!mission_run_is_unattended(None));
     assert!(!mission_run_is_unattended(Some("")));
@@ -8197,7 +8224,7 @@ fn a_human_ask_keeps_its_reason_while_a_turn_failure_stands() {
 /// time and nothing read it.
 #[test]
 fn the_captured_usage_limit_stall_now_names_its_cause_on_both_records() {
-    let frames = include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
+    let frames = /* sqlite-large-value: allow-for-now lv-h124dbd484e04 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
@@ -8371,7 +8398,7 @@ fn the_control_pump_reports_the_recorded_usage_limit_failure_over_its_socket() {
             read_json_message(&mut websocket).unwrap().unwrap()["method"],
             "initialized"
         );
-        for line in include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl").lines() {
+        for line in /* sqlite-large-value: allow-for-now lv-hf473d7c409b6 owner=st_drivers::codex_app_server::tests TODO=trace-statement-and-value-representation */ include_str!("../../tests/fixtures/codex_usage_limit_inbound.jsonl").lines() {
             let frame = serde_json::from_str::<Value>(line).unwrap();
             write_json_message(&mut websocket, &frame).unwrap();
         }

@@ -493,18 +493,18 @@ pub async fn run<B: Backend>(
         activity_changed: watch::channel(0).0,
         exchange_jobs: Arc::default(),
     };
-    tokio::spawn(keep_connectivity_current(fleet.clone()));
+    tokio::spawn(crate::task_cpu::account("replication.connectivity", keep_connectivity_current(fleet.clone())));
     if let Some(fabric) = fabric.clone() {
-        tokio::spawn(keep_fabric_presence_current(fabric, fleet.clone()));
+        tokio::spawn(crate::task_cpu::account("replication.fabric_presence", keep_fabric_presence_current(fabric, fleet.clone())));
     }
     backend.ready().await;
     let notify = wake;
     refresh_fleet_view(&backend, &fleet).await;
-    tokio::spawn(keep_fleet_view_current(
+    tokio::spawn(crate::task_cpu::account("replication.fleet_view", keep_fleet_view_current(
         backend.clone(),
         fleet.clone(),
         notify.subscribe(),
-    ));
+    )));
     let state = PeerState {
         backend: backend.clone(),
         node: config.node.clone(),
@@ -517,7 +517,7 @@ pub async fn run<B: Backend>(
     for peer in config.peers.iter().filter(|peer| peer.url.is_empty()) {
         let backend = backend.clone();
         let name = peer.name.clone();
-        tokio::spawn(async move {
+        tokio::spawn(crate::task_cpu::account("replication.peer_failure", async move {
             loop {
                 tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
                 super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
@@ -525,7 +525,7 @@ pub async fn run<B: Backend>(
                     .record_failure(&name, "down", "no recent inbound exchange", None)
                     .await;
             }
-        });
+        }));
     }
     start_outbound(
         backend.clone(),
@@ -562,7 +562,7 @@ pub async fn run<B: Backend>(
             endpoints.update(|set| set.tailscale = vec![address]);
         }
         if let Some(tailscale) = tailscale {
-            tokio::spawn(keep_tailnet_current(
+            tokio::spawn(crate::task_cpu::account("replication.tailnet", keep_tailnet_current(
                 tailscale,
                 bound_address.map(|address| (address.port(), app.clone())),
                 tailnet.map(|address| address.ip()),
@@ -570,14 +570,14 @@ pub async fn run<B: Backend>(
                 fleet_transports,
                 notify_for_transports,
                 fleet.connectivity_changed.subscribe(),
-            ));
+            )));
         }
         if let (Some(fabric), Some(address)) = (fabric, loopback) {
             let protocol = file
                 .fabric_protocol
                 .clone()
                 .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
-            settings_tasks.spawn(keep_fabric_exposed(
+            settings_tasks.spawn(crate::task_cpu::account("replication.fabric_exposure", keep_fabric_exposed(
                 fabric,
                 protocol,
                 address,
@@ -585,15 +585,15 @@ pub async fn run<B: Backend>(
                 fleet.connectivity_changed.subscribe(),
                 config.state_dir.clone(),
                 file.clone(),
-            ));
+            )));
         }
-        settings_tasks.spawn(keep_endpoints_published(
+        settings_tasks.spawn(crate::task_cpu::account("replication.publish_endpoints", keep_endpoints_published(
             backend,
             file.mode.as_str(),
             endpoints.clone(),
             config.state_dir.clone(),
             file.clone(),
-        ));
+        )));
     }
     let serving = async move {
         // A dial-out member accepts no connections, but still supervises publication.
@@ -909,10 +909,10 @@ async fn lock_current_settings(
 ) -> Result<Option<std::fs::File>> {
     let state_dir = state_dir.to_path_buf();
     let settings = settings.clone();
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || crate::task_cpu::blocking("replication.settings", || {
         let lock = FleetFile::lock_settings(&state_dir)?;
         Ok((FleetFile::load(&state_dir)?.as_ref() == Some(&settings)).then_some(lock))
-    })
+    }))
     .await?
 }
 
@@ -1004,7 +1004,7 @@ fn start_outbound<B: Backend>(
 ) {
     // One dialer per target. Targets follow membership: a new listening member gets a dialer,
     // and a member that ends or turns dial-out loses its dialer.
-    tokio::spawn(async move {
+    tokio::spawn(crate::task_cpu::account("replication.outbound", async move {
         let mut view_changes = fleet.view_changed.subscribe();
         let mut dialers: BTreeMap<String, Dialer> = BTreeMap::new();
         let mut transport_changes = notify.subscribe();
@@ -1038,7 +1038,7 @@ fn start_outbound<B: Backend>(
                     continue;
                 }
                 let (routes, route_changes) = watch::channel(routes);
-                let task = tokio::spawn(dial_peer(
+                let task = tokio::spawn(crate::task_cpu::account("replication.dial_peer", dial_peer(
                     backend.clone(),
                     node.clone(),
                     name.clone(),
@@ -1046,7 +1046,7 @@ fn start_outbound<B: Backend>(
                     auth.clone(),
                     fleet.clone(),
                     notify.subscribe(),
-                ));
+                )));
                 dialers.insert(name, (routes, task));
             }
             tokio::select! {
@@ -1059,7 +1059,7 @@ fn start_outbound<B: Backend>(
                 _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
             }
         }
-    });
+    }));
 }
 
 /// Exchange with one peer for as long as it stays a target, trying its routes in order.
@@ -1084,6 +1084,7 @@ async fn dial_peer<B: Backend>(
     // once, even though the peer dialed in recently.
     let mut moving = false;
     let mut route = 0_usize;
+    let mut preferred_retry = None;
     let mut last_http_success = None;
     // Routes whose one early attempt after an outage is spent, until a probe sees them down again
     // or an exchange over them succeeds. See `wait_peer_retry`.
@@ -1170,10 +1171,17 @@ async fn dial_peer<B: Backend>(
             let routes = routes.borrow_and_update();
             let now = tokio::time::Instant::now();
             refused.retain(|(route, until)| routes.contains(route) && *until > now);
+            if preferred_retry.is_some_and(|deadline| now >= deadline) {
+                route = 0;
+                preferred_retry = None;
+            }
             (0..routes.len())
                 .map(|offset| routes[(route.wrapping_add(offset)) % routes.len()].clone())
                 .find(|candidate| !refused.iter().any(|(route, _)| route == candidate))
         };
+        let preferred_route = selected
+            .as_ref()
+            .map(|selected| routes.borrow().first() == Some(selected));
         if selected.is_none() && !refused.is_empty() {
             let deadline = refused.iter().map(|(_, until)| *until).min().unwrap();
             record_worker(
@@ -1182,6 +1190,7 @@ async fn dial_peer<B: Backend>(
                 "backoff",
                 last_attempt_unix_ms,
                 Some(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                None,
             )
             .await;
             tokio::select! {
@@ -1191,7 +1200,15 @@ async fn dial_peer<B: Backend>(
             continue;
         }
         last_attempt_unix_ms = attempt_unix_ms;
-        record_worker(&backend, &name, "exchange", attempt_unix_ms, None).await;
+        record_worker(
+            &backend,
+            &name,
+            "exchange",
+            attempt_unix_ms,
+            None,
+            preferred_route.map(|preferred| (preferred, preferred_retry)),
+        )
+        .await;
         let carrier = selected.as_ref().map(Route::carrier).unwrap_or_default();
         let is_http = matches!(selected, Some(Route::Http(_)));
         let fabric_route = selected
@@ -1243,7 +1260,15 @@ async fn dial_peer<B: Backend>(
         let Some(url) = url else {
             route = route.wrapping_add(1);
             let delay = retry_delay(backoff.next(), &fleet, &name);
-            record_worker(&backend, &name, "backoff", attempt_unix_ms, Some(delay)).await;
+            record_worker(
+                &backend,
+                &name,
+                "backoff",
+                attempt_unix_ms,
+                Some(delay),
+                preferred_route.map(|preferred| (preferred, preferred_retry)),
+            )
+            .await;
             if wait_peer_retry(
                 &backend,
                 attempt_unix_ms,
@@ -1273,13 +1298,30 @@ async fn dial_peer<B: Backend>(
         };
         match exchange_via(&http, &backend, &node, &peer, &auth, &fleet, carrier).await {
             Ok(moved) => {
+                if route > 0 {
+                    // Keep a working fallback while a transient preferred-route failure cools
+                    // down. Busy successful exchanges must not keep postponing its retry.
+                    preferred_retry.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + worker_interval(Duration::from_secs(60))
+                    });
+                } else {
+                    preferred_retry = None;
+                }
                 if is_http {
                     last_http_success = Some((peer.url.clone(), tokio::time::Instant::now()));
                 }
                 early_spent.remove(&peer.url);
                 backoff = PeerBackoff::default();
                 must_send = false;
-                record_worker(&backend, &name, "idle", attempt_unix_ms, None).await;
+                record_worker(
+                    &backend,
+                    &name,
+                    "idle",
+                    attempt_unix_ms,
+                    None,
+                    preferred_route.map(|preferred| (preferred, preferred_retry)),
+                )
+                .await;
                 if moved {
                     // One exchange carries a bounded batch. Keep going at once while envelopes
                     // still move instead of leaving the rest of a backlog to the timer, or to
@@ -1347,7 +1389,15 @@ async fn dial_peer<B: Backend>(
                     .record_failure(&peer.name, status, &error.to_string(), Some(carrier))
                     .await;
                 let delay = retry_delay(backoff.next(), &fleet, &name);
-                record_worker(&backend, &name, "backoff", attempt_unix_ms, Some(delay)).await;
+                record_worker(
+                    &backend,
+                    &name,
+                    "backoff",
+                    attempt_unix_ms,
+                    Some(delay),
+                    preferred_route.map(|preferred| (preferred, preferred_retry)),
+                )
+                .await;
                 if wait_peer_retry(
                     &backend,
                     attempt_unix_ms,
@@ -1383,6 +1433,7 @@ async fn record_worker<B: Backend>(
     phase: &str,
     last_attempt: u128,
     delay: Option<Duration>,
+    route: Option<(bool, Option<tokio::time::Instant>)>,
 ) {
     // Visibility must not turn a blocked daemon read into a longer replication deadline.
     let _ = tokio::time::timeout(
@@ -1394,6 +1445,15 @@ async fn record_worker<B: Backend>(
                 last_attempt_at_unix_ms: last_attempt,
                 next_retry_at_unix_ms: delay
                     .map(|delay| crate::store::now_ms() + delay.as_millis()),
+                route_is_preferred: route.map(|(preferred, _)| preferred),
+                preferred_retry_at_unix_ms: route
+                    .and_then(|(preferred, deadline)| if preferred { None } else { deadline })
+                    .map(|deadline| {
+                        crate::store::now_ms()
+                            + deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                .as_millis()
+                    }),
             },
         ),
     )
@@ -1556,7 +1616,7 @@ async fn wait_peer_retry<B: Backend>(
                     // probe sees the route down again. The backoff count is kept.
                     early_spent.insert(probed.clone());
                     record_worker(backend, name, "backoff", last_attempt_unix_ms,
-                        Some(Duration::ZERO)).await;
+                        Some(Duration::ZERO), None).await;
                     return false;
                 } else {
                     // Transport is alive, but another expensive exchange has just failed.
@@ -1567,7 +1627,7 @@ async fn wait_peer_retry<B: Backend>(
                     if capped < deadline {
                         deadline = capped;
                         record_worker(backend, name, "backoff", last_attempt_unix_ms,
-                            Some(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
+                            Some(deadline.saturating_duration_since(tokio::time::Instant::now())), None).await;
                     }
                 }
             }
@@ -1603,7 +1663,7 @@ async fn receive_exchange<B: Backend>(
     body: Bytes,
 ) -> Response {
     let body = if deflated(&headers) {
-        match inflate(&body) {
+        match inflate(&body, "an exchange request") {
             Ok(body) => Bytes::from(body),
             Err(error) => {
                 return (
@@ -1698,7 +1758,7 @@ async fn receive_exchange<B: Backend>(
             );
             let state = state.clone();
             let relay = relay.clone();
-            tokio::spawn(async move {
+            tokio::spawn(crate::task_cpu::account("replication.exchange", async move {
                 let _permit = permit;
                 let result = async {
                     let received = state
@@ -1735,7 +1795,7 @@ async fn receive_exchange<B: Backend>(
                 .await
                 .map_err(|error| format!("replication request failed: {error:#}"));
                 done.send_replace(Some(result));
-            });
+            }));
         }
         jobs.get(&relay).unwrap().answer.clone()
     };
@@ -1941,7 +2001,10 @@ async fn fetch_checkpoint_manifest_page(
     let headers = response.headers().clone();
     let bytes = response.bytes().await?.to_vec();
     let bytes = if deflated(&headers) {
-        inflate(&bytes)?
+        inflate(
+            &bytes,
+            &format!("the checkpoint manifest page from peer {}", peer.name),
+        )?
     } else {
         bytes
     };
@@ -2431,7 +2494,7 @@ async fn post_signed<B: Backend>(
     let deadline = tokio::time::Instant::now() + EXCHANGE_POLL_BUDGET;
     let attempted = crate::store::now_ms();
     for _ in 0..MAX_OVERLOAD_POLLS {
-        record_worker(backend, &peer.name, "exchange", attempted, None).await;
+        record_worker(backend, &peer.name, "exchange", attempted, None, None).await;
         let result = match tokio::time::timeout_at(
             deadline,
             post_signed_to(
@@ -2458,7 +2521,15 @@ async fn post_signed<B: Backend>(
         match result {
             Err(error) if error.is::<PeerOverloaded>() => {
                 let delay = error.downcast_ref::<PeerOverloaded>().unwrap().retry_after;
-                record_worker(backend, &peer.name, "overload", attempted, Some(delay)).await;
+                record_worker(
+                    backend,
+                    &peer.name,
+                    "overload",
+                    attempted,
+                    Some(delay),
+                    None,
+                )
+                .await;
                 if tokio::time::timeout_at(deadline, tokio::time::sleep(delay))
                     .await
                     .is_err()
@@ -2561,18 +2632,24 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
             )
         })?
         .to_vec();
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
+    // Both signature names require authentication, including refusals. Switch senders only
+    // after every member accepts aliases; sunset 60 days after the first shipping release.
+    let unsigned = !headers.contains_key(HEADER_SIGNATURE)
+        && !headers.contains_key("x-fractal-signature");
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     // A build older than a path answers an unsigned 404.
-    if status == StatusCode::NOT_FOUND && headers.get(HEADER_SIGNATURE).is_none() {
+    if status == StatusCode::NOT_FOUND && unsigned {
         anyhow::bail!("peer {} runs a build without `{path}`", peer.name);
     }
     // Any other refusal without the fleet's signature is reported by its status, before the
     // signature check would report only a missing header and hide why the exchange failed. Its
     // body is never trusted as data; an unsigned success still fails the signature check below.
-    if !status.is_success() && headers.get(HEADER_SIGNATURE).is_none() {
+    if !status.is_success() && unsigned {
         anyhow::bail!(unsigned_refusal(&peer.name, status, &bytes));
     }
     let bytes = if deflated(&headers) {
-        inflate(&bytes)?
+        inflate(&bytes, &format!("the answer to `{path}` from peer {}", peer.name))?
     } else {
         bytes
     };

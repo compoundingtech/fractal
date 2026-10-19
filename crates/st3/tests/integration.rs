@@ -8,6 +8,7 @@
 mod ci_test_paths;
 
 mod action_coverage;
+mod actor_contract;
 mod adhoc_work;
 mod agents_restart;
 mod authored_resume;
@@ -65,6 +66,7 @@ mod daemon_load;
 mod load_hog;
 mod daemon_environment;
 mod daemon_restart;
+mod event_waits;
 mod driver_incarnation;
 mod delivery_probe;
 mod examples;

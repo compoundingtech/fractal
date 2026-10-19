@@ -50,13 +50,19 @@ claim of the kind, so a later claim does not replace an earlier one. A test fail
 class allows dropping and it has neither a rule nor a `pending` reason, and when a durable kind has
 a rule.
 
+Harness questions retain their compact owner record indefinitely: id, status, answer positions
+and receipt are never deleted or hidden by age. Pending history stays whole; one day after
+resolution only redundant older observations may be trimmed, preserving the newest observation
+and resolution forever. Derived bulky data may expire independently, never the compact record.
+See [Harness questions](harness-questions.md).
+
 Each rule has:
 
 - `kind`, and `when`: conditions that must all hold (`actor=null`, `FIELD=set`, `FIELD=VALUE`);
 - `slot`: the fields besides subject and kind that make up a slot. `claim.origin` is the writer.
   A rule without a slot keeps every claim. `require_slot` leaves out a claim missing a slot field;
 - `keep`: what the rule keeps. It names the planner function in
-  `crates/st3-daemon/src/store/checkpoint_rules.rs` (`planner_rule`); the checkpoint tests fail on one
+  `crates/st3-store/src/store/checkpoint_rules.rs` (`planner_rule`); the checkpoint tests fail on one
   it does not know;
 - `after_slot`: extra terms rendered after the slot in the rules description, for a rule whose planner needs them;
 - `min_age`: only claims accepted at least this long before the cut go.
@@ -72,7 +78,7 @@ rule does, and changes the rules digest:
    If the checkpoint proof's reader answers (`subject_answers` in `checkpoint_rules.rs`) do not
    cover the new reader, add it, so a rule that changes an answer fails the proof.
 2. Bump `RULES_VERSION` and say why in its comment.
-3. Add a test in `crates/st3-daemon/src/store/checkpoint_tests.rs` that names the dropped and the kept
+3. Add a test in `crates/st3-store/src/store/checkpoint_tests.rs` that names the dropped and the kept
    claims.
 4. Measure it on a copy of a real store (below), never on a live one.
 5. Deploy it to every member. Until every participant runs the same rules, checkpoints wait at
@@ -91,3 +97,22 @@ cargo run --release -p st3 --example retention_plan -- /private/dir/clone.sqlite
 
 It opens and migrates the clone, so never point it at a live store or at the copy you keep. Two
 builds that plan the same clone with the same rules report the same digests.
+
+## Giving space back
+
+A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A
+store made with incremental auto-vacuum gives them back: the hourly retention pass releases free
+pages 512 at a time (2 MiB), one short write each, so other writes run between them. A new store
+is made that way.
+
+A store made before then has auto-vacuum off: the file never shrinks, whatever the trims free. One
+VACUUM converts it. It rewrites the whole file, so it needs free disk as large as the store and runs
+with the daemon stopped, during a deploy swap:
+
+```sh
+python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("PRAGMA auto_vacuum = INCREMENTAL"); c.execute("VACUUM")' "$STATE/claims.sqlite3"
+```
+
+The VACUUM also gives back every page already free, so run it after the trims have caught up.
+`PRAGMA auto_vacuum` then answers 2, and from then on the hourly pass keeps the file close to its
+pages in use.

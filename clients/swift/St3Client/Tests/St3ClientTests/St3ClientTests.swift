@@ -6,6 +6,31 @@ import FoundationNetworking
 @testable import St3Client
 
 final class St3ClientTests: XCTestCase {
+    func testUsageAggregationSchemaLiteralsDecode() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/schemas/client-v0.schema.json"))
+        let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let definitions = try XCTUnwrap(schema["$defs"] as? [String: Any])
+        let summary = try XCTUnwrap(definitions["UsageSummary"] as? [String: Any])
+        let properties = try XCTUnwrap(summary["properties"] as? [String: Any])
+        let aggregation = try XCTUnwrap(properties["aggregation"] as? [String: Any])
+        let literals = try XCTUnwrap(aggregation["enum"] as? [String])
+        XCTAssertEqual(literals, [
+            "cumulative-per-incarnation-else-response-deltas",
+            "rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas",
+        ])
+        for literal in literals {
+            let wire: [String: Any] = [
+                "total_tokens": 1200, "input_tokens": 900, "output_tokens": 300,
+                "cached_tokens": 100, "incarnation_count": 2, "aggregation": literal,
+            ]
+            let decoded = try JSONDecoder().decode(UsageSummary.self,
+                from: JSONSerialization.data(withJSONObject: wire))
+            XCTAssertEqual(decoded.aggregation, literal)
+        }
+    }
+
     func testQueuedMissionDeadlineAcceptsNullAndAdmissionTimestamp() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -138,6 +163,7 @@ final class St3ClientTests: XCTestCase {
             ("runtime-authority-indeterminate", ErrorCode.runtimeAuthorityIndeterminate),
             ("terminal-unavailable", ErrorCode.terminalUnavailable),
             ("terminal-ended", ErrorCode.terminalEnded),
+            ("agent-roster-cut-not-ready", ErrorCode.agentRosterCutNotReady),
         ] {
             let decoded = try JSONDecoder().decode(ErrorCode.self, from: Data("\"\(raw)\"".utf8))
             XCTAssertEqual(decoded, expected)
@@ -268,6 +294,46 @@ final class St3ClientTests: XCTestCase {
         guard case .redaction = timeline.items[7].body else { return XCTFail("redaction lost") }
         guard case .truncation = timeline.items[8].body else { return XCTFail("truncation lost") }
         guard case .error = timeline.items[9].body else { return XCTFail("error body lost") }
+    }
+
+    func testExactAgentCollectionFramesDecodeRowsRemovalsAndRetryability() throws {
+        let json = #"{"kind":"snapshot","id":"details","collection":"agents","items":[{"id":"agent/example/worker","kind":"agent","revision":"r1","updated_at":"2026-10-04T08:00:00Z","name":"Worker","state":"idle","reachability":"up","runtime_ids":[],"under":[]}],"order":["agent/example/worker"],"has_more":false}"#
+        let frame = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(json.utf8))
+        XCTAssertEqual(frame.items?.map(\.id), ["agent/example/worker"])
+        XCTAssertEqual(frame.hasMore, false)
+        let removal = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(
+            #"{"kind":"changes","id":"details","collection":"agents","upserts":[],"removes":["agent/example/worker"],"order":[],"has_more":false}"#.utf8))
+        XCTAssertEqual(removal.removes, ["agent/example/worker"])
+        XCTAssertEqual(removal.order, [])
+        let resync = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(
+            #"{"kind":"resync","id":"details","retryable":true,"code":"internal","message":"Read unavailable"}"#.utf8))
+        XCTAssertEqual(resync.retryable, true)
+        XCTAssertNil(resync.items)
+    }
+
+    @MainActor
+    func testExactAgentStreamRefusesADaemonWithoutTheCapability() async throws {
+        let url = URL(string: "https://exact-\(UUID().uuidString.lowercased()).example/")!
+        let capture = TraceRequestCapture()
+        TraceHTTPRegistry.shared.register(capture, host: url.host!)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraceHTTPProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            TraceHTTPRegistry.shared.remove(host: url.host!)
+        }
+        // The stub daemon's capabilities list is empty, as an older daemon's lacks the selector.
+        let client = St3Client(fabricLoopbackURL: url, session: session)
+        do {
+            for try await _ in await client.agentsStream(subscriptionID: "details", agent: "agent/example/worker") {
+                XCTFail("an older daemon must not be sent the selector")
+            }
+            XCTFail("the exact agent stream must fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains(St3Client.exactAgentSelectorCapability), error.localizedDescription)
+        }
+        XCTAssertTrue(capture.requests.contains { $0.url?.path == "/v1/client/capabilities" })
     }
 
     func testRelayOmissionFixtureKeepsKnownBodiesAndOptionalValues() throws {

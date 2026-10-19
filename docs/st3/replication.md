@@ -46,6 +46,57 @@ keeps the newest observation per origin/subject after the D+2 cut; a two-to-thre
 window holds roughly 5,760-8,640 refresh claims, plus each retained newest claim. These are
 arithmetic bounds, not measured saturated-daemon costs.
 
+The receive path's latest-observation lookup uses a local transport-only side index once
+its background bootstrap completes. Store opening does no work for this index: after both
+APIs serve, the managed background writer queue atomically installs capture triggers and a
+high-water mark, then commits after 128 source rows or 20 ms of work, whichever comes
+first, checking the elapsed budget between rows and preserving the last processed cursor.
+The budget bounds work, not I/O latency: one cold read, capture setup or commit can still
+exceed 20 ms. A page always processes at least one row to make progress; 100 ms yields
+between pages remain unchanged.
+Each page releases its background loan; pending foreground writers retain priority.
+Sharing the writer also preserves deferred read-then-write snapshots: no independent
+bootstrap connection can commit across an application writer's pending upgrade.
+Inserts, identity/kind/time updates and deletes maintain the index in their claim
+transaction. Until the final page commits, readers use the original canonical query.
+WAL readers remain available during a copy page; other writers wait only for that page,
+not a whole-history `CREATE INDEX`. `st.db.migration.index.ready{index="transport_observation_seek"}`
+reports the switch; `st.db.migration.index.build.duration` records elapsed build seconds and
+`st.db.migration.index.write_hold.duration` records each page's begin-through-commit
+write-hold upper bound, including finalizers and SQLite acquisition wait but excluding
+background queue admission. The index is rebuildable local acceleration, not replicated authority.
+
+For offline production-size evidence, build the aggregate-only
+`smallclaims` example `transport_observation_bench` in release mode with the
+`transport-bench` feature. Run `--store COPY --n 1000 --mode before --bootstrap-yield-ms 0`,
+then the same command with `--mode after`, using the same checkpointed disposable input.
+Both modes measure a private temporary copy; the before mode removes the helper
+objects and uses main's identical SQL literal, per-call canonical expansion and
+uncached `query_row` preparation path, without readiness probes. The after mode
+executes every real bootstrap page. The example-only `--bootstrap-yield-ms` defaults
+to the daemon's 100 ms inter-page yield; use `0` for the accelerated measurement
+without changing transaction boundaries or sampling. Production pacing is unchanged.
+Project production-paced bootstrap time as `bootstrap_elapsed_ms / 1000 +
+bootstrap_pages * 0.1` seconds from a zero-yield run (a conservative extra yield
+for the final page). Removing deliberate sleeps targets an approximately one-hour
+operator run, but storage speed and unknown claim count can still exceed that target.
+The harness rejects open databases, SQLite sidecars and nearby daemon socket/lock
+artifacts; Linux write-lease support is required. Set `TMPDIR` to private local
+storage with capacity for the database plus its working WAL (reflinks are attempted).
+Only aggregate JSON is emitted, including every bootstrap transaction and the
+writer-transaction totals and wall time per synthetic receive-shaped claim insert.
+The JSON also reports `source_claim_rows` from one premeasurement count,
+`bootstrap_elapsed_ms`, `bootstrap_pages`, `bootstrap_yield_ms` and `index_bytes`.
+When `index_bytes_dbstat` is true, size sums `dbstat.pgsize` for both helper tables
+and their indexes. Otherwise it is the checkpointed `page_count * page_size` growth
+across bootstrap, excluding WAL; reused free pages can make this fallback undercount
+the objects' occupied space. Sizing/checkpoint work is outside transaction samples.
+The advance API exposes copied observation rows, not scanned source rows, so
+`bootstrap_rows_copied` must not be interpreted as the scanned claim count.
+The workload persists a synthetic message and its transport observation, not the
+full replication authentication or runtime projection path. No stored message
+bodies or identifiers are emitted; failures are deliberately detail-free.
+
 The daemon caches its sealed membership view at the store's fleet generation, rather than
 folding the full fleet history on every worker poll. The generation and fold share a read
 snapshot. Fleet claims, their batch/envelope identities, verified signer rows and the pinned
@@ -373,6 +424,13 @@ the fleet secret and joined members' signatures still authenticate the exchange.
 See [Tailscale setup](tailscale.md) for direct-host setup and
 [the migration procedure](../fleet-join.md#move-an-existing-fleet-off-local-dial-helpers)
 for replacing a legacy local dial helper.
+
+After a successful exchange on a fallback route, the worker keeps using it for a
+60-second cooldown, then starts the next exchange from the preferred route again.
+Successful fallback exchanges do not extend that cooldown. If the preferred route
+still fails, normal route failover resumes; Fabric grant refusals retain their
+separate, longer cooldown.
+Per-peer worker status reports `route_is_preferred` and `preferred_retry_at_unix_ms`; `st replication status` shows the preferred/fallback selection and pending preferred-route retry deadline.
 
 The peer HTTP listener is not the privileged local Unix API: it exposes only fleet replication,
 join, and owner-forwarded client operations. Replication and forwarded client requests require
@@ -766,20 +824,38 @@ For each peer, the status view also reports when the last exchange happened and 
 two envelope sets were at that exchange:
 
 ```text
-sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m
+sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m (arrival only)
 peer	node-b	up
   last exchange 2s ago
   node-b has 124,384 envelopes this node lacks
   this node has 3 envelopes node-b lacks
-  receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)
+  receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m (arrival only; measured 2s ago)
 ```
 
 Each node measures the difference from the inventory its peer already sends in every exchange, so
 the protocol does not change and a peer on an older build is measured too. A range both sides hold
 with different digests counts exactly once the peer lists it; until then its count is a lower
 bound. The estimate divides the remaining envelopes by how fast that number shrank over recent
-10-second windows, so a peer that keeps writing lengthens it. The measurements live in memory; the
-first exchange after a restart rebuilds them.
+10-second windows, so a peer that keeps writing lengthens it. It never divides by more than the
+rate envelopes arrive, and gives no estimate while either rate is unknown; the status shows that
+rate as `closing at`. That cap is a guard, not a proof: the number can also fall without a receipt,
+when a checkpoint drops envelopes or the comparison narrows, and when receipts coincide with such a
+drop the estimate can still be too short.
+A window in which the number did not shrink, or nothing arrived, leaves no forecast, and the status
+says `not catching up`; the next window then starts from its own rate rather than half of it. A gap
+of more than five minutes between measurements forgets both rates, and so does a change in what
+the count is compared against: the peer's advertised checkpoint, a change to this node's own
+inventory below its tail (which its checkpoints make), or a switch between range and full
+inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
+comparison changes neither, so only the arrival cap guards those; a peer that starts advertising a
+checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
+as stale, with its counts and time but no rates or estimate; when nothing was missing, the status
+says so of the last measurement and when it was taken, rather than "caught up". Zero envelopes missing means nothing
+the peer listed is missing here, at arrival: admission, projection and visibility can lag behind
+it.
+The estimate is for arrival only: claims admitted, projected and visible can lag behind it, and
+the clients' JSON field (`estimated_catch_up_seconds`) is absent in every case without a forecast.
+The measurements live in memory; the first exchange after a restart rebuilds them.
 
 The `timings` line shows where this daemon has spent replication time since it started:
 

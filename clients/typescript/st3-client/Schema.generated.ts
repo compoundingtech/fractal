@@ -179,7 +179,64 @@ export const ActionCommon = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")),
   "parameters": Schema.Record(Schema.String, Schema.Unknown),
-  "type": Schema.Literals(["arrangement.edit","custom.reply","prompt.respond","attention.resolve","review.approve","review.reject","review.request-changes","message.send","message.read","message.close","launch.create","launch.revise","launch.preview","launch.approve","launch.cancel","mission.start","mission.revise","mission.approve-revision","mission.cancel-revision","mission.cancel","session.import","work.ask","work.done","work.cancel-ask","work.claim","work.renew","work.progress","work.complete","work.fail","work.release","work.retry","work.publish-mission","agent.create","agent.stop","agent.retire","agent.start","agent.suspend","agent.resume","terminal.create","terminal.end","agent.queue-move","lane.join","lane.leave","lane.move","lane.mark","lane.approve","runtime.stop","runtime.restart","runtime.reset","runtime.context-clear","runtime.signal","terminal.input","terminal.resize","terminal.attach","terminal.detach","pairing.revoke"])
+  "type": Schema.Literals([
+  "arrangement.edit",
+  "custom.reply",
+  "prompt.respond",
+  "attention.resolve",
+  "review.approve",
+  "review.reject",
+  "review.request-changes",
+  "message.send",
+  "message.read",
+  "message.close",
+  "launch.create",
+  "launch.revise",
+  "launch.preview",
+  "launch.approve",
+  "launch.cancel",
+  "mission.start",
+  "mission.revise",
+  "mission.approve-revision",
+  "mission.cancel-revision",
+  "mission.cancel",
+  "session.import",
+  "work.ask",
+  "work.done",
+  "work.cancel-ask",
+  "work.claim",
+  "work.renew",
+  "work.progress",
+  "work.complete",
+  "work.fail",
+  "work.release",
+  "work.retry",
+  "work.publish-mission",
+  "agent.create",
+  "agent.stop",
+  "agent.retire",
+  "agent.start",
+  "agent.suspend",
+  "agent.resume",
+  "terminal.create",
+  "terminal.end",
+  "agent.queue-move",
+  "lane.join",
+  "lane.leave",
+  "lane.move",
+  "lane.mark",
+  "lane.approve",
+  "runtime.stop",
+  "runtime.restart",
+  "runtime.reset",
+  "runtime.context-clear",
+  "runtime.signal",
+  "terminal.input",
+  "terminal.resize",
+  "terminal.attach",
+  "terminal.detach",
+  "pairing.revoke"
+])
 }).annotate({ identifier: "ActionCommon" }))()
 export type ActionCommon = typeof ActionCommon.Type
 export type ActionCommonEncoded = typeof ActionCommon.Encoded
@@ -314,6 +371,17 @@ export const DeviceSignature = /*#__PURE__*/ (() => Schema.Struct({
 export type DeviceSignature = typeof DeviceSignature.Type
 export type DeviceSignatureEncoded = typeof DeviceSignature.Encoded
 
+export const Attachment = /*#__PURE__*/ (() => Schema.Struct({
+  "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
+  "media_type": Schema.Literals(["image/png","image/jpeg","image/gif","image/webp"]),
+  "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "origin": Id,
+  "sha256": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
+  "size": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "Attachment" }))()
+export type Attachment = typeof Attachment.Type
+export type AttachmentEncoded = typeof Attachment.Encoded
+
 export const RequestAnswerOption = /*#__PURE__*/ (() => Schema.Struct({
   "conditions": optionalKey(Schema.Array(Schema.String)),
   /** What happens next when the person gives this answer. */
@@ -327,7 +395,18 @@ export type RequestAnswerOption = typeof RequestAnswerOption.Type
 export type RequestAnswerOptionEncoded = typeof RequestAnswerOption.Encoded
 
 export const RequestSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.Literals(["pull_request","issue","document","mission","run","step","agent","host","commit","link"]),
+  "kind": Schema.Literals([
+  "pull_request",
+  "issue",
+  "document",
+  "mission",
+  "run",
+  "step",
+  "agent",
+  "host",
+  "commit",
+  "link"
+]),
   "label": Schema.String,
   /** A graph reference. */
   "ref": optionalKey(Schema.String).annotate({ description: "A graph reference." }),
@@ -341,6 +420,8 @@ export type RequestSubjectEncoded = typeof RequestSubject.Encoded
 /** A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options; feedback asks for text. */
 export const StructuredRequest = /*#__PURE__*/ (() => Schema.Struct({
   "answers": optionalKey(Schema.Array(RequestAnswerOption).check(Schema.isMaxLength(5))),
+  /** Images to look at, read with the blob route and the ask's step as the carrier (message=step-run/…). */
+  "attachments": optionalKey(Schema.Array(Attachment).check(Schema.isMaxLength(4))).annotate({ description: "Images to look at, read with the blob route and the ask's step as the carrier (message=step-run/…)." }),
   /** A choice also takes an answer in the person's own words. */
   "custom": optionalKey(Schema.Boolean).annotate({ description: "A choice also takes an answer in the person's own words." }),
   "question": Schema.String.check(Schema.isMinLength(1)),
@@ -533,6 +614,18 @@ export const AgentDelivery = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentDelivery = typeof AgentDelivery.Type
 export type AgentDeliveryEncoded = typeof AgentDelivery.Encoded
 
+export const AgentEndReason = /*#__PURE__*/ (() => Schema.Struct({
+  "actor": optionalKey(Schema.String),
+  "diagnostic": optionalKey(Schema.String),
+  "ended_at": Timestamp,
+  "exit_code": optionalKey(Schema.Int),
+  "exit_signal": optionalKey(Schema.String),
+  "kind": Schema.Literals(["completed","stopped-by-person","stopped-by-agent","crashed","harness-exited","host-lost","retired"]),
+  "reason": optionalKey(Schema.String)
+}).annotate({ identifier: "AgentEndReason" }))()
+export type AgentEndReason = typeof AgentEndReason.Type
+export type AgentEndReasonEncoded = typeof AgentEndReason.Encoded
+
 export const AgentHandoff = /*#__PURE__*/ (() => Schema.Struct({
   "desired_token": Schema.String,
   "destination": Schema.String,
@@ -594,7 +687,19 @@ export const AgentPresentation = /*#__PURE__*/ (() => Schema.Struct({
   /** How many steps are queued in all. */
   "queued": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "How many steps are queued in all." }),
   /** The agent state word, by its fixtures/clients/words.json id. */
-  "state": Schema.Literals(["needs_you","needs_login","fault","working","compacting","idle","starting","down","stopped","retired","unknown"]).annotate({ description: "The agent state word, by its fixtures/clients/words.json id." })
+  "state": Schema.Literals([
+  "needs_you",
+  "needs_login",
+  "fault",
+  "working",
+  "compacting",
+  "idle",
+  "starting",
+  "down",
+  "stopped",
+  "retired",
+  "unknown"
+]).annotate({ description: "The agent state word, by its fixtures/clients/words.json id." })
 }).annotate({ identifier: "AgentPresentation" }))()
 export type AgentPresentation = typeof AgentPresentation.Type
 export type AgentPresentationEncoded = typeof AgentPresentation.Encoded
@@ -612,7 +717,17 @@ export type AgentRelationship = typeof AgentRelationship.Type
 export type AgentRelationshipEncoded = typeof AgentRelationship.Encoded
 
 /** Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`. */
-export const AgentState = /*#__PURE__*/ (() => openEnum(["desired","starting","running","waiting","down","stopped","failed","suspended","retired"]).annotate({ identifier: "AgentState", description: "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`." }))()
+export const AgentState = /*#__PURE__*/ (() => openEnum([
+  "desired",
+  "starting",
+  "running",
+  "waiting",
+  "down",
+  "stopped",
+  "failed",
+  "suspended",
+  "retired"
+]).annotate({ identifier: "AgentState", description: "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`." }))()
 export type AgentState = typeof AgentState.Type
 export type AgentStateEncoded = typeof AgentState.Encoded
 
@@ -648,7 +763,17 @@ export const AgentSuspension = /*#__PURE__*/ (() => Schema.Struct({
   /** The request claim; each phase change is a change of this agent. */
   "operation_id": Schema.String.annotate({ description: "The request claim; each phase change is a change of this agent." }),
   /** suspend: quiescing, snapshotting, suspended, or failed (refused; the seat keeps running). resume: restoring, verifying, resumed; a failed resume returns to suspended with code and reason. */
-  "phase": Schema.Literals(["quiescing","snapshotting","suspended","failed","fencing-source","transferring","restoring","verifying","resumed"]).annotate({ description: "suspend: quiescing, snapshotting, suspended, or failed (refused; the seat keeps running). resume: restoring, verifying, resumed; a failed resume returns to suspended with code and reason." }),
+  "phase": Schema.Literals([
+  "quiescing",
+  "snapshotting",
+  "suspended",
+  "failed",
+  "fencing-source",
+  "transferring",
+  "restoring",
+  "verifying",
+  "resumed"
+]).annotate({ description: "suspend: quiescing, snapshotting, suspended, or failed (refused; the seat keeps running). resume: restoring, verifying, resumed; a failed resume returns to suspended with code and reason." }),
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "source_host": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "suspended_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
@@ -741,7 +866,7 @@ export type UsageContext = typeof UsageContext.Type
 export type UsageContextEncoded = typeof UsageContext.Encoded
 
 export const UsageSummary = /*#__PURE__*/ (() => Schema.Struct({
-  "aggregation": Schema.Literal("cumulative-per-incarnation-else-response-deltas"),
+  "aggregation": Schema.Literals(["cumulative-per-incarnation-else-response-deltas","rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas"]),
   "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "context": optionalKey(UsageContext),
@@ -759,7 +884,17 @@ export const MissionId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:mission
 export type MissionId = typeof MissionId.Type
 export type MissionIdEncoded = typeof MissionId.Encoded
 
-export const WorkState = /*#__PURE__*/ (() => Schema.Literals(["waiting-person","waiting","ready","claimed","blocked","verifying","completed","failed","cancelled"]).annotate({ identifier: "WorkState" }))()
+export const WorkState = /*#__PURE__*/ (() => Schema.Literals([
+  "waiting-person",
+  "waiting",
+  "ready",
+  "claimed",
+  "blocked",
+  "verifying",
+  "completed",
+  "failed",
+  "cancelled"
+]).annotate({ identifier: "WorkState" }))()
 export type WorkState = typeof WorkState.Type
 export type WorkStateEncoded = typeof WorkState.Encoded
 
@@ -797,6 +932,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When a `down` seat began waiting for a session; null in every other state. */
   "down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When a `down` seat began waiting for a session; null in every other state." }),
   "driver": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Derived terminal reason; absent when evidence is missing or stale. Never infer completion from absence. */
+  "end_reason": Schema.OptionFromOptionalNullOr(AgentEndReason, NULL_NONE).annotate({ description: "Derived terminal reason; absent when evidence is missing or stale. Never infer completion from absence." }),
   /** Current member reconcile failure; cleared by a successful pass. */
   "fault": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Current member reconcile failure; cleared by a successful pass." }),
   /** Placement handoff phase; the destination waits for former hosts to acknowledge their stopped runtimes. */
@@ -1090,16 +1227,355 @@ export const ArrangementPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ArrangementPage = typeof ArrangementPage.Type
 export type ArrangementPageEncoded = typeof ArrangementPage.Encoded
 
-export const Attachment = /*#__PURE__*/ (() => Schema.Struct({
-  "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
-  "media_type": Schema.Literals(["image/png","image/jpeg","image/gif","image/webp"]),
-  "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
-  "origin": Id,
-  "sha256": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
-  "size": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "Attachment" }))()
-export type Attachment = typeof Attachment.Type
-export type AttachmentEncoded = typeof Attachment.Encoded
+export const AssistantAgentItem = /*#__PURE__*/ (() => Schema.Struct({
+  "current_mission_id": Schema.OptionFromNullOr(Schema.String),
+  "current_run_id": Schema.OptionFromNullOr(Schema.String),
+  "id": Id,
+  /** Null when undeclared. */
+  "lifecycle": Schema.OptionFromNullOr(Schema.Literals(["standing","owner","bounded","unknown"])).annotate({ description: "Null when undeclared." }),
+  "runtime_state": Schema.Literals([
+  "desired",
+  "starting",
+  "running",
+  "waiting",
+  "stopped",
+  "failed",
+  "suspended",
+  "unknown"
+]),
+  /** Null when the agent has not been observed. */
+  "updated_at": Schema.OptionFromNullOr(Timestamp).annotate({ description: "Null when the agent has not been observed." })
+}).annotate({ identifier: "AssistantAgentItem" }))()
+export type AssistantAgentItem = typeof AssistantAgentItem.Type
+export type AssistantAgentItemEncoded = typeof AssistantAgentItem.Encoded
+
+export const AssistantAgentPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("assistant.agents"),
+  "filters": Schema.Record(Schema.String, Schema.Never),
+  "items": Schema.Array(AssistantAgentItem),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo,
+  "sync": optionalKey(SyncNotice)
+}).annotate({ identifier: "AssistantAgentPage" }))()
+export type AssistantAgentPage = typeof AssistantAgentPage.Type
+export type AssistantAgentPageEncoded = typeof AssistantAgentPage.Encoded
+
+/** Concrete person identity, never a session actor or a deployment-specific fixed person. */
+export const PersonId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))).annotate({ identifier: "PersonId", description: "Concrete person identity, never a session actor or a deployment-specific fixed person." }))()
+export type PersonId = typeof PersonId.Type
+export type PersonIdEncoded = typeof PersonId.Encoded
+
+export const AssistantAttentionItem = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": Schema.OptionFromNullOr(Schema.String),
+  /** Every custom.* kind collapses to custom; any other unrecognized source kind is unknown. */
+  "attention_kind": Schema.Literals([
+  "human-gate",
+  "launch-approval",
+  "revision-approval",
+  "unread-message",
+  "person-step",
+  "agent-request",
+  "fault",
+  "harness-login",
+  "harness-prompt",
+  "custom",
+  "unknown"
+]).annotate({ description: "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." }),
+  "episode": Schema.String,
+  "id": Id,
+  "mission_id": Schema.OptionFromNullOr(Schema.String),
+  "mission_run_id": Schema.OptionFromNullOr(Schema.String),
+  "person_id": PersonId,
+  "revision": Revision,
+  "waiting_since": Timestamp
+}).annotate({ identifier: "AssistantAttentionItem" }))()
+export type AssistantAttentionItem = typeof AssistantAttentionItem.Type
+export type AssistantAttentionItemEncoded = typeof AssistantAttentionItem.Encoded
+
+export const AssistantAttentionPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("assistant.attention"),
+  "filters": Schema.Record(Schema.String, Schema.Never),
+  "items": Schema.Array(AssistantAttentionItem),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo,
+  "sync": optionalKey(SyncNotice)
+}).annotate({ identifier: "AssistantAttentionPage" }))()
+export type AssistantAttentionPage = typeof AssistantAttentionPage.Type
+export type AssistantAttentionPageEncoded = typeof AssistantAttentionPage.Encoded
+
+export const AssistantContentRange = /*#__PURE__*/ (() => Schema.Struct({
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AssistantContentRange" }))()
+export type AssistantContentRange = typeof AssistantContentRange.Type
+export type AssistantContentRangeEncoded = typeof AssistantContentRange.Encoded
+
+export const AssistantConversationContent = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "kind": Schema.Literal("assistant-conversation-content"),
+  "next_range": Schema.OptionFromNullOr(AssistantContentRange),
+  "reference": Schema.String,
+  "returned_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "revision": Revision,
+  "session_id": Id,
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "text": Schema.String,
+  "truncated": Schema.Boolean
+}).annotate({ identifier: "AssistantConversationContent" }))()
+export type AssistantConversationContent = typeof AssistantConversationContent.Type
+export type AssistantConversationContentEncoded = typeof AssistantConversationContent.Encoded
+
+export const TerminalId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:terminal)/[^\\s]+$", "u"), "terminal").annotate({ identifier: "TerminalId" }))()
+export type TerminalId = typeof TerminalId.Type
+export type TerminalIdEncoded = typeof TerminalId.Encoded
+
+export const AssistantTerminalContent = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "incarnation_id": Schema.String,
+  "kind": Schema.Literal("assistant-terminal-content"),
+  "returned_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "screen_revision": Revision,
+  "terminal_id": TerminalId,
+  "text": Schema.String,
+  "truncated": Schema.Boolean
+}).annotate({ identifier: "AssistantTerminalContent" }))()
+export type AssistantTerminalContent = typeof AssistantTerminalContent.Type
+export type AssistantTerminalContentEncoded = typeof AssistantTerminalContent.Encoded
+
+export const AssistantContentPage = /*#__PURE__*/ (() => Schema.Union([
+  AssistantConversationContent,
+  AssistantTerminalContent
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "AssistantContentPage" }))()
+export type AssistantContentPage = typeof AssistantContentPage.Type
+export type AssistantContentPageEncoded = typeof AssistantContentPage.Encoded
+
+/** Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes. */
+export const AssistantResponseBytes = /*#__PURE__*/ (() => Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384)).annotate({ identifier: "AssistantResponseBytes", description: "Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes." }))()
+export type AssistantResponseBytes = typeof AssistantResponseBytes.Type
+export type AssistantResponseBytesEncoded = typeof AssistantResponseBytes.Encoded
+
+export const AssistantConversationContentRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "reference": Schema.String.check(Schema.isMinLength(1)),
+  "revision": Revision,
+  "session_id": Id,
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AssistantConversationContentRequest" }))()
+export type AssistantConversationContentRequest = typeof AssistantConversationContentRequest.Type
+export type AssistantConversationContentRequestEncoded = typeof AssistantConversationContentRequest.Encoded
+
+export const AssistantTerminalContentRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "incarnation_id": Schema.String.check(Schema.isMinLength(1)),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "screen_revision": Revision,
+  "terminal_id": TerminalId
+}).annotate({ identifier: "AssistantTerminalContentRequest" }))()
+export type AssistantTerminalContentRequest = typeof AssistantTerminalContentRequest.Type
+export type AssistantTerminalContentRequestEncoded = typeof AssistantTerminalContentRequest.Encoded
+
+/** Disjoint content queries: conversation range or terminal screen; mixing their fields is denied. */
+export const AssistantContentRequest = /*#__PURE__*/ (() => Schema.Union([
+  AssistantConversationContentRequest,
+  AssistantTerminalContentRequest
+], { mode: "oneOf" }).annotate({ identifier: "AssistantContentRequest", description: "Disjoint content queries: conversation range or terminal screen; mixing their fields is denied." }))()
+export type AssistantContentRequest = typeof AssistantContentRequest.Type
+export type AssistantContentRequestEncoded = typeof AssistantContentRequest.Encoded
+
+export const AssistantMinimalReadMode = /*#__PURE__*/ (() => Schema.Literals(["approval-once","caller-bound-allow"]).annotate({ identifier: "AssistantMinimalReadMode" }))()
+export type AssistantMinimalReadMode = typeof AssistantMinimalReadMode.Type
+export type AssistantMinimalReadModeEncoded = typeof AssistantMinimalReadMode.Encoded
+
+export const AssistantPrincipal = /*#__PURE__*/ (() => Schema.Literals(["assistant/chatgpt"]).annotate({ identifier: "AssistantPrincipal" }))()
+export type AssistantPrincipal = typeof AssistantPrincipal.Type
+export type AssistantPrincipalEncoded = typeof AssistantPrincipal.Encoded
+
+/** Unpadded base64url encoding of a raw 32-byte Ed25519 public key. */
+export const Ed25519PublicKey = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_-]{43}$", "u"))).annotate({ identifier: "Ed25519PublicKey", description: "Unpadded base64url encoding of a raw 32-byte Ed25519 public key." }))()
+export type Ed25519PublicKey = typeof Ed25519PublicKey.Type
+export type Ed25519PublicKeyEncoded = typeof Ed25519PublicKey.Encoded
+
+/** Public pins only. The attestor key signs SCG read proofs and is pinned independently of the shim key; the two MUST differ. Budgets only lower the contract defaults; default_response_bytes <= max_response_bytes. */
+export const AssistantReadTrust = /*#__PURE__*/ (() => Schema.Struct({
+  "attestor_public_key": Ed25519PublicKey,
+  /** Budget for a read that sends no max_response_bytes. */
+  "default_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(4096)).annotate({ description: "Budget for a read that sends no max_response_bytes." }),
+  /** Equals the grant issuer: the daemon-configured owning person. */
+  "issuer": PersonId,
+  "key_id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
+  /** Ceiling for an explicit max_response_bytes. */
+  "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384)).annotate({ description: "Ceiling for an explicit max_response_bytes." }),
+  "shim_public_key": Ed25519PublicKey
+}).annotate({ identifier: "AssistantReadTrust", description: "Public pins only. The attestor key signs SCG read proofs and is pinned independently of the shim key; the two MUST differ. Budgets only lower the contract defaults; default_response_bytes <= max_response_bytes." }))()
+export type AssistantReadTrust = typeof AssistantReadTrust.Type
+export type AssistantReadTrustEncoded = typeof AssistantReadTrust.Encoded
+
+export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals([
+  "read.assistant.summary",
+  "read.assistant.attention",
+  "read.assistant.missions",
+  "read.assistant.agents",
+  "read.assistant.conversation",
+  "read.assistant.terminal",
+  "write.assistant.messages",
+  "write.assistant.custom-reply"
+]).annotate({ identifier: "AssistantScope" }))()
+export type AssistantScope = typeof AssistantScope.Type
+export type AssistantScopeEncoded = typeof AssistantScope.Encoded
+
+export const AssistantSenderClass = /*#__PURE__*/ (() => Schema.Literals(["external-assistant"]).annotate({ identifier: "AssistantSenderClass" }))()
+export type AssistantSenderClass = typeof AssistantSenderClass.Type
+export type AssistantSenderClassEncoded = typeof AssistantSenderClass.Encoded
+
+export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
+  "consent_evidence": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512)),
+  "device_id": Id,
+  "disclosure_consent": Schema.Boolean,
+  "expires_at": Timestamp,
+  "id": Id,
+  /** Daemon-configured owning person, sealed by the authoritative grant-issuer member at trusted-local begin. */
+  "issuer": PersonId,
+  /** SHA-256 of the canonical device public-key string; never a credential digest. */
+  "key_id": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).annotate({ description: "SHA-256 of the canonical device public-key string; never a credential digest." }),
+  "kind": Schema.Literal("assistant-grant"),
+  "minimal_read_mode": AssistantMinimalReadMode,
+  "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "principal": AssistantPrincipal,
+  /** Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied. */
+  "read_trust": optionalKey(AssistantReadTrust),
+  "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))),
+  "revoked": Schema.Boolean,
+  "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
+  "sender_class": AssistantSenderClass,
+  "session_actor": Schema.String.check(Schema.isPattern(new RegExp("^assistant/chatgpt/session/.+$", "u")))
+}).annotate({ identifier: "AssistantGrant" }))()
+export type AssistantGrant = typeof AssistantGrant.Type
+export type AssistantGrantEncoded = typeof AssistantGrant.Encoded
+
+export const AssistantGrantPolicy = /*#__PURE__*/ (() => Schema.Struct({
+  "api_version": Schema.Literal("st3.client.v0"),
+  "consent_evidence": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512)),
+  "disclosure_consent": Schema.Literal(true),
+  "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(2592000))),
+  "minimal_read_mode": AssistantMinimalReadMode,
+  "recipient_allowlist": optionalKey(Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u"))))),
+  "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique())
+}).annotate({ identifier: "AssistantGrantPolicy" }))()
+export type AssistantGrantPolicy = typeof AssistantGrantPolicy.Type
+export type AssistantGrantPolicyEncoded = typeof AssistantGrantPolicy.Encoded
+
+export const AssistantMissionItem = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_ids": Schema.Array(Schema.String),
+  "blocked_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "id": Id,
+  "phase": Schema.Literals([
+  "draft",
+  "ready",
+  "running",
+  "standing",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+  "retired",
+  "unknown"
+]),
+  /** Null when the source revision is not identifier-shaped. */
+  "revision": Schema.OptionFromNullOr(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(256))).annotate({ description: "Null when the source revision is not identifier-shaped." }),
+  "run_id": Schema.OptionFromNullOr(Schema.String),
+  "step_counts": Schema.Struct({ "completed": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
+  "updated_at": Timestamp
+}).annotate({ identifier: "AssistantMissionItem" }))()
+export type AssistantMissionItem = typeof AssistantMissionItem.Type
+export type AssistantMissionItemEncoded = typeof AssistantMissionItem.Encoded
+
+export const AssistantMissionPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("assistant.missions"),
+  "filters": Schema.Record(Schema.String, Schema.Never),
+  "items": Schema.Array(AssistantMissionItem),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo,
+  "sync": optionalKey(SyncNotice)
+}).annotate({ identifier: "AssistantMissionPage" }))()
+export type AssistantMissionPage = typeof AssistantMissionPage.Type
+export type AssistantMissionPageEncoded = typeof AssistantMissionPage.Encoded
+
+/** Opaque, snapshot-bound page/event cursor. */
+export const Cursor = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinLength(8)).check(Schema.isMaxLength(2048)).pipe(Schema.brand("st3/Cursor")).annotate({ identifier: "Cursor", description: "Opaque, snapshot-bound page/event cursor." }))()
+export type Cursor = typeof Cursor.Type
+export type CursorEncoded = typeof Cursor.Encoded
+
+/** Metadata query. Every value travels as one scalar query string; duplicates and unknown fields are denied; no person parameter exists. */
+export const AssistantPageRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "cursor": optionalKey(Cursor),
+  "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))),
+  "max_response_bytes": optionalKey(AssistantResponseBytes)
+}).annotate({ identifier: "AssistantPageRequest", description: "Metadata query. Every value travels as one scalar query string; duplicates and unknown fields are denied; no person parameter exists." }))()
+export type AssistantPageRequest = typeof AssistantPageRequest.Type
+export type AssistantPageRequestEncoded = typeof AssistantPageRequest.Encoded
+
+export const AssistantPairedSession = /*#__PURE__*/ (() => Schema.Struct({
+  "api_version": Schema.Literal("st3.client.v0"),
+  "credential": Schema.RedactedFromValue(Schema.String.check(Schema.isMinLength(32))),
+  "device_id": Id,
+  "expires_at": Timestamp,
+  "grant": AssistantGrant,
+  "kind": Schema.Literal("assistant-paired-session"),
+  "principal": AssistantPrincipal,
+  "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
+  "sender_class": AssistantSenderClass,
+  "session_actor": Schema.String.check(Schema.isPattern(new RegExp("^assistant/chatgpt/session/.+$", "u")))
+}).annotate({ identifier: "AssistantPairedSession" }))()
+export type AssistantPairedSession = typeof AssistantPairedSession.Type
+export type AssistantPairedSessionEncoded = typeof AssistantPairedSession.Encoded
+
+export const AssistantPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
+  "api_version": Schema.Literal("st3.client.v0"),
+  "assistant_id": AssistantPrincipal,
+  "consent_evidence": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512)),
+  "device_name": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(120)),
+  "disclosure_consent": Schema.Literal(true),
+  "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(2592000))),
+  "minimal_read_mode": optionalKey(AssistantMinimalReadMode),
+  "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique())
+}).annotate({ identifier: "AssistantPairingBegin" }))()
+export type AssistantPairingBegin = typeof AssistantPairingBegin.Type
+export type AssistantPairingBeginEncoded = typeof AssistantPairingBegin.Encoded
+
+export const AssistantProjection = /*#__PURE__*/ (() => Schema.Literals(["summary","attention","missions","agents","conversation-content","terminal-content"]).annotate({ identifier: "AssistantProjection" }))()
+export type AssistantProjection = typeof AssistantProjection.Type
+export type AssistantProjectionEncoded = typeof AssistantProjection.Encoded
+
+/** Owner-only trusted-local provisioning at the grant's authoritative origin; accepting it increments policy_revision. Omitted budgets pin 4096 and 16384; default_response_bytes <= max_response_bytes. */
+export const AssistantReadTrustRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "api_version": Schema.Literal("st3.client.v0"),
+  "attestor_public_key": Ed25519PublicKey,
+  "default_response_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(4096))),
+  "issuer": PersonId,
+  "key_id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
+  "max_response_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384))),
+  "shim_public_key": Ed25519PublicKey
+}).annotate({ identifier: "AssistantReadTrustRequest", description: "Owner-only trusted-local provisioning at the grant's authoritative origin; accepting it increments policy_revision. Omitted budgets pin 4096 and 16384; default_response_bytes <= max_response_bytes." }))()
+export type AssistantReadTrustRequest = typeof AssistantReadTrustRequest.Type
+export type AssistantReadTrustRequestEncoded = typeof AssistantReadTrustRequest.Encoded
+
+export const AssistantSummary = /*#__PURE__*/ (() => Schema.Struct({
+  "as_of": Timestamp,
+  "counts": Schema.Struct({ "agent_states": Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "attention": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_states": Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
+  "kind": Schema.Literal("assistant-summary")
+}).annotate({ identifier: "AssistantSummary" }))()
+export type AssistantSummary = typeof AssistantSummary.Type
+export type AssistantSummaryEncoded = typeof AssistantSummary.Encoded
+
+/** Summary query: only the response budget; the person is always the grant issuer. */
+export const AssistantSummaryRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "max_response_bytes": optionalKey(AssistantResponseBytes)
+}).annotate({ identifier: "AssistantSummaryRequest", description: "Summary query: only the response budget; the person is always the grant issuer." }))()
+export type AssistantSummaryRequest = typeof AssistantSummaryRequest.Type
+export type AssistantSummaryRequestEncoded = typeof AssistantSummaryRequest.Encoded
 
 export const AttentionBlocked = /*#__PURE__*/ (() => Schema.Struct({
   "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -1146,10 +1622,32 @@ export type PersonUpdateEncoded = typeof PersonUpdate.Encoded
 
 export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "action_parameters": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-  "actions": Schema.Array(Schema.Literals(["custom.reply","prompt.respond","work.done","review.approve","review.reject","review.request-changes","launch.approve","launch.cancel","mission.approve-revision","mission.cancel-revision","message.read"])),
+  "actions": Schema.Array(Schema.Literals([
+  "custom.reply",
+  "prompt.respond",
+  "work.done",
+  "review.approve",
+  "review.reject",
+  "review.request-changes",
+  "launch.approve",
+  "launch.cancel",
+  "mission.approve-revision",
+  "mission.cancel-revision",
+  "message.read"
+])),
   /** Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts. */
   "alert": optionalKey(Schema.Boolean).annotate({ description: "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." }),
-  "attention_kind": Schema.Union([Schema.Literals(["human-gate","launch-approval","revision-approval","unread-message","person-step","agent-request","fault","harness-login","harness-prompt"]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
+  "attention_kind": Schema.Union([Schema.Literals([
+  "human-gate",
+  "launch-approval",
+  "revision-approval",
+  "unread-message",
+  "person-step",
+  "agent-request",
+  "fault",
+  "harness-login",
+  "harness-prompt"
+]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
   "because": optionalKey(Schema.String),
   /** The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask. */
   "blocked": optionalKey(AttentionBlocked),
@@ -1226,21 +1724,23 @@ export const Capability = /*#__PURE__*/ (() => Schema.Struct({
 export type Capability = typeof Capability.Type
 export type CapabilityEncoded = typeof Capability.Encoded
 
-/** Opaque, snapshot-bound page/event cursor. */
-export const Cursor = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinLength(8)).check(Schema.isMaxLength(2048)).pipe(Schema.brand("st3/Cursor")).annotate({ identifier: "Cursor", description: "Opaque, snapshot-bound page/event cursor." }))()
-export type Cursor = typeof Cursor.Type
-export type CursorEncoded = typeof Cursor.Encoded
-
 export const Capabilities = /*#__PURE__*/ (() => Schema.Struct({
   "capabilities": Schema.Array(Capability),
   "event_cursor": Cursor,
+  "grant_expires_at": optionalKey(Timestamp),
+  "grant_id": optionalKey(Id),
+  "grant_kind": optionalKey(Schema.Literals(["person","assistant"])),
   "kind": Schema.Literal("capabilities"),
-  "limits": Schema.Struct({ "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), /** The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096. */
+  "limits": Schema.Struct({ "default_assistant_response_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(4096))), "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_assistant_response_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), /** The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096. */
 "max_message_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))).annotate({ description: "The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096." }), "max_page_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1024)), "max_wait_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
   /** Compile-time build identity of the responding daemon; absent on older servers. */
   "machine_version": optionalKey(Schema.String).annotate({ description: "Compile-time build identity of the responding daemon; absent on older servers." }),
+  "minimal_read_mode": optionalKey(AssistantMinimalReadMode),
   "oldest_event_cursor": Cursor,
+  "policy_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
+  "principal": optionalKey(AssistantPrincipal),
   "schemas": Schema.Array(Schema.String).check(Schema.isMinLength(1)),
+  "sender_class": optionalKey(AssistantSenderClass),
   "session_actor": Id,
   "transport": Schema.Literals(["unix","fabric-loopback"])
 }).annotate({ identifier: "Capabilities" }))()
@@ -1274,7 +1774,9 @@ export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
+"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
   Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
@@ -1284,7 +1786,21 @@ export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
 export type CollectionCommand = typeof CollectionCommand.Type
 export type CollectionCommandEncoded = typeof CollectionCommand.Encoded
 
-export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary","clients","usage","machines","devices","sessions","terminals"]).annotate({ identifier: "CollectionName" }))()
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "missions",
+  "attention",
+  "agents",
+  "work",
+  "glasses",
+  "arrangements",
+  "summary",
+  "clients",
+  "usage",
+  "machines",
+  "devices",
+  "sessions",
+  "terminals"
+]).annotate({ identifier: "CollectionName" }))()
 export type CollectionName = typeof CollectionName.Type
 export type CollectionNameEncoded = typeof CollectionName.Encoded
 
@@ -1343,19 +1859,10 @@ export const ConnectedClient = /*#__PURE__*/ (() => Schema.Struct({
 export type ConnectedClient = typeof ConnectedClient.Type
 export type ConnectedClientEncoded = typeof ConnectedClient.Encoded
 
-export const Device = /*#__PURE__*/ (() => Schema.Struct({
-  "expires_at": Timestamp,
-  "id": Id,
-  "kind": Schema.Literal("device"),
-  "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
-  "operational": optionalKey(Operational),
-  "person_id": Id,
-  "revision": Revision,
-  "scopes": Schema.Array(Schema.String).check(Schema.isUnique()),
-  "session_actor": Id,
-  "state": Schema.Literals(["active","expired","revoked"]),
-  "updated_at": Timestamp
-}).annotate({ identifier: "Device" }))()
+export const Device = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": optionalKey(AssistantMinimalReadMode), "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": Id, "policy_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "principal": optionalKey(Schema.Never), "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": optionalKey(Schema.Never), "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp }),
+  Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": AssistantMinimalReadMode, "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal, "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": AssistantSenderClass, "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp })
+], { mode: "oneOf" }).annotate({ identifier: "Device" }))()
 export type Device = typeof Device.Type
 export type DeviceEncoded = typeof Device.Encoded
 
@@ -1738,7 +2245,16 @@ export const MissionStepPresentation = /*#__PURE__*/ (() => Schema.Struct({
   "owner": PresentationActor,
   "path": Schema.String,
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
-  "word": Schema.Literals(["needs_you","done","working","ready","waiting","cancelled","failed","pending"])
+  "word": Schema.Literals([
+  "needs_you",
+  "done",
+  "working",
+  "ready",
+  "waiting",
+  "cancelled",
+  "failed",
+  "pending"
+])
 }).annotate({ identifier: "MissionStepPresentation" }))()
 export type MissionStepPresentation = typeof MissionStepPresentation.Type
 export type MissionStepPresentationEncoded = typeof MissionStepPresentation.Encoded
@@ -1749,7 +2265,16 @@ export const MissionStuck = /*#__PURE__*/ (() => Schema.Struct({
   "attempts": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "blockers": Schema.Array(Schema.String),
   "step": StepRunId,
-  "word": Schema.Literals(["needs_you","done","working","ready","waiting","cancelled","failed","pending"])
+  "word": Schema.Literals([
+  "needs_you",
+  "done",
+  "working",
+  "ready",
+  "waiting",
+  "cancelled",
+  "failed",
+  "pending"
+])
 }).annotate({ identifier: "MissionStuck" }))()
 export type MissionStuck = typeof MissionStuck.Type
 export type MissionStuckEncoded = typeof MissionStuck.Encoded
@@ -1769,7 +2294,21 @@ export const MissionPresentation = /*#__PURE__*/ (() => Schema.Struct({
   /** Who must act now. */
   "who": PresentationActor,
   /** The mission word, by its fixtures/clients/words.json id. */
-  "word": Schema.Literals(["decision","stalled","unstaffed","unclaimed","queued","working","watching","held","idle","done","failed","cancelled","not_started"]).annotate({ description: "The mission word, by its fixtures/clients/words.json id." })
+  "word": Schema.Literals([
+  "decision",
+  "stalled",
+  "unstaffed",
+  "unclaimed",
+  "queued",
+  "working",
+  "watching",
+  "held",
+  "idle",
+  "done",
+  "failed",
+  "cancelled",
+  "not_started"
+]).annotate({ description: "The mission word, by its fixtures/clients/words.json id." })
 }).annotate({ identifier: "MissionPresentation" }))()
 export type MissionPresentation = typeof MissionPresentation.Type
 export type MissionPresentationEncoded = typeof MissionPresentation.Encoded
@@ -1865,7 +2404,16 @@ export type MissionRunSummary = typeof MissionRunSummary.Type
 export type MissionRunSummaryEncoded = typeof MissionRunSummary.Encoded
 
 /** Lifecycle state of a mission. */
-export const MissionState = /*#__PURE__*/ (() => openEnum(["draft","ready","retired","running","standing","completed","failed","cancelled"]).annotate({ identifier: "MissionState", description: "Lifecycle state of a mission." }))()
+export const MissionState = /*#__PURE__*/ (() => openEnum([
+  "draft",
+  "ready",
+  "retired",
+  "running",
+  "standing",
+  "completed",
+  "failed",
+  "cancelled"
+]).annotate({ identifier: "MissionState", description: "Lifecycle state of a mission." }))()
 export type MissionState = typeof MissionState.Type
 export type MissionStateEncoded = typeof MissionState.Encoded
 
@@ -1965,7 +2513,16 @@ export const Runtime = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   "runtime_id": Schema.String,
   "runtime_kind": Schema.Literals(["agent","exec","terminal","observer","gate"]),
-  "state": Schema.Literals(["pending","starting","running","stopping","stopped","exited","failed","unreachable"]),
+  "state": Schema.Literals([
+  "pending",
+  "starting",
+  "running",
+  "stopping",
+  "stopped",
+  "exited",
+  "failed",
+  "unreachable"
+]),
   "terminal_access": Schema.OptionFromOptionalNullOr(Schema.Struct({ "input": Schema.Literals(["granted","ungranted","unavailable"]), "read": Schema.Literals(["granted","ungranted","unavailable"]), "resize": Schema.Literals(["granted","ungranted","unavailable"]) }), NULL_NONE),
   "terminal_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
   "terminal_sequence": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
@@ -2156,7 +2713,16 @@ export type UsageEncoded = typeof Usage.Encoded
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
-  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read","dismissed"]),
+  "outcome": Schema.Literals([
+  "accept",
+  "decline",
+  "request_changes",
+  "selected",
+  "custom",
+  "feedback",
+  "read",
+  "dismissed"
+]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])
 }).annotate({ identifier: "PersonAnswer" }))()
@@ -2273,10 +2839,6 @@ export const TerminalFacts = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "TerminalFacts" }))()
 export type TerminalFacts = typeof TerminalFacts.Type
 export type TerminalFactsEncoded = typeof TerminalFacts.Encoded
-
-export const TerminalId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:terminal)/[^\\s]+$", "u"), "terminal").annotate({ identifier: "TerminalId" }))()
-export type TerminalId = typeof TerminalId.Type
-export type TerminalIdEncoded = typeof TerminalId.Encoded
 
 export const TerminalColor = /*#__PURE__*/ (() => Schema.Union([
   Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255)),
@@ -2824,6 +3386,8 @@ export type ParticipantRefEncoded = typeof ParticipantRef.Encoded
 
 /** Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not. */
 export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
+  /** The complete local authorization model supplying this judgment. Absent on older producers; the label alone does not certify candidate migration or authority. */
+  "authorization_model": optionalKey(Schema.Literals(["legacy","candidate"])).annotate({ description: "The complete local authorization model supplying this judgment. Absent on older producers; the label alone does not certify candidate migration or authority." }),
   /** The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label. */
   "device": optionalKey(Schema.String).annotate({ description: "The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label." }),
   /** The public key that signed (`p256:…` or a bare Ed25519 key). */
@@ -2838,14 +3402,23 @@ export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
 export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 
+/** Message sender, including an authorized external assistant principal. Not a recipient or actor. */
+export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef", description: "Message sender, including an authorized external assistant principal. Not a recipient or actor." }))()
+export type SenderRef = typeof SenderRef.Type
+export type SenderRefEncoded = typeof SenderRef.Encoded
+
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
+  /** The assistant grant that authorized the send, with sender_class. */
+  "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
   "attachments": optionalKey(Schema.Array(Attachment)),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
   "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  "from": optionalKey(ParticipantRef),
+  "from": optionalKey(SenderRef),
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
   "reply_to": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text. */
+  "sender_class": optionalKey(Schema.Literals(["external-assistant"])).annotate({ description: "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text." }),
   "tags": optionalKey(Schema.Array(Schema.String)),
   "title": optionalKey(Schema.String),
   "to": optionalKey(ParticipantRef)
@@ -3053,7 +3626,7 @@ export type MailBacklog = typeof MailBacklog.Type
 export type MailBacklogEncoded = typeof MailBacklog.Encoded
 
 export const Page = /*#__PURE__*/ (() => Schema.Struct({
-  "collection": Schema.String.check(Schema.makeFilter((value: string) => value !== "resources", { expected: "a string other than \"resources\"" })),
+  "collection": Schema.String.check(Schema.makeFilter((value: string) => !new RegExp("^(?:resources|assistant\\.(?:attention|missions|agents))$", "u").test(value), { expected: "a string not matching ^(?:resources|assistant\\.(?:attention|missions|agents))$" })),
   "filters": Schema.Record(Schema.String, Schema.String),
   "items": Schema.Array(Resource),
   "kind": Schema.Literal("page"),
@@ -3064,7 +3637,7 @@ export const Page = /*#__PURE__*/ (() => Schema.Struct({
 export type Page = typeof Page.Type
 export type PageEncoded = typeof Page.Encoded
 
-export const PairedSession = /*#__PURE__*/ (() => Schema.Struct({
+export const PersonPairedSession = /*#__PURE__*/ (() => Schema.Struct({
   "credential": Schema.RedactedFromValue(Schema.String.check(Schema.isMinLength(32))),
   "device_id": Id,
   "device_key_chain": optionalKey(Schema.Array(Schema.String)),
@@ -3075,17 +3648,21 @@ export const PairedSession = /*#__PURE__*/ (() => Schema.Struct({
   "person_root_key_proof": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   "scopes": Schema.Array(Schema.String).check(Schema.isUnique()),
   "session_actor": Id
-}).annotate({ identifier: "PairedSession" }))()
+}).annotate({ identifier: "PersonPairedSession" }))()
+export type PersonPairedSession = typeof PersonPairedSession.Type
+export type PersonPairedSessionEncoded = typeof PersonPairedSession.Encoded
+
+export const PairedSession = /*#__PURE__*/ (() => Schema.Union([
+  PersonPairedSession,
+  AssistantPairedSession
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "PairedSession" }))()
 export type PairedSession = typeof PairedSession.Type
 export type PairedSessionEncoded = typeof PairedSession.Encoded
 
-export const PairingChallenge = /*#__PURE__*/ (() => Schema.Struct({
-  "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))),
-  "expires_at": Timestamp,
-  "kind": Schema.Literal("pairing-challenge"),
-  "pairing_id": Id,
-  "person_root_fingerprint": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^sha256:[A-Za-z0-9_-]{43}$", "u"))))
-}).annotate({ identifier: "PairingChallenge" }))()
+export const PairingChallenge = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))), "expires_at": Timestamp, "grant_expires_at": optionalKey(Schema.Never), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "kind": Schema.Literal("pairing-challenge"), "minimal_read_mode": optionalKey(Schema.Never), "pairing_id": Id, "person_root_fingerprint": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^sha256:[A-Za-z0-9_-]{43}$", "u")))), "policy_revision": optionalKey(Schema.Never), "principal": optionalKey(Schema.Never) }),
+  Schema.Struct({ "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))), "expires_at": Timestamp, "grant_expires_at": Timestamp, "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "kind": Schema.Literal("pairing-challenge"), "minimal_read_mode": AssistantMinimalReadMode, "pairing_id": Id, "person_root_fingerprint": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal })
+], { mode: "oneOf" }).annotate({ identifier: "PairingChallenge" }))()
 export type PairingChallenge = typeof PairingChallenge.Type
 export type PairingChallengeEncoded = typeof PairingChallenge.Encoded
 
@@ -3212,13 +3789,69 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
-/** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. */
-export const ErrorCode = /*#__PURE__*/ (() => openEnum(["recipient-retired","lifecycle-unavailable","retirement-upgrade-required","attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","suspend-authored-session-selection","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
+/** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
+export const ErrorCode = /*#__PURE__*/ (() => openEnum([
+  "recipient-retired",
+  "lifecycle-unavailable",
+  "retirement-upgrade-required",
+  "attention-migrated",
+  "arrangement-exists",
+  "arrangement-folder-exists",
+  "arrangement-retired",
+  "arrangement-limit",
+  "arrangement-folder-deleted",
+  "arrangement-cycle",
+  "arrangement-body-too-large",
+  "arrangement-owner-forbidden",
+  "invalid-arrangement-subject",
+  "invalid-arrangement-action",
+  "invalid-arrangement-operations",
+  "invalid-arrangement-folder",
+  "invalid-arrangement-name",
+  "invalid-arrangement-key",
+  "invalid-subject-reference",
+  "not-found",
+  "forbidden",
+  "unsupported-capability",
+  "validation-failed",
+  "idempotency-conflict",
+  "issuer-required",
+  "suspend-authored-session-selection",
+  "stale-fence",
+  "cursor-gap",
+  "page-cursor-expired",
+  "agent-roster-cut-not-ready",
+  "rate-limited",
+  "runtime-not-local",
+  "runtime-authority-indeterminate",
+  "runtime-list-not-ready",
+  "runtime-list-ended",
+  "remote-unavailable",
+  "terminal-unavailable",
+  "terminal-ended",
+  "timeline-history-incomplete",
+  "projection-detail-too-large",
+  "projection-detail-invalid-source",
+  "conversation-content-invalidated",
+  "transcript-unavailable",
+  "blob-too-large",
+  "unsupported-media-type",
+  "blob-content-mismatch",
+  "blob-quota-exceeded",
+  "blob-not-found",
+  "blob-expired",
+  "message-too-large",
+  "message-store-full",
+  "long-message-signature-unsupported",
+  "response-budget-exceeded",
+  "content-not-text",
+  "internal"
+]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
@@ -3341,14 +3974,21 @@ export const PairingAdvertisement = /*#__PURE__*/ (() => Schema.Struct({
 export type PairingAdvertisement = typeof PairingAdvertisement.Type
 export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
 
-export const PairingBegin = /*#__PURE__*/ (() => Schema.Struct({
+export const PersonPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "device_name": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(120)),
   "full_control": optionalKey(Schema.Boolean),
   "person_id": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/]+$", "u"))),
   /** Narrows the default limited grant. Must not be combined with full_control. */
   "scopes": optionalKey(Schema.Array(Schema.Literals(["read.projections","read.glasses","control.glasses","terminal.read","control.attention","control.launches"])).check(Schema.isMinLength(1)).check(Schema.isUnique())).annotate({ description: "Narrows the default limited grant. Must not be combined with full_control." })
-}).annotate({ identifier: "PairingBegin" }))()
+}).annotate({ identifier: "PersonPairingBegin" }))()
+export type PersonPairingBegin = typeof PersonPairingBegin.Type
+export type PersonPairingBeginEncoded = typeof PersonPairingBegin.Encoded
+
+export const PairingBegin = /*#__PURE__*/ (() => Schema.Union([
+  PersonPairingBegin,
+  AssistantPairingBegin
+], { mode: "oneOf" }).annotate({ identifier: "PairingBegin" }))()
 export type PairingBegin = typeof PairingBegin.Type
 export type PairingBeginEncoded = typeof PairingBegin.Encoded
 
@@ -3364,7 +4004,31 @@ export type PairingCompleteEncoded = typeof PairingComplete.Encoded
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Resource family. */
-  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","summary","connected-client","usage"]).annotate({ description: "Resource family." }),
+  "kind": openEnum([
+  "attention",
+  "message",
+  "launch",
+  "launch-variant",
+  "launch-decision",
+  "launch-approval",
+  "mission",
+  "work",
+  "agent",
+  "runtime",
+  "observer",
+  "subscription",
+  "lane",
+  "machine",
+  "device",
+  "operation",
+  "history",
+  "session",
+  "glass",
+  "arrangement",
+  "summary",
+  "connected-client",
+  "usage"
+]).annotate({ description: "Resource family." }),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -3379,3 +4043,35 @@ export const ResourcesFilter = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ResourcesFilter" }))()
 export type ResourcesFilter = typeof ResourcesFilter.Type
 export type ResourcesFilterEncoded = typeof ResourcesFilter.Encoded
+
+/** Signed with Ed25519 by the pinned attestor over UTF-8 `st3.scg-read.v1\n` followed by the canonical JSON of this payload (recursively sorted object keys, compact, integers only). */
+export const ScgReadAuthorizationPayload = /*#__PURE__*/ (() => Schema.Struct({
+  "approval_id": Schema.String.check(Schema.isMinLength(1)),
+  "assistant_id": AssistantPrincipal,
+  "execution_id": Schema.String.check(Schema.isMinLength(1)),
+  "expires_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "grant_id": Id,
+  "identity": Schema.Literal("chatgpt"),
+  "issuer": PersonId,
+  "key_id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
+  "max_response_bytes": AssistantResponseBytes,
+  /** Persisted atomically on first acceptance; any replay is denied. */
+  "nonce": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(128)).annotate({ description: "Persisted atomically on first acceptance; any replay is denied." }),
+  /** Every exact decoded query parameter, including cursor, range and max_response_bytes when sent. */
+  "parameters": Schema.Record(Schema.String, Schema.String).annotate({ description: "Every exact decoded query parameter, including cursor, range and max_response_bytes when sent." }),
+  "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "projection": AssistantProjection,
+  /** Lowercase hex SHA-256 of canonical JSON {"method":"GET","parameters":<decoded map>,"path":<exact path>}. */
+  "request_digest": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).annotate({ description: "Lowercase hex SHA-256 of canonical JSON {\"method\":\"GET\",\"parameters\":<decoded map>,\"path\":<exact path>}." })
+}).annotate({ identifier: "ScgReadAuthorizationPayload", description: "Signed with Ed25519 by the pinned attestor over UTF-8 `st3.scg-read.v1\\n` followed by the canonical JSON of this payload (recursively sorted object keys, compact, integers only)." }))()
+export type ScgReadAuthorizationPayload = typeof ScgReadAuthorizationPayload.Type
+export type ScgReadAuthorizationPayloadEncoded = typeof ScgReadAuthorizationPayload.Encoded
+
+/** Sent as unpadded base64url JSON in the `x-st3-scg-read-authorization` header. */
+export const ScgReadAuthorization = /*#__PURE__*/ (() => Schema.Struct({
+  "payload": ScgReadAuthorizationPayload,
+  /** Unpadded base64url Ed25519 signature (64 bytes). */
+  "signature": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_-]{86}$", "u"))).annotate({ description: "Unpadded base64url Ed25519 signature (64 bytes)." })
+}).annotate({ identifier: "ScgReadAuthorization", description: "Sent as unpadded base64url JSON in the `x-st3-scg-read-authorization` header." }))()
+export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
+export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded

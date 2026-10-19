@@ -17,6 +17,10 @@ use crate::config::Config;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod install;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+mod lookup;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+pub use lookup::ConflictingServices;
 
 
 /// The names the service manager knows this install by. An instance has its own, so installing,
@@ -37,6 +41,7 @@ pub fn host_command(program: &str) -> Command {
 }
 
 fn service_names() -> &'static ServiceNames {
+    // arn:lmig:smalltalk:2026-10-16-service-labels-fractal — writers retain old names.
     static NAMES: std::sync::OnceLock<ServiceNames> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| match crate::instance::current() {
         Some(instance) => ServiceNames {
@@ -275,6 +280,15 @@ fn restore_file(path: &Path, previous: Option<&[u8]>) -> Result<()> {
 
 pub fn status() -> Result<ServiceStatusReport> {
     status_native_service()
+}
+
+/// Refuse a service-family conflict before a command writes state or starts a subprocess.
+/// An unavailable user manager still permits the existing unmanaged execution path.
+pub fn preflight(enabled: bool) -> Result<()> {
+    if enabled && let Err(error) = status() && error.is::<ConflictingServices>() {
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn permissions(open: bool) -> Result<()> {
@@ -648,6 +662,7 @@ fn running_pty_ids(
 
 #[cfg(target_os = "linux")]
 fn install_native_service(spec: &ServiceSpec) -> Result<()> {
+    lookup::before_install()?;
     install_systemd_user(spec)
 }
 
@@ -658,13 +673,13 @@ fn status_native_service() -> Result<ServiceStatusReport> {
 
 #[cfg(target_os = "linux")]
 fn restart_native_service(config: &Config) -> Result<()> {
-    optional_systemd_command(
-        replication_service_name(),
-        &["--user", "stop", replication_service_name()],
-    )?;
-    run_command("systemctl", &["--user", "restart", service_name()])?;
+    let services = lookup::native()?;
+    let daemon = services.daemon.name.as_str();
+    let replication = services.replication.name.as_str();
+    optional_systemd_command(replication, &["--user", "stop", replication])?;
+    run_command("systemctl", &["--user", "restart", daemon])?;
     if config.fleet_id.is_some() {
-        run_command("systemctl", &["--user", "start", replication_service_name()])?;
+        run_command("systemctl", &["--user", "start", replication])?;
     }
     wait_for_service_sockets(config)
 }
@@ -676,11 +691,11 @@ fn uninstall_native_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn stop_native_service() -> Result<()> {
-    optional_systemd_command(
-        replication_service_name(),
-        &["--user", "stop", replication_service_name()],
-    )?;
-    run_command("systemctl", &["--user", "stop", service_name()])
+    let services = lookup::native()?;
+    let daemon = services.daemon.name.as_str();
+    let replication = services.replication.name.as_str();
+    optional_systemd_command(replication, &["--user", "stop", replication])?;
+    run_command("systemctl", &["--user", "stop", daemon])
 }
 
 #[cfg(target_os = "linux")]
@@ -719,15 +734,17 @@ fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn start_native_service() -> Result<()> {
-    run_command("systemctl", &["--user", "start", service_name()])?;
-    if replication_systemd_user_unit_path()?.exists() {
-        run_command("systemctl", &["--user", "start", replication_service_name()])?;
+    let services = lookup::native()?;
+    run_command("systemctl", &["--user", "start", &services.daemon.name])?;
+    if services.replication.installed {
+        run_command("systemctl", &["--user", "start", &services.replication.name])?;
     }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn install_native_service(spec: &ServiceSpec) -> Result<()> {
+    lookup::before_install()?;
     install::launchd(
         spec,
         &launch_agent_path()?,
@@ -739,36 +756,28 @@ fn install_native_service(spec: &ServiceSpec) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn status_native_service() -> Result<ServiceStatusReport> {
-    Ok(ServiceStatusReport {
-        manager: "launchd-user",
-        services: vec![
-            launchd_service_status(service_label(), &launch_agent_path()?)?,
-            launchd_service_status(replication_service_label(), &replication_launch_agent_path()?)?,
-        ],
-    })
+    Ok(lookup::native()?.report())
 }
 
 #[cfg(target_os = "macos")]
 fn launchd_service_status(label: &str, plist: &Path) -> Result<ServiceStatus> {
-    if !plist.exists() {
-        return Ok(ServiceStatus {
-            name: label.into(),
-            installed: false,
-            running: false,
-            state: "not-installed".into(),
-        });
-    }
     let target = format!("{}/{label}", launch_domain());
     let output = host_command("launchctl")
         .args(["print", &target])
         .output()
         .with_context(|| format!("run launchctl print {target}"))?;
+    anyhow::ensure!(
+        output.status.success() || output.status.code() == Some(113),
+        "launchctl print {target} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     if !output.status.success() {
         return Ok(ServiceStatus {
             name: label.into(),
-            installed: true,
+            installed: plist.exists(),
             running: false,
-            state: "not-loaded".into(),
+            state: if plist.exists() { "not-loaded" } else { "not-installed" }.into(),
         });
     }
     let state = parse_launchd_state(&String::from_utf8_lossy(&output.stdout));
@@ -791,17 +800,18 @@ fn parse_launchd_state(output: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn restart_native_service(config: &Config) -> Result<()> {
+    let services = lookup::native()?;
     let domain = launch_domain();
-    let replication_service = format!("{domain}/{}", replication_service_label());
+    let replication_service = format!("{domain}/{}", services.replication.name);
     let _ = host_command("launchctl")
         .args(["bootout", &replication_service])
         .status();
     run_command(
         "launchctl",
-        &["kickstart", "-k", &format!("{domain}/{}", service_label())],
+        &["kickstart", "-k", &format!("{domain}/{}", services.daemon.name)],
     )?;
     if config.fleet_id.is_some() {
-        let plist = replication_launch_agent_path()?;
+        let plist = lookup::launchd_path(&services.replication.name)?;
         run_command(
             "launchctl",
             &["bootstrap", &domain, &plist.display().to_string()],
@@ -812,25 +822,26 @@ fn restart_native_service(config: &Config) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn uninstall_native_service() -> Result<()> {
-    let service = format!("{}/{}", launch_domain(), service_label());
+    let services = lookup::native()?;
+    let service = format!("{}/{}", launch_domain(), services.daemon.name);
     let _ = host_command("launchctl")
         .args(["bootout", &service])
         .status();
     let _ = host_command("launchctl")
         .args(["disable", &service])
         .status();
-    let replication_service = format!("{}/{}", launch_domain(), replication_service_label());
+    let replication_service = format!("{}/{}", launch_domain(), services.replication.name);
     let _ = host_command("launchctl")
         .args(["bootout", &replication_service])
         .status();
     let _ = host_command("launchctl")
         .args(["disable", &replication_service])
         .status();
-    let plist = launch_agent_path()?;
+    let plist = lookup::launchd_path(&services.daemon.name)?;
     if plist.exists() {
         fs::remove_file(plist)?;
     }
-    let replication_plist = replication_launch_agent_path()?;
+    let replication_plist = lookup::launchd_path(&services.replication.name)?;
     if replication_plist.exists() {
         fs::remove_file(replication_plist)?;
     }
@@ -839,31 +850,33 @@ fn uninstall_native_service() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn stop_native_service() -> Result<()> {
+    let services = lookup::native()?;
     let _ = host_command("launchctl")
         .args([
             "bootout",
-            &format!("{}/{}", launch_domain(), replication_service_label()),
+            &format!("{}/{}", launch_domain(), services.replication.name),
         ])
         .status();
     run_command(
         "launchctl",
-        &["bootout", &format!("{}/{}", launch_domain(), service_label())],
+        &["bootout", &format!("{}/{}", launch_domain(), services.daemon.name)],
     )
 }
 
 #[cfg(target_os = "macos")]
 fn start_native_service() -> Result<()> {
+    let services = lookup::native()?;
     let domain = launch_domain();
-    let plist = launch_agent_path()?;
+    let plist = lookup::launchd_path(&services.daemon.name)?;
     run_command(
         "launchctl",
         &["bootstrap", &domain, &plist.display().to_string()],
     )?;
     run_command(
         "launchctl",
-        &["kickstart", &format!("{domain}/{}", service_label())],
+        &["kickstart", &format!("{domain}/{}", services.daemon.name)],
     )?;
-    let replication_plist = replication_launch_agent_path()?;
+    let replication_plist = lookup::launchd_path(&services.replication.name)?;
     if replication_plist.exists() {
         run_command(
             "launchctl",
@@ -877,7 +890,7 @@ fn start_native_service() -> Result<()> {
             "launchctl",
             &[
                 "kickstart",
-                &format!("{domain}/{}", replication_service_label()),
+                &format!("{domain}/{}", services.replication.name),
             ],
         )?;
     }
@@ -896,13 +909,7 @@ fn install_systemd_user(spec: &ServiceSpec) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn status_systemd_user() -> Result<ServiceStatusReport> {
-    Ok(ServiceStatusReport {
-        manager: "systemd-user",
-        services: vec![
-            systemd_service_status(service_name())?,
-            systemd_service_status(replication_service_name())?,
-        ],
-    })
+    Ok(lookup::native()?.report())
 }
 
 #[cfg(target_os = "linux")]
@@ -926,15 +933,25 @@ fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
+    parse_systemd_service_status(name, &stdout)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_systemd_service_status(name: &str, stdout: &str) -> Result<ServiceStatus> {
     let value = |key: &str| {
         stdout
             .lines()
             .find_map(|line| line.strip_prefix(&format!("{key}=")))
-            .unwrap_or("unknown")
+            .filter(|value| !value.is_empty())
+            .with_context(|| format!("systemctl show {name} omitted {key}"))
     };
-    let load = value("LoadState");
-    let active = value("ActiveState");
-    let sub = value("SubState");
+    let load = value("LoadState")?;
+    let active = value("ActiveState")?;
+    let sub = value("SubState")?;
+    anyhow::ensure!(
+        matches!(load, "loaded" | "error" | "masked" | "not-found" | "bad-setting" | "stub" | "merged"),
+        "systemctl show {name} returned an invalid LoadState: {load}"
+    );
     Ok(ServiceStatus {
         name: name.into(),
         installed: load != "not-found",
@@ -949,16 +966,16 @@ fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
 
 #[cfg(target_os = "linux")]
 fn uninstall_systemd_user() -> Result<()> {
-    optional_systemd_command(service_name(), &["--user", "disable", "--now", service_name()])?;
-    optional_systemd_command(
-        replication_service_name(),
-        &["--user", "disable", "--now", replication_service_name()],
-    )?;
-    let unit_path = systemd_user_unit_path()?;
+    let services = lookup::native()?;
+    let daemon = services.daemon.name.as_str();
+    let replication = services.replication.name.as_str();
+    optional_systemd_command(daemon, &["--user", "disable", "--now", daemon])?;
+    optional_systemd_command(replication, &["--user", "disable", "--now", replication])?;
+    let unit_path = lookup::systemd_path(daemon)?;
     if unit_path.exists() {
         fs::remove_file(unit_path)?;
     }
-    let replication_path = replication_systemd_user_unit_path()?;
+    let replication_path = lookup::systemd_path(replication)?;
     if replication_path.exists() {
         fs::remove_file(replication_path)?;
     }
@@ -1047,26 +1064,38 @@ fn replication_systemd_user_unit_path() -> Result<PathBuf> {
 }
 
 fn wait_for_service_sockets(config: &Config) -> Result<()> {
-    wait_for_socket(&config.socket)?;
-    wait_for_socket(&config.client_gateway_socket)
+    wait_for_socket(&config.socket, &config.socket)?;
+    wait_for_socket(&config.client_gateway_socket, &config.socket)
 }
 
-fn wait_for_socket(socket: &Path) -> Result<()> {
-    wait_for_socket_for(socket, std::time::Duration::from_secs(10))
+fn wait_for_socket(socket: &Path, api_socket: &Path) -> Result<()> {
+    wait_for_socket_for(socket, api_socket, std::time::Duration::from_secs(10))
 }
 
-fn wait_for_socket_for(socket: &Path, timeout: std::time::Duration) -> Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
+/// Wait until `socket` accepts. A daemon that is starting holds its startup record (beside
+/// `api_socket`) while it opens and replays its store, which can take far longer than any fixed
+/// bound on a large store or a busy host: wait for it. Fail once no live startup has been seen
+/// for `unseen`, whether the service never started one or it ended without accepting.
+fn wait_for_socket_for(
+    socket: &Path,
+    api_socket: &Path,
+    unseen: std::time::Duration,
+) -> Result<()> {
+    let mut deadline = std::time::Instant::now() + unseen;
+    loop {
         if service_socket_accepts(socket) {
             return Ok(());
         }
+        if crate::startup::read(api_socket).is_some() {
+            deadline = std::time::Instant::now() + unseen;
+        } else if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "the st service did not accept connections at {}",
+                socket.display()
+            );
+        }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    anyhow::bail!(
-        "the st service did not accept connections at {}",
-        socket.display()
-    )
 }
 
 #[cfg(unix)]
@@ -1524,13 +1553,40 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("st3.sock");
         fs::write(&socket, b"stale").unwrap();
-        let error = wait_for_socket_for(&socket, std::time::Duration::from_millis(40))
+        let error = wait_for_socket_for(&socket, &socket, std::time::Duration::from_millis(40))
             .expect_err("a stale path is not a ready service");
         assert!(error.to_string().contains("did not accept connections"));
 
         fs::remove_file(&socket).unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        wait_for_socket_for(&socket, std::time::Duration::from_millis(40)).unwrap();
+        wait_for_socket_for(&socket, &socket, std::time::Duration::from_millis(40)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_readiness_waits_for_a_live_startup_and_only_then_gives_up() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("st3.sock");
+        // This process holds the startup record, as a daemon opening its store does.
+        let startup = crate::startup::Startup::begin(&socket).unwrap();
+        assert!(crate::startup::read(&socket).is_some(), "the startup record is live");
+        let unseen = std::time::Duration::from_millis(40);
+        let listening = socket.clone();
+        let listener = std::thread::spawn(move || {
+            // Long past `unseen`: the wait must still be following the live startup.
+            std::thread::sleep(unseen * 5);
+            std::os::unix::net::UnixListener::bind(&listening).unwrap()
+        });
+        wait_for_socket_for(&socket, &socket, unseen).unwrap();
+        let listener = listener.join().unwrap();
+        drop(listener);
+        fs::remove_file(&socket).unwrap();
+        // Once the startup has ended without a listener, the wait gives up after `unseen`.
+        drop(startup);
+        assert!(crate::startup::read(&socket).is_none());
+        let error = wait_for_socket_for(&socket, &socket, unseen)
+            .expect_err("no live startup and no listener is not a ready service");
+        assert!(error.to_string().contains("did not accept connections"));
     }
 
     #[test]

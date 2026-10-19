@@ -16,33 +16,7 @@ mod screen;
 use st3::client::{Client, Endpoint};
 use st3::config::Config;
 
-type Sink = Box<dyn FnMut(String)>;
-
-thread_local! {
-    /// Where this thread's setup output goes instead of the terminal, while the setup screen
-    /// owns it. The caller prints what was said once the screen has gone.
-    static SINK: std::cell::RefCell<Option<Sink>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Say one line to the person: on the terminal, or into the sink when one is set.
-pub(crate) fn said(line: impl Into<String>) {
-    let line = line.into();
-    let unsent = SINK.with(|sink| match sink.borrow_mut().as_mut() {
-        Some(send) => {
-            send(line);
-            None
-        }
-        None => Some(line),
-    });
-    if let Some(line) = unsent {
-        println!("{line}");
-    }
-}
-
-/// Set (or clear) this thread's sink; returns the one it replaced.
-pub(crate) fn capture(sink: Option<Sink>) -> Option<Sink> {
-    SINK.with(|current| std::mem::replace(&mut *current.borrow_mut(), sink))
-}
+pub(crate) use crate::onboarding::{capture, said};
 
 macro_rules! say {
     ($($arg:tt)*) => { said(format!($($arg)*)) };
@@ -77,10 +51,10 @@ pub struct SetupArgs {
     /// Install the user-owned Claude channel (default: true; never installs policy).
     #[arg(long, action = clap::ArgAction::Set)]
     pub claude_channel: Option<bool>,
-    /// Start onboarding again, including a stopped built-in Smalltalk Assistant.
+    /// Start onboarding again, including a stopped built-in Fractal Assistant.
     #[arg(long)]
     pub onboarding: bool,
-    /// Start the built-in Smalltalk Assistant after setup (default: ask, with --yes: yes).
+    /// Start the built-in Fractal Assistant after setup (default: ask, with --yes: yes).
     #[arg(long, action = clap::ArgAction::Set)]
     pub assistant: Option<bool>,
 }
@@ -95,14 +69,14 @@ pub struct PreparedSetup {
 }
 
 fn interactive() -> bool {
-    std::env::var_os("ST_AGENT").is_none()
+    !crate::agent_environment_present()
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
 }
 
 fn require_person_process() -> Result<()> {
     anyhow::ensure!(
-        std::env::var_os("ST_AGENT").is_none(),
+        !crate::agent_environment_present(),
         "setup is a person command and is unavailable inside an agent seat"
     );
     Ok(())
@@ -192,7 +166,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         })
         .await;
     }
-    println!("Welcome to Smalltalk.");
+    println!("Welcome to Fractal.");
     let person = ask_name(
         "Your name",
         "--person",
@@ -237,6 +211,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
             true,
         )?
     };
+    st3::service::preflight(service && start)?;
     // Validate every answer before writing, including the persisted machine identity.
     merge_config(&path, &config)?;
     say!("Saved {}", path.display());
@@ -266,7 +241,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let initial_subject = if let Some(harness) = &harness {
         if !first_run && !args.onboarding {
             println!(
-                "This setup already existed, so the built-in Smalltalk Assistant is not started on its own. Run st setup --onboarding to begin."
+                "This setup already existed, so the built-in Fractal Assistant is not started on its own. Run st setup --onboarding to begin."
             );
             None
         } else if daemon_ready(&config).await {
@@ -453,18 +428,18 @@ fn fallback_harness(found: &[String]) -> Option<String> {
     next
 }
 
-/// Ask before the built-in Smalltalk Assistant starts: it is an agent running on the person's own
+/// Ask before the built-in Fractal Assistant starts: it is an agent running on the person's own
 /// provider account. An explicit `--onboarding` already names the request.
 fn confirm_assistant(config: &Config, harness: &str, args: &SetupArgs) -> Result<bool> {
     if args.onboarding {
         return Ok(true);
     }
     println!(
-        "The built-in Smalltalk Assistant is an agent that runs on your own {harness} account, so it uses your {harness} usage and quota. It runs in {} access mode.",
+        "The built-in Fractal Assistant is an agent that runs on your own {harness} account, so it uses your {harness} usage and quota. It runs in {} access mode.",
         config.active_access_mode().as_str()
     );
     let start = ask_bool(
-        "Start the built-in Smalltalk Assistant now?",
+        "Start the built-in Fractal Assistant now?",
         "--assistant",
         args.assistant,
         args.yes,
@@ -769,7 +744,9 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
     let manifest = serde_json::json!({
         "version": 1,
         "source": "setup",
-        "files": [bin.join("st3"), bin.join("st"), bin.join("pty")],
+        "files": crate::fractal::installed_binaries(vec![
+            bin.join("st3"), bin.join("st"), bin.join("pty"),
+        ]),
     });
     let mut pending = tempfile::NamedTempFile::new_in(&data)?;
     pending.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
@@ -853,6 +830,7 @@ async fn start_daemon(
     service: bool,
     linger: bool,
 ) -> Result<()> {
+    st3::service::preflight(service)?;
     if daemon_ready(config).await {
         return Ok(());
     }

@@ -26,11 +26,40 @@ pub fn phase_spans_enabled() -> bool {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Origin(OriginLabel);
 
-static TASK_ORIGINS: [&str; 15] = [
+static TASK_ORIGINS: &[&str] = &[
     "other", "task checkpoint", "task migrate-event-payloads", "task expire-completed-responses",
     "task coordination-counts-catch-up", "task account-limits-catch-up",
     "task enforce-account-limits", "task trim-local-observations", "task mailbox-wake-dispatch",
     "task reconcile-pass", "task reconcile-deadline",
+    "reconcile", "reconcile.timer", "reconcile.gate_poll",
+    "published_list.agents", "published_list.missions", "published_list.work",
+    "publication.attention", "publication.summary", "publication.advance_evidence",
+    "replication.activate", "replication.retry_projection", "replication.export",
+    "replication.receive", "replication.exchange", "replication.outbound",
+    "startup.open_store", "startup.judge_claims", "startup.validate_replication_backlog",
+    "startup.apply_replication_repairs", "startup.settle_runs",
+    "startup.project_replication_backlog", "startup.warmup", "startup.isolation",
+    "account_limits.enforce", "account_limits.catch_up", "maintenance.checkpoint",
+    "maintenance.envelope_payloads", "maintenance.event_payloads",
+    "maintenance.coordination_counts", "maintenance.stop_deferral_history",
+    "maintenance.response_expiry", "maintenance.wal_checkpoint",
+    "observations.trim", "observations.trim_usage_responses", "observations.database_size",
+    "observations.release_free_pages",
+    "observations.export", "operations.repair_drift", "recorder.receipts",
+    "mailbox.wake_dispatch", "mailbox.own_post", "mailbox.write", "mailbox.subscription",
+    "message_body.reconcile", "seat.snapshot_transfer",
+    "runtime.start", "sekrets.import", "changes.discover", "changes.sync",
+    "account_limits.ready", "allocator.trim", "config.reload_policies",
+    "github.auth", "github.request", "maintenance.malloc_relief",
+    "maintenance.response_expiry_clock", "maintenance.response_expiry_deadline",
+    "peer.raw_lease", "profile.runtime_lag", "publication.evidence",
+    "publication.evidence_ready", "reconcile.supervise", "replication.connectivity",
+    "replication.dial_peer", "replication.fabric_exposure", "replication.fabric_presence",
+    "replication.fleet_view", "replication.peer_failure", "replication.publish_endpoints",
+    "replication.settings", "replication.tailnet", "replication.worker",
+    "slo.export", "slo.history", "terminal.socket", "terminal.tunnel",
+    "terminal.view_dispatch", "terminal.view_watch", "tile.endpoint", "tile.endpoints",
+    "writer.batch.setup", "writer.batch.job", "writer.batch.commit",
     "task replication-projection-retry", "startup validate-replication-backlog",
     "startup apply-replication-repairs", "startup project-replication-backlog",
 ];
@@ -49,6 +78,13 @@ impl Origin {
         match &self.0 {
             OriginLabel::Static(label) => KeyValue::new(key, **label),
             OriginLabel::Route(label) => KeyValue::new(key, label.to_string()),
+        }
+    }
+
+    pub(super) fn label(&self) -> &str {
+        match &self.0 {
+            OriginLabel::Static(label) => label,
+            OriginLabel::Route(label) => label,
         }
     }
 }
@@ -302,6 +338,9 @@ pub(super) struct Instruments {
     read_wait: Histogram<f64>,
     pub readers_opened: Counter<u64>,
     checkpoint: Histogram<f64>,
+    pub worker_wait: Histogram<f64>,
+    pub abandoned_callback_starts: Counter<u64>,
+    deferred: Counter<u64>,
 }
 
 fn duration(meter: &Meter, name: &'static str) -> Histogram<f64> {
@@ -349,6 +388,10 @@ impl Instruments {
                 .with_unit("{connection}")
                 .build(),
             checkpoint: duration(meter, "st.db.wal.checkpoint.duration"),
+            worker_wait: duration(meter, "st.write_workers.queue.wait"),
+            abandoned_callback_starts: meter.u64_counter("st.write_workers.abandoned_callback_starts").with_unit("{job}").build(),
+            deferred: meter.u64_counter("st.db.wal.checkpoint.deferred")
+                .with_unit("{attempt}").build(),
         }
     }
 }
@@ -429,9 +472,27 @@ struct PoolObservation {
     counts: std::sync::Weak<super::ReaderCounts>,
     idle: std::sync::Weak<std::sync::Mutex<Vec<super::ReadConnection>>>,
     wal: Option<std::path::PathBuf>,
+    id: u64,
+    lag: u64,
+    deferred_since: Option<std::time::Instant>,
 }
 
 static POOLS: std::sync::Mutex<Vec<PoolObservation>> = std::sync::Mutex::new(Vec::new());
+
+static WORKER_QUEUES: std::sync::Mutex<Vec<std::sync::Weak<super::writer_admission::WorkerQueue>>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub(super) fn register_worker_queue(queue: &Arc<super::writer_admission::WorkerQueue>) {
+    let mut queues = WORKER_QUEUES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    queues.retain(|queue| queue.strong_count() > 0);
+    queues.push(Arc::downgrade(queue));
+}
+
+fn worker_queue_sample() -> (u64, f64) {
+    let queues = WORKER_QUEUES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    queues.iter().filter_map(std::sync::Weak::upgrade).map(|queue| queue.sample())
+        .fold((0, 0.0_f64), |(depth, busy), (count, age)| (depth + count, busy.max(age)))
+}
 
 pub(super) fn register_pool(pool: &super::ReadPool) {
     let wal = (!pool.shared_memory).then(|| {
@@ -447,10 +508,62 @@ pub(super) fn register_pool(pool: &super::ReadPool) {
         counts: Arc::downgrade(&pool.counts),
         idle: Arc::downgrade(&pool.idle),
         wal,
+        id: pool.diagnostic_id,
+        lag: 0,
+        deferred_since: None,
     });
 }
 
+/// Called once for every physical checkpoint attempt. Errors leave the last known lag and
+/// deferral start intact; they are not evidence that a pinned WAL recovered.
+pub fn wal_checkpoint_observed(pool: &super::ReadPool, report: Option<&super::WalCheckpointReport>) {
+    let Some(report) = report else { return };
+    let deferred = report.frames > 0 && !report.recycled;
+    if deferred {
+        METRICS.deferred.add(1, SQLITE.as_slice());
+    }
+    let mut pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(state) = pools.iter_mut().find(|state| state.id == pool.diagnostic_id) {
+        state.lag = u64::try_from(report.frames.saturating_sub(report.backfilled)).unwrap_or(0);
+        if deferred {
+            state.deferred_since.get_or_insert_with(std::time::Instant::now);
+        } else {
+            state.deferred_since = None;
+        }
+    }
+}
+
 fn register_gauges(meter: &Meter) {
+    meter.u64_observable_gauge("st.write_workers.queue.depth")
+        .with_unit("{job}")
+        .with_callback(|observer| observer.observe(worker_queue_sample().0, &[]))
+        .build();
+    meter.f64_observable_gauge("st.write_workers.queue.busy_age")
+        .with_unit("s")
+        .with_callback(|observer| observer.observe(worker_queue_sample().1, &[]))
+        .build();
+    meter.f64_observable_gauge("st.db.read.loan.oldest_age").with_unit("s")
+        .with_callback(|observer| {
+            for (origin, age) in super::read_lifetime::oldest_loans() {
+                observer.observe(age.as_secs_f64(), &[
+                    KeyValue::new("db.system.name", "sqlite"), origin.attribute("origin"),
+                ]);
+            }
+        }).build();
+    meter.u64_observable_gauge("st.db.wal.checkpoint.lag").with_unit("{frame}")
+        .with_callback(|observer| {
+            let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            observer.observe(pools.iter().filter(|pool| pool.counts.strong_count() > 0)
+                .map(|pool| pool.lag).sum(), SQLITE.as_slice());
+        }).build();
+    meter.f64_observable_gauge("st.db.wal.checkpoint.deferred_age").with_unit("s")
+        .with_callback(|observer| {
+            let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let age = pools.iter().filter(|pool| pool.counts.strong_count() > 0)
+                .filter_map(|pool| pool.deferred_since).map(|since| since.elapsed())
+                .max().unwrap_or_default();
+            observer.observe(age.as_secs_f64(), SQLITE.as_slice());
+        }).build();
     meter.f64_observable_gauge("st.db.writer.current_hold")
         .with_unit("s")
         .with_callback(|observer| {
@@ -557,6 +670,9 @@ mod tests {
             "task coordination-counts-catch-up", "task account-limits-catch-up",
             "task enforce-account-limits", "task trim-local-observations",
             "task mailbox-wake-dispatch", "task reconcile-pass", "task reconcile-deadline",
+            "reconcile", "published_list.agents", "published_list.missions",
+            "published_list.work", "replication.export", "replication.receive",
+            "startup.warmup", "maintenance.wal_checkpoint",
             "task replication-projection-retry", "startup validate-replication-backlog",
             "startup apply-replication-repairs", "startup project-replication-backlog",
         ] {
@@ -587,6 +703,88 @@ mod tests {
             .unwrap();
         assert!(status.success());
         true
+    }
+
+    #[test]
+    fn worker_queue_exports_wait_and_abandoned_callback_starts() {
+        if isolated("worker_queue_exports_wait_and_abandoned_callback_starts") { return; }
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let writer = super::super::writer_admission::with_write_limit_for_test(1, || {
+            super::super::WriterConnection::new(
+                rusqlite::Connection::open_in_memory().unwrap(),
+                Arc::new(AtomicU64::new(0)),
+            )
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let mut worker = Box::pin(writer.spawn_blocking(move || {
+                entered.send(()).unwrap();
+                blocked.recv().unwrap();
+            }));
+            assert!(matches!(futures_util::poll!(worker.as_mut()), std::task::Poll::Pending));
+            started.await.unwrap();
+            let (requester, response) = tokio::sync::oneshot::channel::<()>();
+            let mut job = Box::pin(writer.write_workers()
+                .with_requester(Arc::new(requester), "/v1/intent/mission".to_owned())
+                .spawn_blocking(|| 42));
+            assert!(matches!(futures_util::poll!(job.as_mut()), std::task::Poll::Pending));
+            let (depth, age) = writer.worker_queue.sample();
+            assert_eq!(depth, 1);
+            assert!(age > 0.0);
+            assert!(writer.worker_queue.sample().1 >= age);
+            provider.force_flush().unwrap();
+            let finished = exporter.get_finished_metrics().unwrap();
+            let metrics: Vec<_> = finished.iter().flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics()).collect();
+            let depth = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.depth").unwrap();
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = depth.data() else { panic!("depth gauge"); };
+            assert_eq!(gauge.data_points().next().unwrap().value(), 1);
+            let busy = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.busy_age").unwrap();
+            let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = busy.data() else { panic!("busy gauge"); };
+            assert!(gauge.data_points().next().unwrap().value() >= age);
+            drop(response);
+            release.send(()).unwrap();
+            worker.await.unwrap();
+            assert_eq!(job.await.unwrap(), 42); // Abandonment does not skip the mutation.
+            assert_eq!(writer.worker_queue.sample(), (0, 0.0));
+
+            let held = writer.admit_write().await;
+            let mut cancelled = Box::pin(writer.spawn_blocking(|| panic!("cancelled admission ran")));
+            assert!(matches!(futures_util::poll!(cancelled.as_mut()), std::task::Poll::Pending));
+            assert_eq!(writer.worker_queue.sample().0, 1);
+            drop(cancelled);
+            assert_eq!(writer.worker_queue.sample(), (0, 0.0));
+            drop(held);
+        });
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        let metrics: Vec<_> = finished.iter().rev().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics()).collect();
+        let abandoned = metrics.iter().find(|metric| metric.name() == "st.write_workers.abandoned_callback_starts").unwrap();
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = abandoned.data() else { panic!("abandoned counter"); };
+        let points: Vec<_> = sum.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value(), 1);
+        assert!(points[0].attributes().any(|attribute| attribute == &KeyValue::new("outcome", "ran")));
+        let wait = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.wait").unwrap();
+        assert_eq!(wait.unit(), "s");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = wait.data() else { panic!("wait histogram"); };
+        assert!(histogram.data_points().any(|point| point.attributes().any(
+            |attribute| attribute == &KeyValue::new("origin", "/v1/intent/mission")
+        ) && point.count() == 1 && point.sum() > 0.0));
+        let depth = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.depth").unwrap();
+        let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = depth.data() else { panic!("depth gauge"); };
+        assert_eq!(gauge.data_points().next().unwrap().value(), 0);
+        let busy = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.busy_age").unwrap();
+        let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = busy.data() else { panic!("busy gauge"); };
+        assert_eq!(gauge.data_points().next().unwrap().value(), 0.0);
+        provider.shutdown().unwrap();
     }
 
     fn write() {

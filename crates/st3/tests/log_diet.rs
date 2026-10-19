@@ -32,6 +32,8 @@
 //! Inside an st3 harness, unset `ST_AGENT` first: the local API binds a caller to the agent in
 //! its process ancestry, and these drivers write as their own agents.
 
+use st3::MissionsStore;
+use st3::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -153,6 +155,7 @@ impl Daemon {
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let state = AppState {
+            owning_person: None,
             store: store.clone(),
             notify: notify.clone(),
             event_notify: watch::channel(0_u64).0,

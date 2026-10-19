@@ -1,11 +1,22 @@
 # st data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
-(`crates/st3-daemon/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
+(`crates/st3-seats/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
 are listed in `SHARED_TABLES` there and in the production projection digests. Replicated storage tables
 have their own logical authority digests; local physical fields and caches are outside those identities.
 
 The claim log and immutable blobs are the durable graph authority.
+
+## Large inline values
+
+New storage work must avoid unbounded large inline SQLite objects, including variable
+metadata and index keys. Use a reviewed bounded physical representation or reference
+without reducing the logical input contract or rejecting valid historical data.
+[Large SQLite values](large-values.md) defines the transitional source inventory,
+allow-for-now owner/TODO markers, static guard coverage and cleanup plan. No numeric
+large-value threshold is accepted; the guard checks source-site exceptions, not sizes.
+
+## Retention and local observations
 
 A claim kind of `local` retention (`st schema show KIND`) is an observation that only the node
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
@@ -81,6 +92,15 @@ publishes a backlog. Admission binds the Unix peer to its seat and checks the pu
 inside the daemon's writer transaction. Source runtime, spool sequence, claim kind and usage
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
+
+Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
+at most 64 per thread. At either limit a thread evicts its least recently used connection;
+at the global limit a thread with no cached connection reads without caching. Atomic slot
+reservations bound retained connections without a global query lock, and closing a connection
+releases its slot, including on thread exit. Only connections are retained: each check opens
+a fresh read transaction and releases it before returning, so subsequent checks observe
+committed producer writes without retaining a WAL snapshot. Reads still validate the spool
+format and provider/runtime binding; replacing the spool inode invalidates its connection.
 
 The outbox is transport recovery state, not graph authority. The daemon retains each admitted
 observation under its existing local/latest/durable policy. Producer snapshots remain local
@@ -162,11 +182,13 @@ order from the same admitted claims.
 | `checkpoint_claims` | Shared storage, with stated local fields | Shared immutable dropped-claim/evidence/ancestry/operation identity. Digest logical live/tombstoned identity where relevant; nodes may have trimmed at different times. |
 | `checkpoint_envelopes` | Shared storage, with stated local fields | Shared immutable dropped-envelope identity. Live and trimmed nodes represent the same inventory using envelopes versus tombstones, so digest their logical union rather than treating trim progress as divergence. |
 | `checkpoints` | Local | Local seal/verification/trim/adoption ledger and rowid high water; nodes legitimately occupy different protocol stages. Shared protocol facts are checkpoint.* claims. |
-| `claim_signatures` | Shared storage | Each claim's signature exactly as its envelope payload carried it; written once at sealing or admission, never rewritten. Covered by the envelope hash and writer signature, so it adds nothing to any digest. |
-| `claim_verdict_fresh` | Local cache | Signature verdicts folded from admitted claims in canonical order; never synced, outside every digest, rebuilt by `recheck_claim_verdicts`. |
-| `claim_verdict_links` | Local cache | Signature verdicts folded from admitted claims in canonical order; never synced, outside every digest, rebuilt by `recheck_claim_verdicts`. |
-| `claim_verdict_queue` | Local cache | Signature verdicts folded from admitted claims in canonical order; never synced, outside every digest, rebuilt by `recheck_claim_verdicts`. |
-| `claim_verdicts` | Local cache | Signature verdicts folded from admitted claims in canonical order; never synced, outside every digest, rebuilt by `recheck_claim_verdicts`. |
+| `claim_signature_candidates`, `claim_signature_sources` | Shared current state | Distinct normalized carried signatures per live immutable claim and their carrying writers. Retained candidates remain durable authority input even if envelope history later becomes trimmable; this change qualifies no cap, eviction or trim eligibility. |
+| `claim_signature_counts`, `claim_signature_writer_counts` | Incremental inspection projections | Candidate and carrying-writer counts maintained by admission/deletion triggers. The attributable inspection threshold reports a fault without deleting candidates. |
+| `claim_signature_judging` | Local incremental work | Durable candidate cursor, best candidate and dependency availability for bounded writer loans. Relevant changes invalidate its accumulator; partial candidate state cannot authorize a dependent claim. |
+| `claim_signature_migration` | Local bootstrap progress | Durable inventory cursor, reconciliation targets, serving model and explicit fault. Complete isolated legacy semantics serve until atomic candidate activation; reaching an envelope does not authorize its claims under candidate semantics, since later envelopes can carry more candidates. The legacy P0 remains visible during bootstrap. |
+| `claim_signature_nonce_uses` | Shared incremental projection | Cryptographically matching key/nonce use per live claim, including non-winning candidates. Invalid signature bytes cannot reserve another key's nonce; deletion invalidates affected dependencies before removing use. |
+| `claim_signatures` | Shared projection | Best candidate under current authority: Verified before Held before Invalid, then normalized signature bytes. Every candidate contributes authority dependencies and matching nonce use, including non-winners. Readers pin one complete legacy or candidate model. |
+| `claim_verdict_fresh`, `claim_verdict_links`, `claim_verdict_queue`, `claim_verdicts` | Local cache of shared outcomes | Current-authority candidate fold and dependency work, outside replication digests and rebuilt by `recheck_claim_verdicts`. Links accumulate conservatively per page until claim removal or explicit recheck; completing a judgment does not rewrite its whole dependency set. Property tests compare inventory, selection, verdicts and recomputation across shuffled, split and duplicate delivery. |
 | `claims` | Shared storage, with stated local fields | Shared immutable logical claim bytes/id/subject/kind/actor/predecessors/time. store_index alone is local; system-local/legacy migrated claims must be excluded from logical replicated-source digests. |
 | `coordination_sends` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |
 | `custom_dependencies` | Shared projection | Reducer dependency relationships derived from registered custom subjects. |

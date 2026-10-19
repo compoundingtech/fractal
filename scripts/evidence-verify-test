@@ -4,6 +4,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import re
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,11 +61,12 @@ class Fixture:
         return self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'HEAD^{tree}')
 
     def note(self, commit, tree, key, signer, check='unit', command=('make', 'test'), exit_code=0,
-             runner='nix', tier='full', seconds=0, sign=True, naive=False, inputs=None, omit_inputs=False, mutate=None, parent=None):
+             runner='nix', tier='full', seconds=0, sign=True, naive=False, inputs=None, omit_inputs=False, mutate=None, parent=None,
+             predicate_type='https://smalltalk.dev/evidence/gate/v1'):
         statement = {
             '_type': 'https://in-toto.io/Statement/v1',
             'subject': [{'name': commit, 'digest': {'gitTree': tree}}],
-            'predicateType': 'https://smalltalk.dev/evidence/gate/v1',
+            'predicateType': predicate_type,
             'predicate': {
                 'schema_version': 1, 'change_id': 'change-1', 'signer': signer, 'tier': tier,
                 're_attests': None, 'producer_sha256': 'a' * 64,
@@ -120,6 +122,20 @@ class Verifier(unittest.TestCase):
                          (record, 'nix', 'machine/ci1', 'machine'))
         self.assertEqual(result['command'], ['make', 'test'])
 
+    def test_legacy_and_fractal_predicate_uris_are_accepted_but_a_third_uri_is_not(self):
+        # With no other records and the exact subject tree, only the URI is unsupported.
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1',
+                    predicate_type='https://example.invalid/evidence/gate/v1')
+        self.assertEqual(self.reason(self.tree), 'no_record')
+        for index, uri in enumerate(('https://smalltalk.dev/evidence/gate/v1',
+                                     'https://compounding.tech/fractal/evidence/gate/v1')):
+            with self.subTest(uri=uri):
+                record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1',
+                                     predicate_type=uri, seconds=index)
+                code, result = self.f.verify(self.tree)
+                self.assertEqual(code, 0, result)
+                self.assertEqual(result['record'], record)
+
     def test_wrapper_and_sekrets_are_accepted_kinds_and_unknown_kinds_are_not(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='sekrets')
         self.assertEqual(self.f.verify(self.tree)[1]['kind'], 'sekrets')
@@ -166,11 +182,33 @@ class Verifier(unittest.TestCase):
         self.assertEqual(self.reason(self.tree, command=['make', 'test']), 'wrong_command')
 
     def test_a_failed_run_fails_and_the_latest_record_decides(self):
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=0)
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=1)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=-600)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-300)
         self.assertEqual(self.reason(self.tree), 'check_failed')
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=2)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=0)  # clearly later than the failure
         self.assertEqual(self.f.verify(self.tree)[0], 0)
+
+    def test_a_pass_never_hides_a_failure_it_is_not_clearly_later_than(self):
+        # observed_at is the signer's own clock: equal, inverted and within-the-margin dates all leave the failure standing (creation order is irrelevant)
+        failure = -200
+        for pass_at, expect in ((-230, 1), (-200, 1), (-150, 1), (-81, 1), (-80, 1), (-79, 0), (0, 0)):  # exactly the 120 s margin still fails
+            with self.subTest(pass_at=pass_at):
+                f = Fixture()
+                self.addCleanup(f.tmp.cleanup)
+                ci = f.key('ci', 'machine/ci1')
+                commit, tree = f.commit('one')
+                f.note(commit, tree, ci, 'machine/ci1', exit_code=1, seconds=failure)
+                f.note(commit, tree, ci, 'machine/ci1', seconds=pass_at)  # created AFTER the failure, dated as given
+                self.assertEqual(f.verify(tree)[0], expect, pass_at)
+        # a failure dated later than a pass, however it was created, always stands
+        f = Fixture()
+        self.addCleanup(f.tmp.cleanup)
+        ci = f.key('ci', 'machine/ci1')
+        commit, tree = f.commit('one')
+        f.note(commit, tree, ci, 'machine/ci1', exit_code=1, seconds=-10)
+        f.note(commit, tree, ci, 'machine/ci1', seconds=-20)
+        f.note(commit, tree, ci, 'machine/ci1', seconds=-15)
+        self.assertEqual(f.verify(tree)[1]['reason'], 'check_failed')
 
     def test_a_time_without_a_zone_is_not_evidence_and_cannot_crash_the_ordering(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', naive=True)
@@ -238,11 +276,11 @@ class Verifier(unittest.TestCase):
         self.assertEqual(self.reason(self.tree), 'no_record')
 
     def test_the_number_of_trusted_records_is_reported_for_loop_protection(self):
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=0)
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=1)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-300)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-299)
         code, result = self.f.verify(self.tree)
         self.assertEqual((code, result['reason'], result['attempts']), (1, 'check_failed', 2))
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=2)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=0)
         code, result = self.f.verify(self.tree)
         self.assertEqual((code, result['attempts']), (0, 3))
 
@@ -692,6 +730,364 @@ class SkipPolicy(unittest.TestCase):
                                     '--repository', 'org/repo')[0], 2)  # only with --policy-from
 
 
+def two_check_policy(unit_require=None, other_require=None):
+    """Two checks, `unit` and `other`, each accepting only the observed kind, with their own `require` mode."""
+    doc = json.loads(policy_text())
+    unit = doc['checks']['unit']
+    del unit['kinds']['wrapper']
+    other = json.loads(json.dumps(unit))
+    other['kinds']['observed']['command'] = ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}']
+    doc['checks']['other'] = other
+    if unit_require is not None:
+        unit['require'] = unit_require
+    if other_require is not None:
+        other['require'] = other_require
+    return json.dumps(doc)
+
+
+class RequireAll(unittest.TestCase):
+    """`require` is the mode for rejecting an unsigned change at queue entry: off / shadow / reject, judged per check."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'machine/ci1')
+        self.commit, self.tree = self.f.commit('one')
+
+    def note(self, check, **kwargs):
+        defaults = dict(runner=OBSERVED, command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', check), check=check)
+        defaults.update(kwargs)
+        key = defaults.pop('key', self.ci)
+        signer = defaults.pop('signer', 'machine/ci1')
+        return self.f.note(self.commit, self.tree, key, signer, **defaults)
+
+    def judge(self, text):
+        return evidence_verify.require_all(str(self.f.repo), self.tree, str(self.f.keys), text, 'org/repo')
+
+    def test_require_defaults_to_off_and_is_validated_strictly(self):
+        self.assertEqual(evidence_verify.policy_rules(policy_text(), 'unit', 'org/repo')['require'], 'off')
+        for mode in ('off', 'shadow', 'reject'):
+            self.assertEqual(evidence_verify.policy_rules(two_check_policy(mode), 'unit', 'org/repo')['require'], mode)
+        for bad in ('yes', True, False, 1, None, 'Reject', ['reject'], ''):
+            doc = json.loads(two_check_policy())
+            doc['checks']['unit']['require'] = bad
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.policy_rules(json.dumps(doc), 'unit', 'org/repo')
+            self.assertEqual(caught.exception.reason, 'error', repr(bad))
+
+    def test_a_check_with_require_off_is_not_judged_and_nothing_required_is_ok(self):
+        result = self.judge(two_check_policy())
+        self.assertEqual((result['decision'], result['satisfied'], result['lanes']), ('ok', True, {}))
+
+    def test_shadow_reports_would_reject_and_reject_rejects_and_each_lane_names_its_own_reason(self):
+        result = self.judge(two_check_policy('shadow', 'reject'))
+        self.assertEqual(result['decision'], 'reject')
+        self.assertFalse(result['satisfied'])
+        self.assertEqual({k: (v['decision'], v['reason']) for k, v in result['lanes'].items()},
+                         {'other': ('reject', 'no_record'), 'unit': ('would-reject', 'no_record')})
+        self.note('other')
+        result = self.judge(two_check_policy('shadow', 'reject'))
+        self.assertEqual(result['decision'], 'would-reject')  # only the shadow lane is missing now
+        self.assertEqual(result['lanes']['other']['decision'], 'ok')
+        self.assertEqual(result['lanes']['other']['signer'], 'machine/ci1')
+        self.note('unit')
+        result = self.judge(two_check_policy('shadow', 'reject'))
+        self.assertEqual((result['decision'], result['satisfied']), ('ok', True))
+
+    def test_every_refusal_reason_reaches_the_lane_it_belongs_to(self):
+        self.f.key('stranger')  # a key that is not on the list
+        stranger = self.f.root / 'stranger'
+        old_tree = self.tree
+        later, _ = self.f.commit('two')  # the tree under test moves on: notes for the first one are now for another tree
+        self.tree = self.f.git('rev-parse', 'HEAD^{tree}')
+        command = ('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit')
+        def good(key=None, **kwargs):
+            options = dict(runner=OBSERVED, command=command)
+            options.update(kwargs)
+            return lambda: self.f.note(later, self.tree, key or self.ci, 'machine/ci1', **options)
+        cases = {
+            'no_record': (None, lambda: None),
+            'stale_tree': (None, lambda: self.f.note(self.commit, old_tree, self.ci, 'machine/ci1', runner=OBSERVED, command=command)),
+            'bad_signature': (None, good(sign=False)),
+            'untrusted_signer': (None, good(key=stranger)),
+            'untrusted_level': (['fleet'], good()),
+            'wrong_command': (None, good(command=('make', 'less'))),
+            'check_failed': (None, good(exit_code=1)),
+            'wrong_runner': (None, good(runner='github:other/repo/actions/runs/7/attempts/1/jobs/9')),
+        }
+        for reason, (levels, make) in cases.items():
+            with self.subTest(reason=reason):
+                for ref in self.f.git('for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').split():
+                    self.f.git('update-ref', '-d', ref)
+                doc = json.loads(two_check_policy('reject'))
+                if levels:
+                    doc['checks']['unit']['trust_levels'] = levels
+                make()
+                lane = self.judge(json.dumps(doc))['lanes']['unit']
+                self.assertEqual((lane['satisfied'], lane['decision'], lane['reason']), (False, 'reject', reason), lane)
+
+    def test_a_forged_note_under_a_valid_looking_ref_from_an_untrusted_key_is_refused(self):
+        self.f.key('forger')
+        record = self.note('unit', key=self.f.root / 'forger', signer='machine/ci1')
+        self.assertEqual(self.f.git('for-each-ref', '--format=%(refname)', 'refs/notes/evidence/'), f'refs/notes/evidence/{record}')
+        lane = self.judge(two_check_policy('reject'))['lanes']['unit']
+        self.assertEqual((lane['satisfied'], lane['reason']), (False, 'untrusted_signer'))
+
+    def test_the_cli_exit_code_is_one_only_when_a_reject_lane_fails_and_it_reads_the_base_policy(self):
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        for mode, expected in (('off', (0, 'ok')), ('shadow', (0, 'would-reject')), ('reject', (1, 'reject'))):
+            base = self._base(two_check_policy(mode, 'off'))
+            code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base, '--repository', 'org/repo')
+            self.assertEqual((code, json.loads(out)['decision']), (expected[0], expected[1]), (mode, out))
+        # a pull request's own copy of the policy is not read: asking for the commit without a policy is an error, never a reject
+        code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', self.commit, '--repository', 'org/repo')
+        self.assertEqual((code, json.loads(out)['decision'], json.loads(out)['reason']), (2, 'error', 'no_policy'))
+        for bad in (['--check', 'unit'], ['--project'], ['--command', '["x"]'], ['--kinds', 'observed'], ['--max-age', '60']):
+            self.assertEqual(self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base,
+                                        '--repository', 'org/repo', *bad)[0], 2, bad)
+        self.assertEqual(self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base)[0], 2)  # needs the policy and repository
+        self.assertEqual(self.f.cli('--tree', self.tree, '--keys-from', base)[0], 2)  # without --require-all, --check is still required
+
+    def test_a_verifier_that_cannot_decide_exits_two_with_decision_error_never_zero_or_one(self):
+        def run_cli(text):
+            base = self._base(text)
+            return self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base, '--repository', 'org/repo')
+        broken = json.loads(two_check_policy('reject'))
+        broken['checks']['unit']['require'] = 'sometimes'
+        no_command = json.loads(two_check_policy('reject'))
+        del no_command['checks']['unit']['kinds']['observed']['command']  # a kind rule without a command is a policy error
+        no_level_command = json.loads(two_check_policy('reject'))
+        no_level_command['checks']['unit']['kinds']['observed']['by_level'] = {'machine': {'events': ['pull_request']}}
+        for name, text in (('invalid json', 'not json'), ('unknown top-level key', json.dumps({'version': 1, 'checks': {}, 'x': 1})),
+                           ('invalid require', json.dumps(broken)), ('kind without a command', json.dumps(no_command)),
+                           ('by_level without a command', json.dumps(no_level_command))):
+            code, out, _ = run_cli(text)
+            document = json.loads(out)
+            self.assertEqual((code, document['decision'], document['satisfied'], document['reason']), (2, 'error', False, 'error'), (name, out))
+        # a base commit that has no policy file at all
+        base = self._base('{}')
+        self.f.git('rm', '-q', '.st/evidence-skip-policy.json')
+        self.f.git('commit', '-q', '-m', 'no policy')
+        base = self.f.git('rev-parse', 'HEAD')
+        code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base, '--repository', 'org/repo')
+        self.assertEqual((code, json.loads(out)['decision'], json.loads(out)['reason']), (2, 'error', 'no_policy'))
+        # an unreadable key list and an unexpected exception inside the judging both end as errors too
+        base = self._base(two_check_policy('reject'))
+        code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys', str(self.f.root / 'missing-keys'), '--policy-from', base, '--repository', 'org/repo')
+        self.assertEqual((code, json.loads(out)['decision']), (2, 'error'))
+        import contextlib, io
+        original = evidence_verify.require_all
+        evidence_verify.require_all = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom'))
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = evidence_verify.main(['--repo', str(self.f.repo), '--tree', self.tree, '--require-all', '--keys-from', base,
+                                             '--policy-from', base, '--repository', 'org/repo'])
+        finally:
+            evidence_verify.require_all = original
+        self.assertEqual((code, json.loads(out.getvalue())['decision'], json.loads(out.getvalue())['detail']), (2, 'error', 'RuntimeError: boom'))
+
+    def test_a_lane_is_always_held_to_the_recorded_argv_of_its_kind_because_a_kind_cannot_omit_one(self):
+        # (intake-b) require_all passes no command of its own; the kind's rule always supplies one, so a note that ran anything else fails
+        self.note('unit', command=('make', 'less'))
+        lane = self.judge(two_check_policy('reject'))['lanes']['unit']
+        self.assertEqual((lane['satisfied'], lane['reason']), (False, 'wrong_command'))
+
+    def _base(self, text):
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        (self.f.repo / '.st/evidence-skip-policy.json').write_text(text)
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'policy')
+        return self.f.git('rev-parse', 'HEAD')
+
+
+LANES = {'version': 1, 'lanes': {'unit': {'argv': ['make', 'test'], 'definition_paths': ['config/x.json', 'scripts'], 'tree_inputs': ['src']}}}
+
+
+class LaneDefinitions(unittest.TestCase):
+    """A lane is the argv plus the bytes of the scripts that decide what it runs, as they are at the accepted base."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'machine/ci1')
+        self.base_commit, self.base_tree = self.files({'scripts/run.sh': 'run\n', 'scripts/sub/more.sh': 'more\n',
+                                                       'config/x.json': '{}\n', 'src/code.rs': 'one\n',
+                                                       '.st/required-lanes.json': json.dumps(LANES)})
+
+    def files(self, changes):
+        for name, content in changes.items():
+            path = self.f.repo / name
+            if content is None:
+                path.unlink(missing_ok=True)
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '--allow-empty', '-m', 'step')
+        return self.f.git('rev-parse', 'HEAD'), self.f.git('rev-parse', 'HEAD^{tree}')
+
+    def rules(self, text=None, lane='unit'):
+        return evidence_verify.lane_rules(text or json.dumps(LANES), lane)
+
+    def definition(self, tree):
+        return evidence_verify.lane_definition(str(self.f.repo), self.base_tree, tree, self.rules())
+
+    def note(self, commit, tree, digest, **kwargs):
+        inputs = {} if digest is None else {'lane_definition_sha256': digest}
+        return self.f.note(commit, tree, self.ci, 'machine/ci1', command=('make', 'test'), inputs=inputs, **kwargs)
+
+    def verdict(self, tree, lane):
+        return self.f.verify(tree, command=['make', 'test'], lane=lane)
+
+    def test_the_lane_file_is_validated_strictly(self):
+        def broken(edit, lane='unit'):
+            doc = json.loads(json.dumps(LANES))
+            edit(doc)
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.lane_rules(json.dumps(doc), lane)
+            return caught.exception.reason
+        entry = lambda d: d['lanes']['unit']
+        self.assertEqual(broken(lambda d: d.update(surprise=1)), 'error')
+        self.assertEqual(broken(lambda d: d.update(version=2)), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(typo=1)), 'error')
+        self.assertEqual(broken(lambda d: entry(d).pop('argv')), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(argv=[])), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(argv=['make', 1])), 'error')
+        self.assertEqual(broken(lambda d: entry(d).pop('definition_paths')), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(definition_paths=[])), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(definition_paths=['.'])), 'error')  # the whole tree is not a definition
+        self.assertEqual(broken(lambda d: entry(d).update(definition_paths=['../x'])), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(tree_inputs=['/abs'])), 'error')
+        self.assertEqual(broken(lambda d: None, lane='absent'), 'no_lane')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_rules('not json', 'unit')
+        self.assertEqual(caught.exception.reason, 'error')
+
+    def test_the_digest_covers_the_argv_and_every_byte_and_mode_below_the_listed_paths(self):
+        first = self.definition(self.base_tree)
+        self.assertEqual(first['changed'], [])
+        self.assertEqual(first['sha256'], self.definition(self.base_tree)['sha256'])
+        rules = self.rules()
+        again = evidence_verify.lane_definition(str(self.f.repo), self.base_tree, self.base_tree, dict(rules, argv=['make', 'less']))
+        self.assertNotEqual(first['sha256'], again['sha256'])  # another argv is another lane
+        for change in ({'scripts/run.sh': 'run!\n'}, {'scripts/sub/more.sh': 'more!\n'}, {'config/x.json': '[]\n'},
+                       {'scripts/new.sh': 'new\n'}, {'scripts/sub/more.sh': None}):
+            _, tree = self.files(change)
+            moved = evidence_verify.lane_definition(str(self.f.repo), tree, tree, self.rules())
+            self.assertNotEqual(first['sha256'], moved['sha256'], change)
+            self.files({k: v for k, v in {'scripts/run.sh': 'run\n', 'scripts/sub/more.sh': 'more\n', 'config/x.json': '{}\n'}.items()})
+            self.files({'scripts/new.sh': None} if (self.f.repo / 'scripts/new.sh').exists() else {})
+        _, tree = self.files({'src/code.rs': 'two\n'})  # a tree input is not part of the definition
+        self.assertEqual(self.definition(tree)['changed'], [])
+        self.assertEqual(self.definition(tree)['sha256'], first['sha256'])
+        _, tree = self.files({'scripts-other/x.sh': 'x\n'})  # a sibling with the same prefix is not below scripts
+        self.assertEqual(self.definition(tree)['changed'], [])
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_definition(str(self.f.repo), self.base_tree, self.base_tree, dict(rules, definition_paths=('absent.sh',)))
+        self.assertEqual(caught.exception.reason, 'error')  # a listed path missing at the base is a lane-file error
+
+    def test_a_note_that_carries_the_base_digest_for_an_unchanged_definition_satisfies_the_lane(self):
+        digest = self.definition(self.base_tree)
+        commit, tree = self.files({'src/code.rs': 'three\n'})  # the change under test touches only a tree input
+        self.note(commit, tree, digest['sha256'])
+        code, result = self.verdict(tree, self.definition(tree))
+        self.assertEqual((code, result['satisfied']), (0, True), result)
+
+    def test_wrong_definition_when_the_note_has_no_digest_or_another_one(self):
+        commit, tree = self.files({'src/code.rs': 'four\n'})
+        lane = self.definition(tree)
+        self.note(commit, tree, None)
+        self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'wrong_definition')  # an old note without the input
+        self.note(commit, tree, 'f' * 64)
+        self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'wrong_definition')
+        # a digest made against other scripts (an older base) is not this lane's either
+        older = self.definition(self.base_tree)['sha256']
+        self.files({'scripts/run.sh': 'changed at the base\n'})
+        newer_base = self.f.git('rev-parse', 'HEAD^{tree}')
+        commit, tree = self.files({'src/code.rs': 'five\n'})
+        lane = evidence_verify.lane_definition(str(self.f.repo), newer_base, tree, self.rules())
+        self.note(commit, tree, older)
+        self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'wrong_definition')
+
+    def test_definition_changed_when_the_signed_tree_edits_adds_or_deletes_a_listed_blob(self):
+        digest = self.definition(self.base_tree)['sha256']
+        for change in ({'scripts/run.sh': 'run, but fewer tests\n'}, {'scripts/extra.sh': 'x\n'}, {'config/x.json': None},
+                       {'scripts/sub/more.sh': None}):
+            commit, tree = self.files(change)
+            self.note(commit, tree, digest)  # the note even carries the base's digest: it still must not count
+            lane = self.definition(tree)
+            self.assertTrue(lane['changed'], change)
+            code, result = self.verdict(tree, lane)
+            self.assertEqual((code, result['reason']), (1, 'definition_changed'), (change, result))
+            self.assertIn(sorted(change)[0], result['detail'])
+            self.base_tree = self.base_tree  # the base stays fixed; restore the files for the next case
+            self.files({'scripts/run.sh': 'run\n', 'scripts/sub/more.sh': 'more\n', 'config/x.json': '{}\n', 'scripts/extra.sh': None})
+
+    def test_absent_paths_are_validated_and_none_may_exist_at_the_base_or_appear_in_the_signed_tree(self):
+        doc = json.loads(json.dumps(LANES))
+        doc['lanes']['unit']['absent_paths'] = ['.hooks.cjs', 'pkg/node_modules']
+        text = json.dumps(doc)
+        rules = evidence_verify.lane_rules(text, 'unit')
+        self.assertEqual(rules['absent_paths'], ('.hooks.cjs', 'pkg/node_modules'))
+        for bad in (['.'], [1], ['/abs'], ['../x']):
+            broken = json.loads(text)
+            broken['lanes']['unit']['absent_paths'] = bad
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.lane_rules(json.dumps(broken), 'unit')
+            self.assertEqual(caught.exception.reason, 'error', bad)
+        plain = self.definition(self.base_tree)
+        again = evidence_verify.lane_definition(str(self.f.repo), self.base_tree, self.base_tree, rules)
+        self.assertEqual(again['changed'], [])
+        self.assertNotEqual(again['sha256'], plain['sha256'])  # the list of absent paths is part of the digest
+        smaller = evidence_verify.lane_definition(str(self.f.repo), self.base_tree, self.base_tree, dict(rules, absent_paths=('.hooks.cjs',)))
+        self.assertNotEqual(again['sha256'], smaller['sha256'])
+        for appearing in ({'.hooks.cjs': 'hook\n'}, {'pkg/node_modules/dep/index.js': 'dep\n'}):
+            _, tree = self.files(appearing)
+            lane = evidence_verify.lane_definition(str(self.f.repo), self.base_tree, tree, rules)
+            self.assertEqual(lane['changed'], sorted(appearing), appearing)  # definition_changed names the file
+            self.files({name: None for name in appearing})
+        # a lane file that lists a path which exists at the base is inconsistent: an error, never a pass
+        self.files({'.hooks.cjs': 'hook\n'})
+        base_with = self.f.git('rev-parse', 'HEAD^{tree}')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_definition(str(self.f.repo), base_with, base_with, rules)
+        self.assertEqual(caught.exception.reason, 'error')
+
+    def test_a_check_without_a_lane_is_unsatisfied_under_require_all_when_a_lane_file_is_given(self):
+        policy = two_check_policy('reject', 'reject')
+        self.f.key('x')
+        commit, tree = self.files({'src/code.rs': 'six\n'})
+        result = evidence_verify.require_all(str(self.f.repo), tree, str(self.f.keys), policy, 'org/repo',
+                                             (json.dumps(LANES), self.base_commit))
+        self.assertEqual({k: (v['decision'], v['reason']) for k, v in result['lanes'].items()},
+                         {'other': ('reject', 'no_lane'), 'unit': ('reject', 'no_record')})  # `other` has no lane entry; `unit` has one and no note yet
+        broken = json.dumps({'version': 1, 'lanes': {'unit': {'argv': []}}})
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.require_all(str(self.f.repo), tree, str(self.f.keys), policy, 'org/repo', (broken, self.base_commit))
+        self.assertEqual(caught.exception.reason, 'error')  # a broken lane file is an error, not a reject
+
+    def test_the_cli_takes_the_lane_file_from_the_accepted_base(self):
+        digest = self.definition(self.base_tree)['sha256']
+        commit, tree = self.files({'src/code.rs': 'seven\n'})
+        self.note(commit, tree, digest)
+        keys = self.f.root / 'allowed-signers'
+        args = ('--tree', tree, '--check', 'unit', '--keys', str(keys), '--command', '["make","test"]')
+        code, out, _ = self.f.cli(*args, '--lanes-from', self.base_commit)
+        self.assertEqual((code, json.loads(out)['satisfied']), (0, True), out)
+        code, out, _ = self.f.cli(*args)  # without the flag nothing about the lane is checked (the old behaviour)
+        self.assertEqual(code, 0, out)
+        code, out, _ = self.f.cli(*args[:3], 'absent', *args[4:], '--lanes-from', self.base_commit)
+        self.assertEqual(json.loads(out)['reason'], 'no_lane')
+        code, out, _ = self.f.cli(*args, '--lanes-from', commit.replace(commit[:4], 'ffff', 1))  # not a commit
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'error'))
+        bad = self.files({'.st/required-lanes.json': 'not json'})[0]
+        code, out, _ = self.f.cli(*args, '--lanes-from', bad)
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'error'))
+
+
 class CommittedPolicy(unittest.TestCase):
     """The policy file in this repository, parsed by the same code the gate runs."""
 
@@ -699,10 +1095,70 @@ class CommittedPolicy(unittest.TestCase):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         return evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')
 
+    def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
+        text = (ROOT / '.st/required-lanes.json').read_text()
+        loader = importlib.machinery.SourceFileLoader('st_test_script', str(ROOT / 'scripts/st-test'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        policy = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        for lane, command in module.LOCAL.items():
+            rules = evidence_verify.lane_rules(text, lane)
+            self.assertEqual(rules['argv'], command, lane)  # the lane is what the local producer runs
+            for path in rules['definition_paths']:
+                self.assertTrue((ROOT / path).exists(), path)
+            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/smalltalk')['inputs']
+            if declared is not None:
+                self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
+        self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
+
+    def test_every_absent_path_of_the_committed_lanes_is_refused_when_it_appears_in_a_tree(self):
+        """The mutation control: add one file at each path a lane looks for and does not find; the lane must be refused for that tree."""
+        doc = json.loads((ROOT / '.st/required-lanes.json').read_text())
+        for lane, entry in doc['lanes'].items():
+            f = Fixture()
+            self.addCleanup(f.tmp.cleanup)
+            rules = evidence_verify.lane_rules(json.dumps(doc), lane)
+            for path in rules['definition_paths']:
+                target = f.repo / path / 'file' if (ROOT / path).is_dir() else f.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f'{path}\n')
+            f.git('add', '-A')
+            f.git('commit', '-q', '--allow-empty', '-m', f'base {lane}')
+            base_tree = f.git('rev-parse', 'HEAD^{tree}')
+            self.assertEqual(evidence_verify.lane_definition(str(f.repo), base_tree, base_tree, rules)['changed'], [])
+            for path in rules['absent_paths']:
+                self.assertFalse((ROOT / path).exists(), f'{path} exists in this repository: it cannot be an absent path')
+                target = f.repo / path / 'probe.txt' if path.endswith('node_modules') else f.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('appears\n')
+            if not rules['absent_paths']:
+                continue
+            f.git('add', '-A')  # one commit adds a file at every absent path; each must show up as a change
+            f.git('commit', '-q', '-m', f'add every absent path of {lane}')
+            tree = f.git('rev-parse', 'HEAD^{tree}')
+            changed = evidence_verify.lane_definition(str(f.repo), base_tree, tree, rules)['changed']
+            for path in rules['absent_paths']:
+                self.assertTrue(any(name == path or name.startswith(path + '/') for name in changed), (lane, path))
+
+    def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
+        text = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'isolation-vm': 'off', 'genie-freshness': 'shadow',
+                                 'mail-redelivery-canaries': 'off'})
+        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        for check, mode in modes.items():
+            if mode != 'off':
+                self.assertIn(check, lanes, f'{check} requires a note, so the lane file must define its lane')
+
     def test_declared_inputs_are_exactly_the_reviewed_list_and_all_exist(self):
         # Written out here: changing what a check depends on is a reviewed change to the policy AND to this list.
-        declared = {'typescript-client': sorted([
-            'apps/fractal-web/package.json', 'apps/fractal-web/packages/st3-sdk/package.json', 'apps/ios',
+        declared = {'linux-gate': sorted([
+            '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
+            'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
+            'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/st3-daemon/src/attach_image.rs
+            'slo', 'src', 'templates', 'tests', 'vendor', 'wit']), 'typescript-client': sorted([
+            'apps/fractal-web/package.json', 'apps/fractal-web/packages/st3-sdk/package.json',
+            'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
             'clients/typescript', 'crates/stui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client'])}
@@ -712,6 +1168,28 @@ class CommittedPolicy(unittest.TestCase):
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
+        self.assertEqual(self.rules('linux-gate')['sample_one_in'], 5)
+
+    def test_every_compile_time_include_of_the_rust_sources_is_inside_the_declared_inputs_of_linux_gate(self):
+        # The declared list comes from a textual scan, which cannot see paths built at run time but CAN enumerate the
+        # compile-time ones: include_str!/include_bytes!/include! with a literal path. A source file that includes something
+        # outside the declared inputs would let a change to it keep the old key (a stale pass), so this fails instead.
+        declared = [path.rstrip('/') for path in self.rules('linux-gate')['inputs']]
+        pattern = re.compile(r'include(?:_str|_bytes)?!\(\s*"([^"]+)"')
+        outside = []
+        for source in sorted(ROOT.glob('**/*.rs')):
+            parts = source.relative_to(ROOT).parts
+            if 'target' in parts or '.git' in parts or 'node_modules' in parts:
+                continue
+            for literal in pattern.findall(source.read_text(errors='replace')):
+                target = (source.parent / literal).resolve()
+                try:
+                    relative = target.relative_to(ROOT.resolve()).as_posix()
+                except ValueError:
+                    continue  # outside the repository (OUT_DIR, generated files)
+                if not any(relative == path or relative.startswith(path + '/') for path in declared):
+                    outside.append(f'{source.relative_to(ROOT)} includes {relative}')
+        self.assertEqual(outside, [], 'a compile-time include outside the declared linux-gate inputs: declare it or stop including it')
 
     def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
@@ -982,14 +1460,14 @@ class InputKeyed(unittest.TestCase):
 
     def test_a_newer_failure_with_the_same_key_stops_the_skip_by_itself(self):
         key = self.key(self.tree)
-        self.observed(self.commit, self.tree, key)
+        self.observed(self.commit, self.tree, key, seconds=-600)
         _, second = self.commit_files({'docs/readme.txt': 'edited'})
         self.assertEqual(self.check(second)[0], 0)
-        self.observed(self.f.git('rev-parse', 'HEAD'), second, key, exit_code=1, seconds=60)  # same key, run for real, failed
+        self.observed(self.f.git('rev-parse', 'HEAD'), second, key, exit_code=1, seconds=-300)  # same key, run for real, failed
         _, third = self.commit_files({'docs/readme.txt': 'edited again'})
         code, result = self.check(third)
         self.assertEqual((code, result['reason']), (1, 'check_failed'))
-        self.observed(self.f.git('rev-parse', 'HEAD'), third, key, seconds=120)  # a newer pass lifts it
+        self.observed(self.f.git('rev-parse', 'HEAD'), third, key, seconds=0)  # a clearly newer pass lifts it
         _, fourth = self.commit_files({'docs/readme.txt': 'and again'})
         self.assertEqual(self.check(fourth)[0], 0)
 

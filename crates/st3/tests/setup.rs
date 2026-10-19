@@ -1,6 +1,7 @@
 #![cfg(unix)]
 //! Setup uses only this HOME, state directory and sockets; no host daemon or service.
 
+use st3::MissionsStore;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -138,6 +139,119 @@ fn success(output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+#[cfg(target_os = "linux")]
+fn conflicting_services(fixture: &Fixture) {
+    let units = fixture.path("home/.config/systemd/user");
+    fs::create_dir_all(&units).unwrap();
+    for name in ["st3.service", "fractal.service"] {
+        fs::write(units.join(name), name).unwrap();
+    }
+    let manager = fixture.path("bin/systemctl");
+    fs::write(&manager, r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/manager.log"
+if [ "$2" != show ]; then
+    echo 'unexpected service mutation' >&2
+    exit 9
+fi
+if [ -f "$HOME/.config/systemd/user/$3" ]; then
+    printf 'LoadState=loaded\nActiveState=inactive\nSubState=dead\n'
+else
+    printf 'LoadState=not-found\nActiveState=inactive\nSubState=dead\n'
+fi
+"#).unwrap();
+    fs::set_permissions(manager, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let fixture = Fixture::new();
+    conflicting_services(&fixture);
+    let config = fixture.path("home/.config/st3/config.toml");
+    let work = fixture.path("work-not-created");
+    let original_config = format!(
+        "person = 'person/ada'\nnode = 'studio'\nwork_root = '{}'\n",
+        work.display()
+    );
+    fs::write(&config, &original_config).unwrap();
+    let binaries = fixture.path("home/.local/bin");
+    fs::create_dir_all(&binaries).unwrap();
+    for name in ["st3", "pty"] {
+        fs::write(binaries.join(name), format!("existing {name}")).unwrap();
+    }
+    symlink("st3", binaries.join("st")).unwrap();
+    let output = fixture.cli().args([
+        "setup", "--person", "robin", "--node", "studio", "--yes",
+        "--install", "true", "--service", "true", "--start", "true",
+        "--harness", "none",
+    ]).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("conflicting service units"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("user service is unavailable"));
+    assert!(!fixture.path("home/.local/state/st3/logs/setup-daemon.log").exists());
+    assert!(!fixture.path("run/st3.sock").exists());
+    assert_eq!(fs::read_to_string(&config).unwrap(), original_config);
+    for name in ["st3", "pty"] {
+        assert_eq!(fs::read_to_string(binaries.join(name)).unwrap(), format!("existing {name}"));
+    }
+    assert_eq!(fs::read_link(binaries.join("st")).unwrap(), Path::new("st3"));
+    assert!(!work.exists());
+    let calls = fs::read_to_string(fixture.path("home/manager.log")).unwrap();
+    assert!(calls.lines().all(|line| line.starts_with("--user show ")), "{calls}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let fixture = Fixture::new();
+    conflicting_services(&fixture);
+    let config = fixture.path("home/.config/st3/config.toml");
+    let state = fixture.path("home/.local/state/st3");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(&config, "node = 'studio'\nperson = 'person/ada'\n").unwrap();
+    // Deliberately unreadable membership: conflict refusal must precede even loading it,
+    // and therefore precede fleet_leave, settings saves, endpoint publication or exposure.
+    let membership = st3::config::FleetFile::path(&state);
+    fs::create_dir_all(membership.parent().unwrap()).unwrap();
+    fs::write(&membership, "membership must not be read or replaced").unwrap();
+    let identity = state.join("node-identity.json");
+    fs::write(&identity, "identity must not be resolved or rewritten").unwrap();
+    let config_before = fs::read(&config).unwrap();
+    let state_before = fs::read(&membership).unwrap();
+    let identity_before = fs::read(&identity).unwrap();
+    for args in [
+        vec!["uninstall", "--yes", "--offline", "--erase-local-graph"],
+        vec!["fleet", "mode", "dial-out"],
+        vec!["fleet", "transports", "add", "fabric"],
+        vec!["fleet", "transports", "remove", "fabric"],
+        vec!["fleet", "migrate", "--finish"],
+        vec!["fleet", "migrate", "--unfinish"],
+        vec!["fleet", "migrate", "--anchor"],
+        vec!["fleet", "leave", "--offline", "--force"],
+    ] {
+        let output = fixture.cli().args(&args).output().unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("conflicting service units"), "{args:?}: {stderr}");
+        assert_eq!(fs::read(&config).unwrap(), config_before);
+        assert_eq!(fs::read(&membership).unwrap(), state_before);
+        assert_eq!(fs::read(&identity).unwrap(), identity_before);
+        assert!(!state.join("left-fleet.json").exists());
+        assert!(!state.join("fleet-settings.lock").exists());
+    }
+    let output = fixture.cli().args(["uninstall", "--dry-run", "--no-service"]).output().unwrap();
+    success(&output);
+    let calls = fs::read_to_string(fixture.path("home/manager.log")).unwrap();
+    assert!(calls.lines().all(|line| line.starts_with("--user show ")), "{calls}");
 }
 
 #[cfg(target_os = "linux")]
@@ -649,6 +763,13 @@ fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harnes
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("not installed on the daemon's login PATH"));
     assert!(before.elapsed() < Duration::from_secs(5), "missing harness must fail before waiting for a seat");
+    // Socket readiness is not a roster publication; this fixture explicitly needs one.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(st3_client::Client::unix(fixture.path("run/st3.sock")).agents_list_after(None, None, false, 0))
+        .expect("the fixture must publish its initial roster");
     let agents = fixture.cli().args(["agents", "ls", "--json"]).output().unwrap();
     assert!(!success(&agents).contains("fixture-missing"), "missing binary must not publish a restarting seat");
     let output = fixture
@@ -726,7 +847,7 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
     // I log in" is unticked, and the one action is pressed. Without any agent installed it ends
     // by itself and the interface opens.
     for (prompt, answer) in [
-        ("Smalltalk setup", "\t\u{15}studio\t \t\r"),
+        ("Fractal setup", "\t\u{15}studio\t \t\r"),
         (stui::HOME_IDLE_TEXT, "\u{11}"),
     ] {
         while !String::from_utf8_lossy(&output).contains(prompt) {
@@ -782,6 +903,7 @@ async fn onboarding_api(
         st3::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
     );
     let state = st3::api::AppState {
+        owning_person: None,
         store: store.clone(),
         notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -1126,7 +1248,7 @@ fn the_setup_screen_sets_up_each_agent_on_its_own_and_stores_an_unticked_codex_b
     let (success, output) = play(
         command,
         &[
-            ("Smalltalk setup", "\t\t\t\t\t\t \t\r"),
+            ("Fractal setup", "\t\t\t\t\t\t \t\r"),
             ("Codex is asking you to sign in", ""),
             ("did not finish", "\x1b"),
         ],
@@ -1161,7 +1283,7 @@ fn leaving_the_setup_screen_before_the_button_changes_nothing() {
     fixture.unpack_archive();
     let mut command = portable_pty::CommandBuilder::new(fixture.path("archive/st"));
     command.args(["setup", "--install", "false", "--start", "false", "--service", "false"]);
-    let (success, output) = play(command, &[("Smalltalk setup", "\x1b")], &mut fixture);
+    let (success, output) = play(command, &[("Fractal setup", "\x1b")], &mut fixture);
     assert!(!success, "{output}");
     assert!(output.contains("setup was cancelled; nothing was changed"), "{output}");
     assert!(!fixture.path("home/.config/st3/config.toml").exists());
@@ -1184,7 +1306,7 @@ fn skipping_sets_up_st_and_no_agent() {
     // Name, machine, login box, the Pi row, then the two buttons: Tab to Skip for now.
     let (success, output) = play(
         command,
-        &[("Smalltalk setup", "\t\t\t\t\t\r"), ("st is set up", "\r")],
+        &[("Fractal setup", "\t\t\t\t\t\r"), ("st is set up", "\r")],
         &mut fixture,
     );
     assert!(success, "{output}");

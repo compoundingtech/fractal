@@ -32,29 +32,47 @@ vi.mock('@stylexjs/stylex', async () => {
     props: (...styles: readonly Applied[]) => ({ className: classNames(styles).join(' ') }),
   }
 })
+// Folder transport is not under test: live-mode trees read the fixture folder document. fixture.ts imports
+// client.ts, so the factory must not import it (that waits on this factory); the export reads a hoisted holder.
+const liveFolders = vi.hoisted(() => ({ atom: undefined as unknown }))
+vi.mock('../folders/client.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof FolderClient>()),
+  get folders() {
+    return liveFolders.atom
+  },
+}))
 
 import { fixtureSource } from '../data/fixtureSource.ts'
+import { fleetFromAgents } from '../data/projections.ts'
 import { DataSourceProvider, useSubjectList } from '../data/react.tsx'
+import type { DataSource } from '../data/source.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import type { ArrangementRefusal, SidebarOperation } from '../folders/edit.ts'
+import type * as FolderClient from '../folders/client.ts'
 import type { FolderState } from '../folders/client.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
 import { SubjectAddress } from '../resources/contract.ts'
+import { persistedAtom } from '../state/persistence.ts'
 import { dailyDriver } from './fixtures/layouts.ts'
-import { defaultFilters, fixtureSidebarState } from './sidebar/state.ts'
+import { machineMemory } from './sidebar/show.ts'
+import { defaultFilters, fixtureSidebarState, sidebarState, type SidebarFilters } from './sidebar/state.ts'
 import { createWindow, projectWorkspaces, reduceWindow, type WindowAction } from './workspaces.ts'
 import { AgentFolders, ArrangementEditFeedback } from './AgentFolders.tsx'
 import { WorkbenchContextProvider } from './context.tsx'
+
+liveFolders.atom = fixtureFolders
 
 const viewport = { width: 340, height: 800 }
 const viewportSize: ResizeObserverSize = { inlineSize: viewport.width, blockSize: viewport.height }
 
 class StubResizeObserver implements ResizeObserver {
   private readonly callback: ResizeObserverCallback
+  private readonly targets = new Set<Element>()
   constructor(callback: ResizeObserverCallback) {
     this.callback = callback
   }
   observe(target: Element): void {
+    this.targets.add(target)
     const entry: ResizeObserverEntry = {
       target,
       contentRect: DOMRect.fromRect(viewport),
@@ -62,22 +80,27 @@ class StubResizeObserver implements ResizeObserver {
       contentBoxSize: [viewportSize],
       devicePixelContentBoxSize: [viewportSize],
     }
-    this.callback([entry], this)
+    // Browser observers deliver after layout, never synchronously inside React's commit.
+    queueMicrotask(() => {
+      if (this.targets.has(target)) this.callback([entry], this)
+    })
   }
-  unobserve(): void {}
-  disconnect(): void {}
+  unobserve(target: Element): void { this.targets.delete(target) }
+  disconnect(): void { this.targets.clear() }
 }
 globalThis.ResizeObserver = StubResizeObserver
 Element.prototype.getBoundingClientRect = function (): DOMRect {
   return DOMRect.fromRect(viewport)
 }
 
+const placedName = fixtureProjections.agents[0]!.name!
+const folderName = `Product ${placedName}`
 const folderOps = (refs: readonly string[]): readonly SidebarOperation[] => [
-  { op: 'folder.create', id: 'product', name: 'Product', parent: null, key: 'V' },
+  { op: 'folder.create', id: 'product', name: folderName, parent: null, key: 'V' },
   { op: 'subject.place', subject: refs[0]!, folder: 'product', key: 'W' },
 ]
 
-const FolderTree = ({ query }: { readonly query: string }) => {
+const FolderTree = () => {
   const subjects = useSubjectList()
   const [windowAtom] = React.useState(() =>
     Atom.make(createWindow({ seed: dailyDriver, subjects, attention: [] })),
@@ -114,26 +137,35 @@ const FolderTree = ({ query }: { readonly query: string }) => {
   )
 }
 
-const mountTree = ({ query }: { readonly query: string }) => {
+const mountTree = ({
+  query = '',
+  collapsed = [],
+  source = fixtureSource({ world: fixtureProjections }),
+  filters = { ...defaultFilters, query },
+}: {
+  readonly query?: string
+  readonly collapsed?: readonly string[]
+  readonly source?: DataSource
+  readonly filters?: SidebarFilters
+}) => {
   const registry = AtomRegistry.make()
-  const source = fixtureSource({ world: fixtureProjections })
   registry.get(fixtureFolders).edit(folderOps(fixtureProjections.agents.map((a) => a.id)))
-  registry.set(fixtureSidebarState(source.gateway ?? source.mode).filters, {
-    ...defaultFilters,
-    query,
-  })
+  const state = (source.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(source.gateway ?? source.mode)
+  registry.set(state.filters, filters)
+  registry.set(state.collapsed, collapsed)
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
   flushSync(() => {
     root.render(
       <DataSourceProvider source={source} registry={registry}>
-        <FolderTree query={query} />
+        <FolderTree />
       </DataSourceProvider>,
     )
   })
   return {
     container,
+    filters: () => registry.get(state.filters),
     unmount: () => {
       flushSync(() => root.unmount())
       container.remove()
@@ -143,12 +175,14 @@ const mountTree = ({ query }: { readonly query: string }) => {
 
 describe('AgentFolders row styling', () => {
   it('applies the folder row, search highlight and notice styles', async () => {
-    const tree = mountTree({ query: 'product' })
+    // Free text matches agent identities; ancestors of matching members remain visible.
+    // Include that identity in the folder label to exercise both highlight surfaces.
+    const tree = mountTree({ query: placedName })
     try {
       await vi.waitFor(() =>
         expect(tree.container.querySelectorAll('[role="row"]').length).toBeGreaterThan(0),
       )
-      const folderRow = tree.container.querySelector('[role="row"][aria-label="Product"]')
+      const folderRow = tree.container.querySelector(`[role="row"][aria-label="${folderName}"]`)
       expect(folderRow).not.toBeNull()
       expect(folderRow!.querySelector('[class~="stylex:folder"]')).not.toBeNull()
       const marks = [...tree.container.querySelectorAll('mark')]
@@ -158,6 +192,19 @@ describe('AgentFolders row styling', () => {
       const notice = tree.container.querySelector('[role="status"]')
       expect(notice).not.toBeNull()
       expect(notice!.classList.contains('stylex:notice')).toBe(true)
+    } finally {
+      tree.unmount()
+    }
+  })
+
+  it('reveals a saved-collapsed folder for a facet-only search without highlighting facet text', async () => {
+    const placed = fleetFromAgents(fixtureProjections.agents).agents[0]!
+    const tree = mountTree({ query: `state:${placed.state}`, collapsed: ['product'] })
+    try {
+      await vi.waitFor(() =>
+        expect(tree.container.querySelector(`[role="row"] [data-wf-agent-ref="${placed.ref}"]`)).not.toBeNull(),
+      )
+      expect(tree.container.querySelectorAll('mark')).toHaveLength(0)
     } finally {
       tree.unmount()
     }
@@ -176,6 +223,64 @@ describe('AgentFolders row styling', () => {
       expect(tree.container.querySelector('[role="status"]')?.classList.contains('stylex:notice')).toBe(true)
     } finally {
       tree.unmount()
+    }
+  })
+})
+
+describe('AgentFolders remembered machines', () => {
+  const agentRefs = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>('[data-wf-agent-ref]')].map((row) => row.dataset.wfAgentRef!)
+  // A new live gateway whose own settings differ from the defaults.
+  const live = (gateway: string) => ({ ...fixtureSource({ world: fixtureProjections }), mode: 'live' as const, gateway })
+  const settings: SidebarFilters = { ...defaultFilters, query: '', hideRetired: true, sort: 'name' }
+  // The live workspace's write path: the shared browser persistence document.
+  const remember = (machines: readonly (readonly string[])[] | null) => {
+    const registry = AtomRegistry.make()
+    registry.set(persistedAtom(machineMemory), machines)
+    registry.dispose()
+  }
+
+  it('seeds a new gateway from the remembered machine and keeps its other settings', async () => {
+    remember([['build-host-b']])
+    const tree = mountTree({ source: live('restore.gateway.invalid'), filters: settings })
+    try {
+      expect(tree.filters()).toEqual({ ...settings, query: 'machine:build-host-b' })
+      await vi.waitFor(() => expect(agentRefs(tree.container).length).toBeGreaterThan(0))
+      expect(agentRefs(tree.container).every((ref) => ref.startsWith('agent/build-host-b/'))).toBe(true)
+      const trigger = [...tree.container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('Show'))
+      expect(trigger?.textContent).toContain(', 1 active')
+    } finally {
+      tree.unmount()
+      remember(null)
+    }
+  })
+
+  it('restores nothing from corrupt memory another tab wrote', async () => {
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'wf.ui@1',
+      newValue: JSON.stringify({
+        version: 1,
+        entries: { [machineMemory.key]: { version: 2, value: [['BUILD HOST B']], clock: Date.now() + 60_000, writer: 'other-tab' } },
+      }),
+    }))
+    const tree = mountTree({ source: live('corrupt.gateway.invalid'), filters: settings })
+    try {
+      expect(tree.filters()).toEqual(settings)
+      await vi.waitFor(() => expect(agentRefs(tree.container).some((ref) => ref.startsWith('agent/build-host-a/'))).toBe(true))
+    } finally {
+      tree.unmount()
+      remember(null)
+    }
+  })
+
+  it('drops a gateway’s stale machine token when machines were cleared in this browser', async () => {
+    remember([])
+    const tree = mountTree({ source: live('cleared.gateway.invalid'), filters: { ...settings, query: 'is:asking machine:build-host-b' } })
+    try {
+      expect(tree.filters()).toEqual({ ...settings, query: 'is:asking' })
+    } finally {
+      tree.unmount()
+      remember(null)
     }
   })
 })
