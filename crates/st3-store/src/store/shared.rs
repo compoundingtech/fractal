@@ -220,8 +220,14 @@ impl Store {
                     params![batch.id, batch.origin, batch.replica_sequence, batch.previous_hash, batch.hash, batch.accepted_at_unix_ms.to_string()],
                 )
                 .map_err(internal)?;
-            for claim in &batch.claims {
+            for (position, claim) in batch.claims.iter().enumerate() {
                 ensure_claim_blobs(&transaction, claim)?;
+                smallclaims::store::canonical::record_position_tx(
+                    &transaction,
+                    &claim.id,
+                    position as u64,
+                )
+                .map_err(internal)?;
                 let inserted = transaction
                     .prepare_cached(
                         /* sqlite-large-value: allow-for-now lv-h5ee472647443 owner=st3_store::store::shared TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)

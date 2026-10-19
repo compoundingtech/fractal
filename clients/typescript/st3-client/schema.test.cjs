@@ -4,6 +4,67 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('every wire version receiver accepts exactly the deployed and fractal names', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const contract = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
+    let receivers = 0;
+    for (const [name, definition] of Object.entries(contract.$defs)) {
+        for (const [field, specification] of Object.entries(definition.properties ?? {})) {
+            if (!specification.enum?.some(value => typeof value === 'string' && value.startsWith('st3.'))) continue;
+            receivers++;
+            const [oldName, newName] = specification.enum;
+            assert.deepEqual(specification.enum, [oldName, oldName.replace(/^st3\./, 'fractal.')]);
+            const receiver = Rich[name].fields[field];
+            for (const mode of ['strict', 'tolerant']) {
+                const decode = Rich.decodeUnknownSync(receiver, mode);
+                for (const value of [oldName, newName]) {
+                    assert.equal(Schema.encodeSync(receiver)(decode(value)), value, `${name}.${field}`);
+                }
+                for (const value of [oldName.replace(/^st3\./, 'smalltalk.'), `${newName}.unknown`,
+                    `${oldName},${newName}`, [oldName, newName]]) {
+                    assert.throws(() => decode(value), `${name}.${field} must reject ${JSON.stringify(value)}`);
+                }
+            }
+        }
+    }
+    assert.equal(receivers, 13);
+    assert.equal(Rich.API_VERSION, 'st3.client.v0');
+    assert.equal(contract['x-st-integers'], 'json-safe');
+    assert.equal(contract['x-fractal-integers'], undefined);
+});
+
+test('assistant senders decode timeline messages without becoming recipients or actors', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        id: 'timeline-entry/assistant-message', sequence: 1, revision: 1,
+        timestamp: '2026-10-17T10:00:00Z', role: 'user', type: 'message', final: true,
+        body: {
+            message_id: 'message/assistant', from: 'assistant/chatgpt', to: 'agent/example',
+            sender_class: 'external-assistant', assistant_grant_id: 'assistant-grant/example',
+        },
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const decode = Rich.decodeUnknownSync(Rich.TimelineEntry, mode);
+        const decoded = decode(wire);
+        const encoded = Schema.encodeSync(Rich.TimelineEntry)(decoded);
+        assert.equal(encoded.body.from, 'assistant/chatgpt');
+        assert.equal(encoded.body.to, 'agent/example');
+        assert.equal(encoded.body.sender_class, 'external-assistant');
+        assert.equal(encoded.body.assistant_grant_id, 'assistant-grant/example');
+        for (const from of ['agent/example', 'person/example', 'step/example']) {
+            assert.equal(Schema.encodeSync(Rich.TimelineEntry)(decode({
+                ...wire, body: { ...wire.body, from },
+            })).body.from, from);
+        }
+        for (const from of ['assistant/', 'assistant/with space', 'daemon/example']) {
+            assert.throws(() => decode({ ...wire, body: { ...wire.body, from } }));
+        }
+        assert.throws(() => decode({ ...wire, body: { ...wire.body, to: 'assistant/chatgpt' } }));
+        assert.throws(() => Rich.decodeUnknownSync(Rich.ParticipantRef, mode)('assistant/chatgpt'));
+        assert.throws(() => Rich.decodeUnknownSync(Rich.ActorRef, mode)('assistant/chatgpt'));
+    }
+});
+
 test('both usage aggregation literals keep agent rows through the generated schema', async () => {
     const [{ Schema }, Rich] = await modules;
     const contract = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');

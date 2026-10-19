@@ -29,7 +29,7 @@ pub(super) fn receive_headers(headers: &mut HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(super) fn api_version(version: &str) -> bool {
+pub fn api_version(version: &str) -> bool {
     matches!(version, "st3.client.v0" | "fractal.client.v0")
 }
 
@@ -39,20 +39,20 @@ pub(super) fn protocol_matches(value: &str, old: &str) -> bool {
     })
 }
 
-pub(super) fn selected_protocol<'a>(protocols: &[&'a str], old: &str) -> Option<&'a str> {
+pub fn selected_protocol<'a>(protocols: &[&'a str], old: &str) -> Option<&'a str> {
     match protocols {
         [protocol] if protocol_matches(protocol, old) => Some(protocol),
         _ => None,
     }
 }
 
-pub(super) fn capability(protocol: &str) -> Option<&str> {
+pub fn capability(protocol: &str) -> Option<&str> {
     protocol.strip_prefix("st3.cap.")
         .or_else(|| protocol.strip_prefix("fractal.cap."))
         .filter(|value| !value.is_empty())
 }
 
-pub(super) fn terminal_protocol<'a>(
+pub fn terminal_protocol<'a>(
     protocols: &[&'a str], old: &str, allow_direct: bool,
 ) -> Option<(&'a str, Option<&'a str>)> {
     match protocols {
