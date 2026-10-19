@@ -7,14 +7,12 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/f8388fe7a8617d973e720e29107e68ac5ea95987";
+    pty.url = "github:compoundingtech/pty/4f703c7d7f9cbff5d713b1234d1db98223881bca";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.
     effect-utils.url =
       "github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b";
-    # The messaging fixture must not invoke Nix or fetch a historical build in the sandbox.
-    messaging-baseline.url = "github:compoundingtech/smalltalk/678103d3e8ae873a158bb2cb951d3ffefdf698c4";
   };
 
   outputs =
@@ -25,7 +23,6 @@
       fenix,
       pty,
       effect-utils,
-      messaging-baseline,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -149,14 +146,10 @@
           assert bindings.libghostty-vt-sys.version == "=${pty.lib.libghosttyContract.rustBindingsVersion}";
           pty.packages.${system}.libghostty-vt;
 
-        messagingBaseline =
-          assert messaging-baseline.rev == (builtins.fromJSON (builtins.readFile ./.github/messaging-compat-baseline.json)).commit;
-          messaging-baseline.packages.${system}.st3.overrideAttrs (_: {
-          doCheck = false;
-          nativeCheckInputs = [ ];
-          postInstall = "";
-          cargoBuildFlags = [ "-p" "st3" ];
-        });
+        messagingBaseline = import ./nix/compat-baseline.nix {
+          inherit pkgs;
+          baseline = builtins.fromJSON (builtins.readFile ./.github/messaging-compat-baseline.json);
+        };
 
         # Give the historical binary a distinct name in the check-only PATH.
         # Resolving it there keeps its store identity out of the runtime derivation.
@@ -239,6 +232,7 @@
           "st3-daemon"
           "--exclude"
           "st3-e2e"
+          "--exclude"
           "st3-kernel"
           "--exclude"
           "st3-telemetry"
@@ -254,6 +248,14 @@
           "st3-github-base"
           "--exclude"
           "st3-store"
+          "--exclude"
+          "st3-delivery"
+          "--exclude"
+          "st3-missions"
+          "--exclude"
+          "st3-seats"
+          "--exclude"
+          "st3-attention"
           "--exclude"
           "st3-evidence"
           "--exclude"
@@ -465,6 +467,7 @@
             "st3-daemon"
             "-p"
             "st3-e2e"
+            "-p"
             "st3-kernel"
             "-p"
             "st3-telemetry"
@@ -480,6 +483,14 @@
             "st3-github-base"
             "-p"
             "st3-store"
+            "-p"
+            "st3-delivery"
+            "-p"
+            "st3-missions"
+            "-p"
+            "st3-seats"
+            "-p"
+            "st3-attention"
             "-p"
             "st3-evidence"
             "-p"
@@ -964,10 +975,16 @@
         checks.st3-runtime-inputs =
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;
-            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils messaging-baseline; };
+            baseline = messagingCompat;
+            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
           pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
+        checks.st3-check-input-isolation =
+          assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
+          # Native check inputs must not contribute to the installed package identity.
+          assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
+          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
@@ -1289,6 +1306,7 @@
             pkgs.git
             pkgs.gnutar
             pkgs.jq
+            pkgs.nodejs
             pkgs.openssh
             pkgs.python3
             pkgs.zstd
@@ -1460,7 +1478,7 @@
         };
         # Configuration generation must not realize the Rust/PTY/collector shell.
         devShells.genie = pkgs.mkShell {
-          packages = [ effect-utils.packages.${system}.genie ];
+          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
           shellHook = ''
             mkdir -p repos
             ln -sfn ${effect-utils} repos/effect-utils

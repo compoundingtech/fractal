@@ -1,3 +1,23 @@
+use crate::AttentionListStore;
+use crate::AttentionStore;
+use crate::SummaryListStore;
+use crate::ConversationReadsStore;
+use crate::CustomStore;
+use crate::GlassesStore;
+use crate::ArrangementsStore;
+use crate::DeclarationsStore;
+use crate::LanesStore;
+use crate::MissionListStore;
+use crate::MissionsStore;
+use crate::PersonWorkStore;
+use crate::WorkListStore;
+use crate::AccountsStore;
+use crate::EvidenceSeatsStore;
+use crate::RetirementsStore;
+use crate::RosterAdmissionStore;
+use crate::SeatStatusStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
 use crate::EvidenceStore;
 use crate::PublishedViewsStore;
 use super::*;
@@ -3401,6 +3421,24 @@ pub fn mission_list_cards_with(
     }).collect()
 }
 
+/// Assistant mission metadata keeps the native card's mission-level semantics,
+/// but selects its relevant run independently of the bounded history preview.
+/// Every step contributes scalar counts and agent IDs, even beyond step twenty.
+pub fn assistant_mission_list_cards_with(
+    store: &Store,
+    ids: &[String],
+    at_unix_ms: u128,
+) -> anyhow::Result<Vec<Value>> {
+    let mut cards = mission_list_cards_with(store, ids, at_unix_ms, &BTreeSet::new())?;
+    for (id, card) in ids.iter().zip(&mut cards) {
+        card["run_details"] = json!(
+            store.assistant_mission_run_metadata_at(id, at_unix_ms)?
+                .into_iter().collect::<Vec<_>>()
+        );
+    }
+    Ok(cards)
+}
+
 pub fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
     // Reserve room for the envelope, continuation cursor and fleet sync notice.
     let budget = CLIENT_MAX_RESPONSE_BYTES.saturating_sub(128_000);
@@ -5755,14 +5793,15 @@ pub fn message_provenance(state: &AppState, claim: &ClaimRecord) -> Option<Value
     {
         return None;
     }
-    let verdict = state.store.claim_verdict(&claim.id).ok()?;
-    let mut provenance = json!({"verdict": verdict.name()});
+    let authorization = state.store.claim_authorization(&claim.id).ok()?;
+    let verdict = authorization.verdict;
+    let mut provenance = json!({"verdict": verdict.name(), "authorization_model": authorization.model});
     if let smallclaims::principal::Verdict::Held(reason)
     | smallclaims::principal::Verdict::Invalid(reason) = &verdict
     {
         provenance["reason"] = json!(reason);
     }
-    if let Some(signature) = state.store.claim_signature(&claim.id).ok().flatten() {
+    if let Some(signature) = authorization.signature {
         provenance["signer"] = json!(signature.signer);
         provenance["key"] = json!(signature.key);
         let label = signature
@@ -8805,6 +8844,25 @@ pub struct PairingComplete {
     key_storage: Option<String>,
 }
 
+/// Proof bytes and their authorization model come from one pinned snapshot. The model
+/// label does not make legacy proofs evidence for the corrected candidate semantics.
+fn signature_grant_proofs(state: &AppState, ids: &[String]) -> Result<Option<Vec<Value>>, ApiError> {
+    state.store.read_snapshot(|_| {
+        let mut proofs=Vec::new();
+        for id in ids {
+            let Some(grant)=state.store.claim_by_id(id)? else { return Ok(None); };
+            let authorization=state.store.claim_authorization(id)?;
+            let Some(signature)=authorization.signature else { return Ok(None); };
+            proofs.push(json!({
+                "id":grant.id,"batch_id":grant.batch_id,"subject":grant.subject,"kind":grant.kind,
+                "origin":grant.origin,"actor":grant.actor,"body":grant.body,"predecessors":grant.predecessors,
+                "signature":signature,"authorization_model":authorization.model,
+            }));
+        }
+        Ok(Some(proofs))
+    }).map_err(ApiError::internal)
+}
+
 fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, ApiError> {
     let Some((_, id)) = state
         .store
@@ -8822,21 +8880,8 @@ fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, A
             "the member cannot produce a verifiable person-root grant; the pairing code was not consumed. Inspect the member's signing history",
         )
     };
-    let grant = state
-        .store
-        .claim_by_id(&id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(cannot_prove)?;
-    let signature = state
-        .store
-        .claim_signature(&id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(cannot_prove)?;
-    let proof = json!({
-        "id": grant.id, "batch_id": grant.batch_id, "subject": grant.subject,
-        "kind": grant.kind, "origin": grant.origin, "actor": grant.actor,
-        "body": grant.body, "predecessors": grant.predecessors, "signature": signature,
-    });
+    let proof=signature_grant_proofs(state, &[id])?.ok_or_else(cannot_prove)?
+        .into_iter().next().ok_or_else(cannot_prove)?;
     st3_client::device::verify_person_root_key_proof(person, &proof, None)
         .map_err(|_| cannot_prove())?;
     Ok(Some(proof))
@@ -9018,24 +9063,7 @@ pub async fn pairing_complete(
                     "the member cannot produce verifiable enrollment grants; the pairing code was not consumed. Inspect the member's signing history",
                 )
             };
-            let mut proofs = Vec::new();
-            for id in &chain {
-                let grant = state
-                    .store
-                    .claim_by_id(id)
-                    .map_err(ApiError::internal)?
-                    .ok_or_else(cannot_prove)?;
-                let signature = state
-                    .store
-                    .claim_signature(id)
-                    .map_err(ApiError::internal)?
-                    .ok_or_else(cannot_prove)?;
-                proofs.push(json!({
-                    "id": grant.id, "batch_id": grant.batch_id, "subject": grant.subject,
-                    "kind": grant.kind, "origin": grant.origin, "actor": grant.actor,
-                    "body": grant.body, "predecessors": grant.predecessors, "signature": signature,
-                }));
-            }
+            let proofs=signature_grant_proofs(&state, &chain)?.ok_or_else(cannot_prove)?;
             st3_client::device::verify_device_key_proofs(&person_id, &chain, &proofs, key)
                 .map_err(|_| cannot_prove())?;
             Some((chain, proofs))
@@ -15874,6 +15902,112 @@ mission "differential" state="ready" {
     }
 
     #[test]
+    fn signature_state_faults_are_visible_in_doctor_and_fault_snapshot() {
+        use smallclaims::{
+            fleet::MemberKey,
+            principal::{ClaimSignature, content_digest},
+            store::{append_claim_record_tx, principals::store_claim_signature_tx},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let key = Arc::new(MemberKey::generate().unwrap().0);
+        state.store.set_node_key(key.clone()).unwrap();
+        let claim = {
+            let mut connection = state.store.connection.write();
+            let tx = connection.transaction().unwrap();
+            let claim = append_claim_record_tx(
+                &tx,
+                &state.store.origin,
+                "note/signature-state",
+                "example.note",
+                None,
+                &json!({"fields":{"text":"Diagnostic fault visibility"}}),
+                &[],
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            claim
+        };
+        state.store.replication_snapshot().unwrap();
+        let genuine = state.store.claim_signature(&claim.id).unwrap().unwrap();
+        let content = content_digest(
+            &claim.subject,
+            &claim.kind,
+            claim.actor.as_deref(),
+            &claim.body,
+        );
+        {
+            let mut connection = state.store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for _ in 1..65 {
+                let signature = ClaimSignature::sign(
+                    &key,
+                    &content,
+                    &genuine.signer,
+                    None,
+                    vec![],
+                    genuine.signed_at_unix_ms,
+                );
+                store_claim_signature_tx(&tx, &claim.id, &signature).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        state.store.judge_claims(true).unwrap();
+        let codes = || {
+            doctor_report(&state)
+                .unwrap()
+                .0
+                .checks
+                .into_iter()
+                .map(|check| check.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(codes().contains(&"signature-candidate-count".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-candidate-count"
+                    && fault.item.detail.contains(&state.store.origin))
+        );
+        state
+            .store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claim_signature_migration SET phase='envelopes',cursor=0 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(codes().contains(&"signature-migration-incomplete".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-migration-incomplete")
+        );
+        state
+            .store
+            .fail_signature_migration("fixture corrupt local payload")
+            .unwrap();
+        assert!(codes().contains(&"signature-state-corrupt".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-state-corrupt")
+        );
+        assert!(state.store.claim_by_id(&claim.id).unwrap().is_some());
+    }
+
+    #[test]
     fn a_timeline_message_entry_lists_the_attachments_its_claim_carries() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16093,6 +16227,7 @@ mission "differential" state="ready" {
 
     #[tokio::test]
     async fn fleet_operational_commands_are_bounded_and_report_slow_queries() {
+        use crate::OperationsFixtureStore;
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.seed_operational_fleet();
@@ -18581,6 +18716,58 @@ mission "example/looped" state="ready" {
             bounded["truncated"],
             json!({"unstarted_missions": {"shown": 2, "total": 3}})
         );
+    }
+
+    #[test]
+    fn assistant_mission_cards_keep_older_live_run_and_all_step_scalars() {
+        for status in ["running", "standing"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "live-run-node");
+            let steps = (0..24).map(|i| format!(
+                "  step \"step-{i:02}\" {{ assigned-to \"agent/worker-{i:02}\" }}\n"
+            )).collect::<String>();
+            let source = format!(
+                "version 2\nmission \"example/live\" state=\"ready\" {{\n  goal \"Keep live metadata.\"\n  concurrent-runs max=10\n{steps}}}"
+            );
+            let intent = crate::graph::parse_intent(&source, "live-run-node").unwrap();
+            let preview = state.store.mission(&intent, crate::model::IntentInput {
+                kdl: source.clone(), source_name: None,
+            }).unwrap();
+            state.store.apply_as(&intent, &preview.subject_tokens, "publish-live", Some("person/operator")).unwrap();
+            let mut live = None;
+            for i in 0..4 {
+                let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
+                    mission: "example/live".into(), revision: None,
+                    workspace: root.path().display().to_string(),
+                    requester: Some("person/operator".into()), mode: None,
+                    inputs: BTreeMap::new(), idempotency_key: format!("live-{i}"),
+                }).unwrap();
+                if i == 0 {
+                    state.store.set_mission_run_state(&run.id, status, status, None).unwrap();
+                    for step in &run.steps {
+                        state.store.set_step_state(&step.subject,
+                            if step.step == "step-23" { "blocked" } else { "completed" }, None).unwrap();
+                    }
+                    live = Some(run.subject);
+                } else {
+                    state.store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+                }
+            }
+            let ids = ["mission/example/live".to_owned()];
+            let native = mission_list_cards_with(&state.store, &ids, client_now_ms(), &BTreeSet::new()).unwrap();
+            assert_eq!(native[0]["run_details"].as_array().unwrap().len(), 3);
+            assert!(native[0]["run_details"].as_array().unwrap().iter().all(|run| run["status"] == "completed"));
+            let cards = assistant_mission_list_cards_with(&state.store, &ids, client_now_ms()).unwrap();
+            assert_eq!(cards.len(), 1);
+            let run = &cards[0]["run_details"][0];
+            assert_eq!(run["id"], json!(live.unwrap()));
+            assert_eq!(run["status"], status);
+            assert_eq!(run["progress"], json!({"total": 24, "done": 23}));
+            let steps = run["steps"].as_array().unwrap();
+            assert_eq!(steps.iter().filter(|step| step["state"] == "blocked").count(), 1);
+            assert!(steps.iter().any(|step| step["assignee"] == "agent/live-run-node.worker-23"));
+            assert!(assistant_mission_list_cards_with(&state.store, &[], client_now_ms()).unwrap().is_empty());
+        }
     }
 
     /// Historical steps stay lightweight; detail enriches only open runs and the latest finish.

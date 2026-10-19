@@ -1,7 +1,8 @@
 //! The part of `store::evidence` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::SeatsStore;
 use super::*;
-pub use st3_store::store::evidence::*;
+pub use st3_attention::store::evidence::*;
 
 /// A roster head: its cut, every agent's refs, the first cards in order, and when published.
 pub type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);

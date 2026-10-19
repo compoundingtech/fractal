@@ -35,6 +35,8 @@
 //!   `agents-v1`, holds the agents roster only. A report compares only with main's reports of
 //!   its own profile.
 
+use st3::MissionsStore;
+use st3::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};

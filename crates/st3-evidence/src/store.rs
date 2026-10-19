@@ -76,20 +76,20 @@ pub use smallclaims::store::{
     configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
     newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
 };
-pub use st3_store::store::runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
-pub use st3_store::store::roster_admission::AdmissionGuard;
-pub use st3_store::store::attention_snapshot::{
+pub use st3_attention::store::runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
+pub use st3_attention::store::roster_admission::AdmissionGuard;
+pub use st3_attention::store::attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
-pub use st3_store::store::mission_eligibility::MISSING_AGENT_CONDITION;
-pub use st3_store::store::database_size::DatabaseSize;
-pub use st3_store::store::person_work::AskImages;
-pub use st3_store::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
-pub use st3_store::store::limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
-pub use st3_store::store::limits::ACCOUNT_READING_WINDOW_MS;
-pub use st3_store::store::subagents::{
+pub use st3_attention::store::mission_eligibility::MISSING_AGENT_CONDITION;
+pub use st3_attention::store::database_size::DatabaseSize;
+pub use st3_attention::store::person_work::AskImages;
+pub use st3_attention::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
+pub use st3_attention::store::limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
+pub use st3_attention::store::limits::ACCOUNT_READING_WINDOW_MS;
+pub use st3_attention::store::subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
 pub use runtime::SmalltalkRuntime;
@@ -100,19 +100,19 @@ use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
 pub use st3_kernel::model::local_observation_position;
 pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
-pub use st3_store::store::*;
-pub use st3_store::store::{AgentResourcesChange, AgentResourcesDelta, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, DesiredRow, DiscoveredItem, GATE_BROKEN_CONDITION, HumanAttention};
-pub use st3_store::store::{IdempotencyConflict, MAX_STEP_WAIT_MS, MailboxWatermark, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUN_REPORT_KIND, StepLabel, StepTiming, Store, SubjectCache, USAGE_RESPONSE_HORIZON_MS};
-pub use st3_store::store::{UsageFold, UsageFolds, ViewEntry, WORK_NUDGED_KIND, accounts, adhoc_work, agent_messages, agent_queue_values, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx};
-pub use st3_store::store::{append_claim_with_commit_context, arrangements, assistant_write, attention, attention_snapshot, backup, backup_format, card_fold, check_mailbox_fence, checkpoint, checkpoint_rules, checkpoint_status};
-pub use st3_store::store::{claim_append_error, claim_log_order, client_summary, conversation_reads, coordination, custom, database_size, declarations, delegation, delivery, desired_from_row, directive_notes};
-pub use st3_store::store::{end_watch_tx, fold_step_clock, fold_step_timing, format_wait_span, generation_id_from_subject, git_change_tables, github_post_agent_tx, github_workflow_failures, glass_heads, glasses, harness_questions, idle_mail};
-pub use st3_store::store::{lanes, limits, loop_run_views_tx, mailbox_changes, mailbox_lease, mailbox_wakes, message_bodies, message_subscriptions, migrate_local_usage_seen, mission_eligibility, mission_ivm, mission_list};
-pub use st3_store::store::{mission_provenance, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, missions, normalize_message_party, observer_actuals, observer_subscription_detail, operation_audit, operations, owner_lists, person_work};
-pub use st3_store::store::{projection_digest, projection_divergence, projectors, published_list, recently_ended_since, reconcile_work_context, replay_graph_from_nothing_tx, resource_preparation, resources, retirements, revision_seats, rollouts};
-pub use st3_store::store::{roster_admission, run_report_fields, runtime_list, runtime_starts, seat_queue_joins_query, seat_queue_moves_query, seat_status, seats, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_run_from_row};
-pub use st3_store::store::{step_timeout_episode, step_timeout_extension_at, step_timing_lease_at, stop_deferral, subagents, subscription_started_run_tx, summary_list, trace_principal, unread_mail, usage_period, validate_claim_input, watch_ended_tx};
-pub use st3_store::store::{work_list, work_summaries_ivm};
+pub use st3_attention::store::*;
+pub use st3_attention::store::{AgentResourcesChange, AgentResourcesDelta, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, DesiredRow, DiscoveredItem, GATE_BROKEN_CONDITION, HumanAttention};
+pub use st3_attention::store::{IdempotencyConflict, MAX_STEP_WAIT_MS, MailboxWatermark, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, RUN_REPORT_KIND, StepLabel, StepTiming, Store, SubjectCache, USAGE_RESPONSE_HORIZON_MS};
+pub use st3_attention::store::{UsageFold, UsageFolds, ViewEntry, WORK_NUDGED_KIND, accounts, adhoc_work, agent_messages, agent_queue_values, agent_view, analyze_mission_revision, append_claim_fenced_outcome, append_claim_tx};
+pub use st3_attention::store::{append_claim_with_commit_context, arrangements, assistant_write, attention, attention_snapshot, backup, backup_format, card_fold, check_mailbox_fence, checkpoint, checkpoint_rules, checkpoint_status};
+pub use st3_attention::store::{claim_append_error, claim_log_order, client_summary, conversation_reads, coordination, custom, database_size, declarations, delegation, delivery, desired_from_row, directive_notes};
+pub use st3_attention::store::{end_watch_tx, fold_step_clock, fold_step_timing, format_wait_span, generation_id_from_subject, git_change_tables, github_post_agent_tx, github_workflow_failures, glass_heads, glasses, harness_questions, idle_mail};
+pub use st3_attention::store::{lanes, limits, loop_run_views_tx, mailbox_changes, mailbox_lease, mailbox_wakes, message_bodies, message_subscriptions, migrate_local_usage_seen, mission_eligibility, mission_ivm, mission_list};
+pub use st3_attention::store::{mission_provenance, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, missions, normalize_message_party, observer_actuals, observer_subscription_detail, operation_audit, operations, owner_lists, person_work};
+pub use st3_attention::store::{projection_digest, projection_divergence, projectors, published_list, recently_ended_since, reconcile_work_context, replay_graph_from_nothing_tx, resource_preparation, resources, retirements, revision_seats, rollouts};
+pub use st3_attention::store::{roster_admission, run_report_fields, runtime_list, runtime_starts, seat_queue_joins_query, seat_queue_moves_query, seat_status, seats, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_run_from_row};
+pub use st3_attention::store::{step_timeout_episode, step_timeout_extension_at, step_timing_lease_at, stop_deferral, subagents, subscription_started_run_tx, summary_list, trace_principal, unread_mail, usage_period, validate_claim_input, watch_ended_tx};
+pub use st3_attention::store::{work_list, work_summaries_ivm};
 pub mod attention_list;
 pub mod evidence;
 pub mod owned_sets;

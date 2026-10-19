@@ -1,3 +1,9 @@
+#[cfg(test)]
+#[cfg(test)]
+use st3::MissionsStore;
+#[cfg(test)]
+use st3::PersonWorkStore;
+use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;

@@ -1,6 +1,9 @@
 use super::*;
 use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair as _}};
 
+#[path = "authorization_identifier_agent_tests.rs"]
+mod identifier_agent_tests;
+
 const OWNER: &str = "person/operator";
 struct Fixture {
     root: tempfile::TempDir,
@@ -34,6 +37,10 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
             AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();
         fixture.revision=grant["policy_revision"].as_u64().unwrap();
     }
+    fixture.state.store.start_agent_roster_refresher().unwrap();
+    crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
+    fixture.state.store.start_attention_list_refresher().unwrap();
+    crate::api::published_attention::refresh_attention_list(&fixture.state.store).unwrap();
     fixture
 }
 impl Fixture {
@@ -627,6 +634,8 @@ mission "projection-two" state="ready" { goal "PRIVATE mission two"; }
             "new_run":format!("projection-{id}"),"idempotency_key":format!("projection-{id}")
         })).unwrap()).unwrap();
     }
+    crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
+    crate::api::published_attention::refresh_attention_list(&fixture.state.store).unwrap();
     projection_read_mode(&mut fixture,"caller-bound-allow").await;
     let mut cursors=Vec::new();
     for projection in ["missions","attention","agents"] {
@@ -725,6 +734,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart always; }
                 "idempotency_key":format!("budget-{index}")
             })).unwrap()).unwrap();
         }
+        crate::api::refresh_attention_list(&fixture.state.store).unwrap();
         for mode in ["approval-once", "caller-bound-allow"] {
             projection_read_mode(&mut fixture, mode).await;
             let first_query = "?max_response_bytes=16384&limit=1";

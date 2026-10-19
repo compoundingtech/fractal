@@ -801,6 +801,7 @@ pub struct Store {
     pub rules_stale: AtomicBool,
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
+    pub(crate) signature_migration_work: Mutex<Option<principals::SignatureEnvelopeWork>>,
     pub origin: String,
     /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
     /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
@@ -811,6 +812,8 @@ pub struct Store {
     /// transaction. Only tests change them.
     pub trim_fault: Mutex<Option<checkpoint_trim::TrimFault>>,
     pub trim_chunk_envelopes: AtomicUsize,
+    /// Minimum trim rest in microseconds; tests may set zero to disable pacing.
+    pub trim_pause_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
     /// The runtime whose projections this store keeps.
@@ -947,6 +950,11 @@ impl Store {
             [],
             |row| row.get(0),
         )?;
+        if fresh {
+            // Only before the first table. Pages a trim frees can then go back to the
+            // filesystem; an existing store switches with one VACUUM (docs/st3/retention.md).
+            connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL")?;
+        }
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
@@ -956,10 +964,9 @@ impl Store {
         })?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
-            inventory_generation::initialize(connection)?;
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbdb606ee3fe6 owner=smallclaims::store TODO=trace-statement-and-value-representation */ principals::PRINCIPAL_SCHEMA)?;
-            Ok(())
+            inventory_generation::initialize(connection)
         })?;
+        principals::initialize_schema(connection)?;
         if fresh {
             runtime.create_schema_for_fresh_store(connection)?;
         } else {
@@ -1061,11 +1068,13 @@ impl Store {
             rules: std::sync::RwLock::new(None),
             rules_stale: AtomicBool::new(true),
             verdicts_due: AtomicBool::new(false),
+            signature_migration_work: Mutex::new(None),
             origin,
             path,
             shared_memory,
             trim_fault: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
+            trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
             runtime,
         })
@@ -1708,6 +1717,15 @@ impl CompactReplicationInventory {
     }
 }
 
+/// Who decides whether a pending envelope may be admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionAuthority {
+    /// The fleet membership this store has admitted so far.
+    Membership,
+    /// The store a backup came from, which admitted every envelope it archived.
+    Source,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ReplicationAdmission {
     pub valid: usize,
@@ -1737,11 +1755,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
     )?;
     anyhow::ensure!(
         table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses an unsupported st schema; start with a new state directory"
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
     );
     anyhow::ensure!(
         version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses unsupported st schema version {version}"
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
     );
     Ok(())
 }
@@ -6779,6 +6797,25 @@ impl Store {
     }
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
+        self.admit_replication_backlog(AdmissionAuthority::Membership)
+    }
+
+    /// Admit the envelopes of a backup being restored. A backup holds only envelopes its source
+    /// admitted, and admission is final: a membership claim that arrived later does not revoke
+    /// history admitted before it. Restore receives the log in writer order, not in the order
+    /// its source admitted it, so judging each envelope by the membership claims replayed ahead
+    /// of it would hold history the source admitted. A member migrated without a writer floor
+    /// is keyed from sequence 1, and its unsigned pre-migration envelopes would wait for
+    /// signatures that never come. Hashes and claims are checked as in normal admission, and
+    /// restore verified every archived signature as it received it.
+    pub fn admit_restored_backlog(&self) -> Result<ReplicationAdmission> {
+        self.admit_replication_backlog(AdmissionAuthority::Source)
+    }
+
+    fn admit_replication_backlog(
+        &self,
+        authority: AdmissionAuthority,
+    ) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it.
@@ -6921,7 +6958,12 @@ impl Store {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    let hold = fleet_admission_hold(&pass, prepared_membership, envelope)?;
+                    let hold = match authority {
+                        AdmissionAuthority::Membership => {
+                            fleet_admission_hold(&pass, prepared_membership, envelope)?
+                        }
+                        AdmissionAuthority::Source => None,
+                    };
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
@@ -9344,7 +9386,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-he7b2f39a2da2 owner=smallclai
         now,
     )?;
     // A device signed this claim before the node wrote it: keep the signature with it.
-    principals::attach_expected_signature_tx(transaction, &id, subject, kind, actor)?;
+    principals::attach_expected_signature_from_writer_tx(transaction, &id, subject, kind, actor, origin)?;
     Ok(ClaimRecord {
         id,
         store_index,
