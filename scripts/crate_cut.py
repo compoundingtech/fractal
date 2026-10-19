@@ -204,6 +204,10 @@ def load(src, store_type="Store", nodes=None, fixed=None):
                     if pm:
                         target = os.path.normpath(os.path.join(os.path.dirname(rel), pm.group(1)))
                         MODULE_PATH_OVERRIDE[target] = module_path(rel) + [it.name]
+    for rel, (text, items) in parsed.items():
+        for it in items:
+            if it.kind == "mod" and any(re.fullmatch(r"#\[cfg\(test\)\]", at.strip()) for at in it.attrs):
+                TEST_ONLY_MODULES.add(tuple(module_path(rel)) + (it.name,))
     for rel in module_files(src):
         FILE_USES[rel] = "\n".join(it.text for it in parsed[rel][1] if it.kind == "use")
     for rel in module_files(src):
@@ -341,7 +345,7 @@ def build_refs(nodes, store_type="Store"):
             if prev == "." and prev2 != "..":
                 # method call: .w( or .w::<..>(
                 if nxt == "(" or body.startswith("::<", k):
-                    ts = list(methods.get(w, ())) + (list(tmethods.get(w, ())) if n.test else [])
+                    ts = list(methods.get(w, ())) + ([t for t in tmethods.get(w, ()) if visible(n, t)] if n.test else [])
                     for t in ts:
                         if t is n:
                             continue
@@ -593,6 +597,7 @@ WIDEN = re.compile(r"pub\((?:crate|super|self|in [A-Za-z_:]+)\)")
 
 
 MODULE_PATH_OVERRIDE = {}  # file -> module path, for files declared with #[path = "..."]
+TEST_ONLY_MODULES = set()  # module paths (tuples) declared with a plain `#[cfg(test)]`: they do not exist in a test-support build
 
 
 def module_path(rel):
@@ -835,6 +840,22 @@ def is_vacant(text):
     return True
 
 
+def _shared_import_lines(lower, mk, shares, prefix=""):
+    """`use` lines importing a shared module into a destination: the glob, and its names explicitly (an explicit
+    import wins over the globs of the surrounding scope, which the helpers used to shadow)."""
+    path = "::".join([lower] + _shared_path(*mk))
+    names = set()
+    for n in shares.get(mk, ()):
+        if n.kind in ("impl",):
+            continue
+        names |= set(n.names) if n.kind == "macro_call" else ({n.name} if n.name else set())
+    names = sorted(names)
+    lines = ["%suse %s::*;" % (prefix, path)]
+    for k in range(0, len(names), 10):
+        lines.append("%suse %s::{%s};" % (prefix, path, ", ".join(names[k : k + 10])))
+    return lines
+
+
 def place_tests(nodes, mtests, files, tfiles, lower):
     """Where the moved tests land and what they leave behind.
 
@@ -863,9 +884,9 @@ def place_tests(nodes, mtests, files, tfiles, lower):
     def shared_pub(n):
         """Whether code outside this test module can name the type: pub, in modules that are pub (a
         prod file, a pub test-support file, or inline modules declared pub)."""
-        if not n.item.is_pub:
+        if not n.item.is_pub or any(re.fullmatch(r"#\[cfg\(test\)\]", at.strip()) for at in n.item.attrs):
             return False
-        if any(not CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0].rstrip().endswith("pub") for k in range(len(n.container))):
+        if any(not CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0].rstrip().endswith("pub") or "#[cfg(test)]" in CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0] for k in range(len(n.container))):
             return False
         return n.file in files or pub_support(n.file)
     defs_by_name = collections.defaultdict(list)
@@ -899,8 +920,8 @@ def place_tests(nodes, mtests, files, tfiles, lower):
                 continue  # pub in a module others can reach already
             if u.kind == "impl" and test_types.get((u.file, u.container, u.merge)) is not None and shared_pub(test_types[(u.file, u.container, u.merge)]):
                 continue
-            if u.name and (u.file != t.file or u.container != t.container) and len(defs_by_name[u.name]) > 1:
-                continue  # an ambiguous name that probably names something else
+            if u.name and (u.file != t.file or u.container != t.container) and sum(1 for x in t.refs if nodes[x].test and nodes[x].name == u.name) > 1:
+                continue  # several visible candidates: a name that probably names something else
             mk = (u.file, u.container)
             if kind == "dest":
                 imports[k].add(mk)
@@ -936,13 +957,18 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             pad = "    " * len(prefix)
             uses = [u2 for u2 in (_without_names(u, defined[(rel, c)] | {x.name for x in copied if x.name}) for u in uses) if u2]
             for mk in sorted(imports.get((rel, c), ())):
-                uses.append("use %s::*;" % "::".join([lower] + _shared_path(*mk)))
+                uses += _shared_import_lines(lower, mk, shares)
             if attrs.rstrip().endswith("pub") and "test-support" in attrs:
                 uses.append("pub use %s::%s::*;" % (lower, "::".join(module_path(rel) + list(c))))
             body = "\n".join(pad + "    " + u for u in uses) + ("\n\n" if uses else "") + inner
             out.append(f"{pad}{attrs}mod {nm} {{\n{body}\n{pad}}}")
         return "\n\n".join(x for x in out if x)
 
+    included = set()
+    for n in nodes:
+        if n.test and n.kind == "macro_call":
+            for m in re.finditer(r'include!\("([^"]+)"\)', n.item.text):
+                included.add(os.path.normpath(os.path.join(os.path.dirname(n.file), m.group(1))))
     facade_blocks, new_files, decls = {}, {}, collections.defaultdict(list)
     pub_test_mods = set()
     helper_names = {u.name for u in copied if u.name}
@@ -975,14 +1001,15 @@ def place_tests(nodes, mtests, files, tfiles, lower):
         body = render(rel, (), g)
         body = re.sub(r"\b(?:super::)+(?:tests|\w+_tests)::(" + "|".join(map(re.escape, sorted(helper_names))) + r")\b", r"\1", body) if helper_names else body
         if rel in files:
-            globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
+            globs = [ln for mk in sorted(imports.get((rel, ()), ())) for ln in _shared_import_lines(lower, mk, shares, '#[cfg(any(test, feature = "test-support"))]\n')]
             facade_blocks[rel] = ("\n".join(globs) + "\n" if globs else "") + body
         else:
             text, items = tfiles[rel]
             local = {u.name for u in copied if u.name} | {t.name for t in mtests if t.name}
             uses = [_without_unused_relative(_without_names(it.text, local), body) for it in items if it.kind == "use"]
-            globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
-            new_files[rel] = "#![allow(unused_imports)]\n" + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
+            uses = [u2 for u2 in _shared_uses(uses, rel, (), items, shares, [], set(), set(tfiles), root=lower, dest=True) if u2]
+            globs = [ln for mk in sorted(imports.get((rel, ()), ())) for ln in _shared_import_lines(lower, mk, shares)]
+            new_files[rel] = ("" if rel in included else "#![allow(unused_imports)]\n") + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
     return facade_blocks, new_files, decls, removals, copied, pub_test_mods, shares, share_imports, imports
 
 
@@ -1005,6 +1032,21 @@ def _dev_dependencies(lower_ident):
 TEST_SUPPORT_CFG = '#[cfg(any(test, feature = "test-support"))]'
 
 
+def _vis_position(text, start, code):
+    """Where `pub` goes for an item whose code starts at `code`: before the block comments in front of it (a
+    SQLite inventory marker has to stay adjacent to the `fn`)."""
+    pos = code
+    while True:
+        head = text[start:pos].rstrip()
+        if not head.endswith("*/"):
+            break
+        k = text.rfind("/*", start, pos)
+        if k < 0:
+            break
+        pos = k
+    return pos
+
+
 def _widen_item_edits(text, it):
     """Edits that make one item pub and, if it is gated by plain `cfg(test)`, gated by test-support too."""
     edits = []
@@ -1013,19 +1055,45 @@ def _widen_item_edits(text, it):
         edits.append((it.start + m.start(), it.start + m.end(), TEST_SUPPORT_CFG))
     vis = ri._VIS.match(text, code)
     if vis is None:
-        edits.append((code, code, "pub "))
+        pos = _vis_position(text, it.start, code)
+        edits.append((pos, pos, "pub "))
     elif vis.group(0).strip() != "pub":
         edits.append((code, vis.end(), "pub "))
     return edits
 
 
+def _available(path):
+    """Whether the module exists in a test-support build: no module on the way is `#[cfg(test)]` alone."""
+    return not any(tuple(path[:k]) in TEST_ONLY_MODULES for k in range(1, len(path) + 1))
+
+
+def _shared_base(rel):
+    """The module a file's shared module sits in: next to the file when that exists in a test-support build,
+    else in the nearest ancestor that does. A top-level file's shared module is its child (a sibling would be
+    a second top-level module that depends on it both ways)."""
+    p = module_path(rel)
+    if len(p) == 1:
+        return p
+    base = p[:-1]
+    while base and not _available(base):
+        base = base[:-1]
+    return base
+
+
+SHARED_SUFFIX = ""  # a cut on top of another names its shared modules apart from that cut's
+
+
 def _shared_name(rel, container):
-    stem = module_path(rel)[-1]
-    return stem + ("_" + "_".join(container) if container else "") + "_shared"
+    p = module_path(rel)
+    base = _shared_base(rel)
+    suffix = ("_" + "_".join(container)) if container else ""
+    if len(p) == 1:
+        return "shared" + suffix + SHARED_SUFFIX
+    return "_".join(p[len(base):]) + suffix + "_shared" + SHARED_SUFFIX
 
 
 def _shared_path(rel, container):
-    return module_path(rel)[:-1] + [_shared_name(rel, container)]
+    return _shared_base(rel) + [_shared_name(rel, container)]
 
 
 def _insert_position(text, container):
@@ -1058,7 +1126,7 @@ def _resolve_use(segs, base):
     return cur + list(segs[i:])
 
 
-def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
+def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="crate", dest=False, lower_files=None, depth=0):
     shared_names = {tuple(module_path(r2)): {n.name for n in ns if n.name} for (r2, c2), ns in shares.items() if not c2}
     """The `use` items of the file a shared module is cut from, adjusted to where the module sits: dev
     dependencies dropped, child modules named absolutely, modules that only exist for tests replaced by
@@ -1067,6 +1135,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
     children = {it.name for it in items if it.kind == "mod"}
     shared_of = {tuple(module_path(r2)): _shared_path(r2, c2) for (r2, c2) in shares if not c2 and r2 in test_rels}
     out = []
+    extra_uses = []
     for u in uses:
         parsed = use_paths(u)
         if not parsed:
@@ -1075,13 +1144,16 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
         attrs = re.sub(r"#\[cfg\(test\)\]\s*", "", attrs)
         keep = []
         for segs, alias in paths:
+            orig_segs = segs
             if segs[0] in dev:
                 continue
-            if segs[0] in children:
+            if not dest and segs[0] in children:
                 segs = ["crate"] + f_path + segs
-            elif segs[0] == "self":
+            elif not dest and segs[0] == "self":
                 segs = ["crate"] + f_path + segs[1:]
             absolute = _resolve_use(segs, f_path[:-1] + ["_"])
+            if absolute is not None and segs[0] in ("super", "self", "crate") and not dest:
+                segs = ["crate"] + absolute  # the shared module may not sit where the file does
             extra = None
             if absolute is not None:
                 hit = None
@@ -1089,21 +1161,31 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
                     if tuple(absolute[:k]) in shared_of:
                         hit = (k, shared_of[tuple(absolute[:k])])
                         break
-                test_only = any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1])
+                test_only = any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1]) or (len(absolute) > 1 and not _available(absolute[:-1]))
                 if hit is not None:
                     leaf = segs[-1]
                     if leaf == "*":
-                        extra = ["crate"] + hit[1] + absolute[hit[0]:]  # the shared module's items too
-                    elif leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
-                        segs = ["crate"] + hit[1] + absolute[hit[0]:]
+                        if len(absolute) == hit[0] + 1:
+                            extra = [root] + hit[1] + absolute[hit[0]:]  # the shared module's items too
+                    elif len(absolute) == hit[0] + 1 and leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
+                        segs = [root] + hit[1] + absolute[hit[0]:]
                         test_only = False
-                    else:
+                    elif len(absolute) == hit[0] + 1:
                         continue  # not extracted: it stays in the cfg(test) module
+                    # deeper than the module (a child module): the path stays as it is
                 if test_only:
+                    if segs[-1] == "*" and lower_files and depth < 6 and not dest:
+                        # the glob served names that module imported itself: take its imports instead
+                        rel2 = next((r for r in lower_files if module_path(r) == list(absolute[:-1])), None)
+                        if rel2 is not None:
+                            items2 = lower_files[rel2][1]
+                            extra_uses.extend(_shared_uses([it.text for it in items2 if it.kind == "use"], rel2, (), items2, shares, dev, pairs, test_rels, root, dest, lower_files, depth + 1))
                     segs = None  # exists only for cfg(test)
             if extra is not None:
                 keep.append((extra, None))
             if segs is None:
+                if dest:
+                    keep.append((orig_segs, alias))  # a destination file may still have that module itself
                 continue
             mod = segs[-2] if len(segs) >= 2 else None
             if (mod, segs[-1]) in pairs:
@@ -1111,17 +1193,17 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
             keep.append((segs, alias))
         if keep:
             out.append(render_use(attrs, vis, keep))
-    return out
+    return out + [u for u in extra_uses if u not in out]
 
 
-def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers):
+def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers, dest_src=None, dest_root=None):
     """Extract the lower test items the moved tests need into a shared module next to their file, gated by
     test-support, and re-export it where the items were (`pub use`), so old paths keep resolving."""
     added_decls = collections.defaultdict(list)
     for (rel, cont), ns in sorted(shares.items()):
         name = _shared_name(rel, cont)
         parts = module_path(rel)
-        directory = "/".join(parts[:-1])
+        directory = "/".join(_shared_base(rel))
         path = os.path.join(src_dir, directory, name + ".rs") if directory else os.path.join(src_dir, name + ".rs")
         text, items = lower_files[rel]
         file_uses = [it.text for it in items if it.kind == "use"]
@@ -1134,20 +1216,34 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             uses = list(ifile_uses) + [u for u in file_uses]
             for u in CONTAINERS.get((irel, icont), ("", []))[1]:
                 if re.fullmatch(r"\s*use super::\*;\s*", u):
-                    uses.append("use super::%s::*;" % module_path(irel)[-1])
+                    uses.append("use crate::%s::*;" % "::".join(module_path(irel)))
                 else:
-                    uses.append(re.sub(r"\buse super::", "use super::%s::" % module_path(irel)[-1], u))
+                    uses.append(re.sub(r"\buse super::", "use crate::%s::" % "::".join(module_path(irel)), u))
         elif not cont:
-            uses = file_uses
+            uses = list(file_uses)
+            if rel not in test_rels:
+                # a production file's own items (the ones that stay) are neighbours of the shared module;
+                # named explicitly, because a glob import of the same name elsewhere would make them ambiguous
+                uses.append("use crate::%s::*;" % "::".join(parts))
+                groups_ = collections.defaultdict(set)
+                cur_path = os.path.join(src_dir, rel)
+                cur_items = ri.parse(Path(cur_path).read_text()) if os.path.exists(cur_path) else []
+                for it in cur_items:
+                    if it.kind in FREE_KINDS and it.kind != "mod" and it.is_pub and it.name and not any(x.startswith("#[test]") for x in it.attrs):
+                        groups_[tuple(x for x in it.attrs if x.startswith("#[cfg"))].add(it.name)
+                for cfgs, names_ in sorted(groups_.items()):
+                    own = sorted(names_)
+                    for k in range(0, len(own), 12):
+                        uses.append("".join(c + "\n" for c in cfgs) + "use crate::%s::{%s};" % ("::".join(parts), ", ".join(own[k : k + 12])))
         else:
             # inside the inline module `super` is the file's module; here that module is a sibling
             uses = list(file_uses)
             for u in CONTAINERS.get((rel, cont), ("", []))[1]:
                 if re.fullmatch(r"\s*use super::\*;\s*", u):
-                    uses.append("use super::%s::*;" % parts[-1])
+                    uses.append("use crate::%s::*;" % "::".join(parts))
                 else:
-                    uses.append(re.sub(r"\buse super::", "use super::%s::" % parts[-1], u))
-        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels)
+                    uses.append(re.sub(r"\buse super::", "use crate::%s::" % "::".join(parts), u))
+        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, lower_files=lower_files)
         globs = ["use %s::*;" % "::".join(["crate"] + _shared_path(*mk)) for mk in sorted(share_imports.get((rel, cont), ()))]
         body = []
         for u in sorted(ns, key=lambda n: n.item.start):
@@ -1155,7 +1251,13 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             code = ri._leading_meta(t, 0, len(t))[1]
             vis = ri._VIS.match(t, code)
             if u.kind in ("fn", "const", "static", "struct", "enum", "type", "trait", "union"):
-                t = t[:code] + "pub " + t[(vis.end() if vis else code):]
+                if vis:
+                    t = t[:code] + "pub " + t[vis.end():]
+                else:
+                    pos = _vis_position(t, 0, code)
+                    t = t[:pos] + "pub " + t[pos:]
+            elif u.kind == "macro_call" and t.lstrip().startswith(("thread_local!", "#[")) and "thread_local!" in t:
+                t = re.sub(r"(?m)^(\s*)(?:pub(?:\([^)]*\))?\s+)?static\b", r"\1pub static", t)
             body.append(t)
         # imports of the parent module that only exist for cfg(test) are not there in a test-support build
         extras = []
@@ -1185,12 +1287,42 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             otext = Path(opath).read_text()
             pos = _insert_position(otext, cont)
             if pos is not None:
-                line = '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::*;\n' % "::".join(_shared_path(rel, cont))
+                spath = "::".join(_shared_path(rel, cont))
+                line = '#[cfg(any(test, feature = "test-support"))]\n#[allow(unused_imports)]\npub use crate::%s::*;\n' % spath
+                named = sorted({x for u in ns for x in (u.names if u.kind == "macro_call" else ([u.name] if u.name else [])) if u.kind != "impl"})
+                for k in range(0, len(named), 10):
+                    line += '#[cfg(any(test, feature = "test-support"))]\n#[allow(unused_imports)]\npub use crate::%s::{%s};\n' % (spath, ", ".join(named[k : k + 10]))
                 Path(opath).write_text(otext[:pos] + line + otext[pos:])
     for parent, decls in added_decls.items():
         ppath = os.path.join(src_dir, parent)
         ptext = Path(ppath).read_text()
         Path(ppath).write_text(ptext.rstrip("\n") + "\n\n" + "\n".join(decls))
+    # paths that go through a cfg(test)-only module to an item that now lives in its shared module
+    renames = []
+    for (rel, cont), ns in shares.items():
+        if not cont and rel in test_rels:
+            names = sorted({n.name for n in ns if n.name})
+            if names:
+                stem = module_path(rel)[-1]
+                renames.append((re.compile(r"(?<![\w:])(?:super::)*" + re.escape(stem) + r"::(" + "|".join(map(re.escape, names)) + r")\b(?!::)"), "crate::" + "::".join(_shared_path(rel, ()))))
+    if renames:
+        for f in _src_files([src_dir]):
+            t = Path(f).read_text()
+            nt = t
+            for pat, target in renames:
+                nt = pat.sub(lambda m, target=target: target + "::" + m.group(1), nt)
+            if nt != t:
+                Path(f).write_text(nt)
+        if dest_src:
+            # the same paths in the new crate go through the crate below by name
+            for f in _src_files([dest_src]):
+                t = Path(f).read_text()
+                nt = t
+                for pat, target in renames:
+                    nt = pat.sub(lambda m, target=target: dest_root + target[len("crate"):] + "::" + m.group(1), nt)
+                if nt != t:
+                    Path(f).write_text(nt)
+
 
 
 def apply_cut(args, nodes, files, tfiles, order):
@@ -1293,7 +1425,7 @@ def apply_cut(args, nodes, files, tfiles, order):
             continue
         text, items = tfiles[rel]
         out = remove_spans(text, spans)
-        if is_vacant(out):
+        if is_vacant(out) and rel not in {r for (r, _) in test_shares}:
             deleted_test_files.append(rel)
             parts = module_path(rel)
             parent = "/".join(parts[:-1]) + ".rs"
@@ -1332,7 +1464,7 @@ def apply_cut(args, nodes, files, tfiles, order):
     widen = collections.defaultdict(dict)
     macro_exports = collections.defaultdict(dict)  # lower file -> {start: item}
     macro_imports = collections.defaultdict(set)  # destination file -> macro names
-    for n in moved + mtests + test_copies:
+    for n in moved + mtests + test_copies + [u for ns in test_shares.values() for u in ns]:
         for r in n.refs:
             t = nodes[r]
             if t.kind == "macro_rules" and r not in moved_ids and t.fixed is None and not t.test:
@@ -1379,7 +1511,8 @@ def apply_cut(args, nodes, files, tfiles, order):
             code = ri._leading_meta(text, it.start, len(text))[1]
             m = ri._VIS.match(text, code)
             if m is None:
-                edits.append((code, code, "pub "))
+                pos = _vis_position(text, it.start, code)
+                edits.append((pos, pos, "pub "))
                 widened += 1
             elif not m.group(0).startswith("pub ") and not m.group(0).rstrip() == "pub":
                 edits.append((code, m.end(), "pub "))
@@ -1419,7 +1552,7 @@ def apply_cut(args, nodes, files, tfiles, order):
         if n.test and n.kind == "macro_call":
             for m in re.finditer(r'include!\("([^"]+)"\)', n.item.text):
                 includers[os.path.normpath(os.path.join(os.path.dirname(n.file), m.group(1)))] = (n.file, n.container)
-    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles), includers)
+    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles), includers, new_src, lower)
     for rel, names in macro_imports.items():
         path = os.path.join(new_src, rel)
         if not os.path.exists(path):
@@ -1527,11 +1660,37 @@ def wire_crate(args, top_mods):
         t = t.replace(f"pub use {lower.replace('-', '_')}::*;", f"pub use {ident}::*;", 1)
         open(ul, "w").write(t)
     dl = open("crates/st3-daemon/src/lib.rs").read()
+    # grouped re-exports (`pub(crate) use st3_store::{checkout, external_sessions};`) follow the modules too
+    for it in ri.parse(dl):
+        if it.kind != "use":
+            continue
+        parsed = use_paths(it.text)
+        if not parsed:
+            continue
+        attrs, vis, paths = parsed
+        changed = False
+        new_paths = []
+        for segs, alias in paths:
+            if len(segs) >= 2 and segs[0] == lower.replace("-", "_") and segs[1] in top_mods:
+                segs = [ident] + segs[1:]
+                changed = True
+            new_paths.append((segs, alias))
+        if changed:
+            dl = dl.replace(it.text, render_use(attrs, vis, new_paths).join(["\n" if it.text.startswith("\n") else "", ""]), 1)
     for m in top_mods:
-        dl = re.sub(r"(?m)^pub use st3_[a-z_]+::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
+        dl = re.sub(r"(?m)^pub use " + re.escape(lower.replace("-", "_")) + r"::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
     if getattr(args, "traits", None):
         dl = dl.replace("pub use st3_github::{GitChangesStore", "pub use %s::{%s};\npub use st3_github::{GitChangesStore" % (ident, ", ".join(sorted(args.traits))), 1)
     open("crates/st3-daemon/src/lib.rs", "w").write(dl)
+    # code that named the crate below directly (`st3_store::store::..`) now goes through the daemon's re-export
+    pat = re.compile(r"\b" + re.escape(lower.replace("-", "_")) + r"::(" + "|".join(map(re.escape, top_mods)) + r")\b")
+    for f in _src_files(["crates/st3-daemon/src"]):
+        if f.endswith("/lib.rs") and f.count("/") == 3:
+            continue
+        t = Path(f).read_text()
+        nt = pat.sub(r"crate::\1", t)
+        if nt != t:
+            Path(f).write_text(nt)
     print("wired", crate)
 
 
@@ -1575,12 +1734,26 @@ def _in_trait_block(lines, idx):
     return False
 
 
-def _pub_line(path, line_no):
+def _pub_line(path, line_no, name=None):
+    if not os.path.exists(path):
+        return 0
     lines = Path(path).read_text().split("\n")
+    if name and re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?thread_local!", lines[line_no - 1]):
+        # the statics a thread_local! declares are private until the static itself says otherwise
+        t = "\n".join(lines)
+        at = sum(len(l) + 1 for l in lines[: line_no - 1])
+        end = ri._match_delim(t, t.index("{", at)) if "{" in t[at:] else at
+        pat = re.compile(r"(?m)^(\s*)(?:pub(?:\([^)]*\))?\s+)?static(\s+" + re.escape(name) + r"\b)")
+        body = t[at:end]
+        nb = pat.sub(r"\1pub static\2", body, count=1)
+        if nb != body:
+            Path(path).write_text(t[:at] + nb + t[end:])
+            return 1
+        return 0
     if _in_trait_block(lines, line_no - 1):
         return 0
     ln = lines[line_no - 1]
-    new = re.sub(r"^(\s*)(?!pub\b)((?:async\s+|const\s+|unsafe\s+)*(?:fn|const|static|struct|enum|type|trait|mod|use)\b)", r"\1pub \2", ln)
+    new = re.sub(r"^(\s*)(?!pub\b)((?:/\*.*?\*/\s*)*(?:async\s+|const\s+|unsafe\s+)*(?:fn|const|static|struct|enum|type|trait|mod|use)\b)", r"\1pub \2", ln)
     new = re.sub(r"^(\s*)pub\((?:crate|super|self|in [\w:]+)\)\s+", r"\1pub ", new)
     if new != ln:
         lines[line_no - 1] = new
@@ -1624,6 +1797,7 @@ def fix_once(diags, roots, traits):
     names = set()
     imports = collections.defaultdict(set)
     ambiguities = collections.defaultdict(set)
+    dropped = collections.defaultdict(set)
     for d in diags:
         msg = d["message"]
         code = (d.get("code") or {}).get("code")
@@ -1647,13 +1821,20 @@ def fix_once(diags, roots, traits):
                 ambiguities[prim[0]["file_name"]].add(nm.group(1))
             continue
         if code in ("E0603", "E0624"):
+            pn = re.match(r"\w+ `(\w+)` is private", msg)
+            pname = pn.group(1) if pn else None
             for c in d["children"]:
                 for sp in c["spans"]:
                     if "defined here" in c["message"] or "defined here" in (sp.get("label") or "") or "private" in (sp.get("label") or ""):
-                        edits += _pub_line(sp["file_name"], sp["line_start"])
+                        edits += _pub_line(sp["file_name"], sp["line_start"], pname)
             for sp in d["spans"]:
                 if not sp["is_primary"] and "defined here" in (sp.get("label") or ""):
-                    edits += _pub_line(sp["file_name"], sp["line_start"])
+                    edits += _pub_line(sp["file_name"], sp["line_start"], pname)
+            continue
+        if code == "E0432" and prim and "shared" in prim[0]["file_name"]:
+            # a shared test module re-exported a name whose item has moved up: it is not this crate's to export
+            for sp in prim:
+                dropped[prim[0]["file_name"]].add((sp["byte_start"], sp["byte_end"]))
             continue
         nm = re.match(r"cannot find (?:function|value|type|struct, variant or union type|macro) `(\w+)`", msg)
         if nm:
@@ -1692,12 +1873,34 @@ def fix_once(diags, roots, traits):
             at = m.start() if m else (t.index("\n", t.index("//!")) + 1 if t.startswith("//!") else 0)
             Path(f).write_text(t[:at] + "\n".join(add) + "\n" + t[at:])
             edits += len(add)
+    for f, spans in dropped.items():
+        raw = Path(f).read_bytes()
+        t = raw.decode()
+        cspans = [(len(raw[:a].decode()), len(raw[:b].decode())) for a, b in spans]
+        for it in sorted(ri.parse(t), key=lambda i: -i.start):
+            if it.kind != "use":
+                continue
+            hit = [(a, b) for a, b in cspans if it.start <= a and b <= it.end]
+            parsed = use_paths(it.text) if hit else None
+            if not parsed:
+                continue
+            attrs, vis, paths = parsed
+            gone = {t[a:b].split("::")[-1].split(" as ")[-1].strip() for a, b in hit}
+            keep = [(segs, alias) for segs, alias in paths if (alias or segs[-1]) not in gone and "::".join(segs) not in {t[a:b].strip() for a, b in hit}]
+            code = ri._leading_meta(t, it.start, len(t))[1]
+            t = t[:code] + (render_use(attrs, vis, keep) if keep else "") + t[it.end :]
+            edits += 1
+        Path(f).write_text(t)
     for f, nms in ambiguities.items():
         t = Path(f).read_text()
         m = re.search(r"(?m)^pub use (\w+)::([\w:]+)::\*;$", t)
         if not m:
             continue
-        lines = "\n".join("pub use %s::%s::%s;" % (m.group(1), m.group(2), n) for n in sorted(nms) if ("::%s;" % n) not in t)
+        defined = set()
+        lower_file = Path("crates") / m.group(1).replace("_", "-") / "src" / (m.group(2).replace("::", "/") + ".rs")
+        if lower_file.exists():
+            defined = {it.name for it in ri.parse(lower_file.read_text()) if it.name}
+        lines = "\n".join("pub use %s::%s::%s;" % (m.group(1), m.group(2), n) for n in sorted(nms) if ("::%s;" % n) not in t and n in defined)
         if lines:
             Path(f).write_text(t[: m.end()] + "\n" + lines + t[m.end() :])
             edits += 1
@@ -1899,6 +2102,113 @@ def cmd_inventory(args):
     return 1 if problems else 0
 
 
+
+def _unused_imports(cmd, crate):
+    """({lib}, {test}) sets of (file, start, end) for the `unused_imports` warnings one `cargo test --no-run`
+    of `crate` reports, split by the unit that reported them. The library is built the way its tests build
+    it (with the test-support feature), which is also how the workspace builds it. A unit's messages come
+    just before its artifact, whose profile says whether it is the test unit."""
+    out = subprocess.run(cmd, capture_output=True, text=True).stdout
+    lib, test, pending = set(), set(), set()
+    for line in out.split("\n"):
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if crate not in m.get("package_id", "").replace("#", "/"):
+            continue
+        if m.get("reason") == "compiler-message":
+            d = m["message"]
+            if (d.get("code") or {}).get("code") == "unused_imports":
+                for sp in d["spans"]:
+                    if sp["is_primary"]:
+                        pending.add((sp["file_name"], sp["byte_start"], sp["byte_end"]))
+        elif m.get("reason") == "compiler-artifact" and m["target"]["kind"] == ["lib"]:
+            (test if m["profile"]["test"] else lib).update(pending)
+            pending = set()
+    return lib, test
+
+
+def _uses_with_context(text, items, in_test):
+    """Every `use` item of a file, nested inline modules included, with whether it sits in test-only code."""
+    for it in items:
+        if it.kind == "use":
+            yield it, in_test
+        elif it.kind == "mod" and it.body:
+            yield from _uses_with_context(text, ri.parse_items(text, it.body[0], it.body[1]), in_test or it.cfg_test)
+
+
+def cmd_imports(args):
+    """Remove the imports nothing uses. `cargo fix` removes an import that only test code uses (the library
+    build has no use for it); this removes what both the library and its test build leave unused, gates
+    with `#[cfg(test)]` what only the library build does, and removes what the test build leaves unused in
+    code the library never compiles (test-only files and `#[cfg(test)]` modules)."""
+    for crate in [c for c in args.crates.split(",") if c]:
+        lib, test = _unused_imports(["cargo", "test", "-p", crate, "--lib", "--no-run", "--message-format=json"], crate)
+        src = "crates/%s/src" % crate
+        parsed = {os.path.join(src, rel): (open(os.path.join(src, rel)).read(),) for rel in module_files(src)}
+        parsed = {f: (t[0], ri.parse(t[0])) for f, t in parsed.items()}
+        test_files = {os.path.join(src, rel) for rel in test_file_set({os.path.relpath(f, src): v for f, v in parsed.items()})}
+        remove = lib & test
+        gate = lib - test
+        by_file = collections.defaultdict(lambda: ([], [], []))
+        for f, a, b in remove:
+            by_file[f][0].append((a, b))
+        for f, a, b in gate:
+            by_file[f][1].append((a, b))
+        for f, a, b in test - lib:
+            by_file[f][2].append((a, b))
+        removed = gated_total = 0
+        for f, (rem, gat, tonly) in by_file.items():
+            raw = Path(f).read_bytes()
+            text = raw.decode()
+            def cspan(a, b):
+                return len(raw[:a].decode()), len(raw[:b].decode())
+            rem_c = [cspan(a, b) for a, b in rem]
+            gat_c = [cspan(a, b) for a, b in gat]
+            tonly_c = [cspan(a, b) for a, b in tonly]
+            file_in_test = f in test_files or bool(TEST_FILE.search(f))
+            edits = []
+            for it, in_test in _uses_with_context(text, ri.parse(text), file_in_test):
+                parsed_use = use_paths(it.text)
+                if not parsed_use:
+                    continue
+                attrs, vis, paths = parsed_use
+                code = ri._leading_meta(text, it.start, len(text))[1]
+                inside = lambda spans: [(a, b) for a, b in spans if it.start <= a and b <= it.end]
+                r, g = inside(rem_c), inside(gat_c)
+                if in_test:
+                    r += inside(tonly_c)
+                if not r and not g:
+                    continue
+
+                def leaf_text(segs, alias):
+                    return alias or segs[-1]
+
+                def flagged(segs, alias, spans):
+                    names = {text[a:b].split("::")[-1].split(" as ")[-1].strip() for a, b in spans}
+                    whole = {text[a:b].strip() for a, b in spans}
+                    return leaf_text(segs, alias) in names or "::".join(segs) in whole
+                keep, gated = [], []
+                for segs, alias in paths:
+                    if flagged(segs, alias, r):
+                        removed += 1
+                    elif flagged(segs, alias, g):
+                        gated.append((segs, alias))
+                    else:
+                        keep.append((segs, alias))
+                new = render_use(attrs, vis, keep) if keep else ""
+                if gated:
+                    new = (new + "\n" if new else "") + render_use("#[cfg(test)]\n" + attrs, vis, gated)
+                    gated_total += len(gated)
+                edits.append((code, it.end, new))
+            for a, b, rep in sorted(edits, reverse=True):
+                text = text[:a] + rep + text[b:]
+            Path(f).write_text(text)
+        print("%s: removed %d, gated %d unused imports" % (crate, removed, gated_total))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1907,6 +2217,8 @@ def main(argv=None):
     pf.add_argument("--all-targets", action="store_true")
     pf.add_argument("--rounds", type=int, default=12)
     sub.add_parser("inventory", help="carry the SQLite large-value inventory over a code move")
+    pi = sub.add_parser("imports", help="remove unused imports without breaking the test build")
+    pi.add_argument("--crates", required=True)
     ps = sub.add_parser("sweep", help="remove the dead code a cut leaves in the lower crates")
     ps.add_argument("--roots", required=True)
     ps.add_argument("--rounds", type=int, default=4)
@@ -1933,6 +2245,8 @@ def main(argv=None):
         return cmd_sweep(args)
     if args.cmd == "inventory":
         return cmd_inventory(args)
+    if args.cmd == "imports":
+        return cmd_imports(args)
     config = load_config(args.config)
     pins = [l.strip() for l in open(args.pins)] if args.pins and os.path.exists(args.pins) else []
     nodes, files, tfiles = load(args.src)
@@ -1946,6 +2260,8 @@ def main(argv=None):
         path, lay = spec.split("=")
         load(path, nodes=nodes, fixed=config["order"].index(lay) + 1)
     if args.cmd == "apply":
+        if args.above:
+            globals()["SHARED_SUFFIX"] = "_" + args.layer
         below = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] < current]
         above = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] > current]
         if not args.lower:

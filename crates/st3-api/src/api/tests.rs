@@ -1,5 +1,6 @@
 mod roster_fresh;
 
+use crate::RolloutsStore;
 use super::*;
 use crate::model::SESSION_CLAIMS;
 use axum::body::to_bytes;
@@ -1609,6 +1610,21 @@ fn native_title_subscriptions_recognize_the_outer_pi_and_omp_drivers() {
         assert_eq!(peer.transport, format!("{driver}-channel"));
         assert!(!peer.archives_inbox);
         assert!(native_delivery_identity(37, &args, &[]).is_none(), "argv alone cannot authorize a seat");
+    }
+}
+
+#[test]
+fn delivery_identity_accepts_new_names_and_rejects_masked_or_conflicting_aliases() {
+    let args = ["st3", "driver", "codex"].map(str::to_owned);
+    for (values, expected) in [
+        (vec!["ST_AGENT=agent/seat"], Some("agent/seat")),
+        (vec!["FRACTAL_AGENT=agent/seat"], Some("agent/seat")),
+        (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT=agent/seat"], Some("agent/seat")),
+        (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT=agent/other"], None),
+        (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT="], None),
+    ] {
+        let env: Vec<_> = values.into_iter().map(str::to_owned).collect();
+        assert_eq!(native_delivery_identity(37, &args, &env).map(|peer| peer.agent).as_deref(), expected);
     }
 }
 

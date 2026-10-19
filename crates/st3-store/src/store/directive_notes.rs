@@ -263,7 +263,7 @@ pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St
     Ok(())
 }
 
-fn current(connection: &Connection, person: &str, now: u128) -> Result<Option<DirectiveNote>> {
+pub fn current(connection: &Connection, person: &str, now: u128) -> Result<Option<DirectiveNote>> {
     smallclaims::touched::note_read(|| person.to_owned());
     let claim = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd742fa0a89fd owner=st3_store::store::directive_notes TODO=trace-statement-and-value-representation */ CURRENT_QUERY, [person], claim_from_row).optional()?;
     let Some(mut claim) = claim else { return Ok(None); };
@@ -391,3 +391,6 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;

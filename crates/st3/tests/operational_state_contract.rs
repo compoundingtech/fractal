@@ -1,3 +1,4 @@
+use st3::SeatsStoreCore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
