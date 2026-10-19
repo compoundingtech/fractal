@@ -37,6 +37,8 @@ text = report.table(rows)
 assert '| [daily-test-build](https://example.invalid/job/1) | ✅ success | 21m 05s | Compile (19m 00s) | — |' in text, text
 assert '| daily-mail-redelivery-canaries | ❌ missing | n/a | n/a | none recorded |' in text, text
 assert report.duration(7) == '7s' and report.duration(None) == 'n/a'
+unfinished = [dict(jobs[1], completed_at=None)]
+assert report.rows({'isolation-vm': 'daily-isolation-vm'}, needs, unfinished)[0]['seconds'] == 480, 'a job without completed_at ends at its last step'
 print('passed: rows, order, durations and red lanes')
 
 

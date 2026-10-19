@@ -3479,6 +3479,8 @@ jobs:
               "apps/fractal-web/src/web/liveSidebarTree.ts",
               "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/perfMarks.ts",
+              "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
+              "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
               "apps/fractal-web/src/web/sidebarAttention.ts",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
@@ -3720,20 +3722,6 @@ jobs:
           path: "${{ runner.temp }}/evidence-notes/"
           if-no-files-found: ignore
           retention-days: 7
-      - name: Fill the web shell closure
-        shell: bash
-        run: bash scripts/ci-web-shell fill
-        env:
-          CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
-        continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
-      - name: Save the web shell closure
-        uses: actions/cache/save@v4
-        with:
-          path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
-        continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
       - name: Report job cache coverage
         if: always()
         shell: bash
