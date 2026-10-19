@@ -172,6 +172,20 @@ describe('live header parity', () => {
     await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
     expect(document.querySelector('[data-testid="declaration-dialog"]')).toBeNull()
   })
+  it('keeps secondary actions functional in the constrained-header overflow menu', async () => {
+    const choose = async (label: string) => {
+      await click('Conversation menu')
+      const item = [...document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === label)
+      expect(item, label).toBeDefined()
+      await act(async () => item!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    }
+    await choose('View KDL')
+    expect(document.querySelector('[data-testid="declaration-dialog"] h2')?.textContent).toBe(agent.id)
+    await click('Close declaration')
+    await choose('Resources')
+    expect(document.querySelector('[role="dialog"][aria-label="Agent resources"]')?.textContent).toContain('Observed project notes')
+    await click('Close resources')
+  })
   it('opens the same declaration from the agent row context menu', async () => {
     await click('Actions for Example Agent')
     const item = [...document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === 'View KDL')

@@ -251,9 +251,17 @@ separator. At constrained desktop widths, the dock may temporarily become narrow
 than 320 px rather than hiding the thread. Restore and container/window shrink apply
 the same bounds and ARIA maximum without changing the saved preference; more space
 restores that preference.
-Native header actions share one horizontal slot. On desktop, an unavailable Resources
-control retains its refusal reason as its accessible description and hover title rather
-than expanding the compact header; the narrow sheet keeps its visible explanation.
+Native header actions share one horizontal slot. A named inline-size container on the
+desktop header degrades chrome by the thread lane, not the viewport: at 680 px View KDL
+becomes a named, tooltipped icon; at 560 px the host breadcrumb is omitted and the agent
+name truncates; at 440 px Resources and View KDL move into the Conversation menu.
+The gear is conversation settings, not a theme control. Unavailable Resources retains
+its accessible refusal description/tooltip, and the overflow menu shows that reason.
+The narrow sheet keeps its own presentation. All desktop header controls remain on one
+32 px band without resize-driven React state. Run the real app geometry regression with
+`node apps/fractal-web/scripts/split-header-geometry-proof.mjs` through the heavy build
+lane; it checks pairwise control/breadcrumb overlap and lane containment at 900 px and
+at 1440 px with Changes fully expanded.
 The desktop pane header is the conversation's sole title owner. The transcript omits
 its own title band and portals its synchronization, retry and run controls into the
 stable pane-header action slot; parked conversations contribute no header controls.

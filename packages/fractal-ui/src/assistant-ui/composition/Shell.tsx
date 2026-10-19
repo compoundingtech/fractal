@@ -157,14 +157,14 @@ export function ThreadHeader({
   narrow?: boolean
 }) {
   return (
-    <header data-testid="thread-header" {...stylex.props(styles.header, !narrow && paneHeaderStyles.header)}>
+    <header data-testid="thread-header" {...stylex.props(styles.header, !narrow && paneHeaderStyles.header, !narrow && styles.laneContainer)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <ChromeControl icon="chevron-right" label="Expand sidebar" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>
-          <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink)}>{folder}</span>
-          <span aria-hidden="true" {...stylex.props(styles.crumbSlash)}>/</span>
+          <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink, !narrow && styles.desktopFolder)}>{folder}</span>
+          <span aria-hidden="true" {...stylex.props(styles.crumbSlash, !narrow && styles.desktopFolder)}>/</span>
         </> : null}
         <span role={narrow ? undefined : 'heading'} aria-level={narrow ? undefined : 2} {...stylex.props(styles.crumbTitle)}>{title}</span>
       </nav>
@@ -200,14 +200,16 @@ const styles = stylex.create({
   splitVertical: { width: 1, alignSelf: 'stretch', backgroundColor: c.borderStrong, cursor: 'col-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', position: 'absolute', insetInline: -3, insetBlock: 0 }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   splitHorizontal: { height: 1, width: '100%', backgroundColor: c.borderStrong, cursor: 'row-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   header: { height: g.band, display: 'flex', alignItems: 'center', gap: g.gutter, paddingInline: g.gutter, flexShrink: 0, minWidth: 0 },
-  breadcrumb: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  laneContainer: { containerType: 'inline-size', containerName: 'thread-header' },
+  desktopFolder: { display: { default: 'inline', '@container thread-header (max-width: 560px)': 'none' } },
+  breadcrumb: { display: 'flex', flex: '1 1 0', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
   crumbSlash: { color: c.fgMuted },
   crumbTitle: { color: c.fg, fontWeight: t.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  actionSlot: { display: 'flex', alignItems: 'center', gap: 8 },
-  actions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 6 },
-  outlineXs: { height: g.controlSm, display: 'inline-flex', alignItems: 'center', paddingInline: 6, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, backgroundColor: 'rgba(255, 255, 255, 0.025)', color: c.fg, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },
+  actionSlot: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },
+  actions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },
+  outlineXs: { height: g.controlSm, display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', flexShrink: 0, paddingInline: 6, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, backgroundColor: 'rgba(255, 255, 255, 0.025)', color: c.fg, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },
   drawer: { display: 'flex', flexDirection: 'column', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.borderStrong, backgroundColor: c.canvas, flexShrink: 0, minHeight: 0 },
   drawerHead: { height: 32, display: 'flex', alignItems: 'center', gap: 12, paddingInline: 12 },
   drawerLabel: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgMuted, fontWeight: t.weightMedium },

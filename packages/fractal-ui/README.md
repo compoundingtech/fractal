@@ -230,6 +230,8 @@ Failed-command reason lines select the final top-level named exception from a tr
 
 `ThreadHeader` shows **Toggle terminal drawer** only when `terminalAvailable` is set. A host that knows why the terminal is unavailable passes `terminalDisabledReason?: string`: the toggle then stays visible but disabled, keeps its exact name, and carries the reason as its accessible description and hover title. Without a reason the toggle stays hidden. `@smalltalk/fractal-ui/assistant-ui/shell` also exports `TerminalDrawer`. The `Thread header` stories cover both cases.
 
+Desktop `ThreadHeader` establishes the named `thread-header` inline-size container, so native host controls can progressively collapse labels and move secondary actions into an overflow menu by the actual lane width, without resize-driven React state. Below 560px it omits the folder crumb and truncates the agent title; controls do not shrink or wrap. `ConstrainedLane` and `ConstrainedLaneLight` cover its 360px/32px geometry. Narrow headers retain their separate presentation.
+
 
 ### Portable sync seam
 

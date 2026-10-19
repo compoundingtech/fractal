@@ -6,6 +6,8 @@ import { useAtom, useAtomValue } from '@effect/atom-react'
 import * as Atom from 'effect/reactivity/Atom'
 import { DateTime } from 'effect'
 import { ChromeControl } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { compactTime } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
@@ -22,6 +24,7 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
   const source = useDataSource()
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
   const [resourcesOpen, setResourcesOpen] = React.useState(false)
+  const [declarationOpen, setDeclarationOpen] = React.useState(false)
   const changeResourcesOpen = (open: boolean) => {
     if (open) markStart('resources_panel', { key: agentRef })
     else cancelMeasure('resources_panel')
@@ -36,9 +39,10 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
       : resources.reason === 'unsupported' ? 'This connection does not support agent resources.' : undefined
     : undefined
   return <div {...stylex.props(styles.actions)}>
-    <Aria.DialogTrigger isOpen={resourcesOpen} onOpenChange={changeResourcesOpen}>
-      <ChromeControl icon="folder" label="Resources" {...(disabledReason === undefined ? {} : { disabledReason })} />
-      <Aria.ModalOverlay isDismissable {...stylex.props(styles.overlay)}>
+    <span {...stylex.props(styles.secondary)}>
+      <ChromeControl icon="folder" label="Resources" onPress={() => changeResourcesOpen(true)} {...(disabledReason === undefined ? {} : { disabledReason })} />
+    </span>
+      <Aria.ModalOverlay isOpen={resourcesOpen} onOpenChange={changeResourcesOpen} isDismissable {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>
           <Aria.Dialog aria-label="Agent resources" {...stylex.props(styles.dialog)}>
             <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => changeResourcesOpen(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
@@ -46,17 +50,26 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
           </Aria.Dialog>
         </Aria.Modal>
       </Aria.ModalOverlay>
-    </Aria.DialogTrigger>
-
-    <Aria.DialogTrigger>
-      <Aria.Button {...stylex.props(styles.button)}>View KDL</Aria.Button>
-      <DeclarationDialog subject={agentRef} />
-    </Aria.DialogTrigger>
+    <span {...stylex.props(styles.secondary)}>
+      <Tooltip label="View KDL">
+        <Aria.Button aria-label="View KDL" onPress={() => setDeclarationOpen(true)} {...stylex.props(styles.button, styles.declarationButton)}>
+          <span {...stylex.props(styles.declarationIcon)}><Icon name="checklist" /></span>
+          <span {...stylex.props(styles.declarationLabel)}>View KDL</span>
+        </Aria.Button>
+      </Tooltip>
+    </span>
+    <DeclarationDialog subject={agentRef} isOpen={declarationOpen} onOpenChange={setDeclarationOpen} />
     <Aria.MenuTrigger>
       <ChromeControl icon="gear" label="Conversation menu" />
       <Aria.Popover {...stylex.props(styles.popover)}>
-        <Aria.Menu aria-label="Conversation settings" selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))} {...stylex.props(styles.menu)}>
-          <Aria.MenuItem id="system" {...stylex.props(styles.menuItem)}>Show all system events</Aria.MenuItem>
+        <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true) }} {...stylex.props(styles.menu)}>
+          <Aria.MenuSection selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))}>
+            <Aria.MenuItem id="system" {...stylex.props(styles.menuItem)}>Show all system events</Aria.MenuItem>
+          </Aria.MenuSection>
+          <Aria.MenuSection selectionMode="none">
+            <Aria.MenuItem id="resources" isDisabled={disabledReason !== undefined} textValue="Resources" {...stylex.props(styles.menuItem)}>Resources{disabledReason === undefined ? null : <span slot="description" {...stylex.props(styles.menuReason)}>{disabledReason}</span>}</Aria.MenuItem>
+            <Aria.MenuItem id="declaration" {...stylex.props(styles.menuItem)}>View KDL</Aria.MenuItem>
+          </Aria.MenuSection>
         </Aria.Menu>
       </Aria.Popover>
     </Aria.MenuTrigger>
@@ -108,8 +121,13 @@ const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { r
   <p role="status" data-wf-read-reason={feed._tag === 'Unavailable' ? feed.reason : undefined}>{feed._tag === 'Waiting' ? `Loading ${label.toLowerCase()}…` : feed.reason === 'ungranted' ? `Read access to ${label.toLowerCase()} has not been granted.` : feed.reason === 'unsupported' ? `This connection does not support ${label.toLowerCase()}.` : `${label} could not be loaded; reconnect and try again.`}</p>
 
 const styles = stylex.create({
-  actions: { display: 'flex', alignItems: 'center', gap: s.md },
-  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
+  actions: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },
+  secondary: { display: { default: 'inline-flex', '@container thread-header (max-width: 440px)': 'none' }, flexShrink: 0 },
+  declarationButton: { height: 28, minWidth: 28, justifyContent: 'center', paddingInline: { default: 8, '@container thread-header (max-width: 680px)': 0 } },
+  declarationIcon: { display: { default: 'none', '@container thread-header (max-width: 680px)': 'inline-flex' } },
+  declarationLabel: { display: { default: 'inline', '@container thread-header (max-width: 680px)': 'none' } },
+  menuReason: { display: 'block', maxWidth: 240, color: c.fgMuted, fontSize: t.denseSize },
+  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, whiteSpace: 'nowrap', flexShrink: 0, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', justifyContent: 'flex-end', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { width: 380, maxWidth: 'calc(100vw - 24px)', height: '100%', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   dialog: { display: 'flex', flexDirection: 'column', height: '100%', outline: 'none' },

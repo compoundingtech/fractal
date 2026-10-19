@@ -7,8 +7,8 @@ import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { colorVars as c, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 const terminalReason = 'The terminal opens once this agent is running on a host.'
-function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason }: { scheme?: Scheme; terminalDisabledReason?: string }) {
-  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, laneWidth }: { scheme?: Scheme; terminalDisabledReason?: string; laneWidth?: number }) {
+  return <main data-scheme={scheme} style={laneWidth === undefined ? undefined : { width: laneWidth }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <ThreadHeader folder="fractal" title="Row projection" panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} terminalDisabledReason={terminalDisabledReason} />
   </main>
 }
@@ -41,6 +41,20 @@ export const TerminalHidden: Story = { tags: ['critical'], play: async ({ canvas
   await expect(within(header).queryByText(terminalReason)).toBeNull()
 } }
 export const TerminalHiddenLight: Story = { ...TerminalHidden, args: { scheme: 'light' } }
+/** The desktop header adapts to its own lane even inside a wide viewport. */
+export const ConstrainedLane: Story = { tags: ['critical'], args: { laneWidth: 360 }, play: async ({ canvasElement }) => {
+  const header = within(canvasElement).getByTestId('thread-header')
+  const lane = header.getBoundingClientRect()
+  await expect(lane.height).toBe(32)
+  await expect(within(header).getByText('fractal')).not.toBeVisible()
+  await expect(within(header).getByRole('heading', { name: 'Row projection' })).toBeVisible()
+  const controls = within(header).getAllByRole('button').map(button => button.getBoundingClientRect())
+  for (const a of controls) {
+    await expect(a.left >= lane.left && a.right <= lane.right && a.top >= lane.top && a.bottom <= lane.bottom).toBe(true)
+    for (const b of controls) if (a !== b) await expect(a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top).toBe(false)
+  }
+} }
+export const ConstrainedLaneLight: Story = { ...ConstrainedLane, args: { ...ConstrainedLane.args, scheme: 'light' } }
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },
 })
