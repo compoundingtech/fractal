@@ -288,10 +288,11 @@ async fn checkpoint_or_sync_activity_refuses_before_any_stop() -> Result<()> {
 
 #[tokio::test]
 async fn rejects_unstaged_enabled_or_running_targets_before_stop() -> Result<()> {
-    for invalid in ["not-installed", "enabled", "running"] {
+    for invalid in ["not-installed", "missing-definition", "enabled", "running"] {
         let mut fixture = Fixture::new()?;
         match invalid {
             "not-installed" => fixture.manager.services.target[0].installed = false,
+            "missing-definition" => fs::remove_file(&fixture.manager.services.target[0].file)?,
             "enabled" => fixture.manager.services.target[0].enabled = true,
             "running" => fixture.manager.services.target[0].running = true,
             _ => unreachable!(),
@@ -316,12 +317,13 @@ async fn both_running_service_families_are_a_hard_error() -> Result<()> {
 
 #[tokio::test]
 async fn missing_daemon_families_and_stopped_legacy_are_not_cutovers() -> Result<()> {
-    for missing in ["both", "legacy", "target", "stopped"] {
+    for missing in ["both", "legacy", "target", "legacy-file", "stopped"] {
         let mut fixture = Fixture::new()?;
         match missing {
             "both" => { fixture.manager.services.legacy.clear(); fixture.manager.services.target.clear(); }
             "legacy" => fixture.manager.services.legacy.clear(),
             "target" => fixture.manager.services.target.clear(),
+            "legacy-file" => fs::remove_file(&fixture.manager.services.legacy[0].file)?,
             "stopped" => fixture.manager.services.legacy.iter_mut().for_each(|unit| unit.running = false),
             _ => unreachable!(),
         }

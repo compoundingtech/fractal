@@ -243,8 +243,10 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     ensure!(services.legacy[0].installed, "legacy daemon unit is not installed");
     ensure!(!services.legacy.iter().any(|unit| unit.running) || !services.target.iter().any(|unit| unit.running), "legacy and Fractal services both run; stop and investigate before cutover");
     ensure!(services.legacy[0].running, "legacy daemon must be running so checkpoint/sync quiescence can be checked");
+    ensure!(services.legacy.iter().all(|unit| unit.file.is_file()),
+        "legacy definitions must be present in the user's service directory; global or orphaned loaded units need operator repair before cutover");
     for unit in &services.target {
-        ensure!(unit.installed && !unit.enabled && !unit.running, "{} must be pre-staged, disabled and stopped", unit.name);
+        ensure!(unit.installed && unit.file.is_file() && !unit.enabled && !unit.running, "{} must be pre-staged, disabled and stopped", unit.name);
     }
     let pairs = layout.pairs(&services);
     for (index, (old, new)) in pairs.iter().enumerate() {
@@ -258,10 +260,9 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     let mut journal = Journal { migration: MIGRATION_ID.into(), services, pairs,
         moves: Vec::new(), emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), committed: false, before, after: None, gap_ms: 0 };
     save(layout, &journal)?;
-    let gap = Instant::now();
     let attempt = swap(layout, manager, &mut journal).await;
-    let protection = match attempt {
-        Ok(protection) => protection,
+    let (protection, gap_ms) = match attempt {
+        Ok(result) => result,
         Err(error) => {
             return match rollback(layout, manager, &journal) {
                 Ok(()) => Err(error).context("host cutover failed before API readiness; legacy paths and services restored"),
@@ -272,7 +273,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     // Point of no automatic return: the new daemon has served its local API.
     journal.committed = true;
     journal.after = Some(protection.clone());
-    journal.gap_ms = gap.elapsed().as_millis();
+    journal.gap_ms = gap_ms;
     save(layout, &journal).context("local API listening, but commit journal could not be persisted; do not roll back state")?;
     finish(manager, &mut journal).context("local API listening; migration committed, rerun migrate host to finish retiring legacy units")?;
     Ok(receipt(manager, host, "completed", "local API listening", protection, journal.gap_ms))
@@ -282,7 +283,7 @@ fn receipt(manager: &impl Manager, host: &str, status: &'static str, local_api: 
     Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), local_api, effective, gap_ms }
 }
 
-async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<Protection> {
+async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<(Protection, u128)> {
     // Quiescence is checked again immediately before changing service state.
     manager.idle().await?;
     let stopped_at = Instant::now();
@@ -317,14 +318,17 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     // launchd opens StandardOutPath before exec, so its parent must already exist.
     fs::create_dir_all(layout.directories[1].1.join("logs"))?;
     manager.reload()?;
-    ensure!(stopped_at.elapsed() < std::time::Duration::from_secs(210),
+    // Reserve bounded target start/protection/probe calls, including launchd's
+    // enable + print + bootstrap + kickstart, inside the five-minute budget.
+    let pre_start_budget = if cfg!(target_os = "macos") { 140 } else { 200 };
+    ensure!(stopped_at.elapsed() < std::time::Duration::from_secs(pre_start_budget),
         "host swap exhausted its five-minute gap budget before target startup; restoring legacy");
     drop(state_lock);
     manager.start(&journal.services.target[0])?;
     let protection = manager.protection(&journal.services.target[0])?;
     ensure!(protection == journal.before, "effective memory.swap.max/MemoryLow changed across the service swap: before {:?}, after {:?}", journal.before, protection);
     manager.probe().await?;
-    Ok(protection)
+    Ok((protection, stopped_at.elapsed().as_millis()))
 }
 
 fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &Journal) -> Result<()> {
