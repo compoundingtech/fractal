@@ -4154,7 +4154,7 @@ mod wire_receiver_tests {
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
         // Alias readers must never change emitted request bytes.
-        let request = websocket_request("ws://localhost/stream", None, None, None).unwrap();
+        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1").unwrap();
         assert_eq!(
             request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
             TERMINAL_SUBPROTOCOL
