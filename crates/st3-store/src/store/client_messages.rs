@@ -1875,9 +1875,9 @@ mod tests {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
             let first = deferred_claim(&transaction, subject, "message.sent",
-                json!({"from":"agent/old","to":"person/old","status":"closed","content":"old","tags":[]}), None);
+                json!({"from":"agent/old","to":"person/robin","status":"closed","content":"old","tags":[]}), None);
             let update = deferred_claim(&transaction, subject, "message.sent",
-                json!({"from":"agent/new","to":"person/new","status":"sent","content":"new","tags":[]}), Some(&first.batch_id));
+                json!({"from":"agent/new","to":"person/blair","status":"sent","content":"new","tags":[]}), Some(&first.batch_id));
             assert_eq!(first.accepted_at_unix_ms, update.accepted_at_unix_ms);
             transaction.commit().unwrap();
             (first, update)
@@ -1902,22 +1902,22 @@ mod tests {
         }
         let canonical = serde_json::to_value(store.message(subject).unwrap().unwrap()).unwrap();
         assert_eq!(canonical["from"], "agent/new");
-        assert_eq!(canonical["to"], "person/new");
+        assert_eq!(canonical["to"], "person/blair");
         assert_eq!(canonical["status"], "sent");
         assert_eq!(canonical["content"], "new");
         store.client_messages_selector_benchmark_rebuild().unwrap();
-        let rows = paged_backfill_rows(&store, Some("person/new"), Some("agent/new"), false);
+        let rows = paged_backfill_rows(&store, Some("person/blair"), Some("agent/new"), false);
         assert_eq!(rows.len(), 1, "the canonical open message must remain in the filtered page");
         assert_eq!(rows[0]["message"], canonical);
         assert_eq!(rows[0]["current"], true);
-        assert!(paged_backfill_rows(&store, Some("person/old"), None, true).is_empty());
+        assert!(paged_backfill_rows(&store, Some("person/robin"), None, true).is_empty());
         assert!(paged_backfill_rows(&store, None, Some("agent/old"), true).is_empty());
         let header: (String, String, bool) = store.readers.get().query_row(
             "SELECT sender,recipient,closed FROM local_client_message_selectors_v1
              WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL",
             [subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
-        assert_eq!(header, ("agent/new".into(), "person/new".into(), false));
+        assert_eq!(header, ("agent/new".into(), "person/blair".into(), false));
     }
 
     #[test]
