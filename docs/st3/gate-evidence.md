@@ -759,7 +759,25 @@ A kind's rule may also name `by_level`: for one signer level (the first part of 
 host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
-`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only.
+
+A check may also name `events` itself (optional; the same two values). It limits the runs ANY note for that check may skip, whoever signed it,
+and a signer level's own `events` can only narrow it further (the verifier reports the intersection, which may be empty: then nothing skips).
+Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
+tree: `"enforce": true, "events": ["pull_request"]`.
+
+### Which checks skip today
+
+| Check | `enforce` | `events` | `sample_one_in` | Since |
+| --- | --- | --- | --- | --- |
+| `typescript-client` | true | `pull_request` | 5 | this change |
+| `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |
+
+`typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
+trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
+real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
+sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
+`enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
 
 ### Requiring a signed note (`require`, shadow only so far)
 

@@ -65,7 +65,7 @@ def git(repo, *args, stdin=None, config=(), env=None):
 
 
 POLICY_KEYS = {'version', 'checks'}
-CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require'}
+CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require', 'events'}
 REQUIRE_MODES = ('off', 'shadow', 'reject')
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
@@ -126,6 +126,11 @@ def policy_rules(text, check, repository):
         raise Failure('error', f'skip policy for {check}: sample_one_in must be an integer from 1 to 1000')
     if not (isinstance(entry['kinds'], dict) and entry['kinds']):
         raise Failure('error', f'skip policy for {check}: kinds must name at least one kind')
+    # `events` (optional) limits the runs a note for this check may skip, whoever signed it: ["pull_request"] keeps the merge queue
+    # testing the combined tree. Absent means every event the gate allows; a signer level's own `events` can only narrow it further.
+    check_events = entry.get('events')
+    if check_events is not None and not valid_events(check_events):
+        raise Failure('error', f'skip policy for {check}: events must be a nonempty list of {", ".join(EVENTS)}')
 
     def fill(value):
         return value.replace('{repository}', repository).replace('{check}', check)
@@ -151,7 +156,7 @@ def policy_rules(text, check, repository):
             if level not in (kind_levels or levels):
                 raise Failure('error', f'skip policy for {check}/{kind}: by_level {level!r} is not among the trust levels this kind accepts')
             events = override['events']
-            if not (isinstance(events, list) and events and len(set(events)) == len(events) and all(e in EVENTS for e in events)):
+            if not valid_events(events):
                 raise Failure('error', f'skip policy for {check}/{kind}: events must be a nonempty list of {", ".join(EVENTS)}')
             lcommand, lrequired, lbind = checked_command_inputs(override, f'{check}/{kind}/{level}')
             by_level[level] = {'command': [fill(v) for v in lcommand], 'required_inputs': sorted(set(lrequired) | set(lbind)),
@@ -168,7 +173,21 @@ def policy_rules(text, check, repository):
                        # may cover pull requests only), whatever the rest of the kind says.
                        'by_level': by_level}
     return {'kinds': kinds, 'trust_levels': tuple(levels), 'max_age_s': max_age, 'enforce': enforce,
-            'inputs': inputs, 'sample_one_in': sample, 'require': require}
+            'inputs': inputs, 'sample_one_in': sample, 'require': require,
+            'events': list(check_events) if check_events is not None else None}
+
+
+def valid_events(events):
+    return isinstance(events, list) and events and len(set(events)) == len(events) and all(e in EVENTS for e in events)
+
+
+def narrowed_events(check_events, level_events):
+    """The events a satisfied note may skip: the check's list, narrowed by the signer level's; None (any) only when neither limits it."""
+    if check_events is None:
+        return level_events
+    if level_events is None:
+        return list(check_events)
+    return [event for event in level_events if event in check_events]
 
 
 LANES_KEYS = {'version', 'lanes'}
@@ -560,7 +579,7 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
         'match': 'tree' if statement['subject'][0]['digest']['gitTree'] == tree else 'inputs',
         'matched_tree': statement['subject'][0]['digest']['gitTree'], 'source_inputs': input_key,
         'sample_one_in': rules['sample_one_in'] if rules is not None else 1,
-        'events': events,
+        'events': narrowed_events(rules.get('events') if rules is not None else None, events),
     }
 
 
