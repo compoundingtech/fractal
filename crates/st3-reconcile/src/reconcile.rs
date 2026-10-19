@@ -1,5 +1,6 @@
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
+use crate::DeliveryStore;
 use crate::MissionEligibilityStore;
 use crate::MissionsStore;
 use crate::MissionsStoreCore;

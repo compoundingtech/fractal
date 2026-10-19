@@ -5,6 +5,7 @@ pub use crate::store::tests_shared::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
+use crate::DeliveryStore;
 use crate::MissionsStore;
 use crate::PersonWorkStore;
 use crate::SeatStatusStore;

@@ -17,6 +17,7 @@ pub use crate::store::tests_shared::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
+use crate::DeliveryStore;
 use crate::ArrangementsStore;
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
