@@ -232,6 +232,12 @@ Failed-command reason lines select the final top-level named exception from a tr
 
 `ThreadHeader` shows **Toggle terminal drawer** only when `terminalAvailable` is set. A host that knows why the terminal is unavailable passes `terminalDisabledReason?: string`: the toggle then stays visible but disabled, keeps its exact name, and carries the reason as its accessible description and hover title. Without a reason the toggle stays hidden. `@smalltalk/fractal-ui/assistant-ui/shell` also exports `TerminalDrawer`. The `Thread header` stories cover both cases.
 
+### Phone (narrow) geometry
+
+Below its drawer breakpoint a host passes `narrow` to `ThreadHeader` and provides `NarrowLayoutContext` (from `@smalltalk/fractal-ui/assistant-ui/shell`) with `true` around the workspace. The kit then sizes its phone navigation and composer controls as 44px touch targets (`geometryVars.touchTarget`): the narrow header's Expand sidebar and Agent details, the composer's Send, Stop, attach, pickers, queue and suggestion rows, and the Show menu trigger and entries. Agent rows keep their height, status glyph and metric slot but move the actions menu (always visible, since touch has no hover) and the subagent disclosure out of the dense row into their own trailing 44px columns, so the title truncates earlier; SR-1 rows grow to 44px. The composer field uses 16px text (`typeVars.touchInputSize`) so iOS does not zoom on focus. Its height is capped at the smaller of `editorMax` and one third of `--wf-phone-height` (falling back to `100dvh`); a host sets that variable to the visual viewport's height when the keyboard opens. The composer stays in flow under the transcript and is never fixed. A context rather than a viewport media query keeps the same composer dense in a narrow desktop split. Safe-area insets: the host owns top and bottom; the narrow header and composer clear left and right; `NarrowSheet` covers the viewport and clears all four itself. `Thread header/Narrow phone`, `Phone thread`, `Narrow sheet` and `Sidebar/Agent Row/Phone · 44px menu and disclosure columns` cover the geometry, with desktop controls asserted alongside.
+
+Narrow transcripts keep the textual Running/elapsed status but omit the decorative animated run stripe, which would resemble another tab-selection indicator below a host's tab strip. Desktop transcripts retain the stripe. The row action trigger uses the muted chevron rather than the settings glyph.
+
 
 ### Portable sync seam
 
