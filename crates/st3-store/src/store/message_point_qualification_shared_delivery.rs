@@ -136,16 +136,16 @@ impl Accounting {
 
 #[derive(Debug, Serialize)]
 pub struct ClaimEdge {
-    id: String,
-    accepted_at_unix_ms: u128,
+    pub id: String,
+    pub accepted_at_unix_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PointCore {
-    message: MessageView,
-    first: ClaimEdge,
-    last: ClaimEdge,
-    session_id: Value,
+    pub message: MessageView,
+    pub first: ClaimEdge,
+    pub last: ClaimEdge,
+    pub session_id: Value,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -159,11 +159,11 @@ pub struct Domains {
 
 #[derive(Debug)]
 pub struct Point {
-    physical_cut: u64,
-    core: PointCore,
-    domains: Domains,
-    reminder: Option<(String, u64)>,
-    accounting: Accounting,
+    pub physical_cut: u64,
+    pub core: PointCore,
+    pub domains: Domains,
+    pub reminder: Option<(String, u64)>,
+    pub accounting: Accounting,
 }
 
 impl Point {
