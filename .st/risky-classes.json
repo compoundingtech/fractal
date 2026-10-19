@@ -4,7 +4,7 @@
   "classes": [
     {
       "name": "schema",
-      "globs": ["crates/smallclaims/src/store.rs", "crates/smallclaims/src/**/migrat*", "crates/st3-schema/**", "crates/st-storage-version/**", "crates/st3-migrate/**", "crates/st3-store/src/store/checkpoint_rules.rs", "docs/st3/schema.md"],
+      "globs": ["crates/smallclaims/src/store.rs", "crates/smallclaims/src/**/migrat*", "crates/st3-schema/**", "crates/fractal-storage-version/**", "crates/st3-migrate/**", "crates/st3-store/src/store/checkpoint_rules.rs", "docs/st3/schema.md"],
       "content": [
         {"globs": ["crates/st3-store/src/store.rs", "crates/st3-store/src/store/**", "crates/smallclaims/src/**"], "pattern": "(?i)\\b(CREATE\\s+(UNIQUE\\s+)?(TABLE|INDEX|TRIGGER|VIEW)|ALTER\\s+TABLE|DROP\\s+(TABLE|INDEX|TRIGGER|VIEW)|PRAGMA\\s+user_version|user_version\\s*=)"}
       ],
@@ -12,7 +12,7 @@
     },
     {
       "name": "protocol",
-      "globs": ["crates/st-wire/**", "crates/st-resource-protocol/**", "crates/st3-client/**", "crates/st3-client-codegen/**", "clients/**", "wit/**", "crates/st3-api-core/src/api.rs", "crates/st3-api-core/src/api/**", "crates/st3-api-mailbox/src/api/**", "crates/st3-api-client-v0/src/api/**", "crates/st3-daemon/src/api.rs", "crates/st3-peer/src/peer.rs", "crates/st3-peer/src/peer/**", "crates/st3-telemetry/src/relay_trace.rs", "docs/st3/client-v0/**", "docs/st3/ios-fabric-protocol.md"],
+      "globs": ["crates/fractal-wire/**", "crates/fractal-resource-protocol/**", "crates/st3-client/**", "crates/st3-client-codegen/**", "clients/**", "wit/**", "crates/st3-api-core/src/api.rs", "crates/st3-api-core/src/api/**", "crates/st3-api-mailbox/src/api/**", "crates/st3-api-client-v0/src/api/**", "crates/st3-daemon/src/api.rs", "crates/st3-peer/src/peer.rs", "crates/st3-peer/src/peer/**", "crates/st3-telemetry/src/relay_trace.rs", "docs/st3/client-v0/**", "docs/st3/ios-fabric-protocol.md"],
       "forces": ["integration", "client contract tests", "codegen --check", "scripts/read-contract-report"]
     },
     {

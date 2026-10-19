@@ -1,4 +1,4 @@
-//! st-wire — the JSON shapes shared CLI producers emit.
+//! fractal-wire — the JSON shapes shared CLI producers emit.
 //!
 //! The producer prints machine-readable JSON that other programs read. Before this crate each reader
 //! hand-typed its own struct to match, which is two transcriptions of one contract: nothing

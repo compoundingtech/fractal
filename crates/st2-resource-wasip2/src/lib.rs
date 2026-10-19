@@ -1,7 +1,7 @@
 //! Typed, capability-closed Component Model execution for resource observations.
 
 use serde_json::Value;
-use st2_resource_protocol::SnapshotDigest;
+use fractal_resource_protocol::SnapshotDigest;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservationRequest {
@@ -47,7 +47,7 @@ mod runtime {
     use std::sync::{Arc, Condvar, Mutex};
 
     use sha2::{Digest as _, Sha256};
-    use st2_resource_protocol::{
+    use fractal_resource_protocol::{
         FactError, FactValue, MAX_SELECTOR_BYTES, ObservationResult, ProtocolError, Publication,
         ResourceFact, SnapshotBytes, SnapshotSizeError, validate_topics,
     };

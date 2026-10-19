@@ -1369,6 +1369,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-resource-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "fractal-storage-version"
+version = "0.1.0"
+
+[[package]]
+name = "fractal-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fraction"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4479,6 +4500,7 @@ dependencies = [
  "ciborium",
  "data-encoding",
  "flate2",
+ "fractal-storage-version",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -4494,7 +4516,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "st-storage-version",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -4558,6 +4579,8 @@ version = "0.1.0"
 dependencies = [
  "agent-spec",
  "anyhow",
+ "fractal-resource-protocol",
+ "fractal-wire",
  "kdl",
  "libc",
  "notify",
@@ -4570,8 +4593,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "st-resource-protocol",
- "st-wire",
  "st2-resource-providers",
  "st2-resource-wasip2",
  "st3-schema",
@@ -4582,15 +4603,6 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite 0.30.0",
  "wat",
-]
-
-[[package]]
-name = "st-resource-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
 ]
 
 [[package]]
@@ -4609,18 +4621,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "st-storage-version"
-version = "0.1.0"
-
-[[package]]
-name = "st-wire"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "st2"
 version = "0.1.0"
 dependencies = [
@@ -4628,6 +4628,8 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "fractal-resource-protocol",
+ "fractal-wire",
  "kdl",
  "libc",
  "parking_lot",
@@ -4635,8 +4637,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "st-drivers",
- "st-resource-protocol",
- "st-wire",
  "st2-resource-providers",
  "st2-resource-wasip2",
  "tempfile",
@@ -4678,13 +4678,13 @@ name = "st2-resource-providers"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fractal-resource-protocol",
  "hickory-resolver",
  "libc",
  "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
- "st-resource-protocol",
  "st2-resource-wasip2",
  "tempfile",
  "tokio",
@@ -4695,11 +4695,11 @@ dependencies = [
 name = "st2-resource-wasip2"
 version = "0.1.0"
 dependencies = [
+ "fractal-resource-protocol",
  "libc",
  "serde",
  "serde_json",
  "sha2",
- "st-resource-protocol",
  "tempfile",
  "wasmtime",
  "wat",
@@ -5410,12 +5410,12 @@ name = "st3-schema"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fractal-storage-version",
  "hex",
  "regex",
  "serde",
  "serde_json",
  "sha2",
- "st-storage-version",
  "toml 0.9.12+spec-1.1.0",
 ]
 

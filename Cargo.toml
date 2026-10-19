@@ -13,11 +13,11 @@ members = [
   "crates/smallclaims",
   "crates/st-drivers",
   "crates/st-runtime",
-  "crates/st-storage-version",
-  "crates/st-resource-protocol",
+  "crates/fractal-storage-version",
+  "crates/fractal-resource-protocol",
   "crates/st2-resource-providers",
   "crates/st2-resource-wasip2",
-  "crates/st-wire",
+  "crates/fractal-wire",
   "crates/st3",
   "crates/st-chatgpt",
   "crates/st3-daemon",
@@ -58,8 +58,8 @@ default-members = [
   "crates/smallclaims",
   "crates/st-drivers",
   "crates/st-runtime",
-  "crates/st-resource-protocol",
-  "crates/st-wire",
+  "crates/fractal-resource-protocol",
+  "crates/fractal-wire",
   "crates/st3",
   "crates/st3-daemon",
   "crates/st3-e2e",
@@ -229,10 +229,10 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-st2-resource-protocol = { package = "st-resource-protocol", path = "crates/st-resource-protocol" }
+fractal-resource-protocol = { path = "crates/fractal-resource-protocol" }
 st2-resource-providers = { path = "crates/st2-resource-providers", optional = true }
 st2-resource-wasip2 = { path = "crates/st2-resource-wasip2", optional = true, features = ["runtime"] }
-st2-wire = { package = "st-wire", path = "crates/st-wire" }
+fractal-wire = { path = "crates/fractal-wire" }
 tempfile = "3"
 tracing = "0.1"
 

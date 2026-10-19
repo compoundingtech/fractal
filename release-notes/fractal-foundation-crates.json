@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Rename the storage-version, resource-protocol and wire crates to fractal-*",
+  "replay": {"status": "none", "detail": "The rename changes source names only. Stored claims and projections do not change."},
+  "schema": {"status": "none", "detail": "The storage version and schema digests stay unchanged."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and hash domains stay unchanged."},
+  "compatibility": {"status": "changed", "detail": "Rust callers use fractal-storage-version, fractal-resource-protocol and fractal-wire. The old Cargo names and dependency aliases are removed. Binary names and serialized values stay unchanged."},
+  "downtime": {"status": "none", "detail": "The rename requires no state migration or service change."},
+  "manual": {"status": "none", "detail": "Operators need no action. Source consumers update their Cargo dependencies and Rust import paths."},
+  "recovery": {"status": "none", "detail": "Existing releases read the same state. Release notes still read storage versions from commits before the crate rename."}
+}

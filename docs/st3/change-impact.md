@@ -14,7 +14,7 @@ is a schema change (release notes already treat it as one).
 
 | class | selects | forces |
 |---|---|---|
-| schema | schema version and migration files, `st3-schema`, `st-storage-version`, `st3-migrate`, checkpoint rules, `docs/st3/schema.md`; DDL (`CREATE`/`ALTER`/`DROP` table, index, trigger, view; `user_version`) in store and smallclaims sources | integration, store and smallclaims suites, a release-notes upgrade fragment |
+| schema | schema version and migration files, `st3-schema`, `fractal-storage-version`, `st3-migrate`, checkpoint rules, `docs/st3/schema.md`; DDL (`CREATE`/`ALTER`/`DROP` table, index, trigger, view; `user_version`) in store and smallclaims sources | integration, store and smallclaims suites, a release-notes upgrade fragment |
 | protocol | wire and resource-protocol crates, the client crate and its generator, `clients/`, `wit/`, `api.rs` and `api/`, `peer`, `relay_trace`, client-v0 and fabric protocol docs | integration, client contract tests, codegen `--check`, `scripts/read-contract-report` |
 | generated-contracts | the generator, generated clients, `action-coverage.json`, the read-contract report; contract hashes and registry digests in content | codegen `--check`, action coverage, client contract tests |
 | authorization | client-v0 and web API files, `sekrets`, accounts, roster admission and delegation, device signing, `.st/**`; trusted keys, pairing, signing keys in content | integration, authorization tests, `scripts/audit-claim-signatures-test` |

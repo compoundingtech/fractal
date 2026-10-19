@@ -6,7 +6,7 @@ description = "A replicated claims graph: the claim log, its canonical order and
 license = "MIT"
 
 [dependencies]
-st-storage-version = { path = "../st-storage-version" }
+fractal-storage-version = { path = "../fractal-storage-version" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"

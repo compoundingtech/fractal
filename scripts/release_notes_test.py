@@ -290,22 +290,34 @@ class ReleaseNotes(unittest.TestCase):
 
     def test_shared_storage_version_is_read_from_the_pinned_tree(self):
         self.write('crates/smallclaims/src/store.rs',
-                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
-        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
         value = fragment()
         value['schema'] = {'status': 'changed', 'detail': 'Forward migration.', 'transitions': [[16, 19]]}
         self.add_fragment(value=value)
         source = self.commit('Shared version migration')
         self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 1)
         # Neither a later working-tree version nor an undeclared transition may pass.
-        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 20;')
+        self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 20;')
         self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 1)
         later = self.commit('Later version increment')
         self.assertEqual(version(self.repo, later, 'schema'), 20)
-        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = unknown;')
+        self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = unknown;')
         malformed = self.commit('Malformed shared version')
         with self.assertRaisesRegex(ImpactError, 'cannot identify schema version'):
             version(self.repo, malformed, 'schema')
+
+    def test_storage_crate_rename_preserves_historical_version_discovery(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
+        before = self.commit('Historical storage crate')
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
+        after = self.commit('Rename storage crate without a schema change')
+        self.assertEqual(version(self.repo, before, 'schema'), 19)
+        self.assertEqual(version(self.repo, after, 'schema'), 19)
 
     def test_explicit_source_backfill_and_source_pinning(self):
         self.write('fix.rs', '// Direct fix\n')
@@ -331,15 +343,15 @@ class ReleaseNotes(unittest.TestCase):
 
     def test_shared_storage_version_is_read_from_the_exact_candidate(self):
         self.write('crates/smallclaims/src/store.rs',
-                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
-        self.write('crates/st-storage-version/src/lib.rs',
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/fractal-storage-version/src/lib.rs',
                    'pub const STORAGE_VERSION: u32 = 19;')
         value = fragment()
         value['schema'] = {'status': 'changed', 'detail': 'Shared version; forward migration.',
                            'transitions': [[16, 19]]}
         self.add_fragment(value=value)
         source = self.commit('Move the schema version to its shared crate')
-        self.write('crates/st-storage-version/src/lib.rs',
+        self.write('crates/fractal-storage-version/src/lib.rs',
                    'pub const STORAGE_VERSION: u32 = 99;')
         report = check_pull_request(self.repo, self.base, source)
         self.assertEqual(report['version_changes'][0]['to'], 19)
@@ -347,8 +359,8 @@ class ReleaseNotes(unittest.TestCase):
 
     def test_shared_storage_version_change_requires_its_transition(self):
         self.write('crates/smallclaims/src/store.rs',
-                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
-        self.write('crates/st-storage-version/src/lib.rs',
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/fractal-storage-version/src/lib.rs',
                    'pub const STORAGE_VERSION: u32 = 19;')
         self.add_fragment()
         source = self.commit('Unclassified shared schema transition')

@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 #[cfg(feature = "wasip2-provider-runtime")]
-use st_resource_protocol::ProposalFence;
+use fractal_resource_protocol::ProposalFence;
 #[cfg(feature = "wasip2-provider-runtime")]
 use st2_resource_providers::{
     GitHubIssueConfig, GitHubIssueModule, GitHubPrConfig, GitHubPrModule, PtyStatsConfig,
@@ -246,7 +246,7 @@ struct ObservationCompletion {
     authority: ObservationAuthority,
     watermark: u64,
     fence: ProposalFence,
-    result: Result<st_resource_protocol::ObservationResult, String>,
+    result: Result<fractal_resource_protocol::ObservationResult, String>,
 }
 
 #[cfg(feature = "wasip2-provider-runtime")]
@@ -286,10 +286,10 @@ impl ObservationCancellation {
 #[cfg(feature = "wasip2-provider-runtime")]
 fn catch_observation(
     observe: impl FnOnce() -> Result<
-        st_resource_protocol::ObservationResult,
+        fractal_resource_protocol::ObservationResult,
         st2_resource_wasip2::ObserveError,
     >,
-) -> Result<st_resource_protocol::ObservationResult, String> {
+) -> Result<fractal_resource_protocol::ObservationResult, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(observe))
         .map_err(|_| "provider observation panicked".to_owned())?
         .map_err(|error| error.to_string())
@@ -886,7 +886,7 @@ impl Worker {
         match completion.result {
             Ok(result) => {
                 let failure_detail = match &result {
-                    st_resource_protocol::ObservationResult::Failed { diagnostic } => Some(
+                    fractal_resource_protocol::ObservationResult::Failed { diagnostic } => Some(
                         diagnostic
                             .clone()
                             .unwrap_or_else(|| "provider returned a failed observation".to_owned()),
@@ -1241,7 +1241,7 @@ impl ProviderRuntime {
         &self,
         request: &Wasip2ObservationRequest,
         cancellation: &ObservationCancellation,
-    ) -> Result<st_resource_protocol::ObservationResult, st2_resource_wasip2::ObserveError> {
+    ) -> Result<fractal_resource_protocol::ObservationResult, st2_resource_wasip2::ObserveError> {
         match self {
             Self::GitHubIssue {
                 executor,

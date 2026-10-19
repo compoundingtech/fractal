@@ -6,7 +6,7 @@ description = "Authoritative st3 subject, resource, and claim registry"
 license = "MIT"
 
 [dependencies]
-st-storage-version = { path = "../st-storage-version" }
+fractal-storage-version = { path = "../fractal-storage-version" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 hex = "0.4"
 regex = "1"

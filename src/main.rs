@@ -2242,14 +2242,14 @@ fn message_cmd(cmd: MessageCmd) -> Result<()> {
             }
             if count {
                 match view.coverage {
-                    st2_wire::message::SentCoverage::Since { .. } => {
+                    fractal_wire::message::SentCoverage::Since { .. } => {
                         println!("{}", view.messages.len());
                         return Ok(());
                     }
-                    st2_wire::message::SentCoverage::Unavailable => {
+                    fractal_wire::message::SentCoverage::Unavailable => {
                         anyhow::bail!("sent-message coverage is unavailable")
                     }
-                    st2_wire::message::SentCoverage::Partial { pending, .. } => {
+                    fractal_wire::message::SentCoverage::Partial { pending, .. } => {
                         anyhow::bail!("sent-message coverage is partial ({pending} pending)")
                     }
                 }
@@ -2259,9 +2259,9 @@ fn message_cmd(cmd: MessageCmd) -> Result<()> {
                 return Ok(());
             }
             let coverage = match view.coverage {
-                st2_wire::message::SentCoverage::Unavailable => "unavailable".to_string(),
-                st2_wire::message::SentCoverage::Since { since } => format!("since {since}"),
-                st2_wire::message::SentCoverage::Partial { since, pending } => {
+                fractal_wire::message::SentCoverage::Unavailable => "unavailable".to_string(),
+                fractal_wire::message::SentCoverage::Since { since } => format!("since {since}"),
+                fractal_wire::message::SentCoverage::Partial { since, pending } => {
                     format!("partial since {since}; {pending} pending")
                 }
             };
