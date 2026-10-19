@@ -8,6 +8,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, waiting } from '../data/source.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { LiveAgentWorkspace, narrowLayoutQuery } from './LiveAgentWorkspace.tsx'
+import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 
 // The real workspace over the deterministic fixture world, with resources supported as on the live gateway.
 const source = {
@@ -165,4 +166,29 @@ export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
   const reopened = await canvas.findByRole('dialog', { name: 'Agent details' })
   await userEvent.click(within(reopened).getByRole('button', { name: 'Close agent details' }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
+} }
+
+/** The sidebar shortcut keeps its tooltip hint and stable name, and restores focus through the header's ref. */
+export const SidebarShortcutFocusReturn: Story = { play: async ({ canvasElement }) => {
+  const { canvas, narrow, header } = await workspace(canvasElement)
+  if (!narrow) return assertWide(canvasElement)
+  const toggle = header.getByRole('button', { name: 'Expand sidebar' })
+  await expect(toggle).toHaveAccessibleName('Expand sidebar')
+  // Cross the header before the control, as a pointer does entering the workspace.
+  await userEvent.hover(header.getByRole('navigation', { name: 'Breadcrumb' }))
+  await userEvent.hover(toggle)
+  await expect(await tooltipFor(toggle, 'Expand sidebar (⌘/Ctrl+B)')).toHaveTextContent(/^Expand sidebar \(⌘\/Ctrl\+B\)$/)
+  await userEvent.unhover(toggle)
+  // Open from another focused control: the shortcut must focus sidebarToggleRef before
+  // the modal captures its restore target, rather than relying on a click on the toggle.
+  const details = header.getByRole('button', { name: 'Agent details' })
+  details.focus()
+  await expect(details).toHaveFocus()
+  await userEvent.keyboard('{Control>}b{/Control}')
+  const sheet = await canvas.findByRole('dialog', { name: 'Agent navigation' })
+  await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true))
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent navigation' })).toBeNull())
+  await waitFor(() => expect(toggle).toHaveFocus())
+  await expect(toggle).toHaveAccessibleName('Expand sidebar')
 } }
