@@ -781,6 +781,102 @@ async fn revoked_jobs_hold_capacity_and_completion_admits_a_queued_seat() {
     assert_eq!(store.runtime_start_counts().unwrap(), (0, 0));
 }
 
+    // Per-PR contract for the boot canary `concurrent` scenario: five seats declared at once all
+    // start through the real start workers and their capacity queue, each as its own
+    // incarnation, and the crash-loop guard parks none.
+    #[tokio::test]
+async fn five_simultaneous_starts_get_distinct_incarnations_without_crash_loop_park() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let workspace = tempfile::tempdir().unwrap();
+    let seats = ["a", "b", "c", "d", "e"].map(|letter| format!("agent/canary/seat-{letter}"));
+    let source = seats.iter().fold(String::from("version 2\n"), |source, subject| {
+        format!(
+            "{source}agent {:?} {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            subject.trim_start_matches("agent/"),
+            workspace.path().display().to_string()
+        )
+    });
+    apply_source(&store, &source, "concurrent");
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Arc::new(Reconciler::new(
+        store.clone(),
+        runtime.clone(),
+        "node".into(),
+        Arc::new(Notify::new()),
+    ));
+    // Dispatch on real worker threads, through the MAX_START_JOBS admission queue.
+    reconciler
+        .wait_for_test_starts
+        .store(false, Ordering::Release);
+    for _ in 0..8 {
+        reconciler.reconcile_once().unwrap();
+        workers_done(&reconciler).await;
+        reconciler.reconcile_start_jobs().unwrap();
+        // Each launched seat keeps running as the incarnation its start observed.
+        for member in runtime.started_members.lock().unwrap().iter() {
+            let observation = RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: member.terminal,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(format!(
+                    "fake-start:{}",
+                    member.tags[start_jobs::OPERATION_TAG]
+                )),
+            };
+            if member.terminal {
+                let mut ptys = runtime.ptys.lock().unwrap();
+                if !ptys.iter().any(|pty| pty.runtime_id == member.runtime_id) {
+                    ptys.push(observation);
+                }
+            } else {
+                runtime
+                    .execs
+                    .lock()
+                    .unwrap()
+                    .entry(member.runtime_id.clone())
+                    .or_insert(observation);
+            }
+        }
+    }
+    let started = runtime.starts.lock().unwrap().clone();
+    assert_eq!(started.len(), 5, "each seat starts exactly once: {started:?}");
+    assert_eq!(started.iter().collect::<BTreeSet<_>>().len(), 5);
+    let mut incarnations = BTreeSet::new();
+    for subject in &seats {
+        let actual = store.latest_actual_value(subject).unwrap().unwrap();
+        assert_eq!(
+            actual_field(&actual, "status").and_then(Value::as_str),
+            Some("running"),
+            "{subject}"
+        );
+        let incarnation = actual_field(&actual, "incarnation_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        assert!(incarnation.starts_with("fake-start:"), "{subject}: {incarnation}");
+        incarnations.insert(incarnation);
+        // The canary's crash-loop guard check, over this seat's whole claim trace.
+        for claim in store.claims_for(subject, None).unwrap() {
+            let fields = &claim.body["fields"];
+            assert!(
+                !(claim.kind == "runtime.reconcile-decision"
+                    && fields["key"]
+                        .as_str()
+                        .is_some_and(|key| key.contains("crash-loop"))),
+                "{subject} parked: {fields}"
+            );
+            assert!(
+                !(claim.kind == "runtime.action.failed"
+                    && fields["action"] == "claude-channel-recovery"),
+                "{subject} parked: {fields}"
+            );
+        }
+    }
+    assert_eq!(incarnations.len(), 5, "{incarnations:?}");
+    assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+}
+
     #[tokio::test]
 async fn a_late_revoked_runtime_is_stopped_by_provenance_and_a_replacement_survives() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, false);

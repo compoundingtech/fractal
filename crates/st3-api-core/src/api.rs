@@ -387,7 +387,8 @@ impl ApiError {
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
-            "database-busy" | "database-locked" | "message-selectors-not-ready" => StatusCode::SERVICE_UNAVAILABLE,
+            "database-busy" | "database-locked" | "message-selectors-not-ready"
+            | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNPROCESSABLE_ENTITY,
@@ -7950,6 +7951,10 @@ fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T
 #[cfg(test)]
 #[path = "api/replication_guard_tests.rs"]
 mod replication_guard_tests;
+
+#[cfg(test)]
+#[path = "api/checkpoint_plan_tests.rs"]
+mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.

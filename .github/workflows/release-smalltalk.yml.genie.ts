@@ -22,7 +22,9 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ],
       "tags": [
         "**",
-        "!edge"
+        "!edge",
+        // Evidence records may live under refs/tags/evidence/ (one immutable tag per signed note); pushing one must never release.
+        "!evidence/**"
       ]
     },
     "workflow_dispatch": null,
