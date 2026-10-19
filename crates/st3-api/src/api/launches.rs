@@ -1,3 +1,4 @@
+use crate::SeatsStoreCore;
 use super::*;
 
 pub async fn start_planning_session(

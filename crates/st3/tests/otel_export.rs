@@ -1391,8 +1391,15 @@ async fn daemon_collection_stream_without_export_delivers_first_frame() {
     let client = st3_client::Client::unix_as(&daemon.socket, "person/ada");
     let mut stream = client.collection_stream().await.unwrap();
     stream.subscribe("missions", "missions", 2, None, None).await.unwrap();
-    let frame = tokio::time::timeout(Duration::from_secs(15), stream.next())
-        .await.unwrap().unwrap().unwrap();
+    // Readiness does not wait for the mission list's first publication. A window that subscribes
+    // before then resyncs once, is kept, and gets its snapshot when the list publishes.
+    let frame = tokio::time::timeout(Duration::from_secs(15), async {
+        let first = stream.next().await.unwrap().unwrap();
+        if first["kind"] != "resync" { return first; }
+        assert_eq!((first["id"].as_str(), first["code"].as_str(), first["retryable"].as_bool()),
+            (Some("missions"), Some("mission-list-not-ready"), Some(true)), "{first}");
+        stream.next().await.unwrap().unwrap()
+    }).await.unwrap();
     assert_eq!(frame["kind"], "snapshot", "{frame}");
     assert_eq!(frame["id"], "missions", "{frame}");
     assert!(frame["items"].is_array(), "{frame}");

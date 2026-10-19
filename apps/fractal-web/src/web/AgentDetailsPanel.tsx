@@ -24,7 +24,8 @@ const resources: WorkbenchResources = {
 
 export interface AgentDetailsPanelProps {
   readonly agentRef: string
-  readonly width: number
+  /** A number is the sized side panel; `fill` flows at the container's width (the narrow Details sheet). */
+  readonly width: number | 'fill'
   readonly scheme: 'dark' | 'light'
   readonly onClose: () => void
   readonly onOpen: (uri: string, split: boolean) => void
@@ -41,7 +42,7 @@ export function AgentDetailsPanel({ agentRef, width, scheme, onClose, onOpen, va
   const detailsKey = `details:${agentRef} view=details`
   const [selected, setSelected] = React.useState(detailsKey)
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
-  return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={{ width }} {...stylex.props(styles.root)}>
+  return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={width === 'fill' ? undefined : { width }} {...stylex.props(styles.root, width === 'fill' && styles.fillRoot)}>
     <div {...stylex.props(styles.closeBar)}><Button aria-label="Close agent inspector" onPress={onClose} {...stylex.props(styles.close)}>Close</Button></div>
     <Workbench layout={layout} resources={resources} workspaceId={`live-inspector:${agentRef}`} scheme={scheme}
       appearance={{ width: 'W1', header: 'H3', chrome: 'P1', dropZones: 'D3' }}
@@ -135,6 +136,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
 
 const styles = stylex.create({
   root: { flexShrink: 0, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', backgroundColor: c.canvas, color: c.fg },
+  fillRoot: { width: '100%', flexGrow: 1 },
   closeBar: { display: 'flex', justifyContent: 'flex-end', flexShrink: 0, padding: s.xs },
   close: { fontSize: t.metaSize, color: c.fgMuted, backgroundColor: 'transparent', borderWidth: 0, padding: s.xs, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   content: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flexGrow: 1, overflowY: 'auto' },

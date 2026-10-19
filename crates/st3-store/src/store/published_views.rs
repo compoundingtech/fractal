@@ -6,8 +6,8 @@
 use super::*;
 
 /// The collections a refresher may publish. Agents keep their own roster signal.
-pub const PUBLISHED_COLLECTIONS: [&str; 6] =
-    ["missions", "work", "attention", "summary", "glasses", "arrangements"];
+pub const PUBLISHED_COLLECTIONS: [&str; 7] =
+    ["missions", "work", "attention", "summary", "glasses", "arrangements", "runtimes"];
 
 /// One collection's publication state.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -114,22 +114,6 @@ impl Store {
         self.smalltalk.published_views.withdraw(collection);
     }
 
-    /// Say that `collection`'s running refresher governs its view while it has nothing to serve:
-    /// see [`PublishedViews::hold`].
-    pub fn hold_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.hold(collection);
-    }
-
-    /// Whether a refresher serves or governs `collection`'s view: its windows then reread only
-    /// when the view changes again.
-    pub fn collection_view_published(&self, collection: &str) -> bool {
-        self.smalltalk.published_views.published(collection)
-    }
-
-    /// Follows every collection's publication revision.
-    pub fn subscribe_collection_views(&self) -> tokio::sync::watch::Receiver<Revisions> {
-        self.smalltalk.published_views.subscribe()
-    }
 }
 
 #[cfg(test)]

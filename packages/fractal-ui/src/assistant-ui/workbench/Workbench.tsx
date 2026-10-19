@@ -490,7 +490,7 @@ function ThreadPane({ pane, resources, workspaceId }: { pane: WorkbenchPane; res
     </div>
     <div data-testid="workbench-composer-dock" {...stylex.props(styles.composerDock, dockTheme)}>
       <div {...stylex.props(styles.composerLane)}>
-        <Composer agent={title} running={thread.runtime.isRunning === true} folder={controls?.folder} branch={controls?.branch} onSend={controls?.onSend} onSteer={controls?.onSteer} onStop={controls?.onStop} draftKey={`workbench.${workspaceId}.${paneKey(pane)}`} />
+        <Composer agent={title} conversationLabel={`${title}, ${landmarkContext ?? workspaceId}, ${paneKey(pane)}`} running={thread.runtime.isRunning === true} folder={controls?.folder} branch={controls?.branch} onSend={controls?.onSend} onSteer={controls?.onSteer} onStop={controls?.onStop} draftKey={`workbench.${workspaceId}.${paneKey(pane)}`} />
       </div>
     </div>
   </EmbraceRuntimeProvider>
