@@ -1063,6 +1063,10 @@
               fractalMigration.phase = "stage";
               declarationsApply.enable = false;
             }).config;
+            escaped = (mkHmModuleEval {
+              fractalMigration.phase = "stage";
+              environment.FRACTAL_TEST_XML = "<tag>&value";
+            }).config;
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
             fakeSystemctl = pkgs.writeShellScript "fractal-migration-test-systemctl" ''
@@ -1114,6 +1118,10 @@
             && !(rendered.launchd.agents ? fractal)
             && pkgs.lib.hasInfix "<string>com.compoundingtech.fractal</string>" daemon
             && pkgs.lib.hasInfix "<string>com.compoundingtech.fractal-apply</string>" apply
+            && pkgs.lib.hasInfix "&lt;tag&gt;&amp;value"
+              escaped.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text
+            && pkgs.lib.hasInfix "&lt;tag&gt;&amp;value"
+              escaped.home.file."Library/LaunchAgents/com.compoundingtech.fractal-apply.plist".text
             && !(pkgs.lib.hasInfix "RunAtLoad" daemon)
             && !(pkgs.lib.hasInfix "KeepAlive" daemon)
             && !(pkgs.lib.hasInfix "RunAtLoad" apply)

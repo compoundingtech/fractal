@@ -245,10 +245,10 @@ in
     };
     home.file = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin) {
       "Library/LaunchAgents/com.compoundingtech.fractal.plist".text =
-        lib.generators.toPlist { } targetPlist;
+        lib.generators.toPlist { escape = true; } targetPlist;
       "Library/LaunchAgents/com.compoundingtech.fractal-apply.plist" =
         mkIf (cfg.declarationsApply.enable && hasDeclarations) {
-          text = lib.generators.toPlist { } targetApplyPlist;
+          text = lib.generators.toPlist { escape = true; } targetApplyPlist;
         };
     };
     home.activation.fractalMigrationPreflight = mkIf staging (lib.hm.dag.entryBetween
