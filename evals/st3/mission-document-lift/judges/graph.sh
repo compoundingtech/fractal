@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the root mission run}"
-root="mission-run/$ST_MISSION_RUN"
-work="$(env -u ST_AGENT st3 work ls --all --json)"
-root_view="$(env -u ST_AGENT st3 --json missions show "$root")"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the root mission run}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+root="mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+work="$(env -u FRACTAL_AGENT -u ST_AGENT st3 work ls --all --json)"
+root_view="$(env -u FRACTAL_AGENT -u ST_AGENT st3 --json missions show "$root")"
 producer="$(jq -r '.steps[] | select(.step == "lift-mission-document") | .subject' <<<"$root_view")"
 publisher="$(jq -r '.steps[] | select(.step == "lift-mission-document/work/publish-ready-graph-mission") | .subject' <<<"$root_view")"
 consumer="$(jq -r '.steps[] | select(.step == "execute-lifted-mission") | .subject' <<<"$root_view")"
@@ -33,7 +36,8 @@ publisher_complete="$(st trace show "$publisher" --json --limit 100 | jq -s '[.[
 test "$output_index" -gt "$publisher_claim"
 test "$output_index" -lt "$publisher_complete"
 
-child_runs="$(jq -r --arg root "$root" --arg agent "agent/$ST_MISSION_RUN/pdl.agent" '[.[] | select(.run != $root and .assigned_to == $agent) | .run] | unique | .[]' <<<"$work")"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+child_runs="$(jq -r --arg root "$root" --arg agent "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/pdl.agent" '[.[] | select(.run != $root and .assigned_to == $agent) | .run] | unique | .[]' <<<"$work")"
 test "$(grep -c . <<<"$child_runs")" -eq 1
 child="$(head -n 1 <<<"$child_runs")"
 
@@ -45,7 +49,8 @@ test "$(jq -r '.body.fields.parent_step_run' <<<"$created")" = "$consumer"
 test "$(jq -r '.store_index' <<<"$created")" -gt "$output_index"
 
 for step in inspect-inventory write-result verify-result publish-result; do
-  jq -e --arg run "$child" --arg step "$step" --arg agent "agent/$ST_MISSION_RUN/pdl.agent" \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  jq -e --arg run "$child" --arg step "$step" --arg agent "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/pdl.agent" \
     'any(.[]; .run == $run and .step == $step and .status == "completed" and .assigned_to == $agent and (.title | length > 0) and (.goals | length > 0))' \
     <<<"$work" >/dev/null
 done

@@ -134,8 +134,9 @@ Git revision as `StBuildCommit` and the revision's commit count as
 `build_version` with `devicectl device info apps --bundle-id
 com.compoundingtech.smalltalk --device "$ST_IOS_DEVICE" --json-output -` to
 verify the installed build independently of pairing or proof-only UI.
-The embedded `EXPO_PUBLIC_ST3_BUILD` revision also appears in connected-client
-diagnostics.
+<!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
+The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
+also appears in connected-client diagnostics.
 
 Prerequisites are Python 3, Git, Node 24, pnpm 12.7.0, CocoaPods, Xcode, and `gate-slot`
 in the scheduler's PATH. The build takes a heavy admission slot, runs under
@@ -273,7 +274,15 @@ The Debug app accepts a short-lived pairing deep link for headless simulator che
 For connected Debug smoke tests, `com.compoundingtech.smalltalk.starter://tab/Fleet` opens a tab (only Now, Resources, Fleet and Spaces are accepted), `com.compoundingtech.smalltalk.starter://mission?id=mission/...` opens a mission, `com.compoundingtech.smalltalk.starter://agent?id=agent/...` opens an agent's conversation, and `com.compoundingtech.smalltalk.starter://session?id=session/...` opens an exact conversation. Add `&terminal=terminal/...` to the session link to inspect its live terminal screen. `com.compoundingtech.smalltalk.starter://scroll?y=800` scrolls the visible list for screenshots. These links are disabled in Release and carry no authorization: the already-paired client still has to pass the gateway's normal checks.
 `com.compoundingtech.smalltalk.starter://attention?id=attention/...` opens one attention item's detail from Now.
 
-The simulator asks before it opens each link it is handed, so a headless run can instead put links in `apps/ios/.env` for Metro to inline into the Debug bundle: `EXPO_PUBLIC_ST3_TEST_PAIR_LINK` opens the pairing form at launch, `EXPO_PUBLIC_ST3_TEST_TAB` picks the first tab, and `EXPO_PUBLIC_ST3_TEST_LINKS` (space-separated) follows each link six seconds apart. Restart Metro with `--clear` after changing them.
+<!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
+The simulator asks before it opens each link it is handed, so a headless run can instead put links in `apps/ios/.env` for Metro to inline into the Debug bundle: `EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK` opens the pairing form at launch, `EXPO_PUBLIC_FRACTAL_TEST_TAB` picks the first tab, and `EXPO_PUBLIC_FRACTAL_TEST_LINKS` (space-separated) follows each link six seconds apart. Restart Metro with `--clear` after changing them.
+
+The app reads literal `EXPO_PUBLIC_FRACTAL_*` build variables first, then the corresponding
+legacy `EXPO_PUBLIC_ST3_*` name only when the preferred name is absent. An explicitly empty
+preferred value masks the legacy value. This also applies to `FABRIC_PROOF_LINK`, `TEST_SEND`,
+`TEST_SCROLL_BACK`, `TEST_TERMINAL_KEYS`, `BUILD`, and `FABRIC_DEFAULT`. Metro uses the same
+precedence for `FRACTAL_FABRIC_OFFLINE_DEBUG` and legacy `ST3_FABRIC_OFFLINE_DEBUG`;
+the offline Debug preparation script exports both names.
 
 For screenshots without a real st, `node demoGateway.mjs 8791` serves invented data: attention, missions, agents, one conversation, and one terminal. Pair a Debug simulator with `com.compoundingtech.smalltalk.starter://pair?gateway=http://<the Mac's LAN or Tailscale IPv4>:8791&id=demo&code=demo`. It is not authenticated; never point a Release build or a device at it.
 It completes the phone's real device-key verification read-only: the unauthenticated capabilities preflight is the raw advertisement, and pairing answers with an invented host-signed person-root proof and no signing grant, so the phone still runs its own checks.
@@ -334,7 +343,8 @@ The app reaches its member over its saved gateway (Tailscale, the local network 
 
 With Fabric on, each foreground opens a fresh native listener on the loopback address the bridge returns (the only loopback address the app accepts; it is never saved), the client talks to it, and the background stops it. The paired bearer and the enrolled signing key are the same ones the saved gateway uses, so a device already paired to the member needs only the setting and a grant, not a new pairing. A new pairing made while the bridge is open goes over fabric. The member exposes its paired-only client socket as one fabric service and grants this phone's node ID (shown in Fleet › carrier) that one service, inbound-only: `fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE` on fabric 0.2.41 or later, so the member never dials or probes the phone ([grant](../../docs/st3/ios-fabric-protocol.md#member-exposure-and-authorization)).
 
-The target is `node=NODE_ID&service=NAME` (and an optional `addr=` hint): paste it under Fleet › carrier. A build can carry one: put `EXPO_PUBLIC_ST3_FABRIC_DEFAULT='node=…&service=…'` in an ignored `.env` on the build host and that build opens on Fabric with the target preset, until the person chooses otherwise. A build from the repository carries none and stays on its saved gateway. Never commit a target, a node ID or a link.
+<!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
+The target is `node=NODE_ID&service=NAME` (and an optional `addr=` hint): paste it under Fleet › carrier. A build can carry one: put `EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT='node=…&service=…'` in an ignored `.env` on the build host and that build opens on Fabric with the target preset, until the person chooses otherwise. The legacy `EXPO_PUBLIC_ST3_FABRIC_DEFAULT` is read only when the preferred name is absent. A build from the repository carries none and stays on its saved gateway. Never commit a target, a node ID or a link.
 
 If fabric cannot connect (no grant, member out of reach, no answer within four seconds) the app falls back to the saved gateway and names the route and the reason in Fleet › this connection; a member that refuses the grant is named as a refusal. Turn the fallback off under Fleet › carrier to see fabric fail instead. Fabric is not tried again for thirty seconds after it fails, and a lost connection is redialed three times before the app falls back. Nothing is queued while the bridge is down, and a mutation is never retried over a new connection.
 
