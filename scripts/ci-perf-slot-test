@@ -43,6 +43,18 @@ with tempfile.TemporaryDirectory() as tmp:
     def status():
         return subprocess.check_output([sys.executable, slot, "--status"], env=env, text=True)
 
+    # The acquired slot overrides both inherited aliases, so an empty preferred
+    # marker cannot mask the held slot and make the child acquire it again.
+    for preferred in ("inherited-stale", ""):
+        inherited = {**env, "FRACTAL_PERF_SLOT_HELD": preferred,
+                     "ST_PERF_SLOT_HELD": "legacy-stale"}
+        marked = start(inherited, command=[sys.executable, "-c",
+            "import os; "
+            "assert os.environ['FRACTAL_PERF_SLOT_HELD'] == str(os.getppid()); "
+            "assert os.environ['ST_PERF_SLOT_HELD'] == str(os.getppid())"])
+        assert marked.wait(10) == 0, marked.stderr.read()
+        assert "perf slot free" in status() and not holder.exists()
+
     # Two runs started at once take turns: the second starts only after the first ends, and the
     # waiting one is told who holds the slot and for what.
     log = root / "turns"
