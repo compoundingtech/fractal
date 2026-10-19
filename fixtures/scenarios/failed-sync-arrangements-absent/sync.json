@@ -33,7 +33,7 @@
         },
         {
           "id": "read.arrangements",
-          "state": "granted",
+          "state": "ungranted",
           "version": 0
         },
         {
