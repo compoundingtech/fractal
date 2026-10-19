@@ -5226,6 +5226,7 @@ dependencies = [
  "futures-util",
  "hex",
  "libc",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
@@ -5237,6 +5238,7 @@ dependencies = [
  "st3-secrets",
  "tempfile",
  "tokio",
+ "tracing",
  "urlencoding",
  "uuid",
 ]
