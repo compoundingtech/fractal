@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Install an extracted Smalltalk release without restarting any service.
 set -Eeuo pipefail
 source_dir=$(cd "$(dirname "$0")" && pwd)/bin
 bin_dir=""
-instance="${ST_INSTANCE:-}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+instance="${FRACTAL_INSTANCE-${ST_INSTANCE:-}}"
 quiet=false
 while (($#)); do
   case $1 in
@@ -19,11 +21,14 @@ if [[ -n $instance ]]; then
     echo "install: an instance name is lowercase letters, digits and single hyphens, at most 24 characters" >&2
     exit 2
   }
-  export ST_INSTANCE=$instance
   # A named instance installs below its own directory unless told otherwise.
-  [[ -n $bin_dir ]] || bin_dir=${ST_MACOS_BIN_DIR:-$HOME/.st-instance/$instance/bin}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  [[ -n $bin_dir ]] || bin_dir=${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.st-instance/$instance/bin}}
 fi
-bin_dir=${bin_dir:-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — normalize shared installs too.
+export FRACTAL_INSTANCE=$instance ST_INSTANCE=$instance
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+bin_dir=${bin_dir:-${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}}
 binaries=(st3 pty)
 for binary in "${binaries[@]}"; do
   [[ -f $source_dir/$binary && -x $source_dir/$binary ]] || {
@@ -118,14 +123,16 @@ done
 ln -s st3 "$stage/st"
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 if [[ $(uname -s) == Darwin ]]; then
-  macos_home="${ST_MACOS_INSTALL_HOME:-$HOME}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  macos_home="${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME:-$HOME}}"
   mkdir -p "$macos_home"
   macos_home=$(cd "$macos_home" && pwd)
   macos_app=$(python3 - "$macos_home" <<'PY'
 import os
 from pathlib import Path
 import sys
-app = os.environ.get('ST_MACOS_APP_PATH')
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+app = os.environ.get('FRACTAL_MACOS_APP_PATH', os.environ.get('ST_MACOS_APP_PATH'))
 print(Path(app).expanduser().absolute() if app else Path(sys.argv[1]) / 'Applications/SmallTalk.app')
 PY
 )

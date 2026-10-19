@@ -4,6 +4,7 @@ import { useLocale } from 'react-aria'
 import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
+import { Icon } from '../composition/Icons'
 
 export interface SidebarTreeItem<T> {
   readonly id: Key
@@ -421,13 +422,13 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     }
   }
   const row = (item: T, expanded: boolean, pinned: boolean) => {
-    const glyph = expanded ? '⌄' : direction === 'rtl' ? '‹' : '›'
+    const glyph = <Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />
     const inset = { insetInlineStart: depthIndent(item.depth) }
     return <div {...stylex.props(styles.row)} style={{ paddingInlineStart: `calc(${depthIndent(item.depth)} + ${g.icon})` }}>
       {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden data-sidebar-guide {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${depthIndent(depth)} + ${g.icon} / 2)` }} />)}
       {item.children?.length ? pinned
-        ? <span data-pinned-chevron data-sidebar-disclosure {...stylex.props(styles.chevron)} style={inset}>{glyph}</span>
-        : <Button slot="chevron" data-sidebar-disclosure {...stylex.props(styles.chevron)} style={inset}>{glyph}</Button> : null}
+        ? <span data-pinned-chevron data-sidebar-disclosure {...stylex.props(styles.chevron, direction === 'rtl' && styles.mirrored)} style={inset}>{glyph}</span>
+        : <Button slot="chevron" data-sidebar-disclosure {...stylex.props(styles.chevron, direction === 'rtl' && styles.mirrored)} style={inset}>{glyph}</Button> : null}
       <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
       {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
     </div>
@@ -471,6 +472,7 @@ const styles = stylex.create({
   guide: { position: 'absolute', top: 0, bottom: 0, width: g.hairline, backgroundColor: border.borderStrong, pointerEvents: 'none' },
   // Absolute in the row's gutter, on line one: `g.controlSm` is the kit's minimum row and a two-line row's first line.
   chevron: { position: 'absolute', top: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.controlSm, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
+  mirrored: { transform: 'scaleX(-1)' },
   content: { flex: 1, minWidth: 0 },
   stack: { position: 'absolute', top: 0, insetInline: 0, zIndex: 1, pointerEvents: 'none', overflow: 'hidden', maxHeight: '40%' },
   pinSlot: { position: 'relative', overflow: 'hidden', pointerEvents: 'none' },

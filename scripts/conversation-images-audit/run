@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Put every kind of image into conversations on an isolated st instance, then look at each in the
 # terminal UI under several terminals' answers. Reproduces the table in
 # docs/clients/ui-contract.md (Conversations › Images › Audit).
@@ -37,8 +38,9 @@ st() { on garden-host "$home" "$instance" "$@"; }
 st_pond() { on pond-host "$audit/home-pond" images-audit-pond "$@"; }
 on() {
   local host="$1" at="$2" name="$3"; shift 3
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   env -i HOME="$at" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" \
-    LANG=C.UTF-8 SHELL=/bin/sh HOSTNAME="$host" ST3_PERSON="$person" ST3_WORKER_INTERVAL_MS=300 \
+    LANG=C.UTF-8 SHELL=/bin/sh HOSTNAME="$host" FRACTAL_PERSON="$person" ST3_PERSON="$person" FRACTAL_WORKER_INTERVAL_MS=300 ST3_WORKER_INTERVAL_MS=300 \
     "$audit/tools/st3" --instance "$name" "$@"
 }
 
@@ -261,7 +263,7 @@ look() {
   # the profile or tmux set them), never this machine's other variables.
   cat >"$audit/tools/ui" <<UI
 #!/bin/sh
-set -- HOME="$home" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" LANG=C.UTF-8 ST3_PERSON="$person"
+set -- HOME="$home" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" LANG=C.UTF-8 FRACTAL_PERSON="$person" ST3_PERSON="$person"
 for name in TERM TERM_PROGRAM LC_TERMINAL KITTY_WINDOW_ID ITERM_SESSION_ID TMUX; do
   eval "[ -n \"\\\${\$name+set}\" ]" && eval "set -- \"\\\$@\" \"\$name=\\\$\$name\""
 done

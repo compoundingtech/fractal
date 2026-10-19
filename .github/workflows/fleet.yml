@@ -1291,7 +1291,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1443,7 +1443,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1623,7 +1623,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1800,7 +1800,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1977,7 +1977,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -2546,7 +2546,7 @@ jobs:
         if: (runner.os == 'Linux') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -2868,7 +2868,15 @@ jobs:
         run: |
           git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
-            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
+      - name: Shadow-verify the published notes
+        if: ${{ always() && steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+          [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+          python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
+            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true
@@ -3108,7 +3116,7 @@ jobs:
         if: (runner.os == 'Linux') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -3166,6 +3174,10 @@ jobs:
       - name: Run all three systemd-scope tests in the VM
         id: vmtest
         env:
+          FRACTAL_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
+          FRACTAL_ISOLATION_WORKSPACE: ${{ github.workspace }}
+          FRACTAL_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
+          FRACTAL_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
           ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
           ST_ISOLATION_WORKSPACE: ${{ github.workspace }}
           ST_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
@@ -3174,7 +3186,7 @@ jobs:
           start=$SECONDS
           mkdir -p "$RUNNER_TEMP/vm-out"
           "$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
-          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "$ST_ISOLATION_TIMINGS" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "${FRACTAL_ISOLATION_TIMINGS-${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
           printf '| VM test driver total | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
         if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
       - name: Build the sekrets VM test driver
@@ -3187,6 +3199,7 @@ jobs:
       - name: Run the sekrets gateway test in the VM
         id: sekrets-test
         env:
+          FRACTAL_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
           ST_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
         run: |
           start=$SECONDS
@@ -3465,6 +3478,8 @@ jobs:
               "apps/fractal-web/src/web/liveSidebarTree.ts",
               "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/perfMarks.ts",
+              "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
+              "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
               "apps/fractal-web/src/web/sidebarAttention.ts",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",

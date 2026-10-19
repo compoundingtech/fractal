@@ -32,6 +32,9 @@ import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 import { useGatewaySync } from '../data/react.tsx'
+import { NarrowLayoutContext } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
+import { PhoneWorkspaceTabs } from './PhoneWorkspaceTabs.tsx'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import { useSidebarFolders, type SidebarFoldersBinding } from '../folders/useSidebarFolders.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
@@ -181,12 +184,20 @@ const sidebarClosed = persistedAtom({ key: 'round2.sidebarClosed', schema: Schem
 const palette = persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' })
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
+const phoneAgentTabs = persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] })
 const viewportWidth = () => window.innerWidth
 /** Below 900px the thread is the only thing on screen: agents open as a sheet from the left, the agent's actions and Details from the right. Same width as the sidebar drawer breakpoint. */
 export const narrowLayoutQuery = '(max-width: 899px)'
 const subscribeViewport = (callback: () => void) => {
   window.addEventListener('resize', callback)
   return () => window.removeEventListener('resize', callback)
+}
+// Mobile keyboards resize the visual viewport, not necessarily the layout viewport.
+const phoneViewportHeight = () => window.visualViewport?.height ?? window.innerHeight
+const subscribePhoneViewport = (callback: () => void) => {
+  window.visualViewport?.addEventListener('resize', callback)
+  window.addEventListener('resize', callback)
+  return () => { window.visualViewport?.removeEventListener('resize', callback); window.removeEventListener('resize', callback) }
 }
 const narrowLayoutMatches = () => window.matchMedia(narrowLayoutQuery).matches
 const serverNarrow = () => false
@@ -220,22 +231,19 @@ export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly 
 function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
+  const [phoneAgents, setPhoneAgents] = useAtom(phoneAgentTabs)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
-  // The agents sheet never outlives the narrow layout: widening the window docks the sidebar again.
-  const [agentsOpen, setAgentsOpen] = React.useState(false)
-  const agentsSheetId = React.useId()
+  const agentsDrawer = React.useRef<PhoneAgentDrawerHandle>(null)
   const subscribeNarrow = React.useCallback((callback: () => void) => {
     const query = window.matchMedia(narrowLayoutQuery)
-    const change = () => {
-      if (!query.matches) setAgentsOpen(false)
-      callback()
-    }
-    query.addEventListener('change', change)
-    return () => query.removeEventListener('change', change)
+    query.addEventListener('change', callback)
+    return () => query.removeEventListener('change', callback)
   }, [])
   const narrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
   React.useLayoutEffect(() => setTheme(scheme), [scheme])
   const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
+  const phoneHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
+  const phoneViewportStyle = narrow ? { height: `calc(${phoneHeight}px - var(--wf-devbar-space, 0px))`, '--wf-phone-height': `${phoneHeight}px` } : undefined
   const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
@@ -296,6 +304,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
   const select = (ref: string) => {
+    if (narrow) setPhoneAgents(refs => [...new Set([...refs, current, ref])].filter(Boolean))
     if (ref !== current) {
       cancelMeasure('open_transcript')
       markStart('switch_to_tail', { key: ref })
@@ -303,7 +312,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     }
     setDiffOpen(false)
     setOpenedTool(undefined)
-    setAgentsOpen(false)
+    agentsDrawer.current?.close()
     navigate(ref)
   }
   const open = (request: OpenRequest) => {
@@ -413,6 +422,16 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       : undefined
   const chosen = panes.find((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ?? urlPane
   const visiblePanes = chosen && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...panes, chosen] : panes
+  const phoneTabs = React.useMemo(() => {
+    const names = new Map(agents.map(agent => [agent.ref, agent.name]))
+    return [
+      ...[...new Set([...phoneAgents, current])]
+        .filter(ref => ref === current || names.has(ref))
+        .map(ref => ({ id: ref, label: ref === current ? 'Thread' : names.get(ref)! })),
+      { id: 'changes', label: 'Changes' },
+      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, byRef.get(pane.ref)?.title) })),
+    ]
+  }, [agents, phoneAgents, current, visiblePanes, byRef])
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
   const width = dragWidth ?? Math.round(ratio * viewport)
   const maxPanel = Math.max(240, viewport - (collapsed ? 40 : Math.min(width, Math.max(208, Math.min(440, viewport - 640)))) - 640)
@@ -467,15 +486,13 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   // The panes are portalled from outside the shell providers: those values change on every
   // switch, and React then scans every fiber below a memoized pane for consumers, which costs
   // O(retained turns) per click. No pane reads these shell contexts.
-  return (<>
+  return (<NarrowLayoutContext.Provider value={narrow}>
     <WorkbenchContextProvider value={{ open, focusedRef: address.ref || null, subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
           <ThreadHeaderSlotContext.Provider value={headerSlot}>
-            <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-              {narrow ? <NarrowSheet id={agentsSheetId} side="start" label="Agents" isOpen={agentsOpen} onOpenChange={setAgentsOpen} width={320}>
-                {sidebarBody}
-              </NarrowSheet> : <>
+            <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
+              {narrow ? null : <>
                 <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
                   <header {...stylex.props(styles.brand)}>
                     <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} />
@@ -486,9 +503,9 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                 <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               </>}
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ClockedThreadHeader agent={agent} stale={stale} narrow={narrow} sidebarCollapsed={narrow} onToggleSidebar={() => setAgentsOpen(true)} sidebarSheet={{ open: agentsOpen, id: agentsSheetId }} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={narrow ? undefined : agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrow ? narrowDetailsOpen : diffOpen} drawerOpen={terminalOpen} onTogglePanel={narrow ? () => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) } : () => setDiffOpen((value) => !value)} onToggleDrawer={toggleTerminal} />
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarSheet={sheet} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => setDiffOpen(value => !value)} onToggleDrawer={toggleTerminal} />}
                 <GatewayConnectionStatus />
-                {visiblePanes.length > 0 ? (
+                {!narrow && visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
                     <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
                       Thread
@@ -503,7 +520,11 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                     })}
                   </div>
                 ) : null}
-                <div ref={setPaneHost} {...stylex.props(styles.body)} />
+                {/* Keep this panel and its portal container at one reconciliation position across the breakpoint. */}
+                <PhoneWorkspaceTabs enabled={narrow} tabs={phoneTabs} selected={selectedPane === 'thread' ? current : selectedPane} onSelect={id => id === current || agents.some(row => row.ref === id) ? select(id) : navigate(current, id)}>
+                  <div ref={setPaneHost} {...stylex.props(styles.body, narrow && selectedPane === 'changes' && styles.phoneHidden)} />
+                  {narrow && selectedPane === 'changes' && current !== '' ? <React.Suspense fallback={<SystemNotice kind="loading" title="Loading captured changes" />}><ChangesInspector key={current} agentRef={current} width="fill" /></React.Suspense> : null}
+                </PhoneWorkspaceTabs>
               </section>
               {!narrow && diffOpen && openedTool === undefined && current !== '' ? (
                 <>
@@ -544,8 +565,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.flatMap(agent => [agent.ref, ...(agent.subagents ?? []).flatMap(child => child.session_id === undefined ? [] : [child.session_id])])} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
-  </>)
+    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.flatMap(agent => [agent.ref, ...(agent.subagents ?? []).flatMap(child => child.session_id === undefined ? [] : [child.session_id])])} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
+  </NarrowLayoutContext.Provider>)
 }
 
 /** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
@@ -587,7 +608,7 @@ const GatewayConnectionStatus = () => {
  * evict their follows. Render-time history updates avoid a second committed selection.
  * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
  * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, onOpenDocument, onOpenAgent, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly ux?: UxTelemetry }) {
+export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agentName, onOpenTool, onOpenDocument, onOpenAgent, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
   const [viewportStore] = React.useState(() => new ViewportStore())
@@ -598,7 +619,7 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
   const [retained, setRetained] = React.useState<readonly RetainedPane[]>([])
   const [switched, setSwitched] = React.useState<{ readonly shown: string; readonly covered: string | undefined }>({ shown: current, covered: undefined })
   // The terminal is a drawer below the thread: the thread stays shown and usable beside it.
-  const visible = current !== '' && (view._tag === 'Thread' || view._tag === 'Terminal')
+  const visible = !hidden && current !== '' && (view._tag === 'Thread' || view._tag === 'Terminal')
   React.useLayoutEffect(() => {
     if (visible) return
     // Abandon at the eager view boundary, even if the transcript module or data
@@ -667,7 +688,7 @@ export function LiveSidebarToolbar(props: Omit<SidebarToolbarProps, 'searchStyle
 
 const styles = stylex.create({
   legacyBridge: { '--canvas': c.canvas, '--panel': c.raised, '--recess': c.message, '--ink': c.fg, '--muted': c.fgMuted, '--line': c.borderStrong, '--accent': c.primary, '--on-accent': c.onPrimary, '--selection': c.rowActive, '--good': c.done, '--warning': c.attention, '--danger': c.dangerFg, '--sans': t.fontSans, '--mono': t.fontMono },
-  app: { display: 'flex', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', width: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  app: { display: 'flex', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', width: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, paddingBlockStart: { default: 0, '@media (max-width: 899px)': 'env(safe-area-inset-top)' }, paddingBlockEnd: { default: 0, '@media (max-width: 899px)': 'env(safe-area-inset-bottom)' }, boxSizing: 'border-box' },
   // Out of flow, above the panes. Viewport-wide but zero-height: no hit area of
   // its own, yet shrink-to-fit popovers get the viewport as available width.
   overlayHost: { position: 'fixed', top: 0, left: 0, width: '100%', height: 0, zIndex: 20 },
@@ -689,6 +710,7 @@ const styles = stylex.create({
   footer: { height: 40, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0 },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
+  phoneHidden: { display: 'none' },
   // Identical geometry in both states: revealing a pane must not invalidate its layout. Only
   // non-inherited properties toggle (no inert/pointer-events/visibility), so a reveal does not
   // restyle the retained subtree; content-visibility already removes it from focus and a11y.

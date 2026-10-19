@@ -1,7 +1,9 @@
 // Multiple-selection filter menu: checkbox entries with counts; selection semantics belong to the host.
+import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Header, Menu, MenuItem, MenuSection, MenuTrigger, Popover, VisuallyHidden, type Selection } from 'react-aria-components'
 import { Icon } from '../composition/Icons'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 
 /** One checkbox entry; `id` is the host's selection key. */
@@ -27,7 +29,8 @@ export interface ShowMenuProps {
 
 /** Checkbox menu entry for a multiple-selection menu: check, label, right-aligned tabular count. */
 export function ShowMenuItem({ id, label, count }: ShowMenuEntry) {
-  return <MenuItem id={id} textValue={label} aria-label={`${label}, ${count}`} {...stylex.props(styles.item)}>
+  const narrow = React.useContext(NarrowLayoutContext)
+  return <MenuItem id={id} textValue={label} aria-label={`${label}, ${count}`} {...stylex.props(styles.item, narrow && styles.touchRow)}>
     {({ isSelected }) => <>
       <span aria-hidden="true" data-show-check={isSelected ? 'checked' : 'unchecked'} {...stylex.props(styles.check, isSelected && styles.checked)}>{isSelected && <Icon name="check" size={12} />}</span>
       <span {...stylex.props(styles.label)}>{label}</span>
@@ -39,10 +42,11 @@ export function ShowMenuItem({ id, label, count }: ShowMenuEntry) {
 /** Trigger plus multiple-selection menu; it stays open while entries toggle. */
 export function ShowMenu({ groups, selectedKeys, onSelectionChange, label = 'Show', popoverTheme }: ShowMenuProps) {
   const active = selectedKeys.size
+  const narrow = React.useContext(NarrowLayoutContext)
   const select = (keys: Selection) =>
     onSelectionChange(keys === 'all' ? new Set(groups.flatMap(group => group.entries.map(entry => entry.id))) : new Set([...keys].map(String)))
   return <MenuTrigger>
-    <Button data-show-active={active > 0 ? active : undefined} {...stylex.props(styles.trigger, active > 0 && styles.triggerActive)}>
+    <Button data-show-active={active > 0 ? active : undefined} {...stylex.props(styles.trigger, narrow && styles.touchRow, active > 0 && styles.triggerActive)}>
       <span>{label}</span>
       {active > 0 && <><span aria-hidden="true" {...stylex.props(styles.badge)}>{active}</span><VisuallyHidden>, {active} active</VisuallyHidden></>}
       <Icon name="chevron-down" size={12} />
@@ -61,6 +65,8 @@ export function ShowMenu({ groups, selectedKeys, onSelectionChange, label = 'Sho
 const styles = stylex.create({
   trigger: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, minHeight: g.controlMd, paddingInline: s.sm, boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: { default: surface.controlFill, ':hover': surface.rowHover }, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   triggerActive: { color: ink.fg, backgroundColor: surface.rowActive },
+  // Narrow (phone) hosts: the trigger and every entry are 44px touch targets.
+  touchRow: { minHeight: g.touchTarget },
   badge: { minWidth: g.icon, height: g.icon, paddingInline: s.xs, boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: r.full, backgroundColor: accent.primary, color: accent.onPrimary, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
   popover: { minWidth: g.menuMin, maxWidth: 'calc(100vw - 16px)', overflowY: 'auto', boxSizing: 'border-box', padding: s.xs, backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, boxShadow: elevation.popover, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   menu: { outlineStyle: 'none' },
