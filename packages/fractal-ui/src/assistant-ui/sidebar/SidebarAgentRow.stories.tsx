@@ -313,7 +313,9 @@ export const PhoneTouchTargets: Story = { tags: ['critical'], name: 'Phone · 44
   const trigger = within(rows[0]!).getByRole('button', { name: 'Actions for First session' })
   await userEvent.click(trigger)
   const items = await waitFor(() => { const found = document.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]'); expect(found.length).toBeGreaterThan(0); return found })
-  for (const item of items) await expect(item.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+  // The standard popover scales during entry; measure the settled touch geometry.
+  for (const item of items) await waitFor(() => expect(item.getBoundingClientRect().height).toBeGreaterThanOrEqual(44))
+  await expect(document.querySelector('[role="tooltip"]')).toBeNull()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
   await waitFor(() => expect(document.activeElement).toBe(trigger))

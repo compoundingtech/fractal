@@ -33,7 +33,7 @@ function PhoneThreadStory({ scheme, narrow }: { scheme: Scheme; narrow: boolean 
     <NarrowLayoutContext.Provider value={narrow}>
       <div data-testid="phone-column" {...stylex.props(styles.column)}>
         <EmbraceRuntimeProvider options={options}>
-          <ThreadHeader narrow={narrow} folder="workstation-a" title="Row projection" status="working" statusLabel="working" freshness="live" sidebarCollapsed={narrow} onToggleSidebar={() => {}} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+          <ThreadHeader narrow={narrow} folder="build-1" title="Row projection" status="working" statusLabel="working" freshness="live" sidebarCollapsed={narrow} onToggleSidebar={() => {}} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
           <div {...stylex.props(styles.transcript)}><Transcript viewportKey="phone" title="Row projection" turns={[turn]} sync={sync} now={now} observedAt={now - 3000} onOpenTool={() => {}} /></div>
           <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn conversationLabel="Row projection" /></div>
         </EmbraceRuntimeProvider>
@@ -87,6 +87,11 @@ export const Narrow: Story = { tags: ['critical'], play: async ({ canvasElement 
   await expect(send.getBoundingClientRect().bottom).toBeLessThanOrEqual(column.getBoundingClientRect().bottom)
   await expect(send.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight)
   await expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(column.getBoundingClientRect().top)
+  // iOS can shrink only the visual viewport: use the host's explicit height, not layout dvh.
+  column.style.setProperty('--wf-phone-height', '400px')
+  column.style.height = '400px'
+  await waitFor(() => expect(field.getBoundingClientRect().height).toBeLessThanOrEqual(400 / 3 + 1))
+  await expect(send.getBoundingClientRect().bottom).toBeLessThanOrEqual(column.getBoundingClientRect().bottom)
 } }
 export const NarrowLight: Story = { ...Narrow, args: { scheme: 'light', narrow: true } }
 /** Desktop density is unchanged outside a narrow host: 14px field text and the 32px Send. */

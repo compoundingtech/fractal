@@ -144,6 +144,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const rowLayout = variant === 'SR-2' ? layout : 'SR2-A'
   const rowGlyph = variant === 'SR-2' ? 'SG-1' : glyph
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
+  const menuOpen = React.useRef(false)
   const detailsTrigger = React.useRef<HTMLButtonElement>(null)
   const tooltipAnchor = React.useRef<HTMLDivElement>(null)
   const [hoverOpen, setHoverOpen] = React.useState(false)
@@ -155,7 +156,12 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   }, [])
   // The hover card anchors to the measured row frame so it follows the row, not its hidden trigger.
   const rowAnchor = React.useCallback((node: HTMLDivElement | null) => { tooltipAnchor.current = node; return attachSidebarLine1Fit(node) }, [])
-  const hoverIntent = (open: boolean) => { clearTimeout(hoverTimer.current); hoverTimer.current = window.setTimeout(() => setHoverOpen(open), open ? 150 : 300) }
+  const hoverIntent = (open: boolean) => {
+    clearTimeout(hoverTimer.current)
+    // Portalled menu focus bubbles through the row; it must not open a second overlay that consumes Escape.
+    if (open && menuOpen.current) return
+    hoverTimer.current = window.setTimeout(() => setHoverOpen(open), open ? 150 : 300)
+  }
   const prefetch = () => { if (!inTree) callbacks?.prefetch?.(item.ref) }
   const open = () => { callbacks?.select?.(item.id, item.parentRef?.replace(/^agent\//, '')); onOpen?.(item) }
   const quickOpen = canOpen && rowHovered
@@ -192,7 +198,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       <VisuallyHidden><span id={descriptionId} data-row-description>{metadata}</span></VisuallyHidden>
       <div {...stylex.props(styles.actions)}>
         <DialogTrigger><TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}><VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={() => setHoverOpen(false)} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden><Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger><Popover triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={item} {...clock} /></Dialog></Popover></DialogTrigger>
-        <MenuTrigger><Button ref={menuTrigger} data-agent-menu="true" aria-label={`Actions for ${title}`} className={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle, narrow && styles.menuNarrow).className ?? ''}><Icon name="gear" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
+        <MenuTrigger onOpenChange={isOpen => { menuOpen.current = isOpen; clearTimeout(hoverTimer.current); if (isOpen) setHoverOpen(false) }}><Button ref={menuTrigger} data-agent-menu="true" aria-label={`Actions for ${title}`} className={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle, narrow && styles.menuNarrow).className ?? ''}><Icon name="gear" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
           <MenuItem id="open" isDisabled={!canOpen} onAction={open} style={menuItemStyle}>Open conversation</MenuItem>
           {callbacks?.split !== undefined && <MenuItem id="split-right" onAction={() => callbacks.split?.(item.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
           {callbacks?.split !== undefined && <MenuItem id="split-below" onAction={() => callbacks.split?.(item.ref, 'below')} style={menuItemStyle}>Open in split below</MenuItem>}

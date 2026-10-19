@@ -1,22 +1,43 @@
 import * as React from 'react'
-import * as Aria from 'react-aria-components'
+import { mergeProps, useFocusRing, useTab, useTabList } from 'react-aria'
+import { Item, useTabListState } from 'react-stately'
+import type { TabListState } from 'react-stately'
 import * as stylex from '@stylexjs/stylex'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex'
 
-/** React Aria owns roving focus and arrow keys; one stable viewport retains the live thread. */
+interface PhoneTab { readonly id: string; readonly label: string }
+
+/** React Aria owns keyboard navigation. A shared panel keeps the thread's portal host and drafts mounted. */
 export function PhoneWorkspaceTabs({ tabs, selected, onSelect, children }: {
-  readonly tabs: readonly { readonly id: string; readonly label: string }[]
+  readonly tabs: readonly PhoneTab[]
   readonly selected: string
   readonly onSelect: (id: string) => void
   readonly children: React.ReactNode
 }) {
+  const prefix = React.useId()
   const index = Math.max(0, tabs.findIndex(tab => tab.id === selected))
-  return <Aria.Tabs selectedKey={tabs[index]!.id} onSelectionChange={key => onSelect(String(key))} {...stylex.props(styles.root)}>
-    <Aria.TabList aria-label="Workspace views" {...stylex.props(styles.list)}>
-      {tabs.map(tab => <Aria.Tab key={tab.id} id={tab.id} {...stylex.props(styles.tab)}>{tab.label}</Aria.Tab>)}
-    </Aria.TabList>
-    <Aria.TabPanel id={tabs[index]!.id} shouldForceMount {...stylex.props(styles.panel)}>{children}</Aria.TabPanel>
-  </Aria.Tabs>
+  const list = React.useRef<HTMLDivElement>(null)
+  const state = useTabListState({
+    items: tabs,
+    children: tab => <Item key={tab.id} title={tab.label}>{tab.label}</Item>,
+    selectedKey: tabs[index]!.id,
+    onSelectionChange: key => onSelect(String(key)),
+  })
+  const { tabListProps } = useTabList({ 'aria-label': 'Workspace views' }, state, list)
+  const panelId = `${prefix}-panel`
+  return <div {...stylex.props(styles.root)}>
+    <div {...tabListProps} ref={list} {...stylex.props(styles.list)}>
+      {tabs.map((tab, i) => <PhoneTabButton key={tab.id} tab={tab} state={state} id={`${prefix}-tab-${i}`} panelId={panelId} />)}
+    </div>
+    <div id={panelId} role="tabpanel" aria-labelledby={`${prefix}-tab-${index}`} tabIndex={0} {...stylex.props(styles.panel)}>{children}</div>
+  </div>
+}
+
+function PhoneTabButton({ tab, state, id, panelId }: { readonly tab: PhoneTab; readonly state: TabListState<PhoneTab>; readonly id: string; readonly panelId: string }) {
+  const ref = React.useRef<HTMLDivElement>(null)
+  const { tabProps, isSelected } = useTab({ key: tab.id }, state, ref)
+  const { focusProps, isFocusVisible } = useFocusRing()
+  return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={id} aria-controls={panelId} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab)}>{tab.label}</div>
 }
 
 const styles = stylex.create({

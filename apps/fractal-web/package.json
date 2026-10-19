@@ -21,6 +21,7 @@
     "react-dom": "19.2.3",
     "react-aria": "3.52.1",
     "react-aria-components": "1.21.1",
+    "react-stately": "3.50.0",
     "@stylexjs/stylex": "0.19.0",
     "@effect/atom-react": "4.0.0"
   },

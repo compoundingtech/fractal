@@ -129,7 +129,7 @@ const styles = stylex.create({
   touchRow: { height: 'auto', minHeight: g.touchTarget },
   // The composer owns the left/right safe-area insets; the narrow host owns top and bottom.
   narrowInsets: { paddingInlineStart: 'env(safe-area-inset-left, 0px)', paddingInlineEnd: 'env(safe-area-inset-right, 0px)' },
-  narrowInput: { maxHeight: `min(${g.editorMax}, 33dvh)` },
+  narrowInput: { maxHeight: `min(${g.editorMax}, calc(var(--wf-phone-height, 100dvh) / 3))` },
   menu: {
     backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline,
     borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.base,

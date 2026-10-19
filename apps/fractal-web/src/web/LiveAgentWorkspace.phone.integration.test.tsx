@@ -8,6 +8,8 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
+import { Schema } from 'effect'
+import { persistedAtom } from '../state/persistence.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -21,6 +23,8 @@ const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/metric-track'
 beforeEach(async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  // jsdom does not supply the CSSOM escaping used by React Aria collection keys.
+  vi.stubGlobal('CSS', { escape: (value: string) => Array.from(value, char => /[a-zA-Z_-]/.test(char) ? char : `\\${char.codePointAt(0)?.toString(16)} `).join('') })
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => window.setTimeout(callback, 0))
   vi.stubGlobal('cancelAnimationFrame', window.clearTimeout)
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
@@ -33,6 +37,7 @@ beforeEach(async () => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/metric-track')
   registry = AtomRegistry.make()
+  registry.set(persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] }), [])
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -55,10 +60,10 @@ it('opens, traps focus, closes with Escape and returns focus without remounting 
   expect(trigger.getAttribute('aria-expanded')).toBe('true')
   expect(dialog.contains(document.activeElement)).toBe(true)
   await act(async () => trigger.focus())
-  expect(dialog.contains(document.activeElement)).toBe(true)
+  await vi.waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
-  expect(document.activeElement).toBe(trigger)
+  await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
   expect(host.querySelector('[aria-label="Agent roster"]')).toBe(roster)
   expect(renders.thread).toBe(count)
 })
@@ -66,16 +71,20 @@ it('opens, traps focus, closes with Escape and returns focus without remounting 
 it('closes the drawer when an agent is selected and supports its explicit close button', async () => {
   const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Expand sidebar"]')!
   await act(async () => { trigger.focus(); trigger.click() })
-  const row = host.querySelector<HTMLElement>('[role="row"][data-key="agent/reviewer"]') ?? [...host.querySelectorAll<HTMLElement>('[role="row"]')].find(node => node.textContent?.includes('Reviewer'))!
-  expect(row).toBeDefined()
-  await act(async () => { row.focus(); row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })) })
+  const row = host.querySelector<HTMLElement>('[role="row"][data-sidebar-tree-key="agent/reviewer"]')!
+  expect(row).not.toBeNull()
+  await act(async () => {
+    row.focus()
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+    row.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+  })
   expect(window.location.pathname).toBe('/w/agent/reviewer')
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
-  expect(document.activeElement).toBe(trigger)
+  await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
   await act(async () => trigger.click())
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Close agents"]')!.click())
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
-  expect(document.activeElement).toBe(trigger)
+  await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
 })
 
 it('switches Thread and Changes with arrow keys and connects the selected tab to its panel', async () => {

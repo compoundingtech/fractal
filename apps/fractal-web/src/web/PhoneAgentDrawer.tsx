@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { FocusScope, mergeProps, useDialog, useModalOverlay } from 'react-aria'
+import { FocusScope, mergeProps, UNSAFE_PortalProvider, useDialog, useModalOverlay } from 'react-aria'
+import { useOverlayTriggerState } from 'react-stately'
 import * as Aria from 'react-aria-components'
 import { colorVars as c, spaceVars as s, surfaceVars as surface, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex'
 
@@ -17,17 +18,21 @@ export function PhoneAgentDrawer({ ref, children, header }: {
   const opener = React.useRef<HTMLElement | null>(null)
   const portalHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => portalHost.current, [])
-  const [isOpen, setOpen] = React.useState(false)
+  const state = useOverlayTriggerState({})
+  const { isOpen, open: openOverlay, close } = state
   const id = React.useId()
-  const close = React.useCallback(() => setOpen(false), [])
   const open = () => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    setOpen(true)
+    openOverlay()
   }
-  const state = { isOpen, setOpen, open, close, toggle: () => setOpen(value => !value) }
   const { modalProps, underlayProps } = useModalOverlay({ isDismissable: true }, state, dialog)
   const { dialogProps } = useDialog({ 'aria-label': 'Agents' }, dialog)
-  React.useLayoutEffect(() => { if (isOpen) closeButton.current?.focus(); else opener.current?.focus() }, [isOpen])
+  React.useLayoutEffect(() => {
+    if (isOpen) { closeButton.current?.focus(); return }
+    // Restore after React Aria has released containment and its pending blur frame.
+    const frame = window.requestAnimationFrame(() => opener.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [isOpen])
   React.useImperativeHandle(ref, () => ({ close }), [close])
   return <>
     {header(open, { open: isOpen, id })}
@@ -35,7 +40,7 @@ export function PhoneAgentDrawer({ ref, children, header }: {
       <FocusScope contain={isOpen}>
         <div {...mergeProps(modalProps, dialogProps)} ref={dialog} id={id} {...stylex.props(styles.drawer)}>
           <header {...stylex.props(styles.header)}><strong>Agents</strong><Aria.Button ref={closeButton} aria-label="Close agents" onPress={close} {...stylex.props(styles.close)}>×</Aria.Button></header>
-          <Aria.UNSAFE_PortalProvider getContainer={getContainer}>{children}<div ref={portalHost} /></Aria.UNSAFE_PortalProvider>
+          <UNSAFE_PortalProvider getContainer={getContainer}>{children}<div ref={portalHost} /></UNSAFE_PortalProvider>
         </div>
       </FocusScope>
     </div>
