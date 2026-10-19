@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Exercise the production cache key with real, dependency-free Nix derivations.
+
+Run under the build gate; this evaluates tiny derivations but never builds them:
+  ~/.nix-profile/bin/gate-slot --lane build --class heavy -- python3 scripts/ci-web-shell-test
+"""
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import unittest
+
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = REPO / 'scripts/ci-web-shell'
+TARGET = '.#devShells.x86_64-linux.web.drvPath'
+TASK_TMP = REPO / 'tmp/tt148-web-shell-identity'
+
+
+def fixture_source(rust_version='1', web_version='1'):
+    # Keep names fixed: changing only the transitive toolchain input must change
+    # the shell derivation hash, not merely its human-readable name.
+    return '''{
+  outputs = { self }: let
+    system = "x86_64-linux";
+    tool = name: version: builtins.derivation {
+      inherit name system version;
+      builder = "/bin/sh";
+      args = [ "-c" "echo $version > $out" ];
+    };
+    webToolchain = tool "fixture-web-toolchain" "%s";
+  in {
+    packages.${system}.rust = tool "fixture-rust" "%s";
+    devShells.${system}.web = builtins.derivation {
+      name = "fixture-web-shell";
+      inherit system webToolchain;
+      builder = "/bin/sh";
+      args = [ "-c" "echo $webToolchain > $out" ];
+    };
+  };
+}
+''' % (web_version, rust_version)
+
+
+class WebShellKeyTest(unittest.TestCase):
+    def test_real_derivation_identity(self):
+        TASK_TMP.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='key-test-', dir=TASK_TMP) as temporary:
+            root = Path(temporary)
+            fixture = root / 'fixture'
+            fixture.mkdir()
+            flake = fixture / 'flake.nix'
+            flake.write_text(fixture_source())
+            # A nested repository prevents Nix from using the enclosing project's
+            # tracked-file filter for this deliberately temporary flake.
+            subprocess.run(['git', 'init', '-q', str(fixture)], check=True)
+            subprocess.run(['git', '-C', str(fixture), 'add', 'flake.nix'], check=True)
+            env = dict(os.environ)
+            for name in ('CI_WEB_SHELL_DIR', 'CI_WEB_SHELL_IDENTITY',
+                         'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'RUNNER_OS'):
+                env.pop(name, None)
+            env['NIX_CONFIG'] = env.get('NIX_CONFIG', '') + (
+                '\nexperimental-features = nix-command flakes\n'
+                'flake-registry =\n'
+            )
+
+            def identity():
+                return subprocess.check_output(
+                    ['nix', 'eval', '--offline', '--raw', TARGET],
+                    cwd=fixture, env=env, text=True,
+                ).strip()
+
+            def key(expected_identity, runner_os=None, github_output=True):
+                command_env = dict(env)
+                if runner_os is not None:
+                    command_env['RUNNER_OS'] = runner_os
+                output_file = root / 'github-output'
+                if github_output:
+                    output_file.write_text('existing=value\n')
+                    command_env['GITHUB_OUTPUT'] = str(output_file)
+                result = subprocess.run(
+                    ['bash', str(SCRIPT), 'key'], cwd=fixture, env=command_env,
+                    text=True, capture_output=True, check=True,
+                )
+                expected_key = (
+                    f'fractal-web-shell2-{runner_os or "Linux"}-'
+                    f'{Path(expected_identity).name.removesuffix(".drv")}'
+                )
+                self.assertEqual(result.stdout, expected_key + '\n')
+                if github_output:
+                    lines = output_file.read_text().splitlines()
+                    self.assertEqual(len(lines), 3, lines)
+                    self.assertEqual(lines[0], 'existing=value')
+                    self.assertEqual(
+                        dict(line.split('=', 1) for line in lines),
+                        {'existing': 'value', 'key': expected_key,
+                         'identity': expected_identity},
+                    )
+                return result.stdout.strip()
+
+            initial_identity = identity()
+            self.assertRegex(initial_identity, r'^/nix/store/[a-z0-9]{32}-fixture-web-shell\.drv$')
+            initial_key = key(initial_identity)
+            self.assertEqual(key(initial_identity, github_output=False), initial_key)
+            self.assertEqual(key(initial_identity, runner_os=''), initial_key)
+            self.assertNotEqual(key(initial_identity, runner_os='Darwin'), initial_key)
+
+            flake.write_text(fixture_source(rust_version='2'))
+            rust_identity = identity()
+            self.assertEqual(rust_identity, initial_identity,
+                             'Rust-only fixture changes must not change the web derivation')
+            self.assertEqual(key(rust_identity), initial_key,
+                             'Rust-only source edits must not invalidate the web cache')
+
+            flake.write_text(fixture_source(rust_version='2', web_version='2'))
+            web_identity = identity()
+            self.assertNotEqual(web_identity, initial_identity,
+                                'A transitive web toolchain change must change the derivation')
+            self.assertNotEqual(key(web_identity), initial_key,
+                                'A web toolchain change must invalidate the web cache')
+
+    def test_restore_requires_matching_identity(self):
+        # Only restore control flow is simulated. The key identity proofs above
+        # always use real Nix evaluation and never put this fake on PATH.
+        TASK_TMP.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='restore-test-', dir=TASK_TMP) as temporary:
+            root = Path(temporary)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            fake_nix = bin_dir / 'nix'
+            fake_nix.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$NIX_TEST_LOG"
+case "$1" in
+  copy) exit 0 ;;
+  develop) shift 3; exec "$@" ;;
+  *) echo "Unexpected nix command: $*" >&2; exit 99 ;;
+esac
+''')
+            fake_nix.chmod(0o755)
+            identity = '/nix/store/fixture-web-shell.drv'
+            for case in ('mismatch', 'missing-recorded', 'missing-expected', 'matching'):
+                with self.subTest(case=case):
+                    cache = root / case
+                    cache.mkdir()
+                    (cache / 'cache').mkdir()
+                    (cache / 'shell-path').write_text('/nix/store/fixture-environment\n')
+                    (cache / 'env.sh').write_text(
+                        'printf sourced > "$CACHE_SOURCE_MARKER"\n'
+                        'export WEB_CACHE_TEST=cached\n'
+                    )
+                    if case != 'missing-recorded':
+                        (cache / 'identity').write_text(
+                            (identity if case != 'mismatch' else identity + '-other') + '\n'
+                        )
+                    log = cache / 'nix-log'
+                    marker = cache / 'sourced'
+                    env = {
+                        **os.environ,
+                        'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
+                        'CI_WEB_SHELL_DIR': str(cache),
+                        'CI_WEB_SHELL_IDENTITY': identity,
+                        'NIX_TEST_LOG': str(log),
+                        'CACHE_SOURCE_MARKER': str(marker),
+                    }
+                    for name in ('GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'WEB_CACHE_TEST'):
+                        env.pop(name, None)
+                    if case == 'missing-expected':
+                        env.pop('CI_WEB_SHELL_IDENTITY')
+                    command = ['bash', '-c', 'printf "%s\\n" "${WEB_CACHE_TEST:-fresh}"']
+                    result = subprocess.run(
+                        ['bash', str(SCRIPT), 'run', *command],
+                        cwd=root, env=env, text=True, capture_output=True, check=True,
+                    )
+                    if case == 'matching':
+                        self.assertEqual(log.read_text().splitlines(), [
+                            f'copy --from file://{cache}/cache --no-check-sigs /nix/store/fixture-environment',
+                        ])
+                        self.assertEqual(marker.read_text(), 'sourced')
+                        self.assertEqual(result.stdout.splitlines()[-1], 'cached')
+                    else:
+                        self.assertEqual(log.read_text().splitlines(), [
+                            'develop .#web -c ' + ' '.join(command),
+                        ])
+                        self.assertFalse(marker.exists(), 'Rejected cache must never be sourced')
+                        self.assertEqual(result.stdout.splitlines()[-1], 'fresh')
+
+    def test_workflow_cache_uses_exact_identity_key(self):
+        cache_steps = []
+        for workflow in sorted((REPO / '.github/workflows').glob('*.yml')):
+            source = workflow.read_text()
+            execution_jobs = re.findall(
+                r'^  fractal-web-execution:\n(.*?)(?=^  [\w-]+:|\Z)',
+                source, re.MULTILINE | re.DOTALL,
+            )
+            for job in execution_jobs:
+                self.assertEqual(
+                    job.count('python3 scripts/ci-web-shell-test'), 1,
+                    f'{workflow.name}: each fractal-web-execution must run this regression test once',
+                )
+            # Generated workflows use named steps. Split only at sibling step
+            # boundaries, leaving nested env/with mappings attached to the step.
+            starts = list(re.finditer(r'^( +)- name:.*$', source, re.MULTILINE))
+            for index, start in enumerate(starts):
+                end = next((other.start() for other in starts[index + 1:]
+                            if len(other.group(1)) <= len(start.group(1))), len(source))
+                step = source[start.start():end]
+                if not re.search(r'uses:\s*[\"\']?actions/cache/(?:restore|save)@', step):
+                    continue
+                if not re.search(r'path:.*runner\.temp.*?/web-shell', step):
+                    continue
+                cache_steps.append((workflow.name, step))
+                with self.subTest(workflow=workflow.name, step=start.group(0).strip()):
+                    self.assertRegex(step, r'key:\s*[\"\']?\$\{\{\s*steps\.web-shell-key\.outputs\.key\s*\}\}')
+                    self.assertNotIn('hashFiles(', step)
+                    # No prefix fallback may select another shell's closure.
+                    restore = re.search(r'^\s*restore-keys:\s*([^\n]*)', step, re.MULTILINE)
+                    if restore:
+                        self.assertIn(restore.group(1).strip(), ('\"\"', "''"))
+            self.assertNotIn('fractal-web-shell1-', source,
+                             f'{workflow.name} still uses the obsolete source-file key')
+        self.assertTrue(cache_steps, 'No generated web-shell cache steps were checked')
+
+
+if __name__ == '__main__':
+    unittest.main()

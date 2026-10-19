@@ -604,7 +604,7 @@ workflow-level path filters. `linux-gate` does not depend on them.
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
-  `nix develop .#web -c bash scripts/ci-fractal-web` without evaluating the flake when the
+  `nix develop .#web -c bash scripts/ci-fractal-web` without realizing the shell's tools when the
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
@@ -657,14 +657,18 @@ workflow-level path filters. `linux-gate` does not depend on them.
   public cache) and substitute ~1.5 GB for `nix develop .#web`. `scripts/ci-web-shell fill`
   stores `nix print-dev-env .#web` and the shell's complete closure as a local `file://`
   binary cache in the Actions cache entry
-  `fractal-web-shell1-<os>-<hashFiles flake.nix, flake.lock, nix/**/*.nix, scripts/ci-web-shell>`.
-  `run` copies the closure into the store (`--no-check-sigs`) and runs the lanes in the sourced
-  `print-dev-env` script, which is the environment `nix develop -c` builds; the flake is not
-  evaluated (about 36 s including the cache download). The script writes `env.sh` and
-  `shell-path` last, so a partial fill is a miss; a miss, a failed copy or a closure that is
-  incomplete after an eviction makes `run` exec `nix develop .#web -c ...` instead, which only
-  costs time. A change to any keyed file gives a new key, so a pull request that edits one never
-  reads main's entry.
+  `fractal-web-shell2-<os>-<web shell derivation basename without .drv>`.
+  Before restoring or probing, `scripts/ci-web-shell key` runs
+  `nix eval --raw .#devShells.x86_64-linux.web.drvPath`. This exact identity includes the
+  shell hook and transitive toolchain inputs, but not unrelated Rust-only flake edits.
+  Both publishers and consumers use the same output key, with no prefix restoration.
+  `run` requires the recorded identity to match, copies the closure into the store
+  (`--no-check-sigs`) and runs the lanes in the sourced `print-dev-env` script, which is the
+  environment `nix develop -c` builds. Only the identity is evaluated on a hit; the shell's
+  tools are not rebuilt. The script writes `env.sh`, `shell-path` and `identity` last, so a
+  partial fill is a miss. A mismatched identity, failed copy or incomplete closure makes
+  `run` exec `nix develop .#web -c ...` instead. Bump the key's format version when changing
+  the cached representation or restore semantics.
   Trust: the restored entry supplies store paths and a shell script that the job executes.
   Main upkeep's `warm-fractal-web` fills the main-scoped entry. A pull request that misses saves
   the entry under its own ref, only for `pull_request` events; this is a deliberate exception
@@ -679,6 +683,11 @@ workflow-level path filters. `linux-gate` does not depend on them.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
+`scripts/ci-web-shell-test`, run after Nix setup in web execution, evaluates dependency-free
+fixture derivations to prove Rust-only edits preserve the key and transitive web-toolchain
+changes invalidate it. Each fractal-web job starts with one runner identity line containing
+CPU model, available core count, runner name and region when exposed by the environment
+(`unknown` otherwise).
 
 `scripts/web-skip-proof` prints the signed-skip decision for the web checks in the
 selection design's format (`check=… decision=skip|run key=… proof=… inputs_sha256=…

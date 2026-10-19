@@ -52,6 +52,7 @@ PATTERNS = (
     "nix/web/**",
     "nix/fractal-web*.nix",
     "scripts/ci-fractal-web*",
+    "scripts/ci-web-shell*",
     "scripts/ci-typescript-client*",
     ".github/workflows/fleet.yml*",
     ".github/workflows/workspace-ci.ts",
@@ -195,6 +196,7 @@ KIT_PATTERNS = (
     "flake.nix",
     "flake.lock",
     "scripts/ci-fractal-web*",
+    "scripts/ci-web-shell*",
     ".github/workflows/fleet.yml*",
     ".github/workflows/workspace-ci.ts",
 )
