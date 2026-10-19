@@ -48,7 +48,7 @@ pub fn stage_fractal(mut config: Config, config_path: Option<&Path>) -> Result<(
     systemd(&spec, &lookup::systemd_path(UNITS[0])?, &lookup::systemd_path(UNITS[1])?, &mut NativeCommands("systemctl"))?;
     #[cfg(target_os = "macos")]
     launchd(&spec, &lookup::launchd_path(LABELS[0])?, &lookup::launchd_path(LABELS[1])?, &launch_domain(), &mut NativeCommands("launchctl"))?;
-    println!("staged fractal services disabled; host cutover must migrate state and activate them");
+    crate::cli_println!("staged fractal services disabled; host cutover must migrate state and activate them");
     Ok(())
 }
 
