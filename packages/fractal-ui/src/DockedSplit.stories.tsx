@@ -193,7 +193,7 @@ export const WorkspaceIsolation: Story = {
   },
 }
 
-/** Thread pane and Changes dock headers share one 32px height and line up; the info slot sits under the dock header. */
+/** Thread and Changes headers align; source information is disclosed from the toolbar. */
 export const SharedHeaders: Story = {
   tags: ['critical'],
   play: async ({ canvasElement }) => {
@@ -203,6 +203,9 @@ export const SharedHeaders: Story = {
     await expect(dock.getBoundingClientRect().height).toBe(32)
     await expect(dock.getBoundingClientRect().top).toBe(main.getBoundingClientRect().top)
     const info = canvasElement.querySelector<HTMLElement>('[data-testid="diff-panel-info"]')!
+    await expect(info).not.toBeVisible()
+    await userEvent.click(within(canvasElement).getByRole('button', { name: 'Captured changes information' }))
+    await expect(info).toBeVisible()
     await expect(info.getBoundingClientRect().top).toBeGreaterThanOrEqual(dock.getBoundingClientRect().bottom)
     await expect(within(canvasElement).getByRole('button', { name: 'Close Captured changes' })).toBeVisible()
   },

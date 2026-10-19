@@ -143,6 +143,15 @@ describe('live captured Changes dock', () => {
     expect(host.textContent).toContain('src/example.ts')
     expect(host.textContent).toContain('Successful-tool captures')
     expect(close()).not.toBeNull()
+    const disclosure = host.querySelector<HTMLButtonElement>('button[aria-label="Captured changes information"]')!
+    expect(disclosure.getAttribute('aria-expanded')).toBe('false')
+    expect(host.querySelector('[data-testid="diff-panel-header"]')?.textContent).toBe('Changes')
+    expect(host.querySelector('[aria-label="Captured change resources"]')).toBeNull()
+    await act(async () => disclosure.click())
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true')
+    const provenance = host.querySelector('[data-testid="diff-panel-info"]')!
+    expect(provenance.textContent).toContain('Call: call/edit')
+    expect(provenance.textContent).toContain('not current repository contents')
 
     await act(async () => close().click())
     expect(separator()).toBeNull()

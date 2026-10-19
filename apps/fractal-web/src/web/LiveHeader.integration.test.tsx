@@ -117,9 +117,10 @@ describe('live header parity', () => {
         expect(inspector?.textContent).toContain('src/example.ts')
         expect(inspector?.textContent).toContain('beforeCapture')
         expect(inspector?.textContent).toContain('afterCapture')
-        expect(inspector?.querySelector('[data-captured-change]')).not.toBeNull()
-        // Resource chips are named by their visible content (file name and counts), not an "Open <path>" label.
-        expect([...inspector!.querySelectorAll('[data-captured-change] button')].some(button => button.textContent?.startsWith('example.ts'))).toBe(true)
+        expect(inspector?.querySelector('[data-captured-change]')).toBeNull()
+        expect(inspector?.querySelector('button[aria-label="Captured changes information"]')?.getAttribute('aria-expanded')).toBe('false')
+        expect(inspector?.querySelector('[data-testid="diff-panel-info"]')?.hasAttribute('hidden')).toBe(true)
+        expect([...inspector!.querySelectorAll('button')].some(button => button.textContent === 'Open')).toBe(true)
         expect(inspector?.textContent).not.toContain('This web client does not read change data yet')
       }, { timeout: 15_000 })
     } finally {

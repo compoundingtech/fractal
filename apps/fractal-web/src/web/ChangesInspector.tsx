@@ -25,6 +25,15 @@ export function CapturedChangesView({ feed, width, onClose }: { readonly feed: F
   const choice = selectedCapturedChange({ changes, id: selected })
   const lines = choice?.resource.files[0]?.lines
   const fill = width === 'fill'
+  const root = React.useRef<HTMLElement>(null)
+  const dockInfo = <>
+    <p {...stylex.props(styles.scope)}>{feed._tag === 'Waiting' ? 'Waiting for captured changes.' : feed._tag === 'Unavailable' ? 'Captured changes unavailable: ' + feed.detail : (feed.freshness === 'stale' ? 'Last verified captured changes · ' : '') + 'Successful-tool captures · loaded transcript window' + (page?.hasOlder ? ' · older history not shown' : '')}{feed._tag === 'Observed' && feed.error ? ' · ' + feed.error.detail : ''}</p>
+    {choice ? <>
+      {changes.length > 1 ? <label>Captured resource <select value={choice.id} onChange={event => setSelected(event.target.value)}>{changes.map(change => <option key={change.id} value={change.id}>{change.diff.path} · {capturedProvenance(change)}</option>)}</select></label> : null}
+      <p {...stylex.props(styles.detail)}>{capturedProvenance(choice)}</p>
+      <p {...stylex.props(styles.detail)}>{choice.resource.detail}</p>
+    </> : <p {...stylex.props(styles.empty)}>No successful captured change content in this transcript window. Failed tool results are outside this inspector; failure does not establish that files were unchanged.</p>}
+  </>
   const info = <>
     <p role="status" {...stylex.props(styles.scope)}>{feed._tag === 'Waiting' ? 'Waiting for captured changes.' : feed._tag === 'Unavailable' ? 'Captured changes unavailable: ' + feed.detail : (feed.freshness === 'stale' ? 'Last verified captured changes · ' : '') + 'Successful-tool captures · loaded transcript window' + (page?.hasOlder ? ' · older history not shown' : '')}{feed._tag === 'Observed' && feed.error ? ' · ' + feed.error.detail : ''}</p>
     {choice === undefined ? <p {...stylex.props(styles.empty)}>{feed._tag === 'Observed' ? 'No successful captured change content in this transcript window. Failed tool results are outside this inspector; failure does not establish that files were unchanged.' : 'Changes appear only after verified transcript observations.'}</p> :
@@ -35,9 +44,9 @@ export function CapturedChangesView({ feed, width, onClose }: { readonly feed: F
         <ResourceChipV1 resource={change.resource} file={change.resource.files[0]!} onOpen={() => setSelected(change.id)} />
       </div>)}</section>}
   </>
-  return <aside aria-label="Changes" style={typeof width === 'number' ? { width } : undefined} {...stylex.props(styles.root, fill && styles.fillRoot)}>
+  return <aside ref={root} aria-label="Changes" style={typeof width === 'number' ? { width } : undefined} {...stylex.props(styles.root, fill && styles.fillRoot)}>
     {width === 'dock' ? null : info}
-    {choice !== undefined || width === 'dock' ? <div {...stylex.props(styles.diff, fill && styles.fillRegion)}><DiffPanel key={choice?.id ?? 'empty'} open width="100%" title={width === 'dock' ? 'Captured changes' : 'Captured change'} closeLabel="Close changes" diff={lines?._tag === 'Known' ? lines.value : undefined} path={choice?.diff.path} added={choice?.diff.added} removed={choice?.diff.removed} info={width === 'dock' ? info : undefined} onClose={onClose} /></div> : null}
+    {choice !== undefined || width === 'dock' ? <div {...stylex.props(styles.diff, fill && styles.fillRegion)}><DiffPanel key={choice?.id ?? 'empty'} open width="100%" title={width === 'dock' ? 'Changes' : 'Captured change'} closeLabel="Close changes" diff={lines?._tag === 'Known' ? lines.value : undefined} path={choice?.diff.path} added={choice?.diff.added} removed={choice?.diff.removed} info={width === 'dock' ? dockInfo : undefined} scopeLabel={width === 'dock' ? 'Captured' : undefined} showSurfaceTabs={width !== 'dock'} onOpenFile={width === 'dock' ? () => { const code = root.current?.querySelector<HTMLElement>('[data-testid="diff-code"]'); code?.focus(); code?.scrollIntoView({ block: 'nearest' }) } : undefined} onClose={onClose} /></div> : null}
   </aside>
 }
 

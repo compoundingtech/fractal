@@ -205,8 +205,13 @@ Only successful calls with an observed nonerror result and known changed content
 The inspector preserves reported tool/sender provenance, separates repeated captures of
 the same path, and scopes counts to the shown capture and loaded transcript window.
 Missing captures do not establish that a repository is unchanged. Waiting, unavailable,
-stale observations and older-history boundaries remain visible. Resource card/chip actions
-select captured content locally; they do not fetch repository state.
+stale observations and older-history boundaries remain available. On desktop, the
+Changes header is followed directly by the Captured/current-turn toolbar and files.
+The keyboard-accessible information disclosure holds intact provenance and scope
+caveats, plus local capture selection when multiple resources exist. Repeated card/chip
+summaries are absent; Open on the file header focuses its diff. Unified rows show only
+new line numbers; Split preserves separate old/new numbers. Narrow card/chip actions
+still select captured content locally; neither path fetches repository state.
 
 The panel acquires visible conversation demand while mounted and shares the thread's
 retained feed. Its kit diff viewer loads on demand to preserve the shell's eager-graph
