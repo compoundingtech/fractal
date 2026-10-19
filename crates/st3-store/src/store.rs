@@ -683,7 +683,7 @@ pub fn format_wait_span(milliseconds: u128) -> String {
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc62cde9f8f14 owner=st3_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc897a3db2185 owner=st3_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1047,6 +1047,12 @@ CREATE TABLE IF NOT EXISTS mission_runs (
     updated_at_unix_ms TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mission_runs_mission_index ON mission_runs(mission_id, created_at_unix_ms);
+-- Additive seek-index migration: schema installation runs for existing stores too.
+-- Distinct mission keys, latest headers and live-state probes never fold run history.
+CREATE INDEX IF NOT EXISTS mission_runs_collection_latest_index
+ON mission_runs(mission_id, created_at_unix_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS mission_runs_collection_live_index
+ON mission_runs(mission_id, status) WHERE status IN ('running','standing');
 CREATE INDEX IF NOT EXISTS mission_runs_root_page_index
 ON mission_runs(root_run_id, created_at_unix_ms, id);
 -- The runs that have not finished, a few of every run a fleet has made. The predicate is
