@@ -19,6 +19,9 @@ pub struct FleetView {
 pub struct MemberView {
     pub name: String,
     pub member_key: String,
+    /// Fabric identity bound by the verified signed admission, before endpoint publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     /// `current`, `ended`, or `conflicted`.
     pub state: String,
     pub mode: String,
@@ -65,6 +68,7 @@ impl FleetView {
                 members.push(MemberView {
                     name: name.clone(),
                     member_key: incarnation.member_key.clone(),
+                    node_id: incarnation.node_id.clone(),
                     state: label.into(),
                     mode: incarnation.mode.clone(),
                     endpoints: incarnation.endpoints.clone(),
@@ -217,10 +221,21 @@ pub fn accept(
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_member_views_do_not_require_a_pairing_identity() {
+        let original = member("legacy", "member-key", "current", None);
+        let json = serde_json::to_value(&original).unwrap();
+        assert!(json.get("node_id").is_none());
+        let decoded: MemberView = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(decoded.node_id, None);
+    }
+
     fn member(name: &str, key: &str, state: &str, ended: Option<&str>) -> MemberView {
         MemberView {
             name: name.into(),
             member_key: key.into(),
+            node_id: None,
             state: state.into(),
             mode: "listening".into(),
             endpoints: Vec::new(),

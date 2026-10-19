@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Join a fleet with only its invite code, bootstrapping Fabric trust through the external adapter",
+  "replay": {"status": "none", "detail": "Existing claim history is retained. Pairing binds the new member's signed admission to its authenticated Fabric NodeID."},
+  "schema": {"status": "changed", "detail": "Pairing invitations carry a pinned gateway and one-use permit; signed join requests and admissions bind the Fabric NodeID. Ordinary HTTP invitations retain their existing transcript."},
+  "rules": {"status": "changed", "detail": "Pending Fabric identities receive no ordinary trust or grants. The adapter verifies signed st admission before atomic confirmation of the exact fleet, PTY and client grants."},
+  "compatibility": {"status": "changed", "detail": "Pairing requires coordinated st and st-fabric-adapter builds plus Fabric pairing and pairing_remote support. Existing non-pairing HTTP joins remain supported."},
+  "downtime": {"status": "none", "detail": "No claim-store reset or history migration is required."},
+  "manual": {"status": "changed", "detail": "Run Fabric with --runtime-peers on both machines, install st-fabric-adapter, and run the adapter on the sponsor. Then use st fleet invite NAME and st fleet join CODE; no manual peer configuration is needed."},
+  "recovery": {"status": "changed", "detail": "Preserve adapter state across restarts. Expired, rejected or restart-lost pending attempts require a fresh invitation and never fall back to unverified trust."}
+}

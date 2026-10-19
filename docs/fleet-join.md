@@ -73,10 +73,12 @@ st fleet invites [--all]
 st fleet invites revoke fleet-invite/ID --reason TEXT
 ```
 
-The optional name pins the joiner's name. Expiry defaults to 15 minutes and accepts 10 seconds to
-24 hours. `auto` includes advertised endpoints; `--via` selects a transport. A sponsor must already
-be a fleet member with a listener. Invites are person operations; an agent seat must provide an
-explicit `--as person/NAME` where the command permits it.
+The optional name pins the joiner's name. Expiry defaults to 10 minutes and accepts
+10 seconds to 24 hours; an invitation carrying Fabric pairing is capped at 10
+minutes. `auto` includes advertised endpoints; `--via` selects a transport. A
+sponsor must already be a fleet member with a listener. Invites are person
+operations; an agent seat must provide an explicit `--as person/NAME` where the
+command permits it.
 
 Prefer the no-echo prompt, a pipe, `--code-file` or `--send-fabric` to a code in argv or a transcript.
 The Fabric form creates a private temporary code file, sends it and deletes the local copy;
@@ -228,11 +230,42 @@ allow the peer port. See [Tailscale](st3/tailscale.md) for setup.
 
 ### Fabric
 
-The default protocol is `st3/fleet/FLEET_ID`; `fabric_protocol` can retain an existing grant name.
-The worker exposes its loopback listener with `fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and
-obtains an outbound tunnel with `fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`. `st fleet transports remove fabric`, leave, dial-out
-mode and uninstall remove the exposure. st does not edit Fabric trust: the exposing member must
-allow the dialer's NodeID and protocol. Missing grants are reported with the entry to add.
+Run Fabric with `--runtime-peers` and install the external `st-fabric-adapter` on
+both machines. Keep the adapter running on the sponsor. No prior peer trust is
+needed:
+
+```sh
+# On a member:
+st fleet invite beacon
+# On beacon:
+st fleet join CODE
+```
+
+The code includes a pinned sponsor Fabric NodeID and a one-use pairing permit.
+The joining adapter uses its existing Fabric daemon identity, not a temporary
+peer or a second identity. The restricted `fabric/pair/1` exchange carries the
+existing signed, sealed st admission. It grants no ordinary service access.
+The sponsor verifies the request's signed Fabric NodeID against the authenticated
+pending identity and its admitted member key against signed st membership before
+atomic confirmation. The immutable permit grants exactly `st3/fleet/FLEET_ID`,
+`st3/pty/FLEET_ID`, and `st3-client-v0`, under owner `st/fleet/FLEET_ID`.
+The joiner verifies the sponsor's signed response and pinned endpoint before its
+adapter installs reciprocal access. The st daemon carries admission data only;
+all Fabric permit, confirmation, and policy calls belong to the adapter.
+
+Pending attempts expire or fail closed after a Fabric restart; issue a fresh
+invite rather than manually granting trust. Preserve adapter state across
+restarts. Existing static or other-owner grants are not revoked by pairing or
+membership reconciliation.
+
+The default replication protocol is `st3/fleet/FLEET_ID`.
+`fabric_protocol` can retain an existing grant name for non-pairing migrations.
+The worker exposes its loopback listener with
+`fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and obtains an outbound tunnel with
+`fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`.
+`st fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
+the exposure. The adapter maintains trust and grants; st does not edit
+`peers.toml`.
 
 ### Loopback and plain HTTP
 

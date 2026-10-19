@@ -334,6 +334,7 @@ pub fn invite(
         name: options.name.clone(),
         migrate: options.migrate,
         endpoints,
+        pairing: None,
     }
     .encode()
     .map_err(|error| internal(&error))?;
@@ -408,10 +409,85 @@ async fn sponsor_url(code: &JoinCode, options: &JoinOptions) -> Result<(String, 
         .context("no route to the sponsor: the code has no endpoint this machine can use")
 }
 
+/// JSON-lines transport to the external adapter. st authenticates the sealed answer
+/// before allowing the adapter to install reciprocal trust or acknowledge confirmation.
+struct PairingHelper {
+    child: tokio::process::Child,
+    input: tokio::process::ChildStdin,
+    output: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+}
+
+impl PairingHelper {
+    async fn start(code: &str, executable: Option<&Path>) -> Result<(Self, String)> {
+        use std::process::Stdio;
+        use tokio::io::AsyncBufReadExt as _;
+        let executable = executable.map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("ST_FABRIC_ADAPTER").map(PathBuf::from))
+            .or_else(|| {
+                std::env::current_exe().ok()
+                    .and_then(|exe| exe.parent().map(|parent| parent.join("st-fabric-adapter")))
+                    .filter(|path| path.is_file())
+            })
+            .or_else(|| resolve_tool(None, "st-fabric-adapter"))
+            .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
+        let mut child = tokio::process::Command::new(executable)
+            .arg("pairing-join")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .context("start st-fabric-adapter pairing-join")?;
+        let input = child.stdin.take().context("open adapter input")?;
+        let output = tokio::io::BufReader::new(child.stdout.take().context("open adapter output")?).lines();
+        let mut helper = Self { child, input, output };
+        helper.send(&serde_json::json!({"code": code})).await?;
+        let ready = helper.receive().await?;
+        let node_id = ready["node_id"].as_str().context("adapter omitted its Fabric node identity")?.to_owned();
+        anyhow::ensure!(
+            node_id.len() == 64 && node_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "adapter returned an invalid Fabric node identity"
+        );
+        Ok((helper, node_id))
+    }
+
+    async fn send(&mut self, value: &serde_json::Value) -> Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+        let mut bytes = serde_json::to_vec(value)?;
+        bytes.push(b'\n');
+        self.input.write_all(&bytes).await.context("write pairing adapter request")?;
+        self.input.flush().await?;
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> Result<serde_json::Value> {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(90), self.output.next_line())
+            .await.context("pairing adapter response timed out")??
+            .context("pairing adapter exited before confirmation")?;
+        anyhow::ensure!(line.len() <= 1024 * 1024, "pairing adapter response is too large");
+        serde_json::from_str(&line).context("decode pairing adapter response")
+    }
+
+    async fn confirm(mut self, sealed: &SealedJoin, sponsor_key: &str) -> Result<()> {
+        self.send(&serde_json::json!({"authenticated": sealed, "sponsor_key": sponsor_key})).await?;
+        let result = self.receive().await?;
+        anyhow::ensure!(result["confirmed"] == true, "Fabric pairing was not confirmed");
+        drop(self.input);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), self.child.wait())
+            .await.context("pairing adapter did not exit after confirmation")??;
+        anyhow::ensure!(status.success(), "pairing adapter failed after confirmation");
+        Ok(())
+    }
+}
+
 /// Redeem a join code and write this machine's fleet settings. The local daemon must be
 /// stopped. Running it again after an interruption resumes: with the same code before the
 /// answer arrived, or without one after.
 pub async fn join(options: &JoinOptions) -> Result<Joined> {
+    join_inner(options, None).await
+}
+
+async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joined> {
     let code = JoinCode::decode(&options.code)?;
     let state_dir = &options.state_dir;
     if let Some(existing) = FleetFile::load(state_dir)? {
@@ -467,14 +543,26 @@ pub async fn join(options: &JoinOptions) -> Result<Joined> {
             .writer_head(&name)?
             .map(|(sequence, hash)| WriterHead { sequence, hash })
     };
-    let (url, sponsor_route) = sponsor_url(&code, options).await?;
     let mode = options.settings.mode.as_str();
-    let session = Joiner::start(&code, &key, &name, mode, writer_head, &options.version)?;
-    let http = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let response = http
+    let (session, mut helper, sponsor_route, url) = if let Some(pairing) = &code.pairing {
+        anyhow::ensure!(options.via.is_none(), "--via cannot override a pairing code");
+        let (helper, node_id) = PairingHelper::start(&options.code, adapter).await?;
+        let session = Joiner::start_bound(&code, &key, &name, mode, writer_head, &options.version, Some(node_id))?;
+        (session, Some(helper), format!("fabric://{}/st3/fleet/{}", pairing.gateway, code.fleet_id), None)
+    } else {
+        let (url, route) = sponsor_url(&code, options).await?;
+        (Joiner::start(&code, &key, &name, mode, writer_head, &options.version)?, None, route, Some(url))
+    };
+    let answer: JoinResponse = if let Some(helper) = &mut helper {
+        helper.send(&serde_json::json!({"request": session.request()})).await?;
+        serde_json::from_value(helper.receive().await?["response"].clone()).context("decode adapter join answer")?
+    } else {
+        let url = url.context("HTTP join route is missing")?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let response = http
         .post(format!("{url}/v1/fleet/join"))
         .json(session.request())
         .send()
@@ -491,16 +579,25 @@ pub async fn join(options: &JoinOptions) -> Result<Joined> {
         429 => anyhow::bail!("the sponsor is refusing join attempts for a minute; try again"),
         status => anyhow::bail!("the sponsor answered {status}"),
     }
-    let answer: JoinResponse = response
-        .json()
-        .await
-        .context("decode the sponsor's answer")?;
+        response.json().await.context("decode the sponsor's answer")?
+    };
     let sponsor_key = answer.sponsor_key.clone();
     let sealed: SealedJoin = session.open(&answer)?;
     anyhow::ensure!(
         sealed.fleet_id == code.fleet_id.to_string(),
         "the sponsor answered for another fleet"
     );
+    if let Some(pairing) = &code.pairing {
+        anyhow::ensure!(
+            sealed.sponsor_node_id.as_deref() == Some(pairing.gateway.as_str())
+                && sealed.sponsor_endpoints.iter().any(|endpoint|
+                    endpoint["transport"] == "fabric"
+                        && endpoint["node"] == pairing.gateway
+                        && endpoint["protocol"] == format!("st3/fleet/{}", code.fleet_id)),
+            "the authenticated sponsor answer does not bind the pairing gateway"
+        );
+        helper.context("pairing helper is missing")?.confirm(&sealed, &sponsor_key).await?;
+    }
     let secret_file = match (&sealed.secret, &options.legacy_secret_file) {
         (Some(secret), _) => {
             write_private(&directory.join("secret"), secret.as_bytes())?;
@@ -614,4 +711,110 @@ pub fn migrate_anchor(
         port,
         transports,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fleet::code::PairingData;
+    use crate::sync::Backend as _;
+
+    #[tokio::test]
+    async fn pairing_join_writes_configuration_only_after_helper_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let sponsor_dir = root.path().join("sponsor");
+        let settings = MemberSettings {
+            transports: Some(vec!["fabric".into()]),
+            ..MemberSettings::default()
+        };
+        let founded = found(&sponsor_dir, "sponsor", &settings).unwrap();
+        let runtime = Arc::new(crate::store::runtime::Plain);
+        let store = Arc::new(Store::open(&store_path(&sponsor_dir), "sponsor", runtime.clone()).unwrap());
+        let file = FleetFile::load(&sponsor_dir).unwrap().unwrap();
+        crate::fleet::activate(&store, &sponsor_dir, &file).unwrap();
+        let sponsor_key = Arc::new(MemberKey::load(&file.node_key_path(&sponsor_dir)).unwrap());
+        let gateway = "a".repeat(64);
+        let node_id = "b".repeat(64);
+        let endpoints = vec![serde_json::json!({
+            "transport": "fabric", "node": gateway,
+            "protocol": format!("st3/fleet/{}", founded.fleet_id)
+        })];
+        store.publish_fleet_endpoints("listening", &endpoints, "test").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let backend = crate::sync::Local(store.clone());
+        let secret = fs::read_to_string(sponsor_dir.join("fleet/secret")).unwrap();
+        let app = axum::Router::new().route("/v1/fleet/join", axum::routing::post(
+            move |axum::Json(request): axum::Json<super::super::handshake::JoinRequest>| {
+                let backend = backend.clone();
+                let key = sponsor_key.clone();
+                let secret = secret.clone();
+                async move {
+                    let answer = backend.redeem(&request).await.unwrap();
+                    assert_eq!(answer["status"], "admitted");
+                    let payload = SealedJoin {
+                        fleet_id: answer["fleet_id"].as_str().unwrap().into(),
+                        secret: Some(secret),
+                        anchor_key: answer["anchor_key"].as_str().unwrap().into(),
+                        sponsor: "sponsor".into(),
+                        writer_floor: answer["writer_floor"].as_u64(),
+                        fabric_protocol: None,
+                        admitted_claim: answer["admitted_claim"].as_str().map(str::to_owned),
+                        sponsor_node_id: answer["sponsor_node_id"].as_str().map(str::to_owned),
+                        sponsor_endpoints: answer["sponsor_endpoints"].as_array().unwrap().clone(),
+                    };
+                    axum::Json(super::super::handshake::seal_response(
+                        &request, &hex::decode(answer["token"].as_str().unwrap()).unwrap(),
+                        "sponsor", &key, &payload,
+                    ).unwrap())
+                }
+            }
+        ));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let curl = resolve_tool(None, "curl").expect("the helper transport integration test requires curl");
+        for confirmed in [false, true] {
+            let name = if confirmed { "accepted" } else { "unconfirmed" };
+            let invitation = invite(&store, &founded.fleet_id, "sponsor", &InviteOptions {
+                name: Some(name.into()), lifetime: std::time::Duration::from_secs(600),
+                via: "fabric".into(), person: "person/test".into(), migrate: false,
+            }).unwrap();
+            let mut code = JoinCode::decode(&invitation.code).unwrap();
+            code.pairing = Some(PairingData {
+                gateway: gateway.clone(), attempt: name.into(), secret: "test-permit".into(),
+            });
+            let helper = root.path().join(format!("helper-{name}"));
+            let shell = resolve_tool(None, "sh").expect("the helper transport integration test requires sh");
+            // Only the transport is simulated: the request is redeemed against the real
+            // sponsor store, signed and sealed by its actual admitted member key.
+            let script = format!(
+                "#!{}\nread -r code\nprintf '%s\\n' '{{\"node_id\":\"{node_id}\"}}'\nread -r frame\nrequest=${{frame#*\\\"request\\\":}}\nrequest=${{request%\\}}}}\nanswer=$('{}' --fail --silent --show-error -H 'content-type: application/json' --data \"$request\" 'http://{address}/v1/fleet/join') || exit 1\nprintf '{{\"response\":%s}}\\n' \"$answer\"\nread -r authenticated\nprintf '%s\\n' '{{\"confirmed\":{confirmed}}}'\n",
+                shell.display(), curl.display(),
+            );
+            write_private(&helper, script.as_bytes()).unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+            let joining_dir = root.path().join(name);
+            let options = JoinOptions {
+                state_dir: joining_dir.clone(), configured_node: name.into(),
+                code: code.encode().unwrap(), name: None, via: None,
+                settings: settings.clone(), legacy_secret_file: None, fabric_protocol: None,
+                runtime: runtime.clone(), version: "test".into(),
+            };
+            let result = join_inner(&options, Some(&helper)).await;
+            if confirmed {
+                let joined = result.unwrap();
+                assert_eq!(joined.fleet_id, founded.fleet_id);
+                assert_eq!(FleetFile::load(&joining_dir).unwrap().unwrap().sponsor.as_deref(), Some("sponsor"));
+                assert_eq!(fs::read_to_string(joining_dir.join("fleet/secret")).unwrap(),
+                    fs::read_to_string(sponsor_dir.join("fleet/secret")).unwrap());
+            } else {
+                assert!(result.unwrap_err().to_string().contains("not confirmed"));
+                assert!(FleetFile::load(&joining_dir).unwrap().is_none());
+                assert!(!joining_dir.join("fleet/secret").exists());
+                assert!(!checkpoint_path(&joining_dir).exists());
+            }
+            store.verify_fleet_pairing_admission(name,
+                MemberKey::load(&joining_dir.join("fleet/node.key")).unwrap().public(), &node_id).unwrap();
+        }
+        server.abort();
+    }
 }

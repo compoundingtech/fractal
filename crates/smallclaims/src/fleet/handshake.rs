@@ -54,6 +54,8 @@ pub struct JoinRequest {
     pub build: String,
     #[serde(default)]
     pub migrate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub proof: String,
     pub signature: String,
 }
@@ -61,7 +63,7 @@ pub struct JoinRequest {
 impl JoinRequest {
     /// Every field except the proof and signature, as JSON with sorted keys.
     pub fn transcript(&self) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
+        let mut transcript = serde_json::json!({
             "build": self.build,
             "ephemeral": self.ephemeral,
             "invite": self.invite,
@@ -71,8 +73,12 @@ impl JoinRequest {
             "name": self.name,
             "protocol": self.protocol,
             "writer_head": self.writer_head,
-        }))
-        .expect("a JSON value serializes")
+        });
+        // Omission preserves the exact transcript of pre-pairing HTTP requests.
+        if let Some(node_id) = &self.node_id {
+            transcript["node_id"] = serde_json::Value::String(node_id.clone());
+        }
+        serde_json::to_vec(&transcript).expect("a JSON value serializes")
     }
 }
 
@@ -91,6 +97,10 @@ pub struct SealedJoin {
     pub fabric_protocol: Option<String>,
     #[serde(default)]
     pub admitted_claim: Option<String>,
+    #[serde(default)]
+    pub sponsor_node_id: Option<String>,
+    #[serde(default)]
+    pub sponsor_endpoints: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -176,6 +186,19 @@ impl Joiner {
         writer_head: Option<WriterHead>,
         build: &str,
     ) -> Result<Self> {
+        Self::start_bound(code, member, name, mode, writer_head, build, None)
+    }
+
+    /// Bind the same signed request and token proof to the adapter's local Fabric identity.
+    pub fn start_bound(
+        code: &JoinCode,
+        member: &MemberKey,
+        name: &str,
+        mode: &str,
+        writer_head: Option<WriterHead>,
+        build: &str,
+        node_id: Option<String>,
+    ) -> Result<Self> {
         let ephemeral = EphemeralPrivateKey::generate(&X25519, &SystemRandom::new())
             .map_err(|_| anyhow::anyhow!("generate an ephemeral key"))?;
         let public = ephemeral
@@ -191,6 +214,7 @@ impl Joiner {
             writer_head,
             build: build.into(),
             migrate: code.migrate,
+            node_id,
             proof: String::new(),
             signature: String::new(),
         };
@@ -340,6 +364,7 @@ mod tests {
             name: Some("laptop".into()),
             migrate: false,
             endpoints: vec![CodeEndpoint::Loopback("127.0.0.1:1".into())],
+            pairing: None,
         };
         let payload = SealedJoin {
             fleet_id: code.fleet_id.to_string(),
@@ -349,6 +374,8 @@ mod tests {
             writer_floor: Some(12),
             fabric_protocol: None,
             admitted_claim: Some("claim".into()),
+            sponsor_node_id: None,
+            sponsor_endpoints: Vec::new(),
         };
         (code, sponsor, joiner, payload)
     }
@@ -391,6 +418,20 @@ mod tests {
             verify_request(&renamed, &code.token),
             Err(RequestFault::Proof)
         );
+    }
+
+    #[test]
+    fn fabric_identity_is_bound_by_both_proof_and_member_signature() {
+        let (code, _, member, _) = fixture();
+        let session = Joiner::start_bound(
+            &code, &member, "laptop", "dial-out", None, "test", Some("a".repeat(64)),
+        ).unwrap();
+        verify_request(session.request(), &code.token).unwrap();
+        let mut tampered = session.request().clone();
+        tampered.node_id = Some("b".repeat(64));
+        assert_eq!(verify_request(&tampered, &code.token), Err(RequestFault::Proof));
+        tampered.proof = encode(&proof(&code.token, &tampered.transcript()).finalize().into_bytes());
+        assert_eq!(verify_request(&tampered, &code.token), Err(RequestFault::Signature));
     }
 
     #[test]

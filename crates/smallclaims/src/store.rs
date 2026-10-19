@@ -3380,6 +3380,14 @@ impl Store {
             if bound != request.member_key || bound_name.as_deref() != Some(&request.name) {
                 return Ok(FleetRedemption::Refused("bound-to-another-key"));
             }
+            if request.node_id.is_some()
+                && self.verify_fleet_pairing_admission(
+                    &request.name, &request.member_key, request.node_id.as_deref().unwrap_or_default(),
+                ).is_err()
+                && admitted_claim.is_some()
+            {
+                return Ok(FleetRedemption::Refused("bound-to-another-node"));
+            }
             // The same joiner again: admit it again without new claims, unless the claims were
             // interrupted before they were written.
             let admitted_claim = match admitted_claim {
@@ -3521,6 +3529,9 @@ impl Store {
             ("invite".into(), Value::String(invite_subject)),
             ("mode".into(), Value::String(request.mode.clone())),
         ]);
+        if let Some(node_id) = &request.node_id {
+            fields.insert("node_id".into(), Value::String(node_id.clone()));
+        }
         if let Some(floor) = writer_floor {
             fields.insert("writer_floor".into(), Value::from(floor));
         }
@@ -3546,6 +3557,29 @@ impl Store {
         // Seed and sign at once: the joiner's first exchange must find itself admitted.
         self.replication_snapshot()?;
         Ok(admitted.id)
+    }
+
+    /// Export only st authority: a verified current incarnation must admit this exact
+    /// member key and Fabric identity. The external adapter owns any resulting policy.
+    pub fn verify_fleet_pairing_admission(
+        &self,
+        name: &str,
+        member_key: &str,
+        node_id: &str,
+    ) -> Result<()> {
+        let membership = self.fleet_membership()?;
+        let crate::fleet::MemberState::Current(member) = membership.state(name) else {
+            anyhow::bail!("the pairing member is not a verified current fleet member");
+        };
+        anyhow::ensure!(
+            member.member_key == member_key && member.node_id.as_deref() == Some(node_id),
+            "the signed membership does not bind this member key to this Fabric node"
+        );
+        anyhow::ensure!(
+            node_id.len() == 64 && node_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "the pairing Fabric node identity is invalid"
+        );
+        Ok(())
     }
 
     /// Revoke an invite. Any member can; the sponsor erases the token when it sees the claim.

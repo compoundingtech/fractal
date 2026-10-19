@@ -538,8 +538,8 @@ struct FleetCreateArgs {
 struct FleetInviteArgs {
     /// The name the new machine must use.
     name: Option<String>,
-    /// How long the code stays valid: 10s to 24h.
-    #[arg(long, default_value = "15m")]
+    /// How long the code stays valid: 10s to 24h (Fabric pairing is capped at 10m).
+    #[arg(long, default_value = "10m")]
     expires: String,
     /// Which of this member's endpoints go into the code: auto, tailscale, fabric, loopback.
     #[arg(long, default_value = "auto")]

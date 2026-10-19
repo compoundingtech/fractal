@@ -8,6 +8,7 @@ fn member(name: &str, key: &str, node: &str, state: &str) -> MemberView {
     MemberView {
         name: name.into(),
         member_key: key.into(),
+        node_id: Some(node.into()),
         state: state.into(),
         mode: "listening".into(),
         endpoints: vec![

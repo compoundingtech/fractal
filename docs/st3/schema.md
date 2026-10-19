@@ -91,7 +91,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `fleet.invite-created` | `fleet-invite` | `system-only` | `append` | `durable` | `created_by:subject-reference(person)`, `expires_at_unix_ms!:integer`, `name:string`, `sponsor!:subject-reference(host)`, `transports:array` |  |
 | `fleet.invite-redeemed` | `fleet-invite` | `system-only` | `append` | `durable` | `member_key!:string`, `name!:string` |  |
 | `fleet.invite-revoked` | `fleet-invite` | `system-only` | `append` | `durable` | `reason!:string`, `revoked_by:subject-reference(person)` |  |
-| `fleet.member-admitted` | `host` | `system-only` | `append` | `durable` | `admitted_by:subject-reference(person)`, `fleet_id!:string`, `invite:subject-reference(fleet-invite)`, `member_key!:string`, `mode!:string`, `sponsor:subject-reference(host)`, `via!:string`, `writer_floor:integer` |  |
+| `fleet.member-admitted` | `host` | `system-only` | `append` | `durable` | `admitted_by:subject-reference(person)`, `fleet_id!:string`, `invite:subject-reference(fleet-invite)`, `member_key!:string`, `mode!:string`, `node_id:string`, `sponsor:subject-reference(host)`, `via!:string`, `writer_floor:integer` |  |
 | `fleet.member-endpoints` | `host` | `system-only` | `append` | `durable` | `build:string`, `endpoints:array`, `member_key!:string`, `mode!:string` |  |
 | `fleet.member-left` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key!:string` |  |
 | `fleet.member-removed` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key:string`, `reason!:string`, `removed_by:subject-reference(person)` |  |

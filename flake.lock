@@ -45,6 +45,27 @@
         "type": "github"
       }
     },
+    "fabric": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1792404932,
+        "narHash": "sha256-y8Ih8R63gce1YmRaPSi14FG7qV3UzthL8nJccXRtfss=",
+        "owner": "compoundingtech",
+        "repo": "fabric",
+        "rev": "a926de61b0b8fa2599fba6fe022eb5f11ef73bb6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "fabric",
+        "rev": "a926de61b0b8fa2599fba6fe022eb5f11ef73bb6",
+        "type": "github"
+      }
+    },
     "fenix": {
       "inputs": {
         "nixpkgs": [
@@ -258,6 +279,7 @@
     "root": {
       "inputs": {
         "effect-utils": "effect-utils",
+        "fabric": "fabric",
         "fenix": "fenix",
         "flake-utils": "flake-utils_2",
         "nixpkgs": "nixpkgs_3",

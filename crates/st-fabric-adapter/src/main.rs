@@ -9,10 +9,13 @@ use std::{
     time::Duration,
 };
 mod reconcile;
+mod pairing;
 
 #[derive(Debug, Parser)]
 #[command(about = "Reconcile verified local st fleet membership into Fabric runtime peers")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<PairingCommand>,
     /// Trusted local st3 HTTP socket (never the replication socket).
     #[arg(long)]
     st_socket: Option<PathBuf>,
@@ -31,6 +34,14 @@ struct Args {
     /// Poll interval in seconds.
     #[arg(long, default_value = "5", value_parser = clap::value_parser!(u64).range(1..))]
     interval: u64,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum PairingCommand {
+    /// Attach a restricted Fabric permit to an existing invite ({code} on stdin).
+    PairingInvite,
+    /// Exchange signed admission over Fabric's restricted pairing ALPN.
+    PairingJoin,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,7 +149,7 @@ async fn poll(
         );
         bytes.extend_from_slice(&chunk);
     }
-    let snapshot: LeaveSnapshot = serde_json::from_slice(&bytes).context(
+    let mut snapshot: LeaveSnapshot = serde_json::from_slice(&bytes).context(
         "read st leave-state contract; upgrade st to a version supporting local adapters",
     )?;
     ensure!(
@@ -146,6 +157,26 @@ async fn poll(
         "st leave state is not durable: {}",
         snapshot.persistence_error.as_deref().unwrap_or_default()
     );
+    // Admission publishes signed membership before Fabric confirmation. Fence
+    // every pending bound identity so normal reconciliation cannot grant it early.
+    let pending = pairing::tick(client, socket, state).await?;
+    for member in &mut snapshot.membership.members {
+        // Only the sponsor's confirmed Fabric receipt bridges the period before
+        // the joining daemon can publish endpoints. Propagated admission alone
+        // must never grant access on another fleet member.
+        if let (Some(fleet), Some(node)) = (&snapshot.fleet_id, &member.node_id) {
+            if pending.confirmed.contains(&(fleet.clone(), member.member_key.clone(), node.clone())) {
+                member.endpoints.push(serde_json::json!({
+                    "transport":"fabric", "node":node,
+                    "protocol":format!("st3/fleet/{fleet}")
+                }));
+            }
+        }
+        member.endpoints.retain(|endpoint| {
+            endpoint["transport"] != "fabric"
+                || endpoint["node"].as_str().is_none_or(|node| !pending.blocked.contains(node))
+        });
+    }
     let owners_path = state.join("owners.json");
     let mut known = owners(&owners_path)?;
     if let Some(fleet) = &snapshot.fleet_id {
@@ -225,6 +256,25 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string(&status)?);
         return Ok(());
     }
+    let fabric_socket = match args.fabric_socket {
+        Some(path) => path,
+        None => reconcile::control_socket()?,
+    };
+    if matches!(args.command, Some(PairingCommand::PairingJoin)) {
+        return pairing::join(&fabric_socket, &state).await;
+    }
+    let st_socket = match args.st_socket {
+        Some(path) => path,
+        None => default_st_socket()?,
+    };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .unix_socket(st_socket)
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    if matches!(args.command, Some(PairingCommand::PairingInvite)) {
+        return pairing::invite(&client, &fabric_socket, &state).await;
+    }
     std::fs::create_dir_all(&state)?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -234,19 +284,6 @@ async fn main() -> Result<()> {
         .open(state.join("adapter.lock"))?;
     lock.try_lock()
         .context("another adapter owns this state directory")?;
-    let st_socket = match args.st_socket {
-        Some(path) => path,
-        None => default_st_socket()?,
-    };
-    let fabric_socket = match args.fabric_socket {
-        Some(path) => path,
-        None => reconcile::control_socket()?,
-    };
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .unix_socket(st_socket)
-        .timeout(Duration::from_secs(10))
-        .build()?;
     loop {
         let result = poll(&client, &fabric_socket, &state).await;
         let status = match &result {

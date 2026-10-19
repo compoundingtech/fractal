@@ -51,6 +51,8 @@ impl FleetClaim {
 pub struct Incarnation {
     pub name: String,
     pub member_key: String,
+    /// Fabric identity admitted by the sponsor's signed membership claim, if paired.
+    pub node_id: Option<String>,
     pub via: String,
     pub mode: String,
     pub sponsor: Option<String>,
@@ -158,6 +160,7 @@ impl Membership {
             incarnations.push(Incarnation {
                 name: name.to_owned(),
                 member_key: key.to_owned(),
+                node_id: claim.text("node_id").map(str::to_owned),
                 via: claim.text("via").unwrap_or_default().to_owned(),
                 mode: claim.text("mode").unwrap_or("listening").to_owned(),
                 sponsor: claim.text("sponsor").map(str::to_owned),
