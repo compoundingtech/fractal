@@ -2590,6 +2590,7 @@ async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_i
                     history: false,
                     limit: Some(20),
                     cursor: None,
+                    messages_paging: false,
                 },
                 relay: Some(ClientReadRoute {
                     target: "host/lag-owner".into(),
