@@ -24,6 +24,7 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: (ref: string) => { source.conversation(ref); return source.feed },
   useConversationSync: (ref: string) => { source.conversationSync(ref); return source.sync },
+  useConnection: () => ({ _tag: 'Live' }),
   useDataSource: () => ({ agents, conversationInterest: undefined, retryConversation: source.retryConversation }),
   useFeedInterest: source.feedInterest,
   useNow: () => 1000,
@@ -229,7 +230,7 @@ describe('single unavailable state', () => {
     source.sync = { status: { _tag: 'Failed', cause: { _tag: 'Server', code: 'not-found', message: 'diagnostic' } }, observedAt: 500 }
     const html = render()
     const unavailable = html.slice(html.indexOf('data-testid="transcript-unavailable"'))
-    expect(unavailable.match(/Try again/g)).toHaveLength(1)
+    expect(unavailable.match(/>Retry</g)).toHaveLength(1)
     expect(html).not.toContain('role="alert"')
   })
 })

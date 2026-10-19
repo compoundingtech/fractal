@@ -45,11 +45,11 @@ fn read_credential(path: &Path) -> io::Result<String> {
 const TOOLS: &[(&str, &str, bool)] = &[
     ("st_alerts_list", "List owner alert identifiers and counts.", true),
     ("st_alert_get", "Read one exact owner alert, including its episode and named answer options.", true),
-    ("st_alert_answer", "Propose one typed person-ask answer. Requires separate owner approval in st; retry identical arguments after approval.", false),
+    ("st_alert_answer", "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
     ("st_missions_list", "List mission metadata.", true),
     ("st_agents_list", "List agent metadata.", true),
     ("st_conversation_read", "Read one bounded conversation content range. Content may contain sensitive material.", true),
-    ("st_message_send", "Send one exact message to an owner-allowlisted agent, authorized by grant scope and the ChatGPT confirmation card.", false),
+    ("st_message_send", "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
@@ -152,7 +152,71 @@ fn tool_definitions() -> Vec<Tool> {
         "annotations":{"readOnlyHint":read,"destructiveHint":*name=="st_alert_answer","idempotentHint":true,"openWorldHint":*name=="st_message_send"}
     })).expect("static tool definition")).collect()
 }
+/// Only closed tool names and locally selected codes enter telemetry. A dropped
+/// dispatch future emits cancellation too, without retaining any tool arguments.
+struct CallObservation {
+    tool: &'static str,
+    started: std::time::Instant,
+    outcome: &'static str,
+    code: &'static str,
+    request_id: Option<String>,
+    response_bytes: Option<u64>,
+}
+impl CallObservation {
+    fn new(name: &str) -> Self {
+        Self {
+            tool: TOOLS.iter().find(|(tool, _, _)| *tool == name)
+                .map_or("unknown", |(tool, _, _)| *tool),
+            started: std::time::Instant::now(),
+            outcome: "cancelled",
+            code: "cancelled",
+            request_id: None,
+            response_bytes: None,
+        }
+    }
+    fn response(&mut self, value: &Value) {
+        // Daemon IDs are request/<UUID>. Reject arbitrary text even in this
+        // metadata field: a compromised/malformed gateway must not inject logs.
+        if let Some(id) = value["request_id"].as_str()
+            && let Some(uuid) = id.strip_prefix("request/")
+            && uuid.len() == 36
+            && uuid.bytes().enumerate().all(|(i, byte)| {
+                if matches!(i, 8 | 13 | 18 | 23) { byte == b'-' }
+                else { byte.is_ascii_hexdigit() }
+            })
+        {
+            self.request_id = Some(id.to_owned());
+        }
+    }
+}
+impl Drop for CallObservation {
+    fn drop(&mut self) {
+        tracing::info!(target: "st_chatgpt::call",
+            tool = self.tool, outcome = self.outcome, code = self.code,
+            daemon_request_id = self.request_id.as_deref(),
+            duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            response_bytes = self.response_bytes,
+            "ChatGPT tool call finished");
+    }
+}
 async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value> {
+    let mut observation = CallObservation::new(name);
+    let result = dispatch(adapter, name, args, &mut observation).await;
+    observation.outcome = if result.is_ok() { "success" } else { "error" };
+    observation.code = match &result {
+        Ok(_) => "ok",
+        Err(value) => match value["code"].as_str() {
+            Some("unknown-tool") => "unknown-tool",
+            Some("invalid-arguments") => "invalid-arguments",
+            Some("unavailable") => "unavailable",
+            Some("invalid-daemon-response") => "invalid-daemon-response",
+            Some("incomplete") => "incomplete",
+            _ => "daemon-denied",
+        },
+    };
+    result
+}
+async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut CallObservation) -> Result<Value,Value> {
     validate_arguments(name, args)?;
     let object = args.as_object().expect("validated tool object");
     let write = matches!(name,"st_alert_answer"|"st_message_send");
@@ -169,7 +233,12 @@ async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value
     };
     let response = request.bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired st daemon is unavailable."}))?;
     let status = response.status();
-    let value = response.json::<Value>().await.map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    // reqwest's JSON decoder already buffers the body. Reuse that exact buffer
+    // for byte accounting, without reserializing content or trusting Content-Length.
+    let bytes = response.bytes().await.map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    observation.response_bytes = Some(bytes.len() as u64);
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    observation.response(&value);
     if status.is_success() {Ok(value)} else {Err(json!({"code":if status.as_u16()==413 {"incomplete"} else {"daemon-denied"},"http_status":status.as_u16(),"daemon":value}))}
 }
 impl ServerHandler for Adapter {

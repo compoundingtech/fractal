@@ -39,6 +39,7 @@ nix develop .#web
 pnpm install --frozen-lockfile  # repository root
 pnpm --filter @smalltalk/fractal-ui storybook        # http://127.0.0.1:53705
 pnpm --filter @smalltalk/fractal-ui typecheck
+pnpm --filter @smalltalk/fractal-ui test:stories     # real-story scenario consumption check
 pnpm --filter @smalltalk/fractal-ui build-storybook  # packages/fractal-ui/storybook-static/
 ```
 
@@ -47,15 +48,37 @@ The kit keeps TypeScript 6.0.3 and declares the Node types used by its Storybook
 
 The dev server binds to localhost on a fixed port (53705). To view it from another machine, forward the port, for example `ssh -L 53705:localhost:53705 <host>`, and open http://localhost:53705.
 
+### Scenario data
+
+The **Scenario** toolbar uses the shared `@smalltalk/st3-scenarios` catalog.
+`scenario` selects the world and `scenarioNow` fixes its clock. Only Markdown's
+`AllStates` story currently declares a slice (`conversation`) and renders that
+slice's prose through the real `Markdown` component. Other stories retain their
+existing fixtures. Theme, density and Markdown's rendering picker remain
+independent of scenario data.
+
+For example, open
+`?path=/story/fractal-ui-markdown--all-states&globals=scenario:fleet-mid-refactor&args=conversation:empty`.
+Slice overrides use `args=<slice>:<variant>`; the world uses
+`globals=scenario:<world>`. The `test:stories` CI lane runs the kit's
+`scenarioStoryCheck` over this real story, checking declared reads, visible data
+dependence, toolbar world changes and URL-state roundtripping. World-pin
+invariance is intentionally skipped because the story follows the toolbar.
+The SSR check uses StyleX's Rollup compiler adapter, without the Vite adapter's
+browser stylesheet refresh timer, so Vitest can close its middleware server cleanly.
+
+
 ## Strict play gate
 
-Every `ci-fractal-web` proof discovers every story from the built `index.json` and runs its play at 440×900 and 1440×900, each with dark and light browser color schemes. Each isolated page must report successful `storyFinished` evidence without play exceptions, page errors or unexpected console errors. Only the strict guard's two exact missing development/favicon resources are allowed; missing story assets still fail. The Nix web shell supplies Playwright and Chromium without npm dependencies. The gate serves the static build on an ephemeral localhost port and prints the complete JSON receipt (case evidence, failures and elapsed seconds) into the CI log, failing the proof if any case fails.
+Every `ci-fractal-web` proof discovers every story from the built `index.json` and normally runs its play at 440×900 and 1440×900, each with dark and light browser color schemes. The full strict case set is defined by `fullCases` in `scripts/kit-play-commit-set.mjs`; its explicit overrides omit the scheme-only `NoGreenAllStatesLight` and `FooterWidthBudgetLight` aliases, because the base stories already run both schemes, and run `FilterKeystrokeToPaint` only at 1440px dark. Receipts report those overrides, the intended case count and omissions; shard aggregation requires that exact case set. Each isolated page must report successful `storyFinished` evidence without play exceptions, page errors or unexpected console errors. Only the strict guard's two exact missing development/favicon resources are allowed; missing story assets still fail. The Nix web shell supplies Playwright and Chromium without npm dependencies. The gate serves the static build on an ephemeral localhost port and prints the complete JSON receipt (case evidence, failures and elapsed seconds) into the CI log, failing the proof if any case fails.
 The runner uses one Chromium with up to six concurrent isolated pages, bounded by the available CPU allowance. The receipt records the actual worker count; every indexed case is still required.
 Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
+The gate also validates every strict case override against the complete story index before selecting cases: unknown story IDs fail closed, and a zero-case exclusion must be a `-light` scheme alias with a kept base story from the same source file. Policy tests pin the allowed IDs and benchmark omissions independently of the policy map.
 Navigation waits for DOM readiness, then the unchanged strict guard waits for the story's lifecycle completion; global network idleness is not substituted for a successful play.
 Plays look up a tooltip with `tooltipFor(anchor, name)` from `src/story-play.ts`, never with a document-wide `findByRole('tooltip')`. The helper resolves the tooltip through the anchor's `aria-describedby` and asserts its role, exact accessible name and visibility. Its cost does not grow with the page size.
 TranscriptPress and TranscriptComposer wait for the history controls' existing `data-state="complete"` commit signal before checking the exact mounted turn count. Their shared `committedTranscriptHistory` helper observes that attribute directly; scroll and interaction assertions retain their existing bounds.
 The helper follows the play's `abortSignal` and bounds failure with Testing Library's configured `getConfig().asyncUtilTimeout`, without changing it. An aborted or timed-out wait reports the expected completion state, last observed state and mounted turn count. Its mutation observer, deadline and abort listener are always removed in `finally`.
+The sidebar filter's calibrated keystroke-to-next-frame benchmark retains all four 30-sample phases, the 3x p90 budget and the 4x busy-wait negative control across its internal 240/440 × dark/light probes. `FilterBehavior` separately checks filter/unfilter behavior, retained item identity, bounded row renders and the fresh-object rebuild negative control across those same probes in every outer viewport/theme case, using one filter/unfilter pair per phase instead of repeating the latency measurement.
 
 To run only the gate after building Storybook, inside `nix develop .#web`:
 

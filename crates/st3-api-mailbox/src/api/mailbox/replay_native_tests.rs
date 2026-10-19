@@ -1,7 +1,7 @@
 use super::*;
 use st_drivers::{harness_events, harness_state};
 use std::sync::atomic::Ordering::SeqCst;
-use st3_api::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
+use st3_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
 
 
 fn native_peer_process() -> std::process::Child {

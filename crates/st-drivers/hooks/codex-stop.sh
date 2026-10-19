@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+# Identity conflicts never select either alias; diagnostics contain names only.
+for fractal_legacy in ST_AGENT; do
+  fractal_preferred=FRACTAL_${fractal_legacy#*_}
+  eval 'fractal_new_set=${'"$fractal_preferred"'+x}; fractal_new=${'"$fractal_preferred"'-}; fractal_old_set=${'"$fractal_legacy"'+x}; fractal_old=${'"$fractal_legacy"'-}'
+  if [ "$fractal_new_set" = x ] && [ -n "$fractal_new" ] && [ "$fractal_old_set" = x ] && [ "$fractal_new" != "$fractal_old" ]; then
+    printf 'conflicting identity environment: %s and %s\n' "$fractal_preferred" "$fractal_legacy" >&2
+    unset "$fractal_preferred" "$fractal_legacy"
+    return 1 2>/dev/null || exit 1
+  fi
+done
+unset fractal_legacy fractal_preferred fractal_new_set fractal_new fractal_old_set fractal_old
+
 # st2 Codex Stop hook: expose messages that arrived since the previous idle checkpoint. Ding remains
 # the live push path; this is the lifecycle backstop. Fail-open on every dependency/CLI error.
 
 set -u
 
-identity="${ST_AGENT:-}"
-root="${ST_ROOT:-${CATALOG:-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+identity="${FRACTAL_AGENT-${ST_AGENT:-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+root="${FRACTAL_ROOT-${ST_ROOT:-${CATALOG:-}}}"
 if [[ -z "$identity" || -z "$root" ]] || ! command -v st2 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi

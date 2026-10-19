@@ -4,7 +4,9 @@ import fs from "node:fs";
 
 export default function admissionProbe(pi: any) {
   const record = (value: unknown) => fs.appendFileSync(
-    process.env.ST_ADMISSION_TRACE!, JSON.stringify(value) + "\n",
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    (process.env.FRACTAL_ADMISSION_TRACE ?? process.env.ST_ADMISSION_TRACE)!,
+    JSON.stringify(value) + "\n",
   );
   record({ type: "extension_load", sendUserMessage: typeof pi.sendUserMessage,
     sendMessage: typeof pi.sendMessage, on: typeof pi.on });

@@ -30,6 +30,8 @@ PATTERNS = (
     "clients/typescript/st3-client/BUCK*",
     "clients/typescript/st3-views/**",
     "clients/typescript/st3-scenarios/**",
+    # The st3-scenarios recording import reads the client wire schema at runtime.
+    "docs/st3/client-v0/schemas/client-v0.schema.json",
     # Views tests and scenario lanes read committed client/scenario fixtures.
     "fixtures/**",
     "package.json*",
@@ -168,9 +170,11 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/ConversationPaneFallback.tsx",
     "apps/fractal-web/src/web/ConversationPane.tsx",
     "apps/fractal-web/src/web/conversationPreferences.ts",
+    "apps/fractal-web/src/web/ConversationStates.tsx",
     "apps/fractal-web/src/web/conversationTranscript.ts",
     "apps/fractal-web/src/web/DeclarationDialog.tsx",
     "apps/fractal-web/src/web/detailsSupplement.ts",
+    "apps/fractal-web/src/web/lastObserved.tsx",
     "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
     "apps/fractal-web/src/web/liveSidebarTree.ts",
     "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
@@ -187,6 +191,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/index.html",
     "clients/typescript/st3-scenarios/**",
     "clients/typescript/st3-client/**",
+    # The st3-scenarios recording import reads the client wire schema at runtime.
+    "docs/st3/client-v0/schemas/client-v0.schema.json",
     "package.json*",
     "pnpm-workspace.yaml*",
     "pnpm-lock.yaml",
