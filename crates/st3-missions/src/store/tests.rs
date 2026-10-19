@@ -10676,6 +10676,11 @@ mod seat_queue_purity_tests {
     /* sqlite-large-value: allow-for-now lv-hb8ba0ece1dda owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("seat_queue_purity_tests.rs");
 }
 
+mod step_timing_purity_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-hd83d7b318965 owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("step_timing_purity_tests.rs");
+}
+
 mod declarative_revision_timestamp_tests {
     use super::*;
 

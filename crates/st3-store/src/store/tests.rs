@@ -102,10 +102,6 @@ mod canonical_audit {
     
 }
 
-mod step_timing_purity_tests {
-    use super::*;
-    /* sqlite-large-value: allow-for-now lv-hee5f6bf9cec2 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("step_timing_purity_tests.rs");
-}
 
 mod declarative_revision_timestamp_tests {
     
