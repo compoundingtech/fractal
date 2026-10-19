@@ -2,6 +2,7 @@
 // Sources: docs/st3/client-v0/schemas/client-v0.schema.json, operations.json
 // Generator: crates/st3-client-codegen/src/rich.rs
 // Regenerate: cargo run -p st3-client-codegen; verify: cargo run -p st3-client-codegen -- --check
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 import { DateTime, Duration, Schema, SchemaTransformation } from "effect"
 
 export const API_VERSION = "st3.client.v0" as const
