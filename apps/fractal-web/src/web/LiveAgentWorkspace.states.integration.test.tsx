@@ -258,6 +258,7 @@ describe('RM1 workspace source states', () => {
     registry.set(conversation, observed({ value: inProgress }))
     registry.set(conversationSync, liveSync(inProgress))
     await mount()
+    expect(transcript().textContent).toContain('Run running')
     await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 2 }))
     const log = transcript().querySelector('[data-testid="work-log"]')!
     expect(log.textContent).toContain('Work · completion unverified')
@@ -266,6 +267,7 @@ describe('RM1 workspace source states', () => {
     expect(log.querySelector('[data-tool-status="success"]')).not.toBeNull()
     expect(log.querySelector('button[aria-expanded="true"]')).not.toBeNull()
     expect(host.textContent).toContain('Last seen working · 18 s ago')
+    expect(transcript().textContent).not.toContain('Run running')
     expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
   })
 

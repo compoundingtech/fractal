@@ -315,7 +315,7 @@ export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly t
       if (!turn.work.running && running.size === 0) return turn
       return {
         ...turn,
-        items: turn.items.filter(item => !running.has(item.id)),
+        items: turn.items.filter(item => !running.has(item.id) && (item._tag !== 'Status' || !activeRunStatuses[item.status])),
         work: { ...turn.work, running: false, foldable: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
       }
     }),
