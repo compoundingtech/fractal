@@ -13,7 +13,19 @@ pub async fn page(
     binding: &str,
     context: &response_body::Context,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
-    allow(parameters, METADATA_FIELDS, max_bytes)?;
+    let agent_id = if matches!(projection, "agents" | "agents-rich") {
+        allow(parameters, &["cursor", "limit", "max_response_bytes", "agent_id"], max_bytes)?;
+        parameters.get("agent_id").map(|id| {
+            if identifier_allowed(id) && id.starts_with("agent/") && id.len() > "agent/".len() {
+                Ok(id.clone())
+            } else {
+                Err(validation("agent_id must be an exact canonical agent identifier"))
+            }
+        }).transpose()?
+    } else {
+        allow(parameters, METADATA_FIELDS, max_bytes)?;
+        None
+    };
     let limit = parameters.get("limit").map(|limit| {
         limit.parse::<usize>().ok()
             .filter(|limit| (1..=CLIENT_MAX_PAGE_ITEMS).contains(limit))
@@ -24,7 +36,10 @@ pub async fn page(
     };
     // The native cursor's collection field also binds the disclosure class, grant and
     // policy revision. Authorization still precedes every first and subsequent page.
-    let collection = format!("assistant.{projection}:{binding}");
+    let collection = match &agent_id {
+        Some(id) => format!("assistant.{projection}:{binding}:agent_id={id}"),
+        None => format!("assistant.{projection}:{binding}"),
+    };
     let cursor = query.cursor.as_deref().map(decode_client_cursor).transpose()?;
     if let Some(cursor) = &cursor
         && (cursor.collection != collection
@@ -42,7 +57,7 @@ pub async fn page(
     let projection = projection.to_owned();
     let context = context.clone();
     blocking_store(move || reader.store.clone().read_snapshot(|index| {
-        Ok(read_page(&reader, snapshot, &projection, &collection, &person, &query, cursor, index, &context, max_bytes))
+        Ok(read_page(&reader, snapshot, &projection, &collection, &person, agent_id.as_deref(), &query, cursor, index, &context, max_bytes))
     })).await?
 }
 
@@ -53,6 +68,7 @@ fn read_page(
     projection: &str,
     collection: &str,
     person: &str,
+    agent_id: Option<&str>,
     query: &ClientListQuery,
     cursor: Option<ClientPageCursor>,
     index: u64,
@@ -126,7 +142,8 @@ fn read_page(
         let mut visible_len = 0;
         let mut selected = Vec::new();
         for card in cards.iter().filter(|card| card["id"].as_str()
-            .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")))
+            .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")
+                && agent_id.is_none_or(|target| target == id)))
         {
             if window.contains(&visible_len) {
                 selected.push(card.clone());
@@ -146,7 +163,8 @@ fn read_page(
         let refs = if cursor.is_some() { Vec::new() } else {
             let mut refs = client_agent_page_refs(&state.store, false, index).map_err(ApiError::internal)?;
             refs.retain(|reference| reference["id"].as_str()
-                .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")));
+                .is_some_and(|id| identifier_allowed(id) && id.starts_with("agent/")
+                    && agent_id.is_none_or(|target| target == id)));
             refs
         };
         let page = client_page_read_projected(

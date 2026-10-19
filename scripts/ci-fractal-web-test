@@ -62,6 +62,7 @@ web_inputs = (
     "clients/typescript/st3-client/tsconfig.schema.json",
     "clients/typescript/st3-client/types.test.ts",
     "clients/typescript/st3-client/BUCK",
+    "docs/st3/client-v0/schemas/client-v0.schema.json",
     "fixtures/clients/device-signing-v1.json",
     "fixtures/clients/transcripts/example.json",
     "fixtures/scenarios/example.json",
@@ -75,7 +76,6 @@ non_web_inputs = (
     "crates/st3-client-codegen/src/main.rs",
     "crates/st3-schema/x.rs",
     "docs/st3/client-v0/x.md",
-    "docs/st3/client-v0/schemas/client-v0.schema.json",
     "nested/megarepo.kdl",
     "nested/megarepo.lock",
     "nested/flake.lock",
@@ -118,6 +118,7 @@ workspace_fixture = json.loads('{"devDependencies":{"@smalltalk/st3-scenarios":"
 guard_workspace_dependencies(workspace_fixture)
 assert detector_contract["kit_paths"](["clients/typescript/st3-scenarios/src/index.ts"])
 assert detector_contract["kit_paths"](["clients/typescript/st3-client/index.ts"])
+assert detector_contract["kit_paths"](["docs/st3/client-v0/schemas/client-v0.schema.json"])
 packages["@fixture/uncovered"] = ("packages/uncovered-fixture", {})
 try:
     guard_workspace_dependencies({"dependencies": {"@fixture/uncovered": "workspace:*"}})
@@ -266,12 +267,14 @@ assert "needs.genie-freshness.result == 'success'" in execution
 assert "bash scripts/ci-web-shell run bash scripts/ci-fractal-web" in execution, "the lanes run in the cached web shell"
 assert "nix develop .#web -c" in (root / "scripts/ci-web-shell").read_text(), "a missing shell cache falls back to evaluating the flake"
 assert "actions/cache/restore@" in execution
-# Main upkeep publishes the shared caches. The one save here fills the web shell closure for a pull
-# request whose flake inputs changed, so that its own later runs hit; it is scoped to that pull request.
-saves = re.findall(r"(?ms)^      - name: ([^\n]*)\n(?:(?!^      - ).)*?uses: actions/cache/save@(?:(?!^      - ).)*", execution)
-assert saves == ["Save the web shell closure"], saves
-save = execution[execution.index("      - name: Save the web shell closure"):]
-assert "github.event_name == 'pull_request'" in save and "steps.web-shell.outputs.cache-hit != 'true'" in save
+# Execution only restores: PR-scoped shell copies consume repository quota but
+# cannot warm merge groups. Protected-main upkeep remains the sole shell writer.
+assert "actions/cache/save@" not in execution and "actions/cache@" not in execution
+assert "bash scripts/ci-web-shell fill" not in execution
+upkeep = (root / ".github/workflows/main-upkeep.yml").read_text()
+assert "name: Save the web shell closure" in upkeep
+assert "name: Save the pnpm store" in upkeep
+assert "bash scripts/ci-web-shell fill" in upkeep
 assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()
@@ -447,8 +450,9 @@ with tempfile.TemporaryDirectory() as scratch:
         path.write_text(json.dumps({"modules": [{"id": identifier} for identifier in ids]}))
         return subprocess.run([str(graph_check), str(path)], capture_output=True, text=True)
     covered = graph("./src/Composer.stories.tsx", "./.storybook/preview.ts?v=1", "./../../node_modules/react/index.js",
-                    "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx")
-    assert covered.returncode == 0 and "3 repository files, 0 outside" in covered.stdout, covered
+                    "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx",
+                    "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
+    assert covered.returncode == 0 and "4 repository files, 0 outside" in covered.stdout, covered
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):
