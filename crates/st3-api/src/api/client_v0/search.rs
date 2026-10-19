@@ -1,3 +1,4 @@
+use crate::DeliveryStore;
 use super::*;
 use crate::conversation_search::{SearchEntry, SearchIndex};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -100,7 +101,7 @@ fn searchable_text(value: &Value, output: &mut String) {
 }
 
 /// A conversation considered in the original per-source budget order.
-struct Source {
+pub struct Source {
     id: String,
     owner: String,
     remote: Option<String>,

@@ -1,3 +1,24 @@
+use crate::AttentionSnapshotStore;
+use crate::AttentionStore;
+use crate::ConversationReadsStore;
+use crate::DeliveryStore;
+use crate::DeliveryStoreCore;
+use crate::MailboxLeaseStore;
+use crate::AdhocWorkStore;
+use crate::CoordinationStore;
+use crate::DelegationStore;
+use crate::MissionsStore;
+use crate::MissionsStoreCore;
+use crate::WorkListStore;
+use crate::LimitsStore;
+use crate::RosterAdmissionStore;
+use crate::SeatStatusStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
+use crate::SubagentsStore;
+use crate::EvidenceStore;
+use crate::OwnedSetsStore;
+use crate::PublicationFactsStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd as _;
@@ -67,13 +88,14 @@ use crate::model::{
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
+mod wire_names;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
 mod message_bodies;
 mod client_adapters;
 mod client_presence;
-mod client_v0;
+pub mod client_v0;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
@@ -84,31 +106,36 @@ mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
 mod github_watch;
-mod harness_events;
-mod mailbox;
-mod mail_backlog;
+pub mod harness_events;
+pub mod mailbox;
+pub mod mail_backlog;
 pub mod mission_eligibility_doctor;
-mod read_deadline;
+pub mod read_deadline;
 mod response_body;
 mod owned_sets;
-mod published_attention;
+pub mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{published_attention_rows, refresh_attention_list};
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
+    refresh_agent_roster(store, false)
+}
 mod directive_notes;
 mod request_latency;
 mod client_observations;
 mod terminal_view;
 mod work_response;
-mod published_lists;
+pub mod published_lists;
 #[cfg(target_os = "linux")]
-mod tile_endpoint;
+pub mod tile_endpoint;
 #[cfg(target_os = "linux")]
 pub use tile_endpoint::{
     SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
     spawn_from as spawn_tile_endpoints_from,
 };
-pub use published_lists::start_published_lists;
+pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
 
 #[cfg(test)]
@@ -116,16 +143,16 @@ mod legacy_handler_guard_tests;
 // Route families: each file holds the handlers of one group of routes; the router below names
 // them as family::handler.
 mod agents;
-mod client_reads;
+pub mod client_reads;
 mod fleet;
-mod launches;
-mod messages;
-mod operations;
-mod records;
-mod replication;
+pub mod launches;
+pub mod messages;
+pub mod operations;
+pub mod records;
+pub mod replication;
 mod runs;
-mod sessions;
-mod work;
+pub mod sessions;
+pub mod work;
 // Other api code calls these handlers directly.
 use launches::{
     approve_planning_session, cancel_planning_session, mission, preview_named_planning_candidate,
@@ -143,13 +170,11 @@ use client_reads::{
     client_launches_detail, client_work,
 };
 #[cfg(test)]
-use messages::list_messages;
-#[cfg(test)]
-use operations::{doctor, events};
+use operations::events;
 #[cfg(test)]
 use records::post_claim;
 #[cfg(test)]
-use replication::{replication_export, replication_receive, replication_wake};
+use replication::{replication_export, replication_wake};
 
 pub use client_v0::raw_terminal::splice as raw_terminal_splice;
 
@@ -182,6 +207,7 @@ pub struct AppState {
     pub planner_default: PlannerSpec,
 }
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
 const CLIENT_API_VERSION: &str = "st3.client.v0";
 const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
@@ -207,7 +233,7 @@ fn client_page_cache() -> &'static Mutex<VecDeque<CachedClientPage>> {
 }
 
 #[derive(Clone, Copy)]
-enum ClientTransportBoundary {
+pub enum ClientTransportBoundary {
     Unix,
     FabricLoopback,
 }
@@ -222,7 +248,7 @@ impl ClientTransportBoundary {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct ClientSnapshot {
+pub struct ClientSnapshot {
     id: String,
     host_id: String,
     store_index: u64,
@@ -234,10 +260,10 @@ struct ClientSnapshot {
 }
 
 /// A client page and the snapshot it was read in, which the envelope names.
-type ClientPageResponse = (Extension<ClientSnapshot>, Json<ClientResourcePage>);
+pub type ClientPageResponse = (Extension<ClientSnapshot>, Json<ClientResourcePage>);
 
 #[derive(Clone, Debug, Default, Deserialize)]
-struct ClientListQuery {
+pub struct ClientListQuery {
     limit: Option<usize>,
     cursor: Option<String>,
     #[serde(default)]
@@ -286,7 +312,7 @@ struct ClientPageCursor {
     expires_at_unix_ms: u128,
 }
 
-fn signal_changed(state: &AppState) {
+pub fn signal_changed(state: &AppState) {
     crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::Api, None);
     state.notify.notify_one();
     signal_visible_change(state);
@@ -321,13 +347,13 @@ fn signal_claim_changed(state: &AppState, kind: &str) {
 // and harness readiness still wake the reconciler through their own paths.
 // Local telemetry only wakes clients following this node. Harness observations also
 // affect work eligibility and acknowledgement deadlines; their transitions wake reconciliation.
-fn signal_local_change(state: &AppState) {
+pub fn signal_local_change(state: &AppState) {
     state
         .event_notify
         .send_modify(|generation| *generation = generation.saturating_add(1));
 }
 
-fn signal_visible_change(state: &AppState) {
+pub fn signal_visible_change(state: &AppState) {
     state
         .event_notify
         .send_modify(|generation| *generation = generation.saturating_add(1));
@@ -349,7 +375,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn bad(error: St3Error) -> Self {
+    pub fn bad(error: St3Error) -> Self {
         let status = match error.code {
             "recipient-retired"
             | "lifecycle-unavailable"
@@ -441,42 +467,36 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Build routes only. The owner starts background publications with
+/// [`start_published_lists`]; a bare router refuses unpublished current runtime reads.
 pub fn router(state: AppState) -> Router {
+    router_with(state, &[])
+}
+
+/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// the route table before the envelope and leave layers wrap it, so it is served exactly as the
+/// routes listed here. `router` without them is the route table this crate alone answers.
+pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
+
+/// [`router`] with the route families of the crates above.
+pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
     delivery_presence::start();
-    router_for_transport(state, ClientTransportBoundary::Unix)
-}
-
-/// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
-/// into this router: real native custody controls and the daemon use `router`.
-#[cfg(feature = "test-support")]
-pub fn admitted_mailbox_protocol_router(state: AppState) -> Router {
-    Router::new()
-        .route("/v1/mailbox/bind", post(mailbox::bind_admitted_fixture))
-        .route("/v1/mailbox", get(mailbox::subscribe_admitted_fixture))
-        .fallback_service(router(state.clone()))
-        .with_state(state)
-}
-
-/// Synthetic private-store transport controls; never physical native admission.
-#[cfg(feature = "test-support")]
-pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
-    assert!(subject.starts_with("agent/example/"));
-    admitted_mailbox_protocol_router(state).layer(Extension(NativeDeliveryPeer {
-        agent: subject.into(),
-        transport: "omp-channel",
-        pid: std::process::id(),
-        archives_inbox: false,
-    }))
+    router_for_transport(state, ClientTransportBoundary::Unix, families)
 }
 
 /// Build the loopback-only client gateway. Unlike the local Unix boundary, every ordinary
 /// client request on this router requires a paired bearer credential.
 pub fn fabric_router(state: AppState) -> Router {
-    router_for_transport(state, ClientTransportBoundary::FabricLoopback)
+    fabric_router_with(state, &[])
 }
 
-fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> Router {
+/// [`fabric_router`] with the route families of the crates above.
+pub fn fabric_router_with(state: AppState, families: &[RouteFamily]) -> Router {
+    router_for_transport(state, ClientTransportBoundary::FabricLoopback, families)
+}
+
+fn router_for_transport(state: AppState, transport: ClientTransportBoundary, families: &[RouteFamily]) -> Router {
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -763,13 +783,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
-        .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
         .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
-        .route("/v1/mailbox/bind", post(mailbox::bind))
-        .route("/v1/mailbox/attachment", get(mailbox::attachment))
-        .route("/v1/mailbox/receipts", post(mailbox::receipt))
         .route("/v1/messages/{message_id}/claims", post(messages::post_message_claim))
         .route("/v1/messages/read/{*subject}", get(messages::read_message))
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
@@ -928,6 +944,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             "/v1/hosts/{host}/agent-workspace",
             get(host_agent_workspace),
         );
+    let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
             (state.clone(), transport),
@@ -965,7 +982,7 @@ impl Drop for RequestDuration<'_> {
     }
 }
 
-async fn response_envelope(
+pub async fn response_envelope(
     State(state): State<(AppState, ClientTransportBoundary)>,
     request: Request<Body>,
     next: Next,
@@ -992,6 +1009,9 @@ async fn response_envelope_unbounded(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    if let Err(error) = wire_names::receive_headers(request.headers_mut()) {
+        return error.into_response();
+    }
     // Anonymous pairing discovery is public, static compatibility metadata. Bypass
     // authentication, snapshots, presence and the normal envelope/activity counter entirely.
     if matches!(transport, ClientTransportBoundary::FabricLoopback)
@@ -1170,6 +1190,7 @@ async fn response_envelope_unbounded(
         server: otel.clone(),
         roster: request_route == "/v1/client/agents",
     };
+    request.extensions_mut().insert(envelope_context.clone());
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -1208,6 +1229,7 @@ async fn response_envelope_unbounded(
             let remote = served_remote.clone();
             let result = read_deadline::spawn_mutation_handler(
                 state.store.clone(),
+                request_route.clone(),
                 track_remote_reads(remote, next.run(request)),
                 move |mut future, cx| {
                     if first_work.set(Instant::now()).is_ok() {
@@ -1611,7 +1633,7 @@ pub fn set_client_clock_skew_ms(skew_ms: u64) {
     CLIENT_CLOCK_SKEW_MS.store(skew_ms, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn client_now_ms() -> u128 {
+pub fn client_now_ms() -> u128 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1702,8 +1724,8 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
-    // The work list's refresher ended: nothing publishes it until the daemon restarts.
-    if matches!(code, Some(published_lists::WORK_LIST_ENDED | client_v0::published_missions::ENDED)) {
+    // An ended list publishes nothing until the daemon restarts.
+    if matches!(code, Some(published_lists::WORK_LIST_ENDED | client_v0::published_missions::ENDED | "runtime-list-ended")) {
         return false;
     }
     // An unconfirmed mutation needs the exact original request, not a generic
@@ -1781,6 +1803,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "mission-list-ended"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
+        | "runtime-list-not-ready"
+        | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
         | "conversation-content-invalidated"
@@ -1965,6 +1989,36 @@ fn client_page_read(
     query: &ClientListQuery,
     _pinned: bool,
 ) -> Result<ClientResourcePage, ApiError> {
+    client_page_read_bounded(state, snapshot, collection, items, query, _pinned, None)
+}
+
+/// Assistant reads supply their real response context so packing includes the
+/// snapshot, request ID, sync notice and the continuation cursor. Other native
+/// lists retain their existing paging policy.
+fn client_page_read_bounded(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    collection: &str,
+    items: Vec<Value>,
+    query: &ClientListQuery,
+    _pinned: bool,
+    budget: Option<(&response_body::Context, usize)>,
+) -> Result<ClientResourcePage, ApiError> {
+    client_page_read_projected(state, snapshot, collection, collection, items, query, budget, Ok)
+}
+
+/// Cache shallow source references, but budget and continue from delivered projected rows.
+#[allow(clippy::too_many_arguments)]
+fn client_page_read_projected(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    collection: &str,
+    response_collection: &str,
+    items: Vec<Value>,
+    query: &ClientListQuery,
+    budget: Option<(&response_body::Context, usize)>,
+    project: impl FnOnce(Vec<Value>) -> Result<Vec<Value>, ApiError>,
+) -> Result<ClientResourcePage, ApiError> {
     let (owner, terminal_state) = if collection == "terminals" {
         (query.owner.as_deref(), query.state.as_deref())
     } else {
@@ -1978,6 +2032,9 @@ fn client_page_read(
         &query.cursor
     {
         let cursor = decode_client_cursor(cursor)?;
+        if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit) {
+            return Err(client_page_expired("the page cursor has an invalid item limit"));
+        }
         if cursor.collection != collection
             || cursor.history != query.history
             || cursor.person != query.person
@@ -2014,6 +2071,9 @@ fn client_page_read(
             .ok_or_else(|| {
                 client_page_expired("the page snapshot is no longer available; restart pagination")
             })?;
+        if cursor.offset >= cached.items.len() {
+            return Err(client_page_expired("the page cursor offset is outside its cached snapshot"));
+        }
         (
             cached.items.clone(),
             cursor.items_digest,
@@ -2063,7 +2123,48 @@ fn client_page_read(
             client_v0::cut_oversized_timeline_entry(only, size);
         }
     }
-    let has_more = end < items.len();
+    let page_items = project(page_items)?;
+    let make_page = |end| -> Result<ClientResourcePage, ApiError> {
+        let has_more = end < items.len();
+        let next_cursor = if has_more {
+            Some(encode_client_cursor(&ClientPageCursor {
+                snapshot: snapshot.clone(),
+                collection: collection.into(),
+                offset: end,
+                limit,
+                history: query.history,
+                person: query.person.clone(),
+                actor: query.actor.clone(),
+                owner_run: query.owner_run.clone(),
+                status: query.status.clone(),
+                owner: owner.map(str::to_owned),
+                state: terminal_state.map(str::to_owned),
+                native_only: query.native_only,
+                items_digest: items_digest.clone(),
+                before_index: None,
+                after_key: None,
+                expires_at_unix_ms,
+            })?)
+        } else {
+            None
+        };
+        Ok(ClientResourcePage {
+            kind: "page".into(),
+            collection: response_collection.into(),
+            filters: client_page_filters(collection, query),
+            items: Vec::new(),
+            page: ClientPageInfo {
+                limit,
+                has_more,
+                next_cursor,
+                cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            },
+            sync: client_sync_notice(state),
+            replicated: None,
+        })
+    };
+    let page = client_pack_page(snapshot, page_items, budget, |count| make_page(offset + count))?;
+    let has_more = page.page.has_more;
     if query.cursor.is_none() && has_more {
         let mut cache = client_page_cache()
             .lock()
@@ -2087,42 +2188,49 @@ fn client_page_read(
             });
         }
     }
-    let next_cursor = if has_more {
-        Some(encode_client_cursor(&ClientPageCursor {
-            snapshot: snapshot.clone(),
-            collection: collection.into(),
-            offset: end,
-            limit,
-            history: query.history,
-            person: query.person.clone(),
-            actor: query.actor.clone(),
-            owner_run: query.owner_run.clone(),
-            status: query.status.clone(),
-            owner: owner.map(str::to_owned),
-            state: terminal_state.map(str::to_owned),
-            native_only: query.native_only,
-            items_digest,
-            before_index: None,
-            after_key: None,
-            expires_at_unix_ms,
-        })?)
-    } else {
-        None
-    };
-    Ok(ClientResourcePage {
-        kind: "page".into(),
-        collection: collection.into(),
-        filters: client_page_filters(collection, query),
-        items: page_items,
-        page: ClientPageInfo {
-            limit,
-            has_more,
-            next_cursor,
-            cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
-        },
-        sync: client_sync_notice(state),
-        replicated: None,
-    })
+    Ok(page)
+}
+
+/// Fit whole projected items against the actual response envelope. Rebuild the cursor
+/// for every candidate prefix: its encoded size and position are both part of the budget.
+fn client_pack_page(
+    snapshot: &ClientSnapshot,
+    mut items: Vec<Value>,
+    budget: Option<(&response_body::Context, usize)>,
+    mut make_page: impl FnMut(usize) -> Result<ClientResourcePage, ApiError>,
+) -> Result<ClientResourcePage, ApiError> {
+    let mut count = items.len();
+    let mut page = make_page(count)?;
+    if let Some((context, max_bytes)) = budget {
+        let mut sizes = [0usize; CLIENT_MAX_PAGE_ITEMS];
+        let mut payload_bytes = count.saturating_sub(1);
+        for (size, item) in sizes.iter_mut().zip(&items) {
+            *size = response_body::json_size(item)?;
+            payload_bytes += *size;
+        }
+        // A final page without a cursor can fit where a shorter prefix cannot.
+        // Descending prefixes also handle cursor-size digit boundaries exactly.
+        loop {
+            if context.page_envelope_size(snapshot, &page)? + payload_bytes <= max_bytes {
+                break;
+            }
+            if count <= 1 {
+                let id = items.first().and_then(|item| item["id"].as_str()).unwrap_or("<empty page>");
+                return Err(ApiError {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    code: "response-budget-exceeded".into(),
+                    message: format!("not even one whole item fits the assistant response envelope byte budget; item id: {id}"),
+                    details: Box::default(),
+                });
+            }
+            payload_bytes -= sizes[count - 1] + 1;
+            count -= 1;
+            page = make_page(count)?;
+        }
+        items.truncate(count);
+    }
+    page.items = items;
+    Ok(page)
 }
 
 /// The filters a page names: the ones its query applied.
@@ -3099,31 +3207,32 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
 /// still has a transport to assess. A running seat with a stale path becomes `waiting`; an
 /// already-waiting seat retains its harness block and ask details.
 fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
-    const NATIVE_DRIVERS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
-    let Some(driver) = item
-        .get("driver")
-        .and_then(Value::as_str)
-        .filter(|driver| NATIVE_DRIVERS.contains(driver))
-        .map(str::to_owned)
-    else {
+    let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
-    let local = item.get("host_id").and_then(Value::as_str) == Some(local_host);
-    let live = matches!(
-        item.get("state").and_then(Value::as_str),
-        Some("running" | "waiting")
-    );
-    if !local || !live {
-        return;
-    }
-    let Some(recipient) = item.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    let assessment = delivery_presence::assess_current(recipient, &driver, item["incarnation_id"].as_str());
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+}
+
+/// Share the live/local/native eligibility with scalar readers such as assistant summary
+/// counts. Assess the published inputs without constructing a card or delivery JSON.
+fn agent_delivery_presence(
+    item: &Value,
+    runtime: Option<&str>,
+    local_host: &str,
+) -> Option<delivery_presence::Assessment> {
+    const NATIVE_DRIVERS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
+    let driver = item["driver"].as_str().filter(|driver| NATIVE_DRIVERS.contains(driver))?;
+    if item["host_id"].as_str() != Some(local_host)
+        || !matches!(runtime, Some("running" | "waiting"))
+    {
+        return None;
+    }
+    Some(delivery_presence::assess_current(
+        item["id"].as_str()?, driver, item["incarnation_id"].as_str(),
+    ))
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5633,7 +5742,7 @@ where
     .map_err(ApiError::internal)
 }
 
-async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
+pub async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, St3Error> + Send + 'static,
@@ -6158,15 +6267,17 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        if let Some(agent) = environment.split(|byte| *byte == 0).find_map(|entry| {
-            std::str::from_utf8(entry)
-                .ok()?
-                .strip_prefix("ST_AGENT=")
-                .filter(|value| value.starts_with("agent/"))
-                .map(str::to_owned)
-        }) {
-            return Some(agent);
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        });
+        // A masked/conflicting child identity must not inherit an ancestor's authority.
+        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
+            return st_drivers::contracts::env_with("ST_AGENT", &lookup)
+                .filter(|value| value.starts_with("agent/"));
         }
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         pid = stat
             .rsplit_once(") ")?
@@ -6185,11 +6296,11 @@ fn harness_ancestor(_pid: u32) -> Option<String> {
 }
 
 #[derive(Clone)]
-struct NativeDeliveryPeer {
-    agent: String,
-    transport: &'static str,
-    pid: u32,
-    archives_inbox: bool,
+pub struct NativeDeliveryPeer {
+    pub agent: String,
+    pub transport: &'static str,
+    pub pid: u32,
+    pub archives_inbox: bool,
 }
 
 fn native_delivery_peer(pid: u32) -> Option<NativeDeliveryPeer> {
@@ -6216,11 +6327,14 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    let agent = env.iter().find_map(|entry| {
-        entry
-            .strip_prefix("ST_AGENT=agent/")
-            .map(|suffix| format!("agent/{suffix}"))
-    })?;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    let agent = st_drivers::contracts::env_with("ST_AGENT", &|name| {
+        env.iter().find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        })
+    }).filter(|agent| agent.starts_with("agent/"))?;
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     Some(NativeDeliveryPeer {
         agent,
         transport,
@@ -6262,7 +6376,7 @@ fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
+pub fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     let split = |bytes: Vec<u8>| {
         bytes
             .split(|byte| *byte == 0)
@@ -6277,7 +6391,7 @@ fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
 }
 
 #[cfg(target_os = "macos")]
-fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
+pub fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     let mut mib = [
         libc::CTL_KERN,
         libc::KERN_PROCARGS2,
@@ -6334,7 +6448,7 @@ fn local_process_arguments(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn local_process_arguments(_pid: u32) -> Option<(Vec<String>, Vec<String>)> {
+pub fn local_process_arguments(_pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     None
 }
 
@@ -7104,6 +7218,13 @@ fn doctor_report_with_operation_drift(
             status: "fail".into(),
             message: error.to_string(),
         }),
+    }
+    for fault in state.store.signature_state_faults().map_err(ApiError::internal)? {
+        checks.push(DoctorCheck {
+            name: fault.code.clone(),
+            status: if fault.code == "signature-state-corrupt" { "fail" } else { "warn" }.into(),
+            message: format!("{}: {}", fault.subject, fault.detail),
+        });
     }
     match state.store.claim_verdict_counts() {
         Ok(counts) => checks.push(claim_signatures_check(&counts)),
@@ -8575,7 +8696,7 @@ pub fn request_resume(
     Ok(claim)
 }
 
-async fn apply(
+pub async fn apply(
     State(state): State<AppState>,
     Json(request): Json<ApplyRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
@@ -8791,7 +8912,7 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
 }
 
 #[derive(Deserialize)]
-struct SloHistoryQuery {
+pub struct SloHistoryQuery {
     id: String,
     since_ms: Option<u64>,
     until_ms: Option<u64>,
@@ -9331,16 +9452,16 @@ fn settle_answered_message(
 }
 
 #[derive(Deserialize)]
-struct MessagesQuery {
-    to: Option<String>,
+pub struct MessagesQuery {
+    pub to: Option<String>,
     #[serde(default)]
-    include_closed: bool,
+    pub include_closed: bool,
 }
 
 /// One message as it is read, with who signed it when a person wrote it (see
 /// `client_v0::message_provenance`).
 #[derive(Serialize)]
-struct MessageRead {
+pub struct MessageRead {
     #[serde(flatten)]
     message: MessageView,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -9356,7 +9477,7 @@ fn message_subject(value: &str) -> String {
 }
 
 #[derive(Deserialize)]
-struct EventQuery {
+pub struct EventQuery {
     #[serde(default, alias = "after_index")]
     after: u64,
     subject: Option<String>,
@@ -9713,7 +9834,7 @@ async fn cancel_revision_proposal(
 }
 
 #[derive(Deserialize)]
-struct WorkQuery {
+pub struct WorkQuery {
     actor: Option<String>,
     #[serde(default)]
     include_terminal: bool,
@@ -9770,7 +9891,7 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
 /// The process at the other end of a local socket connection, as the kernel reports it, and
 /// the agent its ancestry names.
 #[derive(Clone, Debug)]
-struct LocalPeer {
+pub struct LocalPeer {
     pid: u32,
     ancestor: Option<String>,
 }
@@ -9872,7 +9993,7 @@ async fn work_action_response(
 }
 
 #[derive(Clone, Debug)]
-struct LiveSession {
+pub struct LiveSession {
     runtime_id: String,
     incarnation_id: String,
     owner_host_id: String,
@@ -10338,8 +10459,15 @@ fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared;
 
 #[cfg(test)]
 mod work_incarnation_tests;
 #[cfg(test)]
 mod message_bodies_tests;
+
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod mailbox_tests_shared;
+

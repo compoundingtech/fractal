@@ -36,6 +36,12 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+use st3::CustomStore;
+use st3::AdhocWorkStore;
+use st3::CoordinationStore;
+use st3::MissionsStore;
+use st3::SeatsStore;
+use st3::SeatsStoreCore;
 use st3::{GitChangesStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
@@ -81,8 +87,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
     ("GET /v1/checkpoint/status", 15.0),
-    // Runtimes read every runtime observation (3.8x for the list, 9.0x for one runtime).
-    ("GET /v1/client/runtimes", 6.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
@@ -1694,10 +1698,13 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
     }
 }
 
-/// Every route `api.rs` declares is measured or listed in `NOT_MEASURED`, and nothing is both.
+/// Every route `api.rs` and the route families above it declare is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let mut declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    declared.extend(family_routes(include_str!(
+        "../../st3-api-mailbox/src/api/mailbox.rs"
+    )));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
         .iter()
@@ -1792,10 +1799,23 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
 
 /// `METHOD /path` for every `.route(...)` in the router's source.
 fn declared_routes(source: &str) -> BTreeSet<String> {
-    let mut routes = BTreeSet::new();
-    let router = &source[source
+    routes_in(&source[source
         .find("fn router_for_transport")
-        .expect("api.rs builds its router in router_for_transport")..];
+        .expect("api.rs builds its router in router_for_transport")..])
+}
+
+/// The routes of a route family a crate above st3-api adds to the router (its `routes` fn).
+fn family_routes(source: &str) -> BTreeSet<String> {
+    let start = source
+        .find("pub fn routes(")
+        .expect("a route family is built in its `routes` fn");
+    let end = start + source[start..].find("\n}\n").expect("the `routes` fn closes");
+    routes_in(&source[start..end])
+}
+
+/// `METHOD /path` for every `.route(...)` in `router`.
+fn routes_in(router: &str) -> BTreeSet<String> {
+    let mut routes = BTreeSet::new();
     let mut rest = router;
     while let Some(start) = rest.find(".route(") {
         rest = &rest[start + ".route(".len()..];
@@ -2101,6 +2121,11 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         native_session_home: Some(root.join("home")),
         planner_default: st3::model::PlannerSpec::default(),
     };
+    let seeded_cut = store.index().unwrap();
+    st3::api::start_published_lists(&state);
+    tokio::time::timeout(Duration::from_secs(120),
+        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        .await.expect("cost census lists publish the seeded store cut").unwrap();
     let server_socket = socket.clone();
     let server =
         tokio::spawn(

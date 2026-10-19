@@ -1,3 +1,14 @@
+#[cfg(test)]
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
+use st3::CoordinationStore;
+use st3::MissionsStore;
+use st3::LimitsStore;
+use st3::SeatsStore;
+use st3::StopDeferralStore;
+use st3::PublicationFactsStore;
 use st3::GitChangesStore;
 use st3::cli_output;
 use st3::{cli_print as print, cli_println as println};
@@ -72,6 +83,7 @@ mod fractal;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
+mod actor_contract;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -112,6 +124,8 @@ use presentation::{
 struct Cli {
     #[arg(long, global = true, hide = true)]
     read_contract_inventory_json: bool,
+    #[arg(long, global = true, hide = true)]
+    checkpoint_space_gate_capabilities: bool,
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate st on this machine: its own state, config, sockets, node
@@ -141,8 +155,56 @@ struct Cli {
 /// failing an agent's step.
 const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+const CLI_ENVIRONMENT_NAMES: [(&str, &str); 5] = [
+    ("ST_INSTANCE", "FRACTAL_INSTANCE"),
+    ("ST3_DAEMON_WAIT", "FRACTAL_DAEMON_WAIT"),
+    ("ST3_TERMINAL_CAPABILITY", "FRACTAL_TERMINAL_CAPABILITY"),
+    ("ST_AGENT", "FRACTAL_AGENT"),
+    ("ST3_INCARNATION", "FRACTAL_INCARNATION"),
+];
+
+fn cli_command() -> clap::Command {
+    // Resolve each family once, not once per argument, to warn once per conflict.
+    // Leave legacy bindings untouched unless the preferred alias is actually present.
+    let bindings = CLI_ENVIRONMENT_NAMES.map(|(old, new)| {
+        std::env::var_os(new).map(|_| {
+            (old, st_drivers::contracts::env(old).map(|_| new))
+        })
+    });
+    cli_command_with_bindings(Cli::command(), &bindings)
+}
+
+fn cli_command_with_bindings(
+    command: clap::Command,
+    bindings: &[Option<(&'static str, Option<&'static str>)>],
+) -> clap::Command {
+    command
+        .mut_args(|mut arg| {
+            for &(old, new) in bindings.iter().flatten() {
+                if arg.get_env() == Some(std::ffi::OsStr::new(old)) {
+                    arg = arg.env(new);
+                    break;
+                }
+            }
+            arg
+        })
+        .mut_subcommands(|command| cli_command_with_bindings(command, bindings))
+}
+
+fn agent_environment_present() -> bool {
+    std::env::var_os("FRACTAL_AGENT").is_some() || std::env::var_os("ST_AGENT").is_some()
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
 #[derive(Subcommand)]
 enum Command {
+    /// Print the generated, versioned CLI actor contract without contacting a daemon.
+    ActorContract {
+        /// Also print the effective instance, config path and state directory.
+        #[arg(long)]
+        effective: bool,
+    },
     /// Configure this machine and start st, with flags for unattended setup.
     Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
@@ -531,7 +593,7 @@ fn fleet_person(actor: Option<String>, config: &Config) -> Result<String> {
         return Ok(actor);
     }
     anyhow::ensure!(
-        std::env::var("ST_AGENT").is_err(),
+        !agent_environment_present(),
         "inside an agent seat, fleet commands need an explicit --as person/NAME"
     );
     config
@@ -4069,7 +4131,7 @@ struct AdmissionBuildArgs {
 
 fn run_admission(command: AdmissionCommand, json_output: bool) -> Result<()> {
     anyhow::ensure!(
-        std::env::var_os("ST_AGENT").is_none(),
+        !agent_environment_present(),
         "admission exceptions must be managed from a person's terminal, outside an agent seat"
     );
     let (build, reason) = match command {
@@ -4224,6 +4286,15 @@ fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<b
     present.then(|| arguments.len() == 2 && arguments[1] == FLAG)
 }
 
+fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
+    const FLAG: &str = "--checkpoint-space-gate-capabilities";
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == FLAG)
+        .then(|| arguments.len() == 2 && arguments[1] == FLAG)
+}
+
 fn main() -> ExitCode {
     cli_output::finish(cli_main())
 }
@@ -4234,6 +4305,23 @@ fn cli_main() -> ExitCode {
         st3::recorder::run(program);
     }
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    match checkpoint_space_gate_capabilities_request(&arguments) {
+        Some(true) => {
+            println!(
+                "{}",
+                json!({
+                    "kind": "checkpoint-space-gate-capabilities",
+                    "version": st3::store::CHECKPOINT_SPACE_GATE_VERSION,
+                })
+            );
+            return ExitCode::SUCCESS;
+        }
+        Some(false) => {
+            eprintln!("st: --checkpoint-space-gate-capabilities must be used alone");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
     if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
         return fractal::web(&arguments);
     }
@@ -4249,8 +4337,7 @@ fn cli_main() -> ExitCode {
         None => {}
     }
     // An instance changes where every path resolves, so it comes before anything reads one.
-    let instance_name = st3::instance::requested(&arguments)
-        .or_else(|| std::env::var(st3::instance::ENV).ok().filter(|name| !name.is_empty()));
+    let instance_name = st3::instance::requested(&arguments);
     if let Some(name) = instance_name {
         // SAFETY: no other thread exists yet; the async runtime starts after this returns.
         if let Err(error) = unsafe { st3::instance::activate(&name) } {
@@ -4260,7 +4347,7 @@ fn cli_main() -> ExitCode {
     }
     // A shell stub from `st completions` calls back with `COMPLETE=<shell>` on each TAB. Answer
     // before any config, runtime, or daemon work; this exits when the variable is set.
-    clap_complete::env::CompleteEnv::with_factory(Cli::command).complete();
+    clap_complete::env::CompleteEnv::with_factory(cli_command).complete();
     // A seat process asks a replacement binary which resume formats it reads before executing it.
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(st_drivers::reexec::PROBE_SUBCOMMAND))
@@ -4293,7 +4380,7 @@ fn cli_main() -> ExitCode {
         arguments.len(),
         std::io::stdin().is_terminal(),
         cli_output::stdout().is_terminal(),
-        std::env::var_os("ST_AGENT").is_some(),
+        crate::agent_environment_present(),
     ) {
         let subject = match crate::setup::prepare_plain_ui() {
             Ok(subject) => subject,
@@ -4313,7 +4400,7 @@ fn cli_main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let json_version = arguments.iter().any(|arg| arg == "--json");
-    let matches = match Cli::command()
+    let matches = match cli_command()
         .override_help(cli_help::root_help(false))
         .try_get_matches_from(arguments)
     {
@@ -4328,6 +4415,15 @@ fn cli_main() -> ExitCode {
         Err(error) => exit_usage_error(error),
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    if let Command::ActorContract { effective } = &cli.command {
+        return match actor_contract::print(*effective) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("st actor-contract: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Root runs tiles. Entering one makes namespaces, which needs this process single-threaded,
     // so it runs before any runtime or thread starts.
     if let Command::Tiles(args) = cli.command {
@@ -4351,7 +4447,12 @@ fn cli_main() -> ExitCode {
         Ok(Some(incarnation)) => {
             // SAFETY: the single-threaded lookup runtime has been dropped; run_cli starts
             // the multi-threaded runtime only after this environment update.
-            unsafe { std::env::set_var("ST3_INCARNATION", incarnation) };
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            unsafe {
+                std::env::set_var("FRACTAL_INCARNATION", &incarnation);
+                std::env::set_var("ST3_INCARNATION", incarnation);
+            }
+            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         }
         Ok(None) => {}
         Err(error) => {
@@ -4407,8 +4508,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         let scoped = subject
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-            || std::env::var("ST3_SUBJECT")
-                .ok()
+            || st_drivers::contracts::env("ST3_SUBJECT")
                 .is_some_and(|value| !value.trim().is_empty());
         anyhow::ensure!(
             scoped || args.identity.is_none(),
@@ -4450,7 +4550,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
     let endpoint = cli
         .endpoint
         .clone()
-        .or_else(|| std::env::var("ST3_ENDPOINT").ok())
+        .or_else(|| st_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
@@ -4661,8 +4761,12 @@ fn daemon_is_unreachable(error: &anyhow::Error) -> bool {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let own = std::env::var("ST_AGENT").ok();
-    let mission_run = std::env::var("ST_MISSION_RUN").ok();
+    let own = st_drivers::contracts::env("ST_AGENT");
+    anyhow::ensure!(
+        own.is_some() || !agent_environment_present(),
+        "agent identity is empty or conflicting; refusing to fall back to person authority"
+    );
+    let mission_run = st_drivers::contracts::env("ST_MISSION_RUN");
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
     if let Command::Setup(args) = cli.command {
         return crate::setup::run(args).await.map(|_| ());
@@ -4779,7 +4883,7 @@ async fn run(cli: Cli) -> Result<()> {
     let (config, unknown_config_keys) = Config::load_client_unvalidated(None)?;
     let endpoint = cli
         .endpoint
-        .or_else(|| std::env::var("ST3_ENDPOINT").ok())
+        .or_else(|| st_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
@@ -4788,6 +4892,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
     let immediate = Client::new(endpoint.clone());
     match cli.command {
+        Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
@@ -4848,8 +4953,7 @@ async fn run(cli: Cli) -> Result<()> {
             ) {
                 client
             } else {
-                let actor = match std::env::var("ST_AGENT")
-                    .ok()
+                let actor = match st_drivers::contracts::env("ST_AGENT")
                     .filter(|agent| agent.starts_with("agent/"))
                 {
                     Some(agent) => agent,
@@ -5839,6 +5943,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    tokio::spawn(st3::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
@@ -5993,6 +6098,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 }
             }));
             spawn_publication_evidence(store.clone());
+            tokio::spawn(build_transport_observation_index(store.clone()));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -7975,8 +8081,7 @@ fn configured_actor(
     if let Some(explicit) = explicit {
         return parse_actor_subject(explicit).map_err(anyhow::Error::msg);
     }
-    if let Some(own) = std::env::var("ST_AGENT")
-        .ok()
+    if let Some(own) = st_drivers::contracts::env("ST_AGENT")
         .filter(|own| own.starts_with("agent/"))
     {
         return Ok(own);
@@ -10669,8 +10774,7 @@ fn normalize_member_subject(subject: &str, namespace: &str) -> String {
 fn blob_actor(named: Option<String>, configured_person: Option<&str>) -> Result<String> {
     let actor = named
         .or_else(|| {
-            std::env::var("ST_AGENT")
-                .ok()
+            st_drivers::contracts::env("ST_AGENT")
                 .filter(|agent| !agent.is_empty())
         })
         .or_else(|| configured_person.map(str::to_owned))
@@ -11447,8 +11551,7 @@ fn lane_actor(explicit: Option<&str>, configured_person: Option<&str>) -> Result
     if let Some(actor) = explicit {
         return Ok(actor.to_owned());
     }
-    if let Some(own) = std::env::var("ST_AGENT")
-        .ok()
+    if let Some(own) = st_drivers::contracts::env("ST_AGENT")
         .map(|own| own.trim().to_owned())
         .filter(|own| !own.is_empty())
     {
@@ -12391,9 +12494,8 @@ fn render_client_agents(
 /// names, so a model that inferred the wrong identity could otherwise read and send as a peer seat.
 /// The process may still act as a non-agent subject, such as its exec or a person its work names.
 fn reject_foreign_agent_actor(actor: &str) -> Result<()> {
-    let own = std::env::var("ST_AGENT").ok();
-    let mission_run = std::env::var("ST_MISSION_RUN")
-        .ok()
+    let own = st_drivers::contracts::env("ST_AGENT");
+    let mission_run = st_drivers::contracts::env("ST_MISSION_RUN")
         .filter(|value| !value.is_empty());
     match foreign_agent_actor(actor, own.as_deref(), mission_run.as_deref()) {
         Some(message) => anyhow::bail!(message),
@@ -12423,8 +12525,7 @@ fn foreign_agent_actor(
 }
 
 fn normalize_message_subject(value: &str) -> String {
-    let mission_run = std::env::var("ST_MISSION_RUN")
-        .ok()
+    let mission_run = st_drivers::contracts::env("ST_MISSION_RUN")
         .filter(|value| !value.is_empty());
     normalize_message_subject_in_run(value, mission_run.as_deref())
 }
@@ -13012,8 +13113,7 @@ async fn send_message(
     request.idempotency_key = match args.idempotency_key {
         Some(key) => key,
         None => {
-            let incarnation = std::env::var("ST3_INCARNATION")
-                .ok()
+            let incarnation = st_drivers::contracts::env("ST3_INCARNATION")
                 .filter(|incarnation| !incarnation.is_empty());
             let hour = message_key_hour();
             let key = derived_message_key(&request, incarnation.as_deref(), hour);
@@ -17801,6 +17901,95 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
     }
 }
 
+/// This starts only after both APIs serve. Each 128-source-row page joins the
+/// managed background writer queue, releases its loan, then yields for 100 ms.
+async fn build_transport_observation_index(store: Arc<Store>) {
+    use smallclaims::store::transport_observation_index as index;
+    let started = Instant::now();
+    st3::otel::record_index_migration(index::NAME, false, None, None);
+    loop {
+        let page_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<index::Page>> {
+            if index::ready(&page_store.readers.get())? {
+                return Ok(None);
+            }
+            index::advance(&page_store.connection).map(Some)
+        }).await;
+        match result {
+            Ok(Ok(None)) => {
+                st3::otel::record_index_migration(index::NAME, true, None, None);
+                return;
+            }
+            Ok(Ok(Some(page))) => {
+                st3::otel::record_index_migration(
+                    index::NAME,
+                    page.ready,
+                    Some(page.write_hold),
+                    page.ready.then(|| started.elapsed()),
+                );
+                if page.ready {
+                    return;
+                }
+            }
+            Ok(Err(error)) if maintenance_contention(&error) => {}
+            error => {
+                eprintln!("st: transport observation index build stopped: {error:?}");
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// A finite bootstrap job: committed pages yield the background writer to live requests.
+/// Local corruption is persisted and visible through doctor/faults; it stops this job.
+/// Background inventory/judgment gets one quiet unit per unit of page wall time.
+/// This bounds duty to 50%; it neither retries nor suppresses a local failure.
+const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
+
+async fn migrate_signature_candidates(store: Arc<Store>) {
+    let worker = store.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let initial = worker.signature_migration()?;
+        let mut phase = initial.phase.clone();
+        if !initial.done() { eprintln!("st3: signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description()); }
+        loop {
+            let page_started = std::time::Instant::now();
+            let report = worker.advance_signature_migration()?;
+            if report.phase != phase {
+                eprintln!("st3: signature bootstrap phase {}: {}",report.phase,report.progress_description());
+                phase = report.phase.clone();
+            }
+            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
+                anyhow::bail!("{reason}");
+            }
+            if report.phase == "judging" {
+                worker.advance_signature_judgment()?;
+            }
+            // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
+            // each page gets an equally long quiet interval (at most 50% worker duty).
+            let page_elapsed = page_started.elapsed();
+            std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+            if worker.signature_migration()?.done() {
+                let complete = worker.signature_migration()?;
+                if !initial.done() { eprintln!("st3: signature candidate authority activated: {}",complete.progress_description()); }
+                loop {
+                    let retired_started = std::time::Instant::now();
+                    if !worker.retire_legacy_signature_page()? { break; }
+                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                }
+                return Ok(());
+            }
+        }
+    }).await;
+    if !matches!(result, Ok(Ok(()))) {
+        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
+            eprintln!("st3: signature migration fault could not be persisted: {error:#}");
+        }
+        eprintln!("st3: signature candidate migration stopped: {result:?}");
+    }
+}
+
 /// Old payloads convert after startup; each page joins the normal writer queue and commits
 /// its own cursor. A failed page retries, including after a daemon restart.
 async fn convert_envelope_payloads(store: Arc<Store>) {
@@ -18129,6 +18318,28 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
             Ok(Err(error)) => eprintln!("st3: local observation trim failed: {error:#}"),
             Err(error) => eprintln!("st3: local observation trim stopped: {error}"),
         }
+        // What these trims, checkpoints and response expiry freed goes back to the filesystem,
+        // one short write at a time so other writes run between them.
+        let mut released = 0;
+        loop {
+            let vacuum_store = store.clone();
+            match vacuum_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(pages)) => released += pages,
+                Ok(Err(error)) => {
+                    eprintln!("st3: giving free pages back failed: {error:#}");
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("st3: giving free pages back stopped: {error}");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if released > 0 {
+            eprintln!("st3: gave {released} free pages back to the filesystem");
+        }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
         match size_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
@@ -18141,17 +18352,17 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
 }
 
 /// Seal and verify checkpoints every ten minutes. The proof copies the store and replays it, so
-/// it runs on a blocking thread, and a copy left by a crash is removed first.
+/// it runs on a blocking thread, and an owned copy left by a crash is swept first.
 async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    // A proof copy is only ever useful to the proof that made it. A staged capture is kept: it
-    // resumes where it stopped while its store-index cut still holds (#2492).
-    if let Ok(entries) = std::fs::read_dir(&context.scratch) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("proof-") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+    // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
+    // proof or a cleanup error stays visible and prevents a later proof from consuming space.
+    let sweep_store = store.clone();
+    let sweep_dir = context.scratch.clone();
+    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("st3: checkpoint proof startup cleanup failed: {error:#}"),
+        Err(error) => eprintln!("st3: checkpoint proof startup cleanup stopped: {error}"),
     }
     loop {
         let store = store.clone();

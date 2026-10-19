@@ -19,13 +19,13 @@ CREATE TABLE IF NOT EXISTS arrangement_registers (
 );
 "#;
 
-type Head = (Value, String, Vec<u8>);
+pub type Head = (Value, String, Vec<u8>);
 fn heads(connection: &Connection, subject: &str) -> Result<BTreeMap<String, Head>> {
     let mut statement = connection.prepare_cached("SELECT register,value,revision,winner FROM arrangement_registers WHERE subject=?1 ORDER BY register")?;
     let rows = statement.query_map([subject], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter().map(|(register,value,revision,key)| Ok((register,(serde_json::from_str(&value)?,revision,key)))).collect()
 }
-fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}) }
+pub fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}) }
 
 /// Projects one edit and bumps its owner's inventory revision. The projector registry calls this
 /// for every appended or replicated `arrangement.edited` claim.
@@ -99,7 +99,7 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
 
 /// Call once per local edit or projecting transaction with its distinct touched owners (a replicated
 /// batch marks them through `project_replicated` and `flush` calls this). Admission indices cannot order deferred materialization behind local edits.
-pub(super) fn bump_inventory_revisions<'a>(
+pub fn bump_inventory_revisions<'a>(
     transaction: &Transaction<'_>,
     owners: impl IntoIterator<Item = &'a str>,
 ) -> Result<()> {
@@ -172,7 +172,7 @@ pub fn arrangement_at(connection: &Connection, subject: &str, through: u64) -> R
     resource(subject, &owner, &revision, time.parse()?, &heads).map(Some)
 }
 
-fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &BTreeMap<String, Head>) -> Result<Value> {
+pub fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &BTreeMap<String, Head>) -> Result<Value> {
     let mut folders = serde_json::Map::new();
     let mut placements = serde_json::Map::new();
     for (key,head) in heads {
@@ -278,33 +278,4 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     }
     bump_inventory_revisions(transaction, owners.iter().map(String::as_str))?;
     Ok(())
-}
-impl Store {
-    pub fn arrangements(&self, person: &str, through: u64) -> Result<Vec<Value>> {
-        self.read_snapshot(|_| arrangements_at(&self.readers.get(),person,through))
-    }
-    /// Owner-local projection counter, including retired and not-yet-created heads.
-    /// It commits with the heads and is independent of claim admission indices.
-    pub fn arrangement_inventory_revision(&self, person: &str) -> Result<u64> {
-        self.read_snapshot(|_| Ok(self.readers.get().query_row(
-            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta
-             WHERE key='arrangement_inventory_revision_v1/'||?1),0)",
-            [person], |row| row.get(0))?))
-    }
-    pub fn arrangement(&self, subject: &str, through: u64) -> Result<Option<Value>> {
-        self.read_snapshot(|_| arrangement_at(&self.readers.get(),subject,through))
-    }
-    pub fn arrangements_changed(&self, after: u64, through: u64) -> Result<bool> {
-        Ok(self.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM arrangements WHERE changed_index>?1 AND changed_index<=?2)",params![after,through.min(i64::MAX as u64)],|row| row.get(0))?)
-    }
-    pub fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error> {
-        if input.kind != "arrangement.edited" { return Err(St3Error::new("invalid-arrangement-operations","edit_arrangement requires arrangement.edited")); }
-        if let Some(actor) = &input.actor { self.graph.ensure_principal_key(actor)?; }
-        if input.expected_subject.is_some() {
-            let mut merging = input.clone();
-            merging.expected_subject = None;
-            return append_claim_with_subject_fences(&self.graph,&merging,None,None,Some(expected_subjects),None).map(|(claim,_)| claim);
-        }
-        append_claim_with_subject_fences(&self.graph,input,None,None,Some(expected_subjects),None).map(|(claim,_)| claim)
-    }
 }

@@ -4,6 +4,65 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('assistant senders decode timeline messages without becoming recipients or actors', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        id: 'timeline-entry/assistant-message', sequence: 1, revision: 1,
+        timestamp: '2026-10-17T10:00:00Z', role: 'user', type: 'message', final: true,
+        body: {
+            message_id: 'message/assistant', from: 'assistant/chatgpt', to: 'agent/example',
+            sender_class: 'external-assistant', assistant_grant_id: 'assistant-grant/example',
+        },
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const decode = Rich.decodeUnknownSync(Rich.TimelineEntry, mode);
+        const decoded = decode(wire);
+        const encoded = Schema.encodeSync(Rich.TimelineEntry)(decoded);
+        assert.equal(encoded.body.from, 'assistant/chatgpt');
+        assert.equal(encoded.body.to, 'agent/example');
+        assert.equal(encoded.body.sender_class, 'external-assistant');
+        assert.equal(encoded.body.assistant_grant_id, 'assistant-grant/example');
+        for (const from of ['agent/example', 'person/example', 'step/example']) {
+            assert.equal(Schema.encodeSync(Rich.TimelineEntry)(decode({
+                ...wire, body: { ...wire.body, from },
+            })).body.from, from);
+        }
+        for (const from of ['assistant/', 'assistant/with space', 'daemon/example']) {
+            assert.throws(() => decode({ ...wire, body: { ...wire.body, from } }));
+        }
+        assert.throws(() => decode({ ...wire, body: { ...wire.body, to: 'assistant/chatgpt' } }));
+        assert.throws(() => Rich.decodeUnknownSync(Rich.ParticipantRef, mode)('assistant/chatgpt'));
+        assert.throws(() => Rich.decodeUnknownSync(Rich.ActorRef, mode)('assistant/chatgpt'));
+    }
+});
+
+test('both usage aggregation literals keep agent rows through the generated schema', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const contract = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
+    const literals = contract.$defs.UsageSummary.properties.aggregation.enum;
+    assert.deepEqual(literals, [
+        'cumulative-per-incarnation-else-response-deltas',
+        'rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas',
+    ]);
+    for (const mode of ['tolerant', 'strict']) {
+        const decode = Rich.decodeUnknownSync(Rich.Agent, mode);
+        for (const aggregation of literals) {
+            const wire = {
+                id: 'agent/example/worker', kind: 'agent', name: 'Worker',
+                reachability: 'local', revision: '1', runtime_ids: [], state: 'waiting',
+                updated_at: '2024-02-29T00:00:00.000Z',
+                usage: {
+                    total_tokens: 1200, input_tokens: 900, output_tokens: 300,
+                    cached_tokens: 100, incarnation_count: 2, aggregation,
+                },
+            };
+            const result = Schema.encodeSync(Rich.Agent)(decode(wire));
+            assert.equal(result.id, wire.id);
+            assert.deepEqual(result.usage, wire.usage);
+        }
+    }
+});
+
 test('pairing challenge object siblings constrain every union branch in both decode modes', async () => {
     const [{ Schema }, Rich] = await modules;
     const assistantEnvelope = require('../../../docs/st3/client-v0/fixtures/assistant-pairing-challenge.json');
@@ -557,4 +616,19 @@ test('exchange carrier additions preserve legacy absence and future carrier valu
     const future = { ...observed, last_successful_exchange: { ...observed.last_successful_exchange, carrier: 'future-carrier' } };
     assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(future)), future);
     assert.throws(() => decode({ ...observed, last_failed_exchange: { carrier: 'fabric' } }));
+});
+
+
+test('message provenance retains its serving model and reads historical absence strictly', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.MessageProvenance, 'strict');
+    for (const authorization_model of ['legacy', 'candidate']) {
+        const wire = { verdict: 'unsigned', authorization_model };
+        assert.deepEqual(Schema.encodeSync(Rich.MessageProvenance)(decode(wire)), wire);
+    }
+    const historical = { verdict: 'unsigned' };
+    assert.deepEqual(Schema.encodeSync(Rich.MessageProvenance)(decode(historical)), historical);
+    assert.throws(() => decode({ ...historical, authorization_model: 'unqualified-model' }));
+    assert.throws(() => decode({ ...historical, authorization_model: null }));
+    assert.throws(() => decode({ ...historical, undeclared_authority: true }));
 });

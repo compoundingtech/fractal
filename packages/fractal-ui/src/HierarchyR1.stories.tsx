@@ -150,9 +150,17 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   for (const entry of rows) {
     const duration = entry.querySelector<HTMLElement>('[data-call-duration]')!
     await expect(getComputedStyle(duration).fontVariantNumeric).toBe('tabular-nums')
-    const text = document.createRange()
-    text.selectNodeContents(duration)
-    await expect(Math.abs(text.getBoundingClientRect().right - edge)).toBeLessThan(1)
+    // Every row retains the pinned duration track, but running calls have no measured end yet.
+    await expect(Math.abs(duration.getBoundingClientRect().right - edge)).toBeLessThan(1)
+    if (entry.parentElement!.getAttribute('data-tool-status') === 'running') {
+      await expect(duration).toBeEmptyDOMElement()
+      await expect(entry.querySelector('[data-call-word]')).toHaveTextContent(/^Running$/)
+    } else {
+      await expect(duration.textContent).not.toBe('')
+      const text = document.createRange()
+      text.selectNodeContents(duration)
+      await expect(Math.abs(text.getBoundingClientRect().right - edge)).toBeLessThan(1)
+    }
     await expect(duration.scrollWidth).toBeLessThanOrEqual(duration.clientWidth)
   }
   const status = (state: string) => children.querySelector<HTMLElement>(`[data-tool-status="${state}"]`)!.firstElementChild as HTMLElement
