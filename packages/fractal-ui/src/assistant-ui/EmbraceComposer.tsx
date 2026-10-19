@@ -28,6 +28,8 @@ export interface EmbraceComposerProps {
   /** Structured drafts parallel to `history`; recall restores chips instead of re-parsing text. */
   readonly tokenHistory?: readonly Draft[]
   readonly targetLabel?: string
+  /** Distinguishes composer landmarks when a host renders multiple conversations. */
+  readonly conversationLabel?: string
   readonly disabledReason?: string
   /** Shown on the C3 cancel control when the runtime cannot cancel the active run. */
   readonly cancelUnavailableReason?: string
@@ -305,7 +307,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
   </>
 }
 
-function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
+function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
   const readOnly = disabledReason !== undefined || isDisabled
   const helpId = React.useId()
@@ -333,7 +335,7 @@ function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestS
   return (
     <ComposerPrimitive.Root
       tabIndex={-1}
-      aria-label="Message composer"
+      aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`}
       {...stylex.props(styles.root, style, cold && styles.cold)}
       onSubmit={event => { if (readOnly || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly) onRequestSubmit?.(false) }}
       onCompositionStartCapture={() => { composing.current = true }}

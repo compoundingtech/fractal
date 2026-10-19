@@ -288,6 +288,25 @@ class ReleaseNotes(unittest.TestCase):
         source = self.commit('Classified contract change')
         self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 2)
 
+    def test_shared_storage_version_is_read_from_the_pinned_tree(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
+        value = fragment()
+        value['schema'] = {'status': 'changed', 'detail': 'Forward migration.', 'transitions': [[16, 19]]}
+        self.add_fragment(value=value)
+        source = self.commit('Shared version migration')
+        self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 1)
+        # Neither a later working-tree version nor an undeclared transition may pass.
+        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 20;')
+        self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 1)
+        later = self.commit('Later version increment')
+        self.assertEqual(version(self.repo, later, 'schema'), 20)
+        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = unknown;')
+        malformed = self.commit('Malformed shared version')
+        with self.assertRaisesRegex(ImpactError, 'cannot identify schema version'):
+            version(self.repo, malformed, 'schema')
+
     def test_explicit_source_backfill_and_source_pinning(self):
         self.write('fix.rs', '// Direct fix\n')
         missing = self.commit('Direct change')

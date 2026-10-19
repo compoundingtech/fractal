@@ -2490,9 +2490,7 @@ fn supervise_leave_with_diagnostics() -> bool {
             .arg(root.path())
             .arg("--")
             .arg(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture", "--include-ignored"])
-            .env_remove("ST_AGENT")
-            .env_remove("ST3_SUBJECT")
+            .args(["--exact", name, "--nocapture", "--include-ignored"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
             .env("SMALLTALK_TEST_SUPERVISED", name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .output().expect("launch bounded fleet leave guardian");
@@ -5053,6 +5051,19 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         source_ptys.iter().all(|row| row["status"] != "running"),
         "source still has a live PTY: {source_ptys:?}"
     );
+    // The transcript shows the mail before the resumed driver reports the turn's end. Suspend
+    // reads the driver's latest report for the running incarnation, so wait for that report.
+    wait_until("resumed seat reports quiet on target", 60, || async {
+        let incarnation = jade.st_json(&["agents", "show", seat])["value"]["incarnation_id"].clone();
+        let page: Value = jade.client()
+            .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100")).await.unwrap();
+        page["claims"].as_array().into_iter().flatten()
+            .find(|claim| claim["kind"] == "harness.observed")
+            .map(|claim| claim["body"].get("fields").unwrap_or(&claim["body"]))
+            .is_some_and(|fields| incarnation.is_string() && fields["incarnation_id"] == incarnation
+                && fields["quiescent"] == true)
+    })
+    .await;
     jade.st_ok(&[
         "agents",
         "suspend",
