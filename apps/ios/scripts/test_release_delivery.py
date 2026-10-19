@@ -178,9 +178,12 @@ class ReleaseDeliveryTests(unittest.TestCase):
             executable = self.tools / name
             executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent(COMMAND_FIXTURE))
             executable.chmod(0o755)
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "Git is required for the delivery fixtures")
+        git_bin = Path(git).parent
         self.env = dict(os.environ)
         self.env.update({
-            "PATH": f"{self.tools}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "PATH": os.pathsep.join((str(self.tools), str(git_bin), "/usr/bin", "/bin")),
             "DELIVERY_FIXTURE_ROOT": str(self.root),
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
