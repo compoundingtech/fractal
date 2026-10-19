@@ -1301,6 +1301,21 @@ digest. `key_id` is the public-key SHA-256 digest. The owner must explicitly gra
 `write.assistant.answers`, `write.assistant.messages`, or `write.assistant.custom-reply`
 for the corresponding native writes. Read scopes and disclosure consent never imply write authority.
 
+Assistant collection reads materialize only the requested page. Missions seek through the
+native mission keyset and build cards for those IDs; agents slice the published roster or
+use the native shallow-reference pager when no refresher runs. Attention slices a published
+owner-specific list. These cursors bind the projection's metadata/content class, grant,
+policy revision, snapshot and page size. A changed or unavailable publication returns
+`page-cursor-expired`; before the first attention or agent publication, reads requiring it
+return the corresponding view-not-ready error. Summary reads count grouped mission states
+and published attention/agent state inputs, without building collection cards.
+Mission cursors also bind the store claim cut: changed mission inputs or more than 512
+intervening claims expire the sequence with `page-cursor-expired`, because mutable sort
+keys can cross the cursor. Read receipts alone do not invalidate a continuation.
+Mission metadata retains the relevant live run even outside the native recent-run preview.
+Summary agent states include
+delivery-presence downgrades, and rich attention/content preserve update request payloads.
+
 The issuer is sealed from the configured owner at trusted-local begin and preserved through
 gateway completion; remote callers cannot select or replace it. Assistant clients validate
 the issuer's concrete person shape from that gateway response without person grant proofs

@@ -3,8 +3,8 @@
 use super::*;
 use crate::model::MemberSpec;
 use crate::publication::{Interruption, interruption};
-pub use st3_store::store::publication::*;
-pub use st3_store::store::publication::{Check, CommitChecks, Guard, check, launched_member};
+pub use st3_missions::store::publication::*;
+pub use st3_missions::store::publication::{Check, CommitChecks, Guard, check, launched_member};
 
 #[cfg(test)]
 mod tests {

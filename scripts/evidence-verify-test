@@ -182,11 +182,33 @@ class Verifier(unittest.TestCase):
         self.assertEqual(self.reason(self.tree, command=['make', 'test']), 'wrong_command')
 
     def test_a_failed_run_fails_and_the_latest_record_decides(self):
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=0)
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=1)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=-600)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-300)
         self.assertEqual(self.reason(self.tree), 'check_failed')
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=2)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=0)  # clearly later than the failure
         self.assertEqual(self.f.verify(self.tree)[0], 0)
+
+    def test_a_pass_never_hides_a_failure_it_is_not_clearly_later_than(self):
+        # observed_at is the signer's own clock: equal, inverted and within-the-margin dates all leave the failure standing (creation order is irrelevant)
+        failure = -200
+        for pass_at, expect in ((-230, 1), (-200, 1), (-150, 1), (-81, 1), (-80, 1), (-79, 0), (0, 0)):  # exactly the 120 s margin still fails
+            with self.subTest(pass_at=pass_at):
+                f = Fixture()
+                self.addCleanup(f.tmp.cleanup)
+                ci = f.key('ci', 'machine/ci1')
+                commit, tree = f.commit('one')
+                f.note(commit, tree, ci, 'machine/ci1', exit_code=1, seconds=failure)
+                f.note(commit, tree, ci, 'machine/ci1', seconds=pass_at)  # created AFTER the failure, dated as given
+                self.assertEqual(f.verify(tree)[0], expect, pass_at)
+        # a failure dated later than a pass, however it was created, always stands
+        f = Fixture()
+        self.addCleanup(f.tmp.cleanup)
+        ci = f.key('ci', 'machine/ci1')
+        commit, tree = f.commit('one')
+        f.note(commit, tree, ci, 'machine/ci1', exit_code=1, seconds=-10)
+        f.note(commit, tree, ci, 'machine/ci1', seconds=-20)
+        f.note(commit, tree, ci, 'machine/ci1', seconds=-15)
+        self.assertEqual(f.verify(tree)[1]['reason'], 'check_failed')
 
     def test_a_time_without_a_zone_is_not_evidence_and_cannot_crash_the_ordering(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', naive=True)
@@ -254,11 +276,11 @@ class Verifier(unittest.TestCase):
         self.assertEqual(self.reason(self.tree), 'no_record')
 
     def test_the_number_of_trusted_records_is_reported_for_loop_protection(self):
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=0)
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=1)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-300)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-299)
         code, result = self.f.verify(self.tree)
         self.assertEqual((code, result['reason'], result['attempts']), (1, 'check_failed', 2))
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=2)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=0)
         code, result = self.f.verify(self.tree)
         self.assertEqual((code, result['attempts']), (0, 3))
 
@@ -1438,14 +1460,14 @@ class InputKeyed(unittest.TestCase):
 
     def test_a_newer_failure_with_the_same_key_stops_the_skip_by_itself(self):
         key = self.key(self.tree)
-        self.observed(self.commit, self.tree, key)
+        self.observed(self.commit, self.tree, key, seconds=-600)
         _, second = self.commit_files({'docs/readme.txt': 'edited'})
         self.assertEqual(self.check(second)[0], 0)
-        self.observed(self.f.git('rev-parse', 'HEAD'), second, key, exit_code=1, seconds=60)  # same key, run for real, failed
+        self.observed(self.f.git('rev-parse', 'HEAD'), second, key, exit_code=1, seconds=-300)  # same key, run for real, failed
         _, third = self.commit_files({'docs/readme.txt': 'edited again'})
         code, result = self.check(third)
         self.assertEqual((code, result['reason']), (1, 'check_failed'))
-        self.observed(self.f.git('rev-parse', 'HEAD'), third, key, seconds=120)  # a newer pass lifts it
+        self.observed(self.f.git('rev-parse', 'HEAD'), third, key, seconds=0)  # a clearly newer pass lifts it
         _, fourth = self.commit_files({'docs/readme.txt': 'and again'})
         self.assertEqual(self.check(fourth)[0], 0)
 
