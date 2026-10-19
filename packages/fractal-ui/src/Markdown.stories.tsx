@@ -3,11 +3,13 @@ import * as stylex from '@stylexjs/stylex'
 import { flushSync } from 'react-dom'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { Button } from 'react-aria-components'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { EmbraceMarkdownPreview } from './assistant-ui/EmbraceToolPreview'
 import { Markdown, ResourceChip, completeStreamingTail, type InlineResource } from './assistant-ui/composition/Markdown'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 const richText = [
   '# [**Selection** and *ordering*](https://example.com/docs/selection_(stable) "Selection guide")',
@@ -125,7 +127,7 @@ export const StreamingHeadingLight: Story = { ...StreamingHeading, args: { schem
 export const StreamingTableLight: Story = { ...StreamingTable, args: { scheme: 'light' } }
 export const StreamingTightListLight: Story = { ...StreamingTightList, args: { scheme: 'light' } }
 export const StreamingParagraphLight: Story = { ...StreamingParagraph, args: { scheme: 'light' } }
-export const RichText: Story = {
+export const RichText: Story = { tags: ['critical'],
   play: async ({ canvasElement }) => {
     const root = requireElement(canvasElement, '[data-testid="markdown"]')
     const title = requireElement<HTMLAnchorElement>(root, 'h1 a')
@@ -141,7 +143,7 @@ export const RichText: Story = {
     if (canvasElement.querySelector('[data-testid="opened-resource"]')?.textContent !== 'Opened src/model.ts') throw new Error('Resource chip lost its open callback')
   },
 }
-export const Languages: Story = {
+export const Languages: Story = { tags: ['critical'],
   args: { scenario: 'languages' },
   play: async ({ canvasElement }) => {
     const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
@@ -162,7 +164,7 @@ export const Light: Story = { ...RichText, args: { scheme: 'light' } }
 export const AllStates: Story = { args: { scenario: 'all' } }
 export const LanguagesLight: Story = { ...Languages, args: { scenario: 'languages', scheme: 'light' } }
 export const AllStatesLight: Story = { args: { scenario: 'all', scheme: 'light' } }
-export const StreamingControlsPersistence: Story = {
+export const StreamingControlsPersistence: Story = { tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     await document.fonts.ready
@@ -205,7 +207,7 @@ export const StreamingControlsPersistence: Story = {
   },
 }
 export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPersistence, args: { scenario: 'streaming', scheme: 'light' } }
-export const StreamingInlineMarkup: Story = {
+export const StreamingInlineMarkup: Story = { tags: ['critical'],
   args: { scenario: 'inline-streaming' },
   play: async ({ canvasElement }) => {
     const adversarial = '['.repeat(50_000)
@@ -244,7 +246,7 @@ export const StreamingInlineMarkup: Story = {
   },
 }
 
-export const CopyFailure: Story = {
+export const CopyFailure: Story = { tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     const fence = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-code-block"]')
@@ -256,8 +258,12 @@ export const CopyFailure: Story = {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new DOMException('Clipboard permission denied', 'NotAllowedError') } } })
     try {
       flushSync(() => copy.click())
-      await settle()
-      if (fence.dataset.copyState !== 'failed' || !fence.querySelector('[role="status"]')?.textContent?.includes('Check clipboard permissions') || copy.disabled) throw new Error('Copy failure must report the permission problem and leave retry available')
+      // The rejected write settles asynchronously: wait for the copy to leave ready/copying, not a fixed two frames.
+      for (let frame = 0; (fence.dataset.copyState === 'ready' || fence.dataset.copyState === 'copying') && frame < 600; frame++) await settle()
+      const status = fence.querySelector('[role="status"]')?.textContent ?? ''
+      if (fence.dataset.copyState !== 'failed' || !status.includes('Check clipboard permissions') || copy.disabled) {
+        throw new Error(`Copy failure must report the permission problem and leave retry available (state ${fence.dataset.copyState}, status ${JSON.stringify(status)}, disabled ${copy.disabled})`)
+      }
     } finally {
       if (descriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
       else Object.defineProperty(navigator, 'clipboard', descriptor)
@@ -265,10 +271,38 @@ export const CopyFailure: Story = {
   },
 }
 
+/** C27/E04–E12: the input boundary forwards foreground ink, while default seat Prose stays soft. */
+function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' | 'light'; narrow?: boolean }) {
+  const [foreground, setForeground] = React.useState(true)
+  const [revision, rerender] = React.useState(0)
+  return <main data-revision={revision} {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <div {...stylex.props(styles.toolbar)}><Button onPress={() => rerender(value => value + 1)}>Rerender input</Button><Button onPress={() => setForeground(false)}>Show soft control</Button><Button onPress={() => setForeground(true)}>Restore input</Button></div>
+    <section {...stylex.props(styles.lane, narrow && styles.inputNarrow)}><EmbraceMarkdownPreview tone={foreground ? 'foreground' : 'default'} markdown={'The input anchors this turn.\n\n- Review the retained snapshot.\n\n| Fact | Value |\n| --- | --- |\n| Snapshot | Retained |'} /></section>
+  </main>
+}
+export const InputForegroundDark1440: Story = { render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getByRole('button', { name: 'Rerender input' }))
+  await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
+  const expected = args.scheme === 'light' ? 'rgb(39, 39, 42)' : 'rgb(245, 245, 245)'
+  const paints = () => [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown"] p, [data-testid="markdown"] li, [data-testid="markdown"] table')].map(element => getComputedStyle(element).color)
+  await expect(paints()).toEqual([expected, expected, expected])
+  await userEvent.click(canvas.getByRole('button', { name: 'Show soft control' }))
+  await waitFor(() => expect(canvas.getByTestId('markdown')).toHaveAttribute('data-tone', 'default'))
+  await expect(paints().every(color => color !== expected)).toBe(true)
+  await userEvent.click(canvas.getByRole('button', { name: 'Restore input' }))
+  await waitFor(() => expect(canvas.getByTestId('markdown')).toHaveAttribute('data-tone', 'foreground'))
+  await expect(paints()).toEqual([expected, expected, expected])
+} }
+export const InputForegroundLight1440: Story = { ...InputForegroundDark1440, args: { scheme: 'light' } }
+export const InputForegroundDark440: Story = { ...InputForegroundDark1440, render: args => <InputInkCanvas scheme={args.scheme} narrow /> }
+export const InputForegroundLight440: Story = { ...InputForegroundDark440, args: { scheme: 'light' } }
+
 const styles = stylex.create({
   canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   lane: { width: '100%', maxWidth: g.lane, minWidth: 0, marginInline: 'auto' },
+  inputNarrow: { maxWidth: g.polishNarrow },
   toolbar: { display: 'flex', alignItems: 'center', gap: s.md, marginBlockEnd: s.lg },
-  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary }, ':disabled': { color: ink.fgMuted, cursor: 'default' } },
+  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing }, ':disabled': { color: ink.fgMuted, cursor: 'default' } },
   heading: { marginBlock: s.lg, fontSize: t.headingSize, lineHeight: t.headingLeading },
 })

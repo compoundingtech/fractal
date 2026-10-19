@@ -2,6 +2,8 @@
 //! reconciler's runtime.running claim. No model or credentials are used in this proof.
 #![cfg(target_os = "linux")]
 
+use st3::MissionsStore;
+use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -201,6 +203,7 @@ async fn delivery_recovery_control(
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
@@ -427,10 +430,24 @@ async fn delivery_recovery_control(
         {
             break agent;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "native control did not become ready: {agent}"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            // CI keeps only this message, not the evidence root: say where the driver stopped.
+            let reports = store.claims_for(SUBJECT, Some("harness.observed")).unwrap().iter()
+                .map(|claim| format!("{} {}", claim.accepted_at_unix_ms,
+                    claim.body.get("fields").unwrap_or(&claim.body)["state"]))
+                .collect::<Vec<_>>();
+            let screen = std::process::Command::new(on_path("pty").unwrap())
+                .env("PTY_ROOT", root.join("pty"))
+                .args(["peek", "--plain", "--full", RUNTIME])
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_else(|error| format!("pty peek failed: {error}"));
+            let lease = rusqlite::Connection::open(root.join("claims.sqlite3")).and_then(|connection| {
+                connection.query_row("SELECT sequence FROM local_mailbox_leases WHERE subject=?1 AND component='delivery'",
+                    [SUBJECT], |row| row.get::<_, u64>(0))
+            }).ok();
+            panic!("native control did not become ready: {agent}\nlease sequence: {lease:?}\nharness reports: {reports:?}\ndriver screen:\n{screen}");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
     let lease = lease_evidence(root);
@@ -854,6 +871,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,

@@ -2,6 +2,7 @@
 //! A real, isolated daemon pauses inside canonical replay. Observation must work while SQLite
 //! holds its write transaction, then advance to serving only after both listeners bind.
 
+use st3::MissionsStore;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -220,9 +221,19 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     assert_eq!(readiness.total, Some(0));
     let early_log = std::fs::read_to_string(&log_path).unwrap();
     assert!(early_log.contains("st: projection full replay phase=startup/project-replication-backlog reason=missing-health"), "fallback must be logged before the replay finishes: {early_log}");
-    // Old clients receive an immediate kernel connection refusal, never an accepted but stalled
-    // request. Their existing outage retry policy remains available to long-lived drivers.
-    assert!(std::os::unix::net::UnixStream::connect(&socket).is_err());
+    assert!(!early_log.contains("st3: startup phases "), "{early_log}");
+    // Both addresses exist early, but neither is listening or queueing a request
+    // while projection is uncommitted. Keep the main refusal/phase contract.
+    for path in [
+        &socket,
+        &root.join("run/client.sock"),
+        &root.join("state/run/st3.sock"),
+    ] {
+        use std::os::unix::fs::FileTypeExt as _;
+        assert!(std::fs::metadata(path).unwrap().file_type().is_socket());
+        let error = std::os::unix::net::UnixStream::connect(path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
     let started = Instant::now();
     let doctor = command(root).args(["doctor", "--json"]).output().unwrap();
     assert!(started.elapsed() < Duration::from_secs(5));
@@ -257,7 +268,14 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
         let directory = root.join("status-bin");
         std::fs::create_dir_all(&directory).unwrap();
         let systemctl = directory.join("systemctl");
-        std::fs::write(&systemctl, "#!/bin/sh\nprintf '%s\\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'\n").unwrap();
+        std::fs::write(&systemctl, r#"#!/bin/sh
+if [ "$2" != show ]; then exit 9; fi
+if [ "$3" = st3.service ]; then
+    printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
+else
+    printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
+fi
+"#).unwrap();
         std::fs::set_permissions(systemctl, std::fs::Permissions::from_mode(0o700)).unwrap();
         let service = command(root)
             .env(
@@ -274,6 +292,8 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
         );
         let service: Value = serde_json::from_slice(&service.stdout).unwrap();
         assert_eq!(service["services"][0]["running"], true);
+        assert_eq!(service["services"][0]["name"], "st3.service");
+        assert_eq!(service["services"][1]["installed"], false);
         assert!(
             service["services"][0]["state"]
                 .as_str()
@@ -310,6 +330,32 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report["startup"]["status"], "serving");
     let log = std::fs::read_to_string(&log_path).unwrap();
+    let timing_lines = log
+        .lines()
+        .filter_map(|line| line.strip_prefix("st3: startup phases "))
+        .collect::<Vec<_>>();
+    assert_eq!(timing_lines.len(), 1, "{log}");
+    let timings: Value = serde_json::from_str(timing_lines[0]).unwrap();
+    let keys = [
+        "configuration_ms", "install_hooks_ms", "open_store_ms", "judge_claims_ms",
+        "validate_replication_backlog_ms", "apply_replication_repairs_ms",
+        "settlement_projection_ms", "runtime_prelude_ms", "login_environment_ms",
+        "isolation_pty_ms", "recorder_ms", "app_state_ms", "reconciler_ms",
+        "background_tasks_ms", "bind_ms", "total_ms",
+    ];
+    assert_eq!(timings.as_object().unwrap().len(), keys.len());
+    let total_ms = timings["total_ms"].as_f64().unwrap();
+    let mut phase_sum_ms = 0.0;
+    for key in keys {
+        let milliseconds = timings[key].as_f64().unwrap();
+        assert!(milliseconds.is_finite() && milliseconds >= 0.0, "{key}: {timings}");
+        assert!(milliseconds <= total_ms, "{key}: {timings}");
+        if key != "total_ms" {
+            phase_sum_ms += milliseconds;
+        }
+    }
+    assert!((phase_sum_ms - total_ms).abs() < 0.001, "{timings}");
+    eprintln!("st3: startup phases {}", timing_lines[0]);
     let fallbacks = log
         .lines()
         .filter(|line| line.starts_with("st: projection full replay"))

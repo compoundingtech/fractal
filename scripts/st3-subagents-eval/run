@@ -21,12 +21,17 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+sys.dont_write_bytecode = True
+from st_boundary import isolated_path
 KILLED = "agent/eval/killed"
 RESTARTED = "agent/eval/restarted"
 STOPPED = "agent/eval/stopped"
@@ -76,9 +81,12 @@ class Node:
         stub = root / "bin/claude"
         stub.write_text(f'#!/bin/sh\nexec "{python}" "{root / "bin/claude.py"}" "$@"\n')
         stub.chmod(0o755)
-        self.path = f"{root / 'bin'}:/usr/bin:/bin"
+        self.path = isolated_path(root / "bin")
+        shell = shutil.which("bash", path=self.path)
+        if not shell:
+            raise SystemExit("bash must be on the isolated PATH")
         self.endpoint = root / "run/st.sock"
-        self.env = {"PATH": self.path, "HOME": str(root / "home"), "SHELL": "/bin/bash",
+        self.env = {"PATH": self.path, "HOME": str(root / "home"), "SHELL": shell,
                     "USER": os.environ.get("USER", "eval"), "LOGNAME": os.environ.get("USER", "eval"),
                     "LANG": "C.UTF-8", "XDG_STATE_HOME": str(root / "home/.local/state"),
                     "XDG_CONFIG_HOME": str(root / "home/.config"),
@@ -86,7 +94,7 @@ class Node:
                     "XDG_RUNTIME_DIR": str(root / "run"), "ST3_ENDPOINT": str(self.endpoint),
                     "ST3_DAEMON_WAIT": "0"}
         # The daemon rebuilds PATH from a login shell; pin it to the isolated one.
-        profile = f"export PATH='{self.path}'\n"
+        profile = f"export PATH={shlex.quote(self.path)}\n"
         for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshenv"):
             (root / "home" / name).write_text(profile)
         (root / "config.toml").write_text(f'''node = "subagents"
@@ -105,6 +113,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
                                        stdout=self.log, stderr=self.log, start_new_session=True)
         until(lambda: self.api("/v1/health"), 60, "the isolated daemon did not answer",
               lambda: self.daemon.poll() is None or fail("daemon exited: " + self.tail()))
+        self.roster_after(0)  # Socket/health readiness alone does not publish the initial roster.
 
     def stop_daemon(self):
         """Stop only the daemon; the seats run on in their PTYs."""
@@ -137,6 +146,17 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         except ValueError:
             return None
         return payload.get("value", payload) if isinstance(payload, dict) else payload
+
+    def roster_after(self, cut):
+        # One named same-daemon barrier, using the real write receipt when available.
+        result = subprocess.run(["curl", "-sf", "--max-time", "10", "--unix-socket", str(self.endpoint),
+                                 f"http://localhost/v1/client/agents?min_cut={cut}"],
+                                capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f"roster cut {cut} failed: {result.stderr.strip()}")
+        payload = json.loads(result.stdout)
+        if payload.get("snapshot", {}).get("store_index", -1) < cut:
+            raise RuntimeError(f"daemon did not serve the requested roster cut {cut}")
 
     def seat_processes(self, subject):
         """Every process this daemon launched for one seat, by its exact private endpoint."""
@@ -316,9 +336,11 @@ def old_settings_capture(node, seat, checks):
     expect(not seat.claims(), "missing hooks nevertheless published a child")
     expect(not (ledger_path.parent / ".harness-subagents-published").exists(),
            "an empty publisher unexpectedly wrote its open/closed map")
-    parent = node.api("/v1/client/agents/" + seat.subject) or {}
-    expect(parent.get("harness_state") == "idle" and not parent.get("subagents"),
-           f"old-settings parent projection: {parent}")
+    # ready() waits for the stand-in, not for the driver's report: wait for the turn's end.
+    parent = until(lambda: (card if (card := node.api("/v1/client/agents/" + seat.subject))
+                            and card.get("harness_state") == "idle" else None),
+                   30, "the old-settings parent never became idle")
+    expect(not parent.get("subagents"), f"old-settings parent projection: {parent}")
     seat.control("finish", id="legacy-child", responses=[{"output": 1}])
     seat.applied()
     time.sleep(2)
@@ -705,6 +727,8 @@ mission "eval/subagents" state="ready" {{
         run_id = "eval/subagents/c1"
         started = json.loads(node.cli("missions", "start", "eval/subagents", "--id", run_id,
                                       "--workspace", str(root / "ws-worker"), "--as", "person/eval", "--json"))
+        # Starting the run admits its parent seat; all subsequent tree assertions need it.
+        node.roster_after(started["publication"]["store_index"])
         run_subject = started.get("subject") or f"mission-run/{run_id}"
         worker_subject = f"agent/{run_id}/worker"
         worker = Seat(node, worker_subject, root / "ws-worker")

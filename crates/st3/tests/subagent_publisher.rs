@@ -2,6 +2,7 @@
 //! their description and session, ends with tokens, and a Codex subagent's tokens in its parent's
 //! usage. An omp seat's channel writes the ledger from the frames its extension sends. These run
 //! against the real API on a private socket; the seat-level proof is `subagents_seat`.
+use st3::SeatsStoreCore;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,7 @@ async fn serve(
 ) {
     let store = Arc::new(Store::open(&root.join("graph.db"), "publisher-test").unwrap());
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,

@@ -1,5 +1,6 @@
 //! Start, checkpoint, transfer, acknowledge and close through an isolated durable daemon.
 #![cfg(unix)]
+use st3::SeatsStoreCore;
 use serde_json::{Value, json};
 use st3::{api::AppState, model::ClaimInput, store::Store};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,7 @@ impl Daemon {
     }
     async fn start(&mut self) {
         let state = AppState {
+            owning_person: None,
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,

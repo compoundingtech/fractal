@@ -3,6 +3,8 @@
 //! --idempotency-key` says whether an unconfirmed send landed.
 #![cfg(unix)]
 
+use st3::RetirementsStore;
+use st3::SeatsStoreCore;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
@@ -23,6 +25,7 @@ const LEAD: &str = "agent/example/lead";
 async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        owning_person: None,
         store: Arc::new(Store::open_memory("message-send-once").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -318,12 +321,32 @@ async fn a_send_whose_answer_was_lost_is_found_and_never_sent_twice() {
     let front = root.path().join("front.sock");
     let losses = Arc::new(Losses::default());
     let proxy = lossy_proxy(front.clone(), back, losses.clone()).await;
+    let intent = st3::parse_intent(
+        "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/tmp\"; }\n",
+        "message-send-once",
+    )
+    .unwrap();
+    store
+        .apply_internal(&intent, "lost-reply-declaration")
+        .unwrap();
     // The daemon applies the send and its in-process retry, and neither answer arrives.
     losses.sends.store(2, Ordering::SeqCst);
 
     let lost = st(&front, &[], SEND).await;
     assert!(!lost.status.success());
     assert_eq!(message_count(&store), 1);
+    let token = store.selected_desired_token(WORKER).unwrap().unwrap();
+    store
+        .retire_agent(
+            WORKER,
+            PERSON,
+            "Work finished",
+            &token,
+            None,
+            "lost-reply-retirement",
+            &[],
+        )
+        .unwrap();
     let rerun = st(&front, &[], SEND).await;
     assert_eq!(
         message_count(&store),

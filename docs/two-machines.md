@@ -2,7 +2,7 @@
 
 Each daemon keeps a local replica of the graph and catches up when it reconnects. This connects **your own machines**; each person currently runs their own fleet.
 
-Finish [getting started](getting-started.md) on the first machine. Install Smalltalk, set `person = "person/ada"`, and start its user service on the second machine too. Harnesses and their logins are needed only on machines that will run seats.
+Finish [getting started](getting-started.md) on the first machine. Install Fractal, set `person = "person/ada"`, and start its user service on the second machine too. Harnesses and their logins are needed only on machines that will run seats.
 
 The examples call the first machine **studio** and the second **beacon**. Choose one route below. Create your first fleet on studio only once; if it already belongs to your fleet, skip `create` and use the endpoints shown by `st fleet status --json`. Creating a fleet preserves your existing graph. To try the worker and mission examples below, first follow [missions in practice](missions-in-practice.md#declare-a-worker-seat) on studio.
 
@@ -60,7 +60,7 @@ st replication status
 
 Beacon listens on its own loopback port and exposes it through Fabric. The invitation sets the sponsor's peer address; the replication worker creates and reacquires the local Fabric tunnel. No manual `fabric dial` or `[[peers]]` entry is needed. Add `--dial-out` to accept no inbound connections on beacon.
 
-With their user services installed, Tailscale, Fabric, and the Smalltalk replication worker restart after reboot and reconnect after network interruptions. A terminal does not need to stay open.
+With their user services installed, Tailscale, Fabric, and the Fractal replication worker restart after reboot and reconnect after network interruptions. A terminal does not need to stay open.
 
 ## SSH as a last resort
 
@@ -86,6 +86,12 @@ st replication status
 st replication status --json
 st doctor
 ```
+
+Ordinary `st agents ls` and `st agents tree` read the latest published roster without
+requesting a refresh. Immediately after starting or changing an agent they can show the
+earlier roster; after daemon startup the roster may still be being prepared. When you need
+to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
+client read and check the served snapshot index. This is not a replicated or cross-host cut.
 
 The worker and missions declared on studio should appear on both machines. `replication status` reports the last successful exchange, backlog, authority digest, graph digest, and table digests. After both members have caught up and writes settle, matching authority digests mean they hold the same replicated history. With matching builds and no waiting claims, matching graph and table digests also confirm the same shared projections. During an upgrade, a reader may hold claims that need a newer build; update it before comparing projections.
 

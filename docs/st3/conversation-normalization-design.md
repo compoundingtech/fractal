@@ -29,6 +29,18 @@ rather than only a placeholder. The optional open-string `visibility` field is a
 UI hint (`visible` by default, `internal`, or `hidden-by-harness`), never a read-scope
 restriction. Unknown role means unknown attribution, not omission.
 
+Fractal Web ignores source records when classifying content visibility. If every
+presentation block is internal/hidden-by-harness, it retains an inspectable event,
+hidden by default, named after the primary block's typed view when available.
+Mixed visible/internal bodies instead keep a quiet, visible-by-default
+“Message with internal records · Show” disclosure; raw body data appears only on
+expansion. Native text blocks may only reference `body.text` via `body_ref`, so
+mixed bodies cannot safely reconstruct visible prose until blocks carry per-block
+text or body ranges. Unspecified visibility retains its existing visible behavior.
+This is defensive schema coverage: at producer revision `25d9c8000`, OMP
+`push_omp_content` emits ordinary text parts as separate entries, and no producer
+of mixed visible/internal presentation blocks has been demonstrated.
+
 Malformed JSON, unfinished tail lines, blank lines and unknown encodings become
 `raw_text` blocks. Their payload has `encoding: "base64"`, `bytes` containing the
 exact original bytes (including newline and controls), and a lossy `text` preview.
@@ -40,14 +52,14 @@ A torn prefix can produce both a raw block and a recovered typed record.
 ### Native record visibility audit
 
 The sole omission table is `omission_reason` in
-`crates/st3/src/external_sessions.rs`: one named match arm per permitted type with
+`crates/st3-store/src/external_sessions.rs`: one named match arm per permitted type with
 an explicit reason. It omits only the four categories below. Nothing else may be
 dropped by a parser branch: an otherwise empty projection falls back to raw JSON.
 The coverage test uses harness-specific native record fixtures, the redacted OMP
 resume/tool captures (also exercising Pi’s shared format), and message/part objects
 from the OpenCode 1.18.34 admission capture. It fails if an empty result has no
 table justification; separate probes cover unknown types, malformed bytes and
-direct owner reads. Fixture provenance is in `crates/st3/fixtures/native-records/SOURCES.md`. When visibility is unproven, retain it.
+direct owner reads. Fixture provenance is in `crates/st3-daemon/fixtures/native-records/SOURCES.md`. When visibility is unproven, retain it.
 
 | Harness records | Decision and reason |
 | --- | --- |
@@ -58,7 +70,7 @@ direct owner reads. Fixture provenance is in `crates/st3/fixtures/native-records
 | Claude attachments other than queued commands and system records without text | Retain raw; queued prompts and textual notices keep their known display shape. |
 | Pi/OMP `session` | Omit the native session setup header. |
 | OMP `reset_boundary`, `credential_pin`, `title` | Retain raw plus typed status views; reset/title are quiet events, credential pins are internal bookkeeping hidden by default. |
-| Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. |
+| Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. (The administrative `model_usage`/`title_change`/`session_init`/`ttsr_injection` records are not in this row: they are retained, and `display: false` marks them `hidden-by-harness`.) |
 | Pi/OMP `custom`, `label`, `session_info`, model/thinking changes and summary records without text | Retain raw; summaries with text remain readable native notes. |
 | OpenCode `snapshot` | Retain raw; visibility is not established across releases. |
 | Claude documents | Retain the complete document payload, with a readable document fallback. |
@@ -72,7 +84,7 @@ OpenCode items whose native rows fit the input bound receive bounded display stu
 and full owner continuations. Rows exceeding that bound produce explicit
 not-fetchable notices, rather than disappearing or acquiring unusable refs.
 
-The normalizer in `crates/st3/src/external_sessions.rs` retains exposed reasoning and
+The normalizer in `crates/st3-store/src/external_sessions.rs` retains exposed reasoning and
 image references. A 512-character unknown excerpt is a UI preference only. Native
 transcript formats remain authoritative.
 
@@ -101,7 +113,12 @@ subtree uses a continuation to `/body/blocks/{index}/view` or `/metadata`; if an
 remainder already needs that block's continuation, it instead points to the whole
 original `/body` so owner fetch recovers every exact subtree. Clients inspect the
 returned JSON accordingly. The final entry-size guard still runs after all display
-bounding and can replace an over-budget entry with a fetchable error notice.
+bounding and can replace an over-budget entry with a fetchable error notice. `omp_event`
+view fields are bounded before the view is built so it stays parseable: kind and attribution
+have 256-byte windows, content and details 8 KiB windows, each plus a visible marker. The
+complete raw record remains available through the block's owner continuation. Page windows target 768 KiB
+but retain one complete larger entry up to the hard response ceiling (1 MiB minus 128,000
+reserved bytes); paging refuses an entry beyond that hard ceiling rather than skipping it.
 
 On `tool_call` blocks, parsed from the native arguments (OMP field `i` becomes
 `intent`; every tool_call view also has `tool`, the native tool name):
@@ -150,7 +167,7 @@ subagent card links to the child transcript as its own conversation.
 duration_ms?, output_bytes?}`.
 
 Extension and bookkeeping records become blocks as follows; anything not listed keeps
-its block shape (other `custom_message` records with display != false stay `text`):
+its block shape:
 
 | OMP record | block kind | view |
 | --- | --- | --- |
@@ -161,6 +178,8 @@ its block shape (other `custom_message` records with display != false stay `text
 | `compaction` / `branch_summary` | `status` | `{type:"compaction", method?, tokens_before?, tokens_after?, short_summary?, summary?}`; first lines collapsed, full summary on expansion |
 | `model_change` | `status` | `{type:"model_change", model, role?, fallback?: bool}` |
 | `thinking_level_change` | `status` | `{type:"thinking_level", level, configured?}` |
+| other visible custom_message | unchanged (`text`) | `{type:"omp_event", kind, attribution?, content?, details?}`: `kind` is the native customType, the rest are the native values present on the record (attribution is never inferred); content and details are bounded separately to 8 KiB (marked text when over) and the full record stays in the raw payload |
+| `model_usage` / `session_init` / `ttsr_injection` | `status` | `{type:"omp_event", kind: <record type>, attribution?, details: <record>}`; explicit `display: false` is retained with visibility `hidden-by-harness` |
 | `title_change` / `title` | `status` | `{type:"title", title, previous?, source?}` (`previous` only on title changes) |
 | `reset_boundary` | `status` | `{type:"reset_boundary"}`; quiet event `session reset` |
 | `credential_pin` | `status`, visibility `internal` | `{type:"credential_pin", provider}`; hidden by default; hash remains only in raw payload/source record |
@@ -374,3 +393,19 @@ one existing collections socket. The first `replace:true` frame contains the new
 entries, subject to the existing 1 MiB frame limit, with `has_more` when older content exists.
 Older content remains available through the existing 200-entry timeline pages and owner
 content chunks. Subsequent `replace:false` frames carry new or revised entries by ID.
+
+Native assistant stop outcomes use the shared `assistant_error` block and harness
+presentation rules: superseded attempts, silent aborts and user interrupts render
+nothing; recovered attempts show a compact note and terminal failures render in full.
+The view retains the exact native `stopReason`, `errorMessage`, `retryRecovery`,
+`errorStatus` and `errorId` under `native`, alongside the presentation projection.
+Native source records remain available through owner reads.
+
+Session exits preserve the complete checkpoint, including `pendingToolCalls`,
+arguments/intent and unknown fields. Only transport size and paging limits apply,
+with visible truncation markers and owner continuations for exact full values.
+Outcomes are read from the owner machine, not stored in the database.
+Recognized exits use the existing `cancelled` status value — the process stopped
+before the turn finished; the recorded kind, reason and exit code stay in `detail` —
+so a planned stop is neither a completed turn nor an error, with no new
+client-visible vocabulary. Fatal and unknown exits remain diagnostic errors.

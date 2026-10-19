@@ -1,4 +1,4 @@
-# Developing Smalltalk
+# Developing Fractal
 
 ## Contributing
 
@@ -9,6 +9,69 @@ Use invented people, host names, and paths in this public repository. Run
 For st3 claims, missions, replication, runtime ownership, or recovery, start with the
 [documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
 read and preserve the proofs in [st2 invariants](st2/invariants.md).
+
+## CLI actor contract
+
+`st actor-contract --json` prints the actor syntax of the binary that runs it. It
+does not read config or call a daemon. The versioned `contract` has one entry for
+each callable clap command path, including hidden commands and optional parent
+commands. `aliases` lists other names under each canonical command. `contract_sha256` is
+the SHA-256 of compact JSON for `contract`, not of the formatted output. The
+printer computes this digest; the checked-in snapshot omits it and the equality
+test compares the contract body. The printed `actor_semantics` reminder comes
+first: actor: none means no --as syntax.
+
+Version policy:
+
+kind st3.actor-contract.v1 and version 1 stay for: new commands, new aliases, new optional fields on an entry, and new values of an existing enum (actor, and any later enum). Readers MUST ignore unknown fields and MUST treat an unknown enum value as unknown, never as one of the values they know; they must not infer --as syntax, person support or authority from an unknown value. kind and version bump together for: a removed or renamed field, a changed field type, a removed enum value, or a changed meaning of an existing field or value. contract_sha256 changes with ANY content change (a command moving class included) and identifies one binary build; it is not a version. The contract describes argv syntax and is never an authorization input.
+
+No actor-contract reader exists in this repository yet; the unknown-enum rule
+is a requirement on future readers. Existing tests parse JSON only to check the
+producer's output and snapshot, not to interpret unknown actor values.
+
+`actor` means whether argv accepts `--as`: `none`, `optional`, or `required`.
+`actor_environment` names an environment default, if one exists. `accepts_person`
+means the real argument value parser accepts `person/NAME`; it does not grant
+person authority. An optional flag can still need an actor from config or the
+environment at run time. A command with no flag can still use a configured
+identity. `can_carry_person` records whether a command can carry a person actor,
+including configured-person fallbacks and the separate `note --actor` option.
+This does not mean an agent may use that person: identity guards and daemon
+authorization still apply. `as_role` distinguishes an actor from the document
+name in `documents put --as` and the ignored compatibility flags on reads.
+`ignores_actor` identifies those ignored flags. Do not use this contract as an
+authorization decision.
+
+Add `--effective` to include only the selected `instance`, `config_path` and
+`state_dir` metadata; no config values are printed. Instance activation and the
+existing config loader determine the state directory. **`config_path` always
+reports `Config::default_path()` for the selected instance, not the actual path
+of a custom config file.** Do not use it as evidence of which file was loaded.
+These fields are outside the hashed contract and can differ between calls.
+Without `--effective`, static mode reads no config (even an invalid config is
+irrelevant) and does not contact a daemon.
+
+After a deliberate CLI change, review the changed actor entries and regenerate
+the checked-in contract:
+
+```sh
+st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+cargo nextest run -p st3 -E 'test(actor_contract)'
+```
+
+Use the binary built from the changed source. Resolve any rebase conflict in
+`docs/st3/actor-contract.json` by running that regeneration command, never by
+hand-merging the JSON. The snapshot test fails if a
+command is added or removed, if its actor parser changes the published fields, or
+if an alias changes. Supplement coverage also compares the reviewed setup/UI,
+note and changes paths, including every descendant, against the real clap
+inventory. Additions or removals require reviewing the identity handlers named
+beside `implicit_person`; mutation tests exercise added setup/UI descendants and
+a removed UI descendant. `st ui open` resolves the configured person before
+queueing a request in that person's terminal UI request directory.
+This is freshness coverage, not proof of live runtime fallback or authority.
+Host, account, repository and harness policy remains in the
+operator layer. Person-authority enforcement is a separate daemon change.
 
 ## Build from source
 
@@ -40,7 +103,7 @@ Client terminal screens use `pty-terminal` and the same pinned `libghostty-vt` a
 the PTY runtime. Styled runs carry terminal-cell widths (including wide characters), soft-wrap
 continuations, strikethrough and admitted OSC 8 links; keyboard modes include kitty flags.
 The Nix package and developer shell link the shared static library through pkg-config, so
-building Smalltalk does not require Zig or a Ghostty source checkout.
+building Fractal does not require Zig or a Ghostty source checkout.
 The runtime, screen projector and the terminal UI pin their PTY protocol crates to the same
 producer revision, keeping one shared protocol source in the workspace.
 
@@ -99,7 +162,8 @@ python3 scripts/ci-fractal-web-licenses --check-lockfile
 nix develop .#web -c python3 scripts/ci-fractal-web-licenses --check
 ```
 
-`genie-freshness` runs the lock-only guard and the companion
+`genie-freshness` (`scripts/ci-genie-freshness`, also built as `nix build .#checks.<system>.genie-freshness`
+in the Nix sandbox) runs the lock-only guard and the companion
 `python3 scripts/ci-fractal-web-licenses-test`. The fractal-web execution lane runs the
 full guard immediately after its frozen install. The generator/full guard restore the
 inventory's read-only permissions (Git does not preserve them).
@@ -122,6 +186,11 @@ Namespace as overflow for ordinary PRs. The second test shard and supporting job
 `ci1-priority` lane; other merge groups use `ci1-merge`. Forks run on Namespace.
 macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
+
+The standalone Rust client's generated `crates/st3-client/src/lib.rs` must be
+regenerated with `cargo run -p st3-client-codegen`, including after changes to
+directory discovery. Commit the generator's exact output rather than hand-formatting
+it; `cargo run -p st3-client-codegen -- --check` checks freshness.
 
 ## Shared UI models
 
@@ -166,9 +235,15 @@ Ratatui builds, and [build your own client](clients/build-your-own.md) for the c
 
 ## Fractal web changelog
 
-Author a short user-facing entry in `apps/fractal-web/.changelog/YYYY-MM-DD-slug.ts`
-and register it in that directory's `mod.ts`. Export `{ title, summary, kind?, publicPrUrl? }`
-as the default value. Summaries contain one to three complete sentences; kinds are
+Author a short user-facing entry in `apps/fractal-web/.changelog/YYYY-MM-DD-slug.ts`.
+That one new file is the whole change: never edit `mod.ts`, which derives the registry from
+the directory through `registry.generated.ts`. Git ignores that generated file (a committed
+sorted list conflicts whenever two branches add an entry), and every build, typecheck, test and
+dev-server start regenerates it; `pnpm --filter fractal-web changelog:registry` does so by hand
+and `changelog:registry:check` fails when it is missing or stale. Export `{ title, summary, kind?,
+publicPrUrl? }` as the default value. An entry is public unless it also exports
+`visibility = 'private'`, which a public build rejects.
+Summaries contain one to three complete sentences; kinds are
 `feature`, `improvement`, or `fix`. The immutable filename supplies the entry ID and date.
 Only link to a confirmed public GitHub pull request. Do not put private names, hosts,
 paths, seats, or links in public entries.

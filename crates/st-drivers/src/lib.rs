@@ -17,6 +17,17 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+/// A temporary directory whose path is already canonical. macOS puts temporary directories
+/// below the `/var` and `/tmp` symlinks, and its file watcher reports the physical path, so a
+/// test that compares paths needs the spelling the code under test sees.
+#[cfg(test)]
+pub(crate) fn canonical_tempdir() -> tempfile::TempDir {
+    let parent = std::fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory");
+    tempfile::Builder::new()
+        .tempdir_in(parent)
+        .expect("temporary directory")
+}
+
 pub mod account;
 pub mod access;
 pub mod catalog;
@@ -24,9 +35,11 @@ pub mod catalog_archive;
 pub mod catalog_lock;
 pub mod catalog_transaction;
 pub mod claude_channel;
+pub mod claude_denials;
 pub mod claude_mcp;
 pub mod claude_prompts;
 pub mod claude_session;
+mod claude_usage;
 pub mod codex_app_server;
 pub mod context;
 pub mod contracts;

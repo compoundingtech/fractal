@@ -1,5 +1,6 @@
 import type {
   Agent,
+  Arrangement,
   Attention,
   Capabilities,
   ErrorEnvelope,
@@ -42,8 +43,12 @@ export interface RosterState {
   readonly agents: Agent[]
   readonly runtimes: Runtime[]
   readonly machines: Machine[]
+  /** Synthetic sidebar inventory; omitted inventories are empty. */
+  readonly arrangements?: Arrangement[]
   /** Agent display order. */
   readonly order: Id[]
+  /** Captured historical resource versions; transport selects these by index, not response copies. */
+  readonly recorded_history?: readonly ChangesEvent[]
 }
 
 export interface DetailsState {
@@ -82,6 +87,8 @@ export interface ConversationThread {
 
 export interface ConversationState {
   readonly threads: ConversationThread[]
+  /** Captured prebaseline windows and older-page entries, separate from the future timeline. */
+  readonly recorded_history?: readonly Extract<ConversationEvent, { readonly _tag: 'replace' }>[]
 }
 
 export interface TerminalRecord {
@@ -98,6 +105,8 @@ export interface TerminalRecord {
 
 export interface TerminalState {
   readonly terminals: TerminalRecord[]
+  /** Captured HTTP screen projections, including the read preceding a first subscription. */
+  readonly recorded_history?: readonly { readonly at_ms: number; readonly screen: TerminalScreen }[]
 }
 
 /**
@@ -120,8 +129,8 @@ export interface SyncExpectation {
 }
 
 export interface SyncState {
-  /** The `GET capabilities` envelope's value. */
-  readonly capabilities: Capabilities
+  /** The observed `GET capabilities` value; absent when a recording never probed it. */
+  readonly capabilities?: Capabilities
   /** A local condition the consumer test must create; replay cannot. */
   readonly local?: { readonly _tag: 'visible-follows'; readonly count: number } | { readonly _tag: 'hidden-follow'; readonly hidden: string; readonly visible: string[] }
   readonly expected: SyncExpectation[]
@@ -138,7 +147,7 @@ export interface SliceStates {
 
 /** Names one subscription by collection and filter. */
 export type Selector =
-  | { readonly collection: 'agents' | 'missions' | 'work' | 'attention' }
+  | { readonly collection: 'agents' | 'missions' | 'work' | 'attention' | 'terminals' }
   | { readonly collection: 'conversation'; readonly conversation: Id }
   | { readonly collection: 'terminal'; readonly terminal: Id }
 
@@ -146,7 +155,7 @@ export type HttpRoute = 'capabilities' | 'resources' | 'events' | 'timeline' | '
 
 interface At {
   readonly at_ms: number
-  /** Store version after this event. */
+  /** Store version after this event. Recorded versions are shared daemon ordinals and are never reassigned. */
   readonly store: number
 }
 

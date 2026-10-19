@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Session } from '@smalltalk/st3-client'
-import { ANCHOR_MS, agent, buildWorld, foldSlice, genericVariants, loadWorld, terminalRecord, terminalRun, wireValues, type RawResource, type Slice, type SyncEvent, type TerminalRecord, type WorldDefinition } from '../src/index.ts'
+import { ANCHOR_MS, agent, buildWorld, foldSlice, genericVariants, terminalRecord, terminalRun, wireValues, type RawResource, type Slice, type SyncEvent, type TerminalRecord, type WorldDefinition } from '../src/index.ts'
 import { drawCast } from '../src/kit/cast.ts'
 import { rngFromSeed } from '../src/kit/rng.ts'
 import { entry, thread } from '../src/kit/factories/turn.ts'
@@ -10,9 +10,10 @@ import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
 import { decodeSlice } from '../scripts/decode.ts'
 import { sliceFile, sliceTimes } from '../scripts/emit.ts'
 
+import { syntheticFleetMidRefactor } from '../src/worlds/fleetMidRefactor.ts'
 const replays: Replay[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
-const base = () => loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
+const base = () => buildWorld(syntheticFleetMidRefactor, genericVariants, ANCHOR_MS)
 const setup = (timeline: SyncEvent[] = []) => {
   const original = base()
   const world = original.with({ sync: { ...original.slices.sync, timeline } })
@@ -78,7 +79,7 @@ describe('foundation contracts', () => {
     replays.push(replay)
     const timelineUrl = `http://scenario.invalid/v1/client/sessions/${encodeURIComponent(conversation.session_id)}/timeline`
     const runtimeUrl = `http://scenario.invalid/v1/client/runtimes/${encodeURIComponent(terminal.runtime.id)}`
-    expect((await replay.fetch(timelineUrl)).status).toBe(404)
+    expect((await replay.fetch(timelineUrl)).status).toBe(200)
     expect((await replay.fetch(runtimeUrl)).status).toBe(404)
     clock.advance(1_000)
     expect((await replay.fetch(timelineUrl)).status).toBe(200)
@@ -222,7 +223,9 @@ describe('foundation contracts', () => {
 
   it('keeps attach and subscribe working when only the advertised capability is omitted', async () => {
     const original = base()
-    const world = original.with({ sync: { ...original.slices.sync, state: { ...original.slices.sync.state, capabilities: { ...original.slices.sync.state.capabilities, capabilities: original.slices.sync.state.capabilities.capabilities.filter((entry) => entry.id !== 'terminal.attach') } } } })
+    const capabilities = original.slices.sync.state.capabilities
+    if (capabilities === undefined) throw new Error('Synthetic base must advertise capabilities')
+    const world = original.with({ sync: { ...original.slices.sync, state: { ...original.slices.sync.state, capabilities: { ...capabilities, capabilities: capabilities.capabilities.filter((entry) => entry.id !== 'terminal.attach') } } } })
     const clock = manualClock(world.now)
     const replay = createReplay(world, { clock })
     replays.push(replay)

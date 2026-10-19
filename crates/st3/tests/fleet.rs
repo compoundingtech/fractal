@@ -4,6 +4,7 @@
 //! `st3` CLI. Nothing here touches the real fleet's state, services, ports, or Fabric names: every
 //! node runs in the foreground under a temporary root, and no test installs a service.
 
+use st3::WatchesStore;
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -202,6 +203,12 @@ impl Node {
         if let Some(shell) = std::env::var_os("SHELL") {
             command.env("SHELL", shell);
         }
+        if let Some(root) = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS") {
+            command.env("RUST_LOG", "st3=trace,smallclaims=trace");
+            fs::write(Path::new(&root).join("command.json"), serde_json::to_vec(&json!({
+                "node": self.name, "operation": arguments.iter().take(2).collect::<Vec<_>>()
+            })).unwrap()).unwrap();
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }
@@ -270,7 +277,7 @@ impl Node {
             .unwrap();
         self.daemon = Some(daemon);
         let client = self.client();
-        // The pinned compatibility build may be cold while other CI lanes compile.
+        // The release compatibility binary may start while other CI lanes compile.
         // Give startup room for that load. Bound each health probe as well: a request
         // stalled behind startup must not consume the whole startup deadline.
         let deadline = Instant::now() + Duration::from_secs(150);
@@ -776,7 +783,11 @@ async fn placement_handoff_source_offline_retires_the_returning_real_daemon_runt
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum SeatMove { Stopped, Running, SourceOffline }
+enum SeatMove {
+    Stopped,
+    Running,
+    SourceOffline,
+}
 
 async fn cross_host_seat_move(mode: SeatMove) {
     const SUBJECT: &str = "agent/move/worker";
@@ -828,9 +839,20 @@ agent "move/worker" {
     }
     if mode == SeatMove::SourceOffline {
         a.stop();
-        b.st_ok(&["agents", "start", SUBJECT, "--host", "cobalt", "--source-offline", "--as", PERSON]);
+        b.st_ok(&[
+            "agents",
+            "start",
+            SUBJECT,
+            "--host",
+            "cobalt",
+            "--source-offline",
+            "--as",
+            PERSON,
+        ]);
     } else {
-        let start = ["agents", "start", SUBJECT, "--host", "cobalt", "--as", PERSON];
+        let start = [
+            "agents", "start", SUBJECT, "--host", "cobalt", "--as", PERSON,
+        ];
         let output = b.st(&start);
         if !output.status.success() {
             panic!(
@@ -843,48 +865,78 @@ agent "move/worker" {
             );
         }
     }
-    wait_until("cobalt's running observation reaches both replicas", 30, || async {
-        let replicas = if mode == SeatMove::SourceOffline { vec![&b] } else { vec![&a, &b] };
-        for node in replicas {
-            if !node.claims().await.iter().any(|claim| {
-                claim["subject"] == SUBJECT
-                    && claim["kind"] == "runtime.observed"
-                    && claim["origin"] == "cobalt"
-                    && claim["body"]["fields"]["status"] == "running"
-                    && claim["body"]["fields"]["incarnation_id"] != old_incarnation
-            }) {
-                return false;
+    wait_until(
+        "cobalt's running observation reaches both replicas",
+        30,
+        || async {
+            let replicas = if mode == SeatMove::SourceOffline {
+                vec![&b]
+            } else {
+                vec![&a, &b]
+            };
+            for node in replicas {
+                if !node.claims().await.iter().any(|claim| {
+                    claim["subject"] == SUBJECT
+                        && claim["kind"] == "runtime.observed"
+                        && claim["origin"] == "cobalt"
+                        && claim["body"]["fields"]["status"] == "running"
+                        && claim["body"]["fields"]["incarnation_id"] != old_incarnation
+                }) {
+                    return false;
+                }
             }
-        }
-        true
-    })
+            true
+        },
+    )
     .await;
     if mode == SeatMove::SourceOffline {
-        let proof = b.claims().await.into_iter().find(|claim| {
-            claim["kind"] == "agent.placement.source-offline" && claim["subject"] == SUBJECT
-        }).expect("source-offline move records its exception");
+        let proof = b
+            .claims()
+            .await
+            .into_iter()
+            .find(|claim| {
+                claim["kind"] == "agent.placement.source-offline" && claim["subject"] == SUBJECT
+            })
+            .expect("source-offline move records its exception");
         assert_eq!(proof["actor"], PERSON);
         let peek = b.st_ok(&["terminals", "peek", SUBJECT]);
-        assert!(peek.contains("moved-seat-ready"), "destination is reachable while source is offline: {peek}");
+        assert!(
+            peek.contains("moved-seat-ready"),
+            "destination is reachable while source is offline: {peek}"
+        );
         a.start().await;
-        wait_until("returning source retires its old incarnation", 30, || async {
-            b.claims().await.iter().any(|claim| {
-                claim["subject"] == SUBJECT && claim["origin"] == "amber"
-                    && claim["body"]["fields"]["reason"] == "placed-elsewhere"
-                    && claim["body"]["fields"]["incarnation_id"] == old_incarnation
-            })
-        }).await;
+        wait_until(
+            "returning source retires its old incarnation",
+            30,
+            || async {
+                b.claims().await.iter().any(|claim| {
+                    claim["subject"] == SUBJECT
+                        && claim["origin"] == "amber"
+                        && claim["body"]["fields"]["reason"] == "placed-elsewhere"
+                        && claim["body"]["fields"]["incarnation_id"] == old_incarnation
+                })
+            },
+        )
+        .await;
     }
-    wait_until("both replicas report the destination incarnation", 30, || async {
-        [&a, &b].iter().all(|node| {
-            let view = status(node);
-            view["actual"]["host"] == "cobalt"
-                && view["actual"]["status"] == "running"
-                && view["actual"]["incarnation_id"] != old_incarnation
-                && view["reachability"] == "reachable"
-        })
-    }).await;
-    let runtime_claims = b.claims().await.into_iter()
+    wait_until(
+        "both replicas report the destination incarnation",
+        30,
+        || async {
+            [&a, &b].iter().all(|node| {
+                let view = status(node);
+                view["actual"]["host"] == "cobalt"
+                    && view["actual"]["status"] == "running"
+                    && view["actual"]["incarnation_id"] != old_incarnation
+                    && view["reachability"] == "reachable"
+            })
+        },
+    )
+    .await;
+    let runtime_claims = b
+        .claims()
+        .await
+        .into_iter()
         .filter(|claim| claim["subject"] == SUBJECT && claim["kind"] == "runtime.observed")
         .collect::<Vec<_>>();
     let source_stop = runtime_claims.iter().find(|claim| {
@@ -1066,7 +1118,15 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
     let manager = node.root.join("bin/systemctl");
     fs::write(
         &manager,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'\n", log.display()),
+        format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$2" != show ]; then exit 9; fi
+if [ "$3" = st3.service ]; then
+    printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
+else
+    printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
+fi
+"#, log.display()),
     ).unwrap();
     fs::set_permissions(manager, fs::Permissions::from_mode(0o700)).unwrap();
     node.env.push((
@@ -1086,10 +1146,10 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
             String::from_utf8_lossy(&output.stderr).contains(message),
             "{output:?}"
         );
-        assert_eq!(
-            fs::read_to_string(log).unwrap(),
-            "",
-            "preconditions must precede even service inspection"
+        let calls = fs::read_to_string(log).unwrap();
+        assert!(
+            calls.lines().all(|line| line.starts_with("--user show ")),
+            "admission preconditions may inspect services but must never mutate them: {calls}"
         );
         assert_eq!(
             node.client().get::<Value>("/v1/health").await.unwrap()["node"],
@@ -1130,7 +1190,7 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
     node.stop();
     node.migrate(&["--anchor"]);
     // A native member no longer needs legacy fleet_id in config.toml. Create must
-    // inspect saved membership before it even asks whether services are installed.
+    // reject saved membership without changing any service.
     fs::write(
         node.root.join("config/st3/config.toml"),
         format!("node = \"{}\"\nperson = \"{PERSON}\"\n", node.name),
@@ -1848,7 +1908,9 @@ async fn rejoin_exchanges_live_claims_beyond_differing_checkpoint_tombstones() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rejoin_slow_exports_preserve_live_claims_and_show_overload_retry() {
-    if st3::test_support::supervise_test() { return; }
+    if st3::test_support::supervise_test() {
+        return;
+    }
     rejoin_tombstone_fixture(true).await;
 }
 
@@ -1909,7 +1971,10 @@ async fn rejoin_tombstone_fixture(slow_export: bool) {
     if slow_export {
         // Restart only the isolated daemon with the fixture-only injection. Each response
         // export takes 25 seconds, beyond the old caller's entire 20-second HTTP deadline.
-        cedar.env.push(("ST3_TEST_REPLICATION_EXPORT_DELAY_MS".into(), "25000".into()));
+        cedar.env.push((
+            "ST3_TEST_REPLICATION_EXPORT_DELAY_MS".into(),
+            "25000".into(),
+        ));
         cedar.stop();
         cedar.start().await;
         cedar.stop_worker();
@@ -1917,30 +1982,49 @@ async fn rejoin_tombstone_fixture(slow_export: bool) {
     birch.start_worker();
     cedar.start_worker();
     if slow_export {
-        wait_until("signed overload exposes polling phase and retry", 90, || async {
-            let status = birch.st_json(&["replication", "status"]);
-            status["peers"].as_array().unwrap().iter().any(|peer| {
-                peer["worker"]["phase"] == "overload"
-                    && peer["worker"]["last_attempt_at_unix_ms"].as_u64().is_some()
-                    && peer["worker"]["next_retry_at_unix_ms"].as_u64().is_some()
-            })
-        }).await;
+        wait_until(
+            "signed overload exposes polling phase and retry",
+            90,
+            || async {
+                let status = birch.st_json(&["replication", "status"]);
+                status["peers"].as_array().unwrap().iter().any(|peer| {
+                    peer["worker"]["phase"] == "overload"
+                        && peer["worker"]["last_attempt_at_unix_ms"].as_u64().is_some()
+                        && peer["worker"]["next_retry_at_unix_ms"].as_u64().is_some()
+                })
+            },
+        )
+        .await;
         let text = birch.st_ok(&["replication", "status"]);
         assert!(text.contains("worker overload"), "{text}");
         assert!(text.contains("next retry in"), "{text}");
     }
     for (node, before) in [&birch, &cedar].into_iter().zip(before) {
-        wait_until("both rejoined workers exchange successfully", if slow_export { 180 } else { 15 }, || async {
-            node.st_json(&["replication", "status"])["timings"]["exchanges"]
-                .as_u64()
-                .unwrap() >= before + 4
-        }).await;
+        wait_until(
+            "both rejoined workers exchange successfully",
+            if slow_export { 180 } else { 15 },
+            || async {
+                node.st_json(&["replication", "status"])["timings"]["exchanges"]
+                    .as_u64()
+                    .unwrap()
+                    >= before + 4
+            },
+        )
+        .await;
         let status = node.st_json(&["replication", "status"]);
-        eprintln!("{} rejoin exchanges={} envelopes_received={}",
-            node.name, status["timings"]["exchanges"], status["timings"]["envelopes_received"]);
+        eprintln!(
+            "{} rejoin exchanges={} envelopes_received={}",
+            node.name, status["timings"]["exchanges"], status["timings"]["envelopes_received"]
+        );
     }
     for node in [&birch, &cedar] {
-        wait_for_notes(node, &expected, if slow_export { 180 } else { 30 }, &[&birch, &cedar]).await;
+        wait_for_notes(
+            node,
+            &expected,
+            if slow_export { 180 } else { 30 },
+            &[&birch, &cedar],
+        )
+        .await;
         let connection =
             rusqlite::Connection::open(node.state_dir().join("claims.sqlite3")).unwrap();
         let count: u64 = connection
@@ -2127,11 +2211,19 @@ async fn a_frozen_member_is_not_reported_up() {
         &[&a, &b],
     )
     .await;
+    // What a says b has not received: what its last measurement found b lacked, plus what a has
+    // written since. While b is up and in sync that is nothing, so the check below cannot pass
+    // for a member reported up.
+    let unsent = |peer: &Value| {
+        peer["sync"]["local_only_envelopes"].as_u64().unwrap_or(0)
+            + peer["sync"]["added_since_measured_envelopes"].as_u64().unwrap_or(0)
+    };
     wait_until("a measures b in sync", 60, || async {
         let peer = peer_status(&a, "b");
         peer["status"] == "up"
             && peer["sync"]["peer_only_envelopes"] == 0
             && peer["sync"]["local_only_envelopes"] == 0
+            && unsent(&peer) == 0
     })
     .await;
 
@@ -2152,12 +2244,9 @@ async fn a_frozen_member_is_not_reported_up() {
     );
     assert!(peer["last_failure_at_unix_ms"].is_u64(), "{peer}");
     assert_eq!(peer["sync"]["stale"], true, "{peer}");
-    assert!(
-        peer["sync"]["added_since_measured_envelopes"]
-            .as_u64()
-            .is_some_and(|added| added >= 20),
-        "{peer}"
-    );
+    // An exchange that b answered just before it froze can still be measured once its response
+    // arrives, counting the first notes as local-only rather than added since: count both.
+    assert!(unsent(&peer) >= 20, "{peer}");
     let text = a.st_ok(&["replication", "status"]);
     assert!(text.contains("peer\tb\tlast-seen"), "{text}");
     assert!(text.contains("last attempt failed"), "{text}");
@@ -2326,23 +2415,34 @@ async fn refusal_settings_writer_across_leave(stage: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn leave_drains_everything_before_it_leaves() {
-    if st3::test_support::supervise_test() {
+    if supervise_leave_with_diagnostics() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
-    let mut a = anchor(root.path(), "a").await;
-    let b = joined(root.path(), &a, "b", &[]).await;
+    let temporary_root = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS")
+        .map(PathBuf::from).unwrap_or_else(|| temporary_root.path().to_owned());
+    let phase = |stage: &str| fs::write(root.join("phase.txt"), stage).unwrap();
+    phase("create and start anchor a");
+    let mut a = anchor(&root, "a").await;
+    phase("invite, join and start b");
+    let b = joined(&root, &a, "b", &[]).await;
+    phase("wait for b listener");
     b.wait_listening().await;
+    phase("stop anchor a");
     a.stop();
     let mut expected = BTreeSet::new();
     // Written while the anchor is away, and more than an older peer's exchange carries (512),
     // so the anchor comes back catching up and defers projecting what it receives.
     for index in 0..700 {
+        phase(&format!("write note {index}/700 on b"));
         b.note(&format!("b-{index}")).await;
         expected.insert(format!("custom/fleet-test/b-{index}"));
     }
+    phase("restart anchor a");
     a.start().await;
+    phase("wait for a listener");
     a.wait_listening().await;
+    phase("fleet leave CLI on b (existing --wait 2m)");
     b.st_ok(&[
         "fleet",
         "leave",
@@ -2353,7 +2453,9 @@ async fn leave_drains_everything_before_it_leaves() {
         PERSON,
     ]);
     // Everything b wrote reached a before the leave, and the leave ended b.
+    phase("wait for all notes on a");
     wait_for_notes(&a, &expected, 10, &[&a, &b]).await;
+    phase("read a fleet status and assert b left");
     let members = a.st_json(&["fleet", "status"])["view"]["members"].clone();
     assert!(
         members.as_array().unwrap().iter().any(|member| {
@@ -2364,7 +2466,46 @@ async fn leave_drains_everything_before_it_leaves() {
     assert!(!b.state_dir().join("fleet").exists());
     assert!(b.state_dir().join("left-fleet.json").exists());
     // While leaving, b refused new writes; now it accepts them again, locally.
+    phase("write local-after-leave on b");
     b.note("local-after-leave").await;
+    phase("stop fixture b");
+    drop(b);
+    phase("stop fixture a");
+    drop(a);
+    phase("complete");
+}
+
+/// The deadline lives outside Rust: a blocked synchronous CLI or runtime teardown
+/// cannot keep it from dumping evidence and failing. The existing guardian owns cleanup.
+fn supervise_leave_with_diagnostics() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write as _;
+        let name = "fleet::leave_drains_everything_before_it_leaves";
+        if std::env::var("SMALLTALK_TEST_SUPERVISED").as_deref() == Ok(name) {
+            return false;
+        }
+        let scripts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new("python3")
+            .arg(scripts.join("st3_test_process.py"))
+            .args(["--owner", &std::process::id().to_string(), "--", "python3"])
+            .arg(scripts.join("st3_fleet_leave_diagnostics.py"))
+            .args(["--seconds", "600", "--root"])
+            .arg(root.path())
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--include-ignored"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
+            .env("SMALLTALK_TEST_SUPERVISED", name)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .output().expect("launch bounded fleet leave guardian");
+        std::io::stdout().write_all(&output.stdout).unwrap();
+        std::io::stderr().write_all(&output.stderr).unwrap();
+        assert!(output.status.success(), "bounded fleet leave: {}", output.status);
+        true
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2947,22 +3088,13 @@ async fn a_member_switches_between_listening_and_dial_out() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs ST3_COMPAT_BIN: the st3 of the pinned baseline release"]
-async fn an_old_build_config_peer_replicates_with_new_members() {
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_replicates_with_new_members_and_preserves_history_on_upgrade() {
     if st3::test_support::supervise_test() {
         return;
     }
     let old = PathBuf::from(
         std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
-    );
-    assert!(
-        !Command::new(&old)
-            .args(["fleet", "--help"])
-            .output()
-            .unwrap()
-            .status
-            .success(),
-        "the baseline must predate membership"
     );
     let root = tempfile::tempdir().unwrap();
     let fleet_id = "2a9d7c5e-1b3f-4e6a-8c0d-9e8f7a6b5c4d";
@@ -2989,9 +3121,8 @@ async fn an_old_build_config_peer_replicates_with_new_members() {
         wait_for_notes(node, &expected, 60, &[&o, &n1, &n2]).await;
     }
 
-    // The baseline predates the backup CLI. Export a private SQLite snapshot of its graph
-    // with the current envelope exporter, then restore the logical file at the current schema.
-    // This is also run by the existing exact fleet-compat CI invocation.
+    // Export an untouched release database through the current backup implementation and
+    // verify that restore retains the source envelopes and graph.
     backup_baseline_graph(&o, root.path());
 
     // n1 and n2 move to membership while the old build keeps replicating with them.
@@ -3003,6 +3134,13 @@ async fn an_old_build_config_peer_replicates_with_new_members() {
     n2.stop();
     n2.migrate(&[&code]);
     n2.start().await;
+    // The previous release understands membership too: migrate it with its own CLI and
+    // exercise signed old/new exchanges, not just the config-peer transport.
+    let code = n1.invite("o", &["--migrate"]);
+    o.stop();
+    o.migrate(&[&code]);
+    o.start().await;
+    o.wait_listening().await;
     // A newly joined member reaches the old build only through the members it can dial.
     let n4 = joined(root.path(), &n1, "n4", &[]).await;
     o.note("o-1").await;
@@ -3014,14 +3152,51 @@ async fn an_old_build_config_peer_replicates_with_new_members() {
     for node in [&o, &n1, &n2, &n4] {
         wait_for_notes(node, &expected, 90, &[&o, &n1, &n2, &n4]).await;
     }
-    // The old build keeps the fleet claims it cannot read as unknown, never invalid.
-    let status = o.st_json(&["replication", "status"]);
-    assert_eq!(status["invalid_records"], 0, "{status}");
+    for node in [&o, &n1, &n2, &n4] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["unsigned_envelopes"], 0, "{}: {status}", node.name);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // Back up signed release envelopes as well as the original config-peer history.
+    let signed_backup = root.path().join("signed-backup");
+    fs::create_dir(&signed_backup).unwrap();
+    backup_baseline_graph(&o, &signed_backup);
+    let retained_ids: BTreeSet<String> = o
+        .claims()
+        .await
+        .into_iter()
+        .map(|claim| claim["id"].as_str().unwrap().to_owned())
+        .collect();
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    o.wait_listening().await;
+    let upgraded_ids: BTreeSet<String> = o
+        .claims()
+        .await
+        .into_iter()
+        .map(|claim| claim["id"].as_str().unwrap().to_owned())
+        .collect();
     assert!(
-        status["unknown_records"].as_u64().unwrap_or(0) > 0,
-        "the old build admitted fleet claims it cannot know: {status}"
+        retained_ids.is_subset(&upgraded_ids),
+        "upgrade lost release history"
     );
-    for node in [&n1, &n2, &n4] {
+    assert_eq!(
+        st3::config::FleetFile::load(&o.state_dir())
+            .unwrap()
+            .unwrap()
+            .fleet_id,
+        fleet_id
+    );
+    o.note("o-upgraded").await;
+    n4.note("n4-after-upgrade").await;
+    expected.extend([
+        "custom/fleet-test/o-upgraded".to_owned(),
+        "custom/fleet-test/n4-after-upgrade".to_owned(),
+    ]);
+    for node in [&o, &n1, &n2, &n4] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1, &n2, &n4]).await;
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["unsigned_envelopes"], 0, "{}: {status}", node.name);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
@@ -3049,8 +3224,20 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
             .unwrap();
     let baseline_envelopes = reader
         .prepare(
-            "SELECT writer,sequence,envelope_hash,previous_hash,accepted_at_unix_ms,payload
-         FROM replica_envelopes WHERE batch_id IS NOT NULL ORDER BY writer,sequence,envelope_hash",
+            "SELECT envelopes.writer,envelopes.sequence,envelopes.envelope_hash,
+                    envelopes.previous_hash,envelopes.accepted_at_unix_ms,envelopes.payload,
+                    (SELECT member_key FROM replica_envelope_signatures AS signatures
+                     WHERE signatures.writer=envelopes.writer
+                       AND signatures.sequence=envelopes.sequence
+                       AND signatures.envelope_hash=envelopes.envelope_hash
+                     ORDER BY member_key LIMIT 1),
+                    (SELECT signature FROM replica_envelope_signatures AS signatures
+                     WHERE signatures.writer=envelopes.writer
+                       AND signatures.sequence=envelopes.sequence
+                       AND signatures.envelope_hash=envelopes.envelope_hash
+                     ORDER BY member_key LIMIT 1)
+             FROM replica_envelopes AS envelopes WHERE batch_id IS NOT NULL
+             ORDER BY envelopes.writer,envelopes.sequence,envelopes.envelope_hash",
         )
         .unwrap()
         .query_map([], |row| {
@@ -3061,8 +3248,8 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
                 previous_hash: row.get(3)?,
                 accepted_at_unix_ms: row.get::<_, String>(4)?.parse().unwrap(),
                 payload: row.get(5)?,
-                member_key: None,
-                signature: None,
+                member_key: row.get(6)?,
+                signature: row.get(7)?,
             })
         })
         .unwrap()
@@ -3129,7 +3316,11 @@ fn fleet_workflows_have_no_path_filter() {
             "fleet.yml filters its runs with {filter}"
         );
     }
-    assert!(stages.contains("an_old_build_config_peer_replicates_with_new_members"));
+    assert!(
+        stages.contains(
+            "previous_release_replicates_with_new_members_and_preserves_history_on_upgrade"
+        )
+    );
     // The optional macOS job lives in macos.yml so label events cannot restart this gate.
     assert!(
         !compat.to_ascii_lowercase().contains("macos-"),
@@ -3158,7 +3349,7 @@ me="{node}-fabric-id"
 echo "$me $*" >> "$registry/calls"
 key() {{ echo "$1.$(echo "$2" | tr '/' '_')"; }}
 case "$1" in
-  id) echo "$me" ;;
+  id) echo "{{\"id\":\"$me\"}}" ;;
   addr) epoch=$(cat "$registry/epoch" 2>/dev/null || echo 0); echo "{{\"addrs\":[\"$epoch\"]}}" ;;
   expose) [ ! -f "$registry/fail-expose-$me" ] || {{ echo "exposure refused" >&2; exit 1; }}; echo "$4" > "$registry/$(key "$me" "$2")" ;;
   unexpose)
@@ -4022,7 +4213,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
             .is_err()
     );
 
-    for (label, sleep, age_ms) in [("minutes", 120, 120_000), ("hours", 2, 4 * 3_600_000)] {
+    for (label, sleep, age_ms) in [("minutes", 2, 120_000), ("hours", 2, 4 * 3_600_000)] {
         // Leave its local daemon alive so it can record work while the network worker sleeps.
         let mut worker = traveller.worker.take().unwrap();
         worker.kill().unwrap();
@@ -4035,8 +4226,10 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
         b.note(&format!("beacon-{label}")).await;
         expected.insert(format!("custom/fleet-test/beacon-{label}"));
         tokio::time::sleep(Duration::from_secs(sleep)).await;
-        // The minutes case uses real elapsed time. The hours case ages persistent evidence;
-        // virtual-clock worker tests separately exercise the full four-hour retry schedule.
+        // Both cases age persistent evidence instead of sleeping through the absence. The worker
+        // test isolated_outbound_only_node_converges_after_two_minutes_and_four_hours runs the
+        // real worker timers over both absences on a virtual clock, with its attempt bounds and
+        // the return through the servers' backoff.
         for node in [&a, &b] {
             let db = rusqlite::Connection::open(node.state_dir().join("claims.sqlite3")).unwrap();
             db.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -4337,15 +4530,22 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         "The fixture member is removed.",
     ]);
     amber.restart().await;
-    wait_until(
-        "jade records its removal after the sponsor restarted",
-        60,
-        || async {
-            fs::read_to_string(jade.state_dir().join("fleet/fleet.toml"))
-                .is_ok_and(|file| file.contains("[removed]"))
-        },
-    )
-    .await;
+    // CI keeps only the panic message: on timeout, say what jade knew of amber and of itself.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !fs::read_to_string(jade.state_dir().join("fleet/fleet.toml"))
+        .is_ok_and(|file| file.contains("[removed]"))
+    {
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting until jade records its removal after the sponsor restarted\n\
+                 jade's view of amber: {}\njade fleet status: {}\namber fleet status: {}",
+                peer_status(&jade, "fixture-amber"),
+                String::from_utf8_lossy(&jade.st(&["--json", "fleet", "status"]).stdout),
+                String::from_utf8_lossy(&amber.st(&["--json", "fleet", "status"]).stdout),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     jade.restart().await;
     assert_eq!(
         jade.st_json(&["fleet", "status"])["removed"]["code"],
@@ -4394,7 +4594,9 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
             }
         }),
     );
-    let server = tokio::spawn(async move { axum::serve(http, app).await.unwrap(); });
+    let server = tokio::spawn(async move {
+        axum::serve(http, app).await.unwrap();
+    });
     let mut node = Node::new(root.path(), "fixture-watch");
     node.env.push(("GH_TOKEN".into(), "fixture-token".into()));
     node.env.push(("ST3_GITHUB_API_URL".into(), api));
@@ -4403,34 +4605,116 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     fs::write(&file, format!("version 2\nagent \"example/watch\" {{ host \"fixture-watch\"; workspace {:?}; command \"true\"; restart \"never\" }}\n", node.root)).unwrap();
     node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
     let cli = |args: &[&str]| -> Value {
-        let output = node.command(args).env("ST_AGENT", "agent/example/watch").output().unwrap();
-        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
+        let output = node
+            .command(args)
+            .env("ST_AGENT", "agent/example/watch")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            node.logs()
+        );
         serde_json::from_slice(&output.stdout).unwrap()
     };
-    let first = cli(&["--json", "gh", "watch", "fixture/app#12", "--until", "1h", "--as", "agent/example/watch"]);
+    let first = cli(&[
+        "--json",
+        "gh",
+        "watch",
+        "fixture/app#12",
+        "--until",
+        "1h",
+        "--as",
+        "agent/example/watch",
+    ]);
     let subject = first["subject"].as_str().unwrap().to_owned();
     assert_eq!(first["state"], "active");
-    let refused = node.command(&["--json", "gh", "comment", "fixture/app#12", "--body", "Foreign actor", "--as", "agent/example/other"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
+    let refused = node
+        .command(&[
+            "--json",
+            "gh",
+            "comment",
+            "fixture/app#12",
+            "--body",
+            "Foreign actor",
+            "--as",
+            "agent/example/other",
+        ])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("agent/example/watch"));
     assert!(posts.lock().unwrap().is_empty());
-    let posted = cli(&["--json", "gh", "comment", "fixture/app#12", "--body", "Copper proof", "--as", "agent/example/watch"]);
+    let posted = cli(&[
+        "--json",
+        "gh",
+        "comment",
+        "fixture/app#12",
+        "--body",
+        "Copper proof",
+        "--as",
+        "agent/example/watch",
+    ]);
     assert_eq!(posted["kind"], "comment");
     assert_eq!(posted["id"], 801);
     assert_eq!(posted["watch"]["subject"], subject);
     node.restart().await;
-    let output = node.command(&["--json", "gh", "ls", "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = node
+        .command(&["--json", "gh", "ls", "--as", "agent/example/watch"])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(listed.as_array().unwrap().iter().filter(|watch| watch["subject"] == subject).count(), 1);
+    assert_eq!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|watch| watch["subject"] == subject)
+            .count(),
+        1
+    );
     let foreign_url = "https://github.com/fixture/app/issues/12#issuecomment-902";
-    let refused = node.command(&["--json", "gh", "own", foreign_url, "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
+    let refused = node
+        .command(&[
+            "--json",
+            "gh",
+            "own",
+            foreign_url,
+            "--as",
+            "agent/example/watch",
+        ])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("github-post-not-ours"));
     node.restart().await;
     for _ in 0..2 {
-        let output = node.command(&["--json", "gh", "own", "https://github.com/fixture/app/issues/12#issuecomment-801", "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = node
+            .command(&[
+                "--json",
+                "gh",
+                "own",
+                "https://github.com/fixture/app/issues/12#issuecomment-801",
+                "--as",
+                "agent/example/watch",
+            ])
+            .env("ST_AGENT", "agent/example/watch")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let owned: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(owned["id"], 801);
         assert_eq!(owned["agent"], "agent/example/watch");
@@ -4438,23 +4722,76 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     }
     let review_file = node.root.join("review.txt");
     fs::write(&review_file, "The Copper proof is ready.").unwrap();
-    let output = node.command(&["--json", "gh", "comment", "fixture/app#12", "--body-file", review_file.to_str().unwrap(), "--review", "approve", "--no-watch", "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = node
+        .command(&[
+            "--json",
+            "gh",
+            "comment",
+            "fixture/app#12",
+            "--body-file",
+            review_file.to_str().unwrap(),
+            "--review",
+            "approve",
+            "--no-watch",
+            "--as",
+            "agent/example/watch",
+        ])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let review: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(review["kind"], "review");
     assert_eq!(review["id"], 802);
     node.restart().await;
-    let output = node.command(&["--json", "gh", "own", "https://github.com/fixture/app/pull/12#pullrequestreview-802", "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = node
+        .command(&[
+            "--json",
+            "gh",
+            "own",
+            "https://github.com/fixture/app/pull/12#pullrequestreview-802",
+            "--as",
+            "agent/example/watch",
+        ])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     // Store::open also initializes projections, so inspect without the daemon's writer.
     node.stop();
-    let store = st3::store::Store::open(&node.state_dir().join("claims.sqlite3"), "fixture-watch").unwrap();
+    let store =
+        st3::store::Store::open(&node.state_dir().join("claims.sqlite3"), "fixture-watch").unwrap();
     for (kind, id) in [("comment", 801), ("review", 802)] {
         let subject = st3::github_watch::github_post_subject("fixture/app", kind, id);
-        assert_eq!(store.claims_for(&subject, Some("github.posted")).unwrap().len(), 1);
-        assert_eq!(store.github_post_agent("fixture/app", kind, id).unwrap().as_deref(), Some("agent/example/watch"));
+        assert_eq!(
+            store
+                .claims_for(&subject, Some("github.posted"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .github_post_agent("fixture/app", kind, id)
+                .unwrap()
+                .as_deref(),
+            Some("agent/example/watch")
+        );
     }
-    assert_eq!(store.github_post_agent("fixture/app", "comment", 902).unwrap(), None);
+    assert_eq!(
+        store
+            .github_post_agent("fixture/app", "comment", 902)
+            .unwrap(),
+        None
+    );
     drop(store);
     node.start().await;
     {
@@ -4465,12 +4802,32 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
         assert_eq!(bodies[1]["event"], "APPROVE");
     }
     for _ in 0..2 {
-        let output = node.command(&["--json", "gh", "unwatch", "fixture/app#12", "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = node
+            .command(&[
+                "--json",
+                "gh",
+                "unwatch",
+                "fixture/app#12",
+                "--as",
+                "agent/example/watch",
+            ])
+            .env("ST_AGENT", "agent/example/watch")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         node.restart().await;
     }
     let listed = node.st_json(&["gh", "ls", "--all", "--as", PERSON]);
-    let ended = listed.as_array().unwrap().iter().find(|watch| watch["subject"] == subject).unwrap();
+    let ended = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|watch| watch["subject"] == subject)
+        .unwrap();
     assert_eq!(ended["state"], "ended");
     assert_eq!(ended["ended"], "unwatched");
     server.abort();
@@ -4483,7 +4840,7 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::canonical_tempdir();
     struct SeatCleanup {
         pty: PathBuf,
         roots: Vec<PathBuf>,
@@ -4513,7 +4870,10 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let pty = st_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
     let node_program = st_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
-    let mut cleanup = SeatCleanup { pty: pty.clone(), roots: Vec::new() };
+    let mut cleanup = SeatCleanup {
+        pty: pty.clone(),
+        roots: Vec::new(),
+    };
     let mut amber = anchor(root.path(), "fixture-move-amber").await;
     let mut jade = joined(root.path(), &amber, "fixture-move-jade", &[]).await;
     cleanup.roots = vec![amber.state_dir().join("pty"), jade.state_dir().join("pty")];
@@ -4693,10 +5053,29 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         before,
         "source transcript changed after the move"
     );
-    let source_ptys = Command::new(&pty).args(["list", "--json"])
-        .env("PTY_ROOT", amber.state_dir().join("pty")).output().unwrap();
+    let source_ptys = Command::new(&pty)
+        .args(["list", "--json"])
+        .env("PTY_ROOT", amber.state_dir().join("pty"))
+        .output()
+        .unwrap();
     let source_ptys: Vec<Value> = serde_json::from_slice(&source_ptys.stdout).unwrap();
-    assert!(source_ptys.iter().all(|row| row["status"] != "running"), "source still has a live PTY: {source_ptys:?}");
+    assert!(
+        source_ptys.iter().all(|row| row["status"] != "running"),
+        "source still has a live PTY: {source_ptys:?}"
+    );
+    // The transcript shows the mail before the resumed driver reports the turn's end. Suspend
+    // reads the driver's latest report for the running incarnation, so wait for that report.
+    wait_until("resumed seat reports quiet on target", 60, || async {
+        let incarnation = jade.st_json(&["agents", "show", seat])["value"]["incarnation_id"].clone();
+        let page: Value = jade.client()
+            .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100")).await.unwrap();
+        page["claims"].as_array().into_iter().flatten()
+            .find(|claim| claim["kind"] == "harness.observed")
+            .map(|claim| claim["body"].get("fields").unwrap_or(&claim["body"]))
+            .is_some_and(|fields| incarnation.is_string() && fields["incarnation_id"] == incarnation
+                && fields["quiescent"] == true)
+    })
+    .await;
     jade.st_ok(&[
         "agents",
         "suspend",
@@ -4761,7 +5140,7 @@ async fn terminal_owner_filters_are_safe_across_mixed_builds() {
 }
 
 /// This narrower compatibility boundary needs a build that already knows today's mission
-/// format, but predates mission.provenance. The ancient fleet baseline is a different contract.
+/// format, but predates mission.provenance; it is independent of the rolling fleet release pin.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_PROVENANCE_COMPAT_BIN: a pre-provenance build with the current mission format"]
 async fn an_older_daemon_runs_a_provenance_revision_and_reads_its_sidecar_after_upgrade() {

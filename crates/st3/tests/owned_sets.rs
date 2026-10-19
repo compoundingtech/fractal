@@ -1,4 +1,6 @@
 //! Each fixture serves an isolated daemon over its own Unix socket and durable graph.
+use st3::SeatsStoreCore;
+use st3::OwnedSetsStore;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
@@ -43,6 +45,7 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
     );
     let socket = root.join("st3.sock");
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
@@ -328,8 +331,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
         tokio::task::spawn_blocking(move || {
             let mut command =
                 st3::test_support::command(test_bin!("st3-fixture"));
-            command
-                .env_remove("ST_AGENT")
+            command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
                 .arg(socket)
@@ -501,8 +503,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
     ] {
         let socket = root.path().join("amber/st3.sock");
         let output = tokio::task::spawn_blocking(move || {
-            st3::test_support::command(test_bin!("st3-fixture"))
-                .env_remove("ST_AGENT")
+            st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
                 .arg(socket)
@@ -837,8 +838,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         let command = || {
             let mut command =
                 st3::test_support::command(test_bin!("st3-fixture"));
-            command
-                .env_remove("ST_AGENT")
+            command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--endpoint"])
                 .arg(&socket);
@@ -1174,8 +1174,7 @@ async fn manual_authored_selection_publication(
 
     let socket = d.client.socket_path().unwrap().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        st3::test_support::command(test_bin!("st3-fixture"))
-            .env_remove("ST_AGENT")
+        st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args(["--endpoint"])
             .arg(socket)

@@ -2,8 +2,12 @@
 //! provider keeps its transport while a fresh st seat initializes this database before spawn.
 //! A snapshot and its event commit together. The driver removes only acknowledged events;
 //! readers of provider-local evidence do not depend on the daemon being reachable.
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -23,6 +27,45 @@ mod output_controls;
 pub const WAKE_PIPE: &str = ".st-harness-events-wake";
 pub const DATABASE: &str = "st-harness-events.sqlite";
 const MAX_PENDING_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_READ_CONNECTIONS: usize = 64;
+const MAX_TOTAL_READ_CONNECTIONS: usize = 128;
+static LIVE_READ_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct ReadConnectionSlot;
+
+impl ReadConnectionSlot {
+    fn reserve() -> Option<Self> {
+        LIVE_READ_CONNECTIONS
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                (live < MAX_TOTAL_READ_CONNECTIONS).then_some(live + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ReadConnectionSlot {
+    fn drop(&mut self) {
+        LIVE_READ_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct ReadConnection {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    connection: Connection,
+    // Fields drop in declaration order: close SQLite before releasing its cache slot.
+    _slot: ReadConnectionSlot,
+}
+
+thread_local! {
+    static READ_CONNECTIONS: RefCell<VecDeque<ReadConnection>> = const {
+        RefCell::new(VecDeque::new())
+    };
+    #[cfg(test)]
+    static CONNECTION_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Event {
@@ -44,6 +87,8 @@ fn connect(agent_dir: &Path) -> Result<Connection> {
         "event spool must be a regular file"
     );
     let connection = Connection::open(path)?;
+    #[cfg(test)]
+    CONNECTION_OPENS.with(|opens| opens.set(opens.get() + 1));
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA synchronous=FULL;")?;
     Ok(connection)
@@ -57,6 +102,62 @@ fn open(agent_dir: &Path) -> Result<Connection> {
         "unsupported harness event spool version {version}"
     );
     Ok(connection)
+}
+
+/// Retain connections, never snapshots. Each call finishes its read transaction before
+/// returning, so the next call sees new commits. Per-thread LRUs avoid a process-wide
+/// query lock, while atomic reservations bound retained connections across all threads.
+/// Checking the inode prevents retaining authority from a replaced spool.
+fn with_read_connection<T>(
+    agent_dir: &Path,
+    read: impl FnOnce(&mut Connection) -> Result<T>,
+) -> Result<T> {
+    let path = agent_dir.join(DATABASE);
+    let metadata = path.symlink_metadata()?;
+    anyhow::ensure!(
+        metadata.file_type().is_file(),
+        "event spool must be a regular file"
+    );
+    READ_CONNECTIONS.with(|connections| {
+        let mut connections = connections.borrow_mut();
+        let cached = connections.iter().position(|entry| entry.path == path);
+        let entry = cached.and_then(|index| connections.remove(index));
+        let mut entry = match entry {
+            Some(entry) if entry.device == metadata.dev() && entry.inode == metadata.ino() => entry,
+            _ => {
+                let slot = ReadConnectionSlot::reserve().or_else(|| {
+                    // Only this thread owns its LRU. At the global cap replace one of
+                    // its entries; a thread with no entry performs an uncached read.
+                    connections.pop_front()?;
+                    ReadConnectionSlot::reserve()
+                });
+                let Some(slot) = slot else {
+                    return read(&mut open(agent_dir)?);
+                };
+                ReadConnection {
+                    path,
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    connection: open(agent_dir)?,
+                    _slot: slot,
+                }
+            }
+        };
+        // Keep the existing format validation even when an external writer changes it.
+        let version: u32 = entry
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        anyhow::ensure!(
+            version == 1,
+            "unsupported harness event spool version {version}"
+        );
+        let result = read(&mut entry.connection);
+        if connections.len() == MAX_READ_CONNECTIONS {
+            connections.pop_front();
+        }
+        connections.push_back(entry);
+        result
+    })
 }
 
 /// Bind a fresh pipe inode before exposing its name. A predecessor retains its old descriptor
@@ -142,7 +243,7 @@ pub fn enable(agent_dir: &Path, runtime_incarnation: &str) -> Result<()> {
         "unsupported harness event spool version {version}"
     );
     connection.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA user_version=1;
+        /* sqlite-large-value: allow-for-now lv-h2b2eb580b691 owner=st_drivers::harness_events TODO=chunk-or-reference-variable-columns */ "PRAGMA journal_mode=WAL; PRAGMA user_version=1;
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS snapshots (kind TEXT PRIMARY KEY, body BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS events (
@@ -158,12 +259,12 @@ pub fn enable(agent_dir: &Path, runtime_incarnation: &str) -> Result<()> {
     )?;
     let tx = connection.transaction()?;
     tx.execute(
-        "INSERT OR IGNORE INTO metadata(key,value)
+        /* sqlite-large-value: allow-for-now lv-h2db625eed9ca owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO metadata(key,value)
         SELECT 'pending-bytes', COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM events",
         [],
     )?;
     tx.execute(
-        "INSERT INTO metadata VALUES ('runtime',?1)
+        /* sqlite-large-value: allow-for-now lv-h472fa3046f75 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES ('runtime',?1)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [runtime_incarnation],
     )?;
@@ -202,68 +303,80 @@ fn append_event(tx: &Connection, kind: &str, body: &Value) -> Result<()> {
         "harness event spool is full; observation was not committed"
     );
     tx.execute(
-        "INSERT INTO events(runtime_incarnation,queued_at_ms,kind,body) VALUES (?1,?2,?3,?4)",
+        /* sqlite-large-value: allow-for-now lv-h3ab6749422e8 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO events(runtime_incarnation,queued_at_ms,kind,body) VALUES (?1,?2,?3,?4)",
         params![runtime, crate::message::now_ms(), kind, body],
     )?;
     tx.execute(
-        "UPDATE metadata SET value=?1 WHERE key='pending-bytes'",
+        /* sqlite-large-value: allow-for-now lv-ha41140108038 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "UPDATE metadata SET value=?1 WHERE key='pending-bytes'",
         [bytes + body.len() as u64],
     )?;
     Ok(())
 }
 
 pub fn read_snapshot(agent_dir: &Path, kind: &str) -> Result<Option<Vec<u8>>> {
-    Ok(open(agent_dir)?
-        .query_row("SELECT body FROM snapshots WHERE kind=?1", [kind], |row| {
-            row.get(0)
-        })
-        .optional()?)
+    with_read_connection(agent_dir, |connection| {
+        Ok(connection
+            .query_row("SELECT body FROM snapshots WHERE kind=?1", [kind], |row| {
+                row.get(0)
+            })
+            .optional()?)
+    })
 }
 
 /// Read saved provider state only when its producer belongs to `runtime`.
 /// A new runtime retains its predecessor's snapshot for durable history, but must not use it
 /// as evidence that its own provider has launched. A driver re-exec keeps the same runtime.
 pub fn read_runtime_state(agent_dir: &Path, runtime: &str) -> Result<Option<Vec<u8>>> {
-    let mut connection = open(agent_dir)?;
-    let tx = connection.transaction()?;
-    let raw: Option<Vec<u8>> = tx
-        .query_row(
-            "SELECT body FROM snapshots WHERE kind='harness-state'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(raw) = raw else { return Ok(None) };
-    let state: Value = serde_json::from_slice(&raw)?;
-    let Some(token) = state["incarnation"].as_str() else {
-        return Ok(None);
-    };
-    let owner: Option<String> = tx
-        .query_row(
-            "SELECT value FROM metadata WHERE key=?1",
-            [format!("provider-runtime:{token}")],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok((owner.as_deref() == Some(runtime)).then_some(raw))
+    with_read_connection(agent_dir, |connection| {
+        let tx = connection.transaction()?;
+        let raw: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT body FROM snapshots WHERE kind='harness-state'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else { return Ok(None) };
+        let state: Value = serde_json::from_slice(&raw)?;
+        let Some(token) = state["incarnation"].as_str() else {
+            return Ok(None);
+        };
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?1",
+                [format!("provider-runtime:{token}")],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok((owner.as_deref() == Some(runtime)).then_some(raw))
+    })
 }
 
 /// Capture the provider snapshot and its physical runtime binding together. Unlike a
 /// filtered read, this distinguishes a retained predecessor from missing/corrupt authority.
 pub fn read_bound_provider_state(agent_dir: &Path) -> Result<Option<(String, Vec<u8>)>> {
-    let mut connection = open(agent_dir)?;
-    let tx = connection.transaction()?;
-    let raw: Option<Vec<u8>> = tx.query_row(
-        "SELECT body FROM snapshots WHERE kind='harness-state'", [], |row| row.get(0),
-    ).optional()?;
-    let Some(raw) = raw else { return Ok(None); };
-    let state: Value = serde_json::from_slice(&raw)?;
-    let token = state["incarnation"].as_str().filter(|token| !token.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("provider snapshot has no ownership token"))?;
-    let runtime: String = tx.query_row(
-        "SELECT value FROM metadata WHERE key=?1", [format!("provider-runtime:{token}")], |row| row.get(0),
-    )?;
-    Ok(Some((runtime, raw)))
+    with_read_connection(agent_dir, |connection| {
+        let tx = connection.transaction()?;
+        let raw: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT body FROM snapshots WHERE kind='harness-state'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else { return Ok(None) };
+        let state: Value = serde_json::from_slice(&raw)?;
+        let token = state["incarnation"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("provider snapshot has no ownership token"))?;
+        let runtime: String = tx.query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [format!("provider-runtime:{token}")],
+            |row| row.get(0),
+        )?;
+        Ok(Some((runtime, raw)))
+    })
 }
 
 fn current_token(connection: &Connection) -> Result<Option<String>> {
@@ -296,9 +409,9 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
     if kind == "harness-state" {
         let token = value["incarnation"].as_str().unwrap();
         if current_token(&tx)?.as_deref() != Some(token) {
-            tx.execute("DELETE FROM metadata WHERE key LIKE 'provider-runtime:%' OR key LIKE 'timeline-next:%'", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hebe0839d344b owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM metadata WHERE key LIKE 'provider-runtime:%' OR key LIKE 'timeline-next:%'", [])?;
             tx.execute(
-                "INSERT INTO metadata(key,value) SELECT ?1,value FROM metadata WHERE key='runtime'",
+                /* sqlite-large-value: allow-for-now lv-h9ff38343dcd5 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata(key,value) SELECT ?1,value FROM metadata WHERE key='runtime'",
                 [format!("provider-runtime:{token}")],
             )?;
         }
@@ -312,7 +425,7 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
         );
     }
     tx.execute(
-        "INSERT INTO snapshots VALUES (?1,?2)
+        /* sqlite-large-value: allow-for-now lv-h5aa808b01da4 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES (?1,?2)
         ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
         params![kind, body],
     )?;
@@ -334,12 +447,12 @@ pub fn write_channel_todo(agent_dir: &Path, runtime: &str, fields: &Value) -> Re
     )?;
     anyhow::ensure!(bound == runtime, "channel todo runtime was superseded");
     tx.execute(
-        "INSERT OR IGNORE INTO metadata(key,value) VALUES (?1,?2)",
+        /* sqlite-large-value: allow-for-now lv-h8d7ebed4003f owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO metadata(key,value) VALUES (?1,?2)",
         params![format!("provider-runtime:{runtime}"), runtime],
     )?;
     append_event(&tx, "harness-todo", &value)?;
     tx.execute(
-        "INSERT INTO snapshots VALUES ('harness-todo',?1)
+        /* sqlite-large-value: allow-for-now lv-h37ce9c369677 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES ('harness-todo',?1)
         ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
         [serde_json::to_vec(&value)?],
     )?;
@@ -378,7 +491,7 @@ pub fn expire_state(agent_dir: &Path, expected: &Value) -> Result<()> {
     if expired.as_deref() != Some(&identity) {
         append_event(&tx, "harness-state-expired", expected)?;
         tx.execute(
-            "INSERT INTO metadata VALUES ('expired-state',?1)
+            /* sqlite-large-value: allow-for-now lv-h99dd304e01ac owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES ('expired-state',?1)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [&identity],
         )?;
@@ -389,7 +502,7 @@ pub fn expire_state(agent_dir: &Path, expected: &Value) -> Result<()> {
 }
 
 pub fn remove_snapshot(agent_dir: &Path, kind: &str) -> Result<()> {
-    open(agent_dir)?.execute("DELETE FROM snapshots WHERE kind=?1", [kind])?;
+    open(agent_dir)?.execute(/* sqlite-large-value: allow-for-now lv-heba9a216dc9b owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM snapshots WHERE kind=?1", [kind])?;
     Ok(())
 }
 
@@ -453,14 +566,14 @@ pub fn prepare_publication(
     )?;
     anyhow::ensure!(pending, "event has already been acknowledged");
     tx.execute(
-        "INSERT OR IGNORE INTO prepared VALUES (?1,?2,?3)",
+        /* sqlite-large-value: allow-for-now lv-he5774f38b4af owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO prepared VALUES (?1,?2,?3)",
         params![sequence, slot, serde_json::to_string(claim)?],
     )?;
     // Rebuild rejected todo claims from their retained event without keeping the malformed
     // pre-normalization slot as a retry target. Preparation and retirement commit together.
     if slot == "harness.todo.observed:normalized" {
         tx.execute(
-            "DELETE FROM prepared WHERE sequence=?1 AND slot='harness.todo.observed:'",
+            /* sqlite-large-value: allow-for-now lv-h3b08ca3937e7 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM prepared WHERE sequence=?1 AND slot='harness.todo.observed:'",
             [sequence],
         )?;
     }
@@ -481,10 +594,10 @@ pub fn acknowledge(agent_dir: &Path, sequence: u64) -> Result<()> {
         [sequence],
         |r| r.get(0),
     )?;
-    tx.execute("DELETE FROM prepared WHERE sequence<=?1", [sequence])?;
-    tx.execute("DELETE FROM events WHERE sequence<=?1", [sequence])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hee598eb7d3be owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM prepared WHERE sequence<=?1", [sequence])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h3edf96b2d331 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM events WHERE sequence<=?1", [sequence])?;
     tx.execute(
-        "UPDATE metadata SET value=CAST(value AS INTEGER)-?1 WHERE key='pending-bytes'",
+        /* sqlite-large-value: allow-for-now lv-hc0c3fec2c924 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "UPDATE metadata SET value=CAST(value AS INTEGER)-?1 WHERE key='pending-bytes'",
         [removed],
     )?;
     tx.commit()?;
@@ -564,7 +677,7 @@ fn append_timeline_operations(
     new_operations: &[Operation],
 ) -> Result<()> {
     tx.execute(
-        "INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-h0bbbe757fb5f owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![
             format!("timeline-next:{}", record.incarnation_id),
             record.next_sequence.to_string()
@@ -572,7 +685,7 @@ fn append_timeline_operations(
     )?;
     for operation in new_operations {
         tx.execute(
-            "INSERT INTO timeline(incarnation,source,body) VALUES (?1,?2,?3)",
+            /* sqlite-large-value: allow-for-now lv-ha5aedd1abf43 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO timeline(incarnation,source,body) VALUES (?1,?2,?3)",
             params![
                 record.incarnation_id,
                 operation.source_id.as_deref().unwrap_or(""),
@@ -581,8 +694,8 @@ fn append_timeline_operations(
         )?;
         append_event(tx, "harness-timeline", &serde_json::to_value(operation)?)?;
     }
-    tx.execute("DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
-    tx.execute("DELETE FROM timeline WHERE id IN (
+    tx.execute(/* sqlite-large-value: allow-for-now lv-ha6225173a889 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h33aca7319211 owner=st_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM timeline WHERE id IN (
         SELECT id FROM (SELECT id, SUM(length(CAST(body AS BLOB))) OVER (ORDER BY id DESC) AS retained FROM timeline)
         WHERE retained > 2097152)", [])?;
     Ok(())
@@ -622,6 +735,134 @@ pub(crate) fn read_timeline(agent_dir: &Path) -> Result<Option<Record>> {
 mod tests {
     use super::*;
     use crate::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer, claim};
+    // Keep the saturation test from deliberately denying slots to reuse assertions.
+    static CACHE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn cached_connections_are_bounded_across_threads() {
+        const THREADS: usize = 8;
+        const SEATS: usize = 200;
+        let _guard = CACHE_TEST_LOCK.lock();
+        let root = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..SEATS)
+            .map(|index| {
+                let path = root.path().join(index.to_string());
+                enable(&path, "runtime").unwrap();
+                path
+            })
+            .collect();
+        let ready = std::sync::Barrier::new(THREADS + 1);
+        let release = std::sync::Barrier::new(THREADS + 1);
+        let cached_entries = AtomicUsize::new(0);
+        #[cfg(target_os = "linux")]
+        let baseline_fds = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        std::thread::scope(|scope| {
+            for paths in paths.chunks(SEATS / THREADS) {
+                let ready = &ready;
+                let release = &release;
+                let cached_entries = &cached_entries;
+                scope.spawn(move || {
+                    for path in paths {
+                        assert!(read_snapshot(path, "harness-state").unwrap().is_none());
+                        assert!(
+                            LIVE_READ_CONNECTIONS.load(Ordering::Relaxed)
+                                <= MAX_TOTAL_READ_CONNECTIONS
+                        );
+                    }
+                    READ_CONNECTIONS.with(|connections| {
+                        cached_entries.fetch_add(connections.borrow().len(), Ordering::Relaxed);
+                    });
+                    ready.wait();
+                    release.wait();
+                    READ_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
+                });
+            }
+            ready.wait();
+            let retained = LIVE_READ_CONNECTIONS.load(Ordering::Relaxed);
+            assert!(retained <= MAX_TOTAL_READ_CONNECTIONS);
+            let entries = cached_entries.load(Ordering::Relaxed);
+            assert!(entries <= retained);
+            #[cfg(target_os = "linux")]
+            eprintln!(
+                "{SEATS} spools, {THREADS} threads: {retained} cached connections; \
+                 fd baseline={baseline_fds}, retained={}",
+                std::fs::read_dir("/proc/self/fd").unwrap().count()
+            );
+            release.wait();
+        });
+    }
+
+    #[test]
+    fn authority_reads_reuse_connections_and_observe_committed_successors() {
+        let _guard = CACHE_TEST_LOCK.lock();
+        let root = tempfile::tempdir().unwrap();
+        enable(root.path(), "runtime-a").unwrap();
+        claim(root.path(), "agent/example", "claude", "provider-a").unwrap();
+        let first = read_runtime_state(root.path(), "runtime-a").unwrap().unwrap();
+        let opens = CONNECTION_OPENS.with(std::cell::Cell::get);
+        for _ in 0..10 {
+            assert_eq!(
+                read_runtime_state(root.path(), "runtime-a").unwrap(),
+                Some(first.clone())
+            );
+            assert_eq!(
+                read_snapshot(root.path(), "harness-state").unwrap(),
+                Some(first.clone())
+            );
+            assert_eq!(
+                read_bound_provider_state(root.path()).unwrap(),
+                Some(("runtime-a".into(), first.clone()))
+            );
+        }
+        assert_eq!(CONNECTION_OPENS.with(std::cell::Cell::get), opens);
+        eprintln!("authority reads: 30/30 warm-cache hits, no connect or initialization PRAGMA");
+
+        enable(root.path(), "runtime-b").unwrap();
+        // A retained predecessor is still evidence only for its original runtime.
+        assert!(read_runtime_state(root.path(), "runtime-b").unwrap().is_none());
+        assert_eq!(
+            read_runtime_state(root.path(), "runtime-a").unwrap(),
+            Some(first.clone())
+        );
+        claim(root.path(), "agent/example", "claude", "provider-b").unwrap();
+        let opens = CONNECTION_OPENS.with(std::cell::Cell::get);
+        let current = read_runtime_state(root.path(), "runtime-b").unwrap().unwrap();
+        assert_ne!(current, first);
+        assert!(read_runtime_state(root.path(), "runtime-a").unwrap().is_none());
+        assert_eq!(
+            read_snapshot(root.path(), "harness-state").unwrap(),
+            Some(current.clone())
+        );
+        assert_eq!(
+            read_bound_provider_state(root.path()).unwrap(),
+            Some(("runtime-b".into(), current))
+        );
+        assert_eq!(CONNECTION_OPENS.with(std::cell::Cell::get), opens);
+
+        open(root.path())
+            .unwrap()
+            .pragma_update(None, "user_version", 2)
+            .unwrap();
+        assert!(read_runtime_state(root.path(), "runtime-b").is_err());
+        assert!(read_snapshot(root.path(), "harness-state").is_err());
+        assert!(read_bound_provider_state(root.path()).is_err());
+    }
+
+    #[test]
+    fn cached_authority_reads_reopen_replaced_spools() {
+        let _guard = CACHE_TEST_LOCK.lock();
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        enable(&agent, "runtime-old").unwrap();
+        claim(&agent, "agent/example", "claude", "provider-old").unwrap();
+        assert!(read_runtime_state(&agent, "runtime-old").unwrap().is_some());
+        std::fs::rename(&agent, root.path().join("retired")).unwrap();
+        enable(&agent, "runtime-new").unwrap();
+        claim(&agent, "agent/example", "claude", "provider-new").unwrap();
+        assert!(read_runtime_state(&agent, "runtime-old").unwrap().is_none());
+        assert!(read_runtime_state(&agent, "runtime-new").unwrap().is_some());
+    }
+
     #[test]
     fn committed_events_survive_reopen_and_acknowledgement() {
         let root = tempfile::tempdir().unwrap();
