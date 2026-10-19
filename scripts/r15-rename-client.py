@@ -34,7 +34,11 @@ GENERATED = {
     'clients/swift/FractalClient/Sources/FractalClient/Models.swift',
     'clients/swift/FractalClient/Sources/FractalClient/Contract.generated.swift',
 }
-SOURCE_SUFFIXES = {'.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.swift'}
+SOURCE_SUFFIXES = {
+    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.swift', '.py', '.json',
+    '.css', '.scss', '.sass', '.less', '.html', '.htm', '.vue', '.svelte',
+    '.astro', '.mdx',
+}
 EXCLUDED_ROOTS = {'scripts', 'docs', '.st', 'nix', 'buck2', '.github', 'repos'}
 
 
@@ -56,6 +60,11 @@ def selected(path: Path) -> bool:
 def rewrite(text: str, path: Path) -> str:
     if path.relative_to(ROOT).as_posix() == 'apps/ios/modules/st-fabric/build.sh':
         return text.replace('libst_fabric_bridge.a', 'libfractal_fabric_bridge.a')
+    if path.relative_to(ROOT).as_posix() == 'apps/ios/scripts/test_release_delivery.py':
+        # The isolated release fixture derives package names from source paths.
+        # Its manifests must use the same canonical names as its dependency edges.
+        text = text.replace('"@smalltalk/" + Path(relative).name',
+                            '"@fractal/" + Path(relative).name.removeprefix("fractal-")')
     for old, new in PACKAGES.items():
         text = text.replace(old, new)
     for old, new in PATHS.items():
