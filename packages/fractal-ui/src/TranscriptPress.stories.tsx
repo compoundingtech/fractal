@@ -212,8 +212,8 @@ export const InsertAbovePressedRow: Story = { play: async ({ canvasElement, abor
 export const InsertAbovePressedRowLight: Story = { ...InsertAbovePressedRow, args: { scheme: 'light' } }
 
 /** Wheel scrolling during a press gives the reader ownership; compensation stays off. */
-export const ScrollDuringPress: Story = { play: async ({ canvasElement }) => {
-  const { viewport, canvas } = await ready(canvasElement)
+export const ScrollDuringPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+  const { viewport, canvas } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
   pointer(retry, 'pointerdown', 1, 'mouse')
   viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
