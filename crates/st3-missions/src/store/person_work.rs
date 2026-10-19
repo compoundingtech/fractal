@@ -382,7 +382,7 @@ impl PersonWorkStore for Store {
             if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-hce55d0ab3402 owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
                 actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2
                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, kind], claim_from_row).optional().map_err(internal)? {
-                if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(input.actor.as_str()) {
+                if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(response_actor) {
                     let Ok((answer, summary)) = &resolved else {
                         return Err(St3Error::new("idempotency-conflict", "this response key already has another answer"));
                     };

@@ -529,12 +529,17 @@ mission "person-work" state="ready" {{
         }).unwrap();
         let item = store.attention_items(Some("person/avery")).unwrap()
             .into_iter().find(|item| item.subject == ask.subject).unwrap();
-        store.finish_person_step_authorized(&PersonStepResponse {
+        let response = PersonStepResponse {
             delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
             summary: String::new(), evidence: vec![], episode: Some(item.episode),
             idempotency_key: "assistant-projection-answer".into(),
             answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
-        }, false, Some(&authorization)).unwrap();
+        };
+        store.finish_person_step_authorized(&response, false, Some(&authorization)).unwrap();
+        // The answer is stored under the assistant principal, so a retry with the same key must
+        // match that stored actor and return the stored view, not write a second answer.
+        store.finish_person_step_authorized(&response, false, Some(&authorization)).unwrap();
+        assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().person_answers.len(), 1);
         let check = |store: &Store| {
             for subject in [&origin.subject, &ask.subject] {
                 let view = store.step_run(subject).unwrap().unwrap();
