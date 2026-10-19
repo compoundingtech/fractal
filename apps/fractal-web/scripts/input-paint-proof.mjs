@@ -17,21 +17,37 @@ const vite = await createServer({ root, configFile: false, optimizeDeps: { entri
   name: 'input-paint-proof', configureServer(server) {
     server.middlewares.use('/input-paint-proof', (_req, res) => {
       res.setHeader('Content-Type', 'text/html')
-      res.end(`<!doctype html><button id="paint">Paint</button><button id="noop">No-op during stream</button><button id="hide">Hide before paint</button><output></output>
+      res.end(`<!doctype html><div id="react"></div><button id="hide">Hide before paint</button><output></output>
 <script type="module">
+import { createElement, useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { flushSync } from 'react-dom'
 import { installInputPaint } from '/apps/fractal-web/src/telemetry/inputPaint.ts'
+import { makeFrameIngest } from '/apps/fractal-web/src/data/frameIngest.ts'
 window.samples = []
-window.stopCapture = installInputPaint({ emit: sample => window.samples.push(sample) })
-document.querySelector('#paint').onclick = () => { document.querySelector('output').textContent = 'painted' }
-document.querySelector('#noop').onclick = () => {
-  const channel = new MessageChannel()
-  channel.port1.onmessage = () => {
-    document.querySelector('output').textContent = 'streamed in another task'
-    window.streamDone = true
-    channel.port1.close(); channel.port2.close()
-  }
-  channel.port2.postMessage(undefined)
+window.streams = 0
+const ingest = makeFrameIngest({ write: ({ value }) => {
+  document.querySelector('output').textContent = value
+  window.streams++
+} })
+// Registered before telemetry: this ingest rAF precedes capture's fallback rAF.
+window.addEventListener('click', event => {
+  if (event.target.id === 'before') ingest.accept({ key: 'stream', value: 'before' })
+}, true)
+const App = () => {
+  const [count, setCount] = useState(0)
+  return createElement('div', {},
+    createElement('button', { id: 'paint', onClick: () => setCount(n => n + 1) }, 'Paint ' + count),
+    createElement('button', { id: 'stopped', onClick: event => { event.stopPropagation(); setCount(n => n + 1) } }, 'Stopped ' + count),
+    createElement('button', { id: 'before', onClick: event => event.stopPropagation() }, 'No-op pre-registered ingest'),
+    createElement('button', { id: 'after', onClick: event => {
+      event.stopPropagation()
+      ingest.accept({ key: 'stream', value: 'after' })
+    } }, 'No-op handler-registered ingest'),
+  )
 }
+flushSync(() => createRoot(document.querySelector('#react')).render(createElement(App)))
+window.stopCapture = installInputPaint({ emit: sample => window.samples.push(sample) })
 document.querySelector('#hide').onclick = () => {
   document.querySelector('output').textContent = 'unpainted'
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
@@ -55,15 +71,20 @@ try {
     if (painted.attributes.outcome !== 'painted' || painted.attributes['input.kind'] !== 'mouse' || painted.attributes.read_to_frame_ms <= 0 || painted.attributes.read_to_frame_ms > 2000) throw new Error(JSON.stringify(painted))
     await page.evaluate(() => new Promise(resolve => { let n = 0; const tick = () => ++n === 8 ? resolve() : requestAnimationFrame(tick); requestAnimationFrame(tick) }))
     if (await page.evaluate(() => window.samples.length) !== 1) throw new Error('Idle emitted input samples')
-    await page.locator('#noop').click()
-    await page.waitForFunction(() => window.streamDone)
+    await page.locator('#before').click()
+    await page.waitForFunction(() => window.streams === 1)
+    await page.locator('#after').click()
+    await page.waitForFunction(() => window.streams === 2)
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-    if (await page.evaluate(() => window.samples.length) !== 1) throw new Error('Separate-task stream mutation was attributed to a no-op click')
+    if (await page.evaluate(() => window.samples.length) !== 1) throw new Error('rAF ingest mutation was attributed to a no-op click')
+    await page.locator('#stopped').click()
+    await page.waitForFunction(() => window.samples.length === 2)
+    if (await page.evaluate(() => window.samples[1].attributes.outcome) !== 'painted') throw new Error('Stopped propagation lost the React microtask commit')
     await page.locator('#hide').click()
     const samples = await page.evaluate(() => { window.stopCapture(); return window.samples })
-    if (samples.length !== 2 || samples[1].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
-    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, separateTaskStreamExcluded: true, samples }))
-    return { status: 'pass', idleFrames: 8, separateTaskStreamExcluded: true, samples }
+    if (samples.length !== 3 || samples[2].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
+    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, stoppedReactCommitPainted: true, samples }))
+    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, stoppedReactCommitPainted: true, samples }
   }`])
 } finally {
   try { await run(['close']) } finally { await vite.close() }

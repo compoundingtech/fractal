@@ -32,13 +32,14 @@ const surface = (target: EventTarget | null): InputSurface => {
   return 'other'
 }
 
-/** A task boundary without background-tab timer clamping. */
-const nextTask = (callback: () => void): (() => void) => {
-  const channel = new MessageChannel()
-  channel.port1.onmessage = () => { cancel(); callback() }
-  const cancel = () => { channel.port1.close(); channel.port2.close() }
-  channel.port2.postMessage(undefined)
-  return cancel
+const frameBoundaries = new Set<() => void>()
+
+/** Drain input-owned records, then disconnect BEFORE stream writes or their React work.
+ * Closing rather than temporarily suspending also excludes async commits caused by ingest.
+ * This is needed even when ingest's rAF was registered before input capture.
+ */
+export const beforeInputPaintFrameIngest = (): void => {
+  for (const close of frameBoundaries) close()
 }
 
 /**
@@ -49,24 +50,25 @@ const nextTask = (callback: () => void): (() => void) => {
  * No React Profiler dependency (production React disables it). MutationObserver child/text/
  * attribute changes count as commits; no-op attributes and React commits without DOM changes
  * do not. Native value/scroll paints without a DOM mutation are deliberately outside this SLI.
- * Observation is scoped to discrete input dispatch and its microtasks: capture starts it,
- * and a posted MessageChannel task drains records and disconnects it. Stream-ingest tasks
- * after that boundary cannot create samples or coalesce pending inputs. No observer runs
- * during idle frames. A later input's DOM commit supersedes an earlier unpainted commit.
+ * React 19.2.3 queues discrete flush work in microtasks (ReactFiberRootScheduler.js:
+ * 265-267,345-346,671-692). A window bubble listener queues our drain after React's
+ * handler-scheduled microtask, before HTML's next rendering opportunity. Stopped propagation
+ * instead closes at a capture-registered rAF. An earlier-registered ingest rAF is NOT assumed
+ * to run later: makeFrameIngest explicitly drains/disconnects before any of its writes.
+ * No observation remains active during ingest's synchronous OR async React commits.
  * No timeout expires committed inputs: lifecycle termination ends them unacknowledged.
  * Event Timing is bound one-to-one by event type and exact timestamp correlation before
  * retaining its interactionId; ambiguous correlations use the paint fallback, never a
  * different input's presentation. The existing rAF + posted-task boundary handles fallback.
  */
-export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint, task = nextTask }: {
+export const installInputPaint = ({ emit, now = () => performance.now(), paint = afterNextPaint }: {
   readonly emit: (sample: InputPaintSample) => void
   readonly now?: () => number
   readonly paint?: (callback: () => void) => () => void
-  readonly task?: (callback: () => void) => () => void
 }): (() => void) => {
   const pending = new Set<Input>()
   let candidate: Input | undefined
-  let cancelTask: (() => void) | undefined
+  let cancelBoundary: (() => void) | undefined
   let disposed = false
   const finish = (input: Input, outcome: Outcome, end = now()) => {
     if (!pending.delete(input)) return
@@ -98,13 +100,15 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     input.cancel = paint(() => finish(input, 'painted'))
   }
   const closeWindow = () => {
+    if (candidate === undefined) return
     commit(observer.takeRecords())
     observer.disconnect()
-    cancelTask?.()
-    cancelTask = undefined
+    cancelBoundary?.()
+    cancelBoundary = undefined
     if (candidate?.committed === undefined && candidate !== undefined) pending.delete(candidate)
     candidate = undefined
   }
+  frameBoundaries.add(closeWindow)
   const capture = (event: Event) => {
     if (disposed || !event.isTrusted || document.visibilityState === 'hidden') return
     closeWindow()
@@ -120,7 +124,18 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     candidate = input
     pending.add(input)
     observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, characterDataOldValue: true, attributes: true, attributeOldValue: true })
-    cancelTask = task(closeWindow)
+    const closeThisInput = () => { if (candidate === input) closeWindow() }
+    const bubble = (dispatched: Event) => {
+      if (dispatched !== event) return
+      window.removeEventListener(event.type, bubble)
+      queueMicrotask(closeThisInput)
+    }
+    window.addEventListener(event.type, bubble)
+    const frame = requestAnimationFrame(closeThisInput)
+    cancelBoundary = () => {
+      window.removeEventListener(event.type, bubble)
+      cancelAnimationFrame(frame)
+    }
   }
   let eventObserver: PerformanceObserver | undefined
   if (typeof PerformanceObserver !== 'undefined' && PerformanceObserver.supportedEntryTypes.includes('event')) {
@@ -151,6 +166,7 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
     if (disposed) return
     abandon()
     disposed = true
+    frameBoundaries.delete(closeWindow)
     observer.disconnect()
     eventObserver?.disconnect()
     for (const type of events) window.removeEventListener(type, capture, true)

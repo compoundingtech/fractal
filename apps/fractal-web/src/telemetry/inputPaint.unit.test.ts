@@ -7,13 +7,15 @@ afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); vi.restor
 const setup = () => {
   let time = 100
   const callbacks = new Set<() => void>()
-  const tasks = new Set<() => void>()
+  const frames = new Map<number, FrameRequestCallback>()
+  let nextFrame = 0
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { const id = ++nextFrame; frames.set(id, callback); return id })
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
   const samples: InputPaintSample[] = []
   const listeners = vi.spyOn(window, 'addEventListener')
   const stop = installInputPaint({
     emit: (sample) => samples.push(sample), now: () => time,
     paint: (callback) => { callbacks.add(callback); return () => { callbacks.delete(callback) } },
-    task: (callback) => { tasks.add(callback); return () => { tasks.delete(callback) } },
   })
   cleanups.push(stop)
   const button = document.createElement('button')
@@ -25,9 +27,13 @@ const setup = () => {
     listener.call(window, event)
   }
   const mutate = async () => { button.textContent = String(time); await Promise.resolve() }
-  const endTask = () => { for (const callback of [...tasks]) callback() }
-  const paint = () => { endTask(); time += 16; for (const callback of [...callbacks]) callback() }
-  return { samples, input, mutate, paint, endTask, stop, advance: () => { time += 10 } }
+  const paint = () => {
+    const ready = [...frames.entries()]
+    for (const [id, callback] of ready) if (frames.delete(id)) callback(time)
+    time += 16
+    for (const callback of [...callbacks]) callback()
+  }
+  return { samples, input, mutate, paint, stop, advance: () => { time += 10 } }
 }
 it('records once after a DOM commit and paint, with only bounded contract attributes', async () => {
   const run = setup()
@@ -123,26 +129,3 @@ it('ignores unchanged attribute and text assignments', async () => {
   expect(run.samples).toEqual([])
 })
 
-it('does not attribute separate-task stream mutations or coalesce a prior real input', async () => {
-  const observe = vi.spyOn(MutationObserver.prototype, 'observe')
-  const disconnect = vi.spyOn(MutationObserver.prototype, 'disconnect')
-  const run = setup()
-  expect(observe).not.toHaveBeenCalled()
-  await run.mutate()
-  run.input(); await run.mutate(); run.endTask()
-  run.advance(); run.input('keydown'); run.endTask()
-  expect(disconnect).toHaveBeenCalled()
-  // The deterministic task seam has closed both discrete-event dispatch windows.
-  // This separate task models makeFrameIngest's streamed transcript DOM updates.
-  await new Promise<void>((resolve) => {
-    const channel = new MessageChannel()
-    channel.port1.onmessage = () => {
-      document.querySelector('button')!.textContent = 'streamed'
-      channel.port1.close(); channel.port2.close(); resolve()
-    }
-    channel.port2.postMessage(undefined)
-  })
-  expect(run.samples).toEqual([])
-  run.paint()
-  expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
-})
