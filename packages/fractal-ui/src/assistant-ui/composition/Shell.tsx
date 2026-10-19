@@ -4,6 +4,7 @@ import { interactionVars as interaction, colorVars as c, typeVars as t, radiusVa
 import { SidebarStatus as StatusGlyph } from '../sidebar/SidebarStatus'
 import { Icon } from './Icons'
 import { ChromeControl } from './ChromeControl'
+import { NarrowLayoutContext } from './NarrowLayout'
 import type { AgentStatus } from '../sidebar/model'
 
 /**
@@ -155,7 +156,10 @@ export function ThreadHeader({
   /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
   narrow?: boolean
 }) {
+  // The `narrow` prop is authoritative for the header's own controls: they size as 44px touch targets even when the host did not provide the context.
+  const inheritedNarrow = React.useContext(NarrowLayoutContext)
   return (
+    <NarrowLayoutContext.Provider value={narrow === true || inheritedNarrow}>
     <header data-testid="thread-header" {...stylex.props(styles.header, narrow && styles.headerNarrow)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <ChromeControl icon="chevron-right" label="Expand sidebar" edge="lead" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
@@ -180,6 +184,7 @@ export function ThreadHeader({
           : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
       </div>
     </header>
+    </NarrowLayoutContext.Provider>
   )
 }
 
