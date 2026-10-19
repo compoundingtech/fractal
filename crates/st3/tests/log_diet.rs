@@ -20,9 +20,13 @@
 //! posts that second's driver output, then runs four reconcile passes, the daemon's least rate
 //! while it idles. The file observer polls every second instead of every minute, and the
 //! workload waits until it records each change. Only a changed observation writes claims, so
-//! both give the claims of the minute polls. The daemon keeps its store in memory: the diet
-//! counts claims, and on a disk shared with other builds each of the workload's thousand
-//! durable writes waited tens of milliseconds. The suite runs 90 simulated seconds. The
+//! both give the claims of the minute polls. The daemon keeps its store in a file on a memory
+//! filesystem where the host has one: the diet counts claims, and on a disk shared with other
+//! builds each of the workload's thousand durable writes waited tens of milliseconds. It is not
+//! a shared-cache memory store: the observer polls on its own timer while passes run, and
+//! shared-cache connections that meet fail at once with `SQLITE_LOCKED` instead of waiting,
+//! which faulted a pass's step or failed the poll, whose retry then waits a minute. A file
+//! store's readers never wait on its writer. The suite runs 90 simulated seconds. The
 //! measurement in `doc/fleet/smalltalk/claim-log-diet` is the ten-minute run:
 //!
 //! ```sh
@@ -159,10 +163,10 @@ impl Daemon {
             .enable_all()
             .build()
             .unwrap();
-        let store = Arc::new(Store::open_memory(NODE).unwrap());
-        let notify = Arc::new(Notify::new());
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
+        let store = Arc::new(Store::open(&state_dir.join("claims.sqlite3"), NODE).unwrap());
+        let notify = Arc::new(Notify::new());
         let state = AppState {
             owning_person: None,
             store: store.clone(),
@@ -500,7 +504,12 @@ fn converge(source: &Store, target: &Store) {
 }
 
 async fn run_workload(seconds: u64) -> Report {
-    let root = tempfile::tempdir().unwrap();
+    // On a memory filesystem a durable commit does not wait for a disk; see the module comment.
+    let root = match Path::new("/dev/shm") {
+        shm if shm.is_dir() => tempfile::tempdir_in(shm),
+        _ => tempfile::tempdir(),
+    }
+    .unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("config.toml"), "version = 0\n").unwrap();
