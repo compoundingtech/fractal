@@ -18,7 +18,7 @@ const unsupportedResources = Atom.make<Feed<ResourcePage>>(unavailable({ reason:
 const unopenedResources = Atom.make<Feed<ResourcePage>>(waiting)
 
 /** Native conversation controls, retained from the former ConversationDetail header portal. */
-export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: string }) => {
+export const ConversationHeaderActions = ({ agentRef, compact = false }: { readonly agentRef: string; readonly compact?: boolean }) => {
   const source = useDataSource()
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
   const [resourcesOpen, setResourcesOpen] = React.useState(false)
@@ -38,7 +38,7 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
     : undefined
   return <div {...stylex.props(styles.actions)}>
     <Aria.DialogTrigger isOpen={resourcesOpen} onOpenChange={changeResourcesOpen}>
-      <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button)}><CompositionIcon name="folder" />Resources</Aria.Button>
+      <span title={disabledReason} {...stylex.props(styles.trigger)}><Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button)}><CompositionIcon name="folder" />Resources</Aria.Button></span>
       <Aria.ModalOverlay isDismissable {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>
           <Aria.Dialog aria-label="Agent resources" {...stylex.props(styles.dialog)}>
@@ -48,7 +48,7 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
         </Aria.Modal>
       </Aria.ModalOverlay>
     </Aria.DialogTrigger>
-    {disabledReason === undefined ? null : <span id={reasonId} {...stylex.props(styles.reason)}>{disabledReason}</span>}
+    {disabledReason === undefined ? null : <span id={reasonId} hidden={compact} {...stylex.props(styles.reason)}>{disabledReason}</span>}
     <Aria.MenuTrigger>
       <Aria.Button aria-label="Conversation menu" {...stylex.props(styles.button)}><CompositionIcon name="gear" /></Aria.Button>
       <Aria.Popover {...stylex.props(styles.popover)}>
@@ -107,6 +107,7 @@ const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { r
 const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: s.md },
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
+  trigger: { display: 'inline-flex' },
   reason: { fontSize: t.denseSize, color: c.fgMuted },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', justifyContent: 'flex-end', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { width: 380, maxWidth: 'calc(100vw - 24px)', height: '100%', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },

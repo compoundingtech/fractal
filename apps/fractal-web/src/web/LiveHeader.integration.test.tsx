@@ -148,6 +148,8 @@ describe('live header parity', () => {
     expect(button('Resources')?.disabled).toBe(true)
     const reason = document.getElementById(button('Resources')!.getAttribute('aria-describedby')!)
     expect(reason?.textContent).toBe('Read access to agent resources has not been granted.')
+    expect(reason?.hidden).toBe(true)
+    expect(button('Resources')?.parentElement?.title).toBe('Read access to agent resources has not been granted.')
     expect(host.querySelector('[data-testid="thread-header"]')?.textContent).not.toMatch(/raw-denial-code|Unknown/)
   })
 })

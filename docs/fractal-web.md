@@ -221,6 +221,9 @@ and double-click restores the default. Width persists in browser storage per rep
 host/workspace, with the conversation identity used when the workspace is unknown.
 Pointer resize updates a CSS variable and separator ARIA values without re-rendering
 the thread. Closing Changes unmounts its lazy inspector and releases its demand.
+Native header actions share one horizontal slot. On desktop, an unavailable Resources
+control retains its refusal reason as its accessible description and hover title rather
+than expanding the compact header; the narrow sheet keeps its visible explanation.
 
 ## Fractal web composer
 
