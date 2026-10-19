@@ -1487,17 +1487,6 @@ mod retry_tests {
         server.abort();
     }
 
-    #[test]
-    fn refused_routes_allow_at_most_three_attempts_per_hour_from_the_first_refusal() {
-        for jitter in [0, 200, 400, u16::MAX] {
-            let delay = fabric_refusal_delay_with_jitter(jitter);
-            assert!(delay >= Duration::from_secs(24 * 60));
-            assert!(delay <= Duration::from_secs(36 * 60));
-            let attempts = 1 + 3600 / delay.as_secs();
-            assert!(attempts <= 3, "{attempts} attempts per hour");
-        }
-    }
-
     #[tokio::test]
     async fn isolated_leaves_refuse_direct_fabric_routes_and_converge_through_the_hub() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1649,7 +1638,7 @@ mod retry_tests {
                     .contains("that member's Fabric grants")
             );
         }
-        // Busy graph, network and online events must leave both refused routes asleep.
+        // Busy graph, network and online events do not change the refusal classification.
         for round in 0..8 {
             for index in 0..3 {
                 write(index, &format!("busy-{round}-{}", names[index]));
@@ -1667,26 +1656,8 @@ mod retry_tests {
             }
             converge(&stores, &contexts).await;
         }
-        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
-        // Advance an hour on the real dialers. Let shell I/O finish in real time between
-        // advances so the command timeout measures a dial, not our simulated hour.
-        tokio::time::pause();
-        for _ in 0..6 {
-            tokio::time::advance(Duration::from_secs(10 * 60)).await;
-            tokio::time::resume();
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            tokio::time::pause();
-        }
-        tokio::time::resume();
-        let attempts = std::fs::read_to_string(&log).unwrap();
-        for name in ["amber", "cobalt"] {
-            let count = attempts.lines().filter(|line| *line == name).count();
-            assert!((2..=3).contains(&count), "{name}: {count} dials in an hour");
-            println!(
-                "isolated refusal proof: {name}: {count} direct attempts in a simulated hour; leaves converged through indigo"
-            );
-        }
-        // A refused Fabric route must not hold up another route to the same member.
+        // A grant refusal must retain the preferred route, not bypass access policy by
+        // selecting an otherwise healthy HTTP fallback.
         routes[2].send_replace(vec![
             Route::Fabric {
                 node: "cobalt".into(),
@@ -1694,31 +1665,15 @@ mod retry_tests {
             },
             Route::Http(format!("http://{}", addresses[2])),
         ]);
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while stores[1]
-                .replication_status(true, Some(fleet_id), &["cobalt".into()])
-                .unwrap()
-                .peers[0]
-                .status
-                != "up"
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("a refused Fabric route must not block the HTTP fallback");
+        tokio::time::sleep(Duration::from_millis(100)).await;
         use crate::replication::ReplicationCarrier;
         let (success, failure) = stores[1].replication_peer_transport("cobalt");
-        assert_eq!(success.unwrap().carrier, ReplicationCarrier::Loopback);
+        assert!(success.is_none(), "grant refusal must not select HTTP fallback");
         let failed_fabric = failure.unwrap();
         assert_eq!(failed_fabric.carrier, ReplicationCarrier::Fabric);
         assert_eq!(failed_fabric.fabric_route.as_deref(), Some("unknown"));
-        // A changed membership route is usable immediately, despite the grant cooldown.
-        let before_route_change = stores[1]
-            .replication_peer_transport("cobalt")
-            .0
-            .unwrap()
-            .at_unix_ms;
+        // An explicit membership route change remains usable immediately.
+        let before_route_change = 0;
         std::fs::write(&grant, addresses[2].to_string()).unwrap();
         routes[2].send_replace(vec![Route::Fabric {
             node: "cobalt-new-route".into(),
@@ -1742,7 +1697,7 @@ mod retry_tests {
             }
         })
         .await
-        .expect("a changed route must interrupt the refusal cooldown");
+        .expect("a changed route must interrupt normal refusal backoff");
         let (success, failure) = stores[1].replication_peer_transport("cobalt");
         let fabric_success = success.unwrap();
         assert_eq!(
@@ -3547,5 +3502,67 @@ mod early_recovery {
             .unwrap_err();
         assert!(unbuilt.is_builder(), "{unbuilt:?}");
         assert!(!exchange_unanswered(&anyhow::Error::new(unbuilt)));
+    }
+}
+
+#[tokio::test]
+async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route() {
+    let fleet_id = "fdf00ee7-a1f7-4ed7-a5ec-a6558b61cd92";
+    let auth = FleetAuth::test(fleet_id, &[53; 32]);
+    let fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
+    let state = PeerState::new(
+        Local(Arc::new(plain_memory("peer").unwrap())),
+        "peer".into(),
+        auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["local".into()])),
+    );
+    for (status, code) in [
+        (StatusCode::INTERNAL_SERVER_ERROR, "replication-request-failed"),
+        (StatusCode::INTERNAL_SERVER_ERROR, "replication-exchange-metadata-too-large"),
+        (StatusCode::PAYLOAD_TOO_LARGE, "replication-exchange-metadata-too-large"),
+        (StatusCode::UNAUTHORIZED, "auth-failed"),
+        (StatusCode::UNPROCESSABLE_ENTITY, "invalid-exchange"),
+        (StatusCode::OK, "invalid-protocol"),
+    ] {
+        let state = state.clone();
+        let app = Router::new().route(EXCHANGE_PATH, post(move |body: Bytes| {
+            let state = state.clone();
+            async move {
+                // A signed success carrying the wrong type exercises protocol decoding;
+                // all other cases are signed application refusals.
+                let mut response = signed_response(
+                    &state,
+                    &FleetAuth::body_digest(&body),
+                    0,
+                    serde_json::json!({"code": code}),
+                ).unwrap();
+                *response.status_mut() = status;
+                response
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = PeerConfig {
+            name: "peer".into(),
+            url: format!("http://{}", listener.local_addr().unwrap()),
+        };
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+        let error = post_signed_to::<_, Vec<String>>(
+            &replication_http_client(),
+            &peer,
+            "local",
+            &auth,
+            &fleet,
+            EXCHANGE_PATH,
+            &serde_json::json!({}),
+            false,
+        ).await.unwrap_err();
+        server.abort();
+        let mut route = 0;
+        assert_eq!(route_failure(&error), RouteFailure::Application, "{code}: {error:#}");
+        assert!(!advance_failed_route(&mut route, &error), "{code}");
+        assert_eq!(route, 0);
+        // Application failures still use the same accumulating normal backoff.
+        let mut backoff = PeerBackoff::default();
+        assert!(backoff.next() < backoff.next());
     }
 }
