@@ -3,6 +3,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -119,6 +120,8 @@ struct Journal {
     emptied: Vec<(usize, u32)>,
     receipts: Vec<usize>,
     links: Vec<usize>,
+    #[serde(default)]
+    config_fence: bool,
     committed: bool,
     before: Protection,
     #[serde(default)]
@@ -180,6 +183,84 @@ fn save(layout: &Layout, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
+const PENDING_RECEIPT: &str = ".fractal-migration-completed.pending";
+
+fn publish_receipt(directory: &Path) -> Result<()> {
+    let pending = directory.join(PENDING_RECEIPT);
+    let mut file = OpenOptions::new().create_new(true).write(true).mode(0o600).open(&pending)?;
+    file.write_all(format!("{MIGRATION_ID}\n").as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&pending, directory.join(RECEIPT_FILE))?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+const CONFIG_BACKING: &str = "config.home-manager.toml";
+const CONFIG_BACKUP: &str = ".fractal-config-before-cutover";
+const CONFIG_PENDING: &str = ".fractal-config.pending";
+const CONFIG_MARKER: &str = "\n# arn:lmig:smalltalk:2026-10-16-service-labels-fractal Home Manager legacy-generation fence\n";
+
+fn home_manager(services: &Services) -> bool {
+    matches!(services.legacy[0].name.as_str(), "smalltalk.service" | "org.nix-community.home.smalltalk")
+}
+
+fn install_config_fence(directory: &Path) -> Result<()> {
+    let mut content = fs::read(directory.join("config.toml"))?;
+    content.extend_from_slice(CONFIG_MARKER.as_bytes());
+    fs::rename(directory.join("config.toml"), directory.join(CONFIG_BACKUP))?;
+    let mut file = OpenOptions::new().create_new(true).write(true).mode(0o600).open(directory.join(CONFIG_PENDING))?;
+    file.write_all(&content)?;
+    file.sync_all()?;
+    fs::rename(directory.join(CONFIG_PENDING), directory.join(CONFIG_BACKING))?;
+    symlink(CONFIG_BACKING, directory.join("config.toml"))?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn restore_config_fence(directory: &Path) -> Result<()> {
+    if fs::symlink_metadata(directory.join(CONFIG_BACKUP)).is_ok() {
+        let config = directory.join("config.toml");
+        if fs::symlink_metadata(&config).is_ok() {
+            ensure!(fs::read_link(&config)? == Path::new(CONFIG_BACKING), "config fence changed during rollback");
+            fs::remove_file(config)?;
+        }
+        fs::rename(directory.join(CONFIG_BACKUP), directory.join("config.toml"))?;
+    }
+    for name in [CONFIG_BACKING, CONFIG_PENDING] {
+        if fs::symlink_metadata(directory.join(name)).is_ok() { fs::remove_file(directory.join(name))?; }
+    }
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn exchange(old: &Path, new: &Path) -> Result<()> {
+    let old = std::ffi::CString::new(old.as_os_str().as_bytes())?;
+    let new = std::ffi::CString::new(new.as_os_str().as_bytes())?;
+    // SAFETY: both C strings remain alive; exchange is atomic on the same filesystem.
+    #[cfg(target_os = "linux")]
+    let result = unsafe { libc::renameat2(libc::AT_FDCWD, old.as_ptr(), libc::AT_FDCWD, new.as_ptr(), libc::RENAME_EXCHANGE) };
+    #[cfg(target_os = "macos")]
+    let result = unsafe { libc::renamex_np(old.as_ptr(), new.as_ptr(), libc::RENAME_SWAP) };
+    if result != 0 { return Err(std::io::Error::last_os_error()).context("atomic directory/bridge exchange"); }
+    Ok(())
+}
+
+fn reverse_root(old: &Path, new: &Path) -> Result<()> {
+    if let Ok(target) = fs::read_link(old) {
+        ensure!(target == new && fs::symlink_metadata(new)?.is_dir(), "invalid rollback bridge");
+        exchange(old, new)?;
+    }
+    if let Ok(target) = fs::read_link(new) {
+        ensure!(target == new && fs::symlink_metadata(old)?.is_dir(), "invalid staged bridge");
+        fs::remove_file(new)?;
+    } else if new.exists() {
+        ensure!(!old.exists(), "both rollback roots exist");
+        fs::rename(new, old)?;
+    }
+    File::open(old.parent().context("root has no parent")?)?.sync_all()?;
+    Ok(())
+}
+
 fn destination_free(old: &Path, new: &Path) -> Result<()> {
     let source = fs::symlink_metadata(old).with_context(|| format!("inspect legacy directory {}", old.display()))?;
     ensure!(source.is_dir() && !source.file_type().is_symlink(), "{} must be a real legacy directory", old.display());
@@ -226,7 +307,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         validate_journal(layout, &journal, &services)?;
         if args.rollback {
             ensure!(!journal.committed, "the local API probe succeeded; rollback to legacy state is no longer permitted");
-            rollback(layout, manager, &journal)?;
+            rollback(layout, manager, &mut journal)?;
             return Ok(receipt(manager, host, "rolled-back", "legacy restored", journal.before, 0));
         }
         ensure!(journal.committed, "an interrupted host swap exists; run `fractal migrate host --rollback` before retrying");
@@ -251,6 +332,18 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     let pairs = layout.pairs(&services);
     for (index, (old, new)) in pairs.iter().enumerate() {
         if index < 2 || old.exists() { destination_free(old, new)?; }
+        if index < 2 {
+            for name in [RECEIPT_FILE, PENDING_RECEIPT] {
+                ensure!(fs::symlink_metadata(old.join(name)).is_err(), "legacy source contains reserved migration marker {name}");
+            }
+        }
+    }
+    if home_manager(&services) {
+        let config = &layout.directories[0].0;
+        for name in [CONFIG_BACKING, CONFIG_BACKUP, CONFIG_PENDING] {
+            ensure!(fs::symlink_metadata(config.join(name)).is_err(), "legacy config contains reserved migration file {name}");
+        }
+        fs::read(config.join("config.toml")).context("read Home Manager config before fencing")?;
     }
     manager.idle().await?;
     let before = manager.protection(&services.legacy[0])?;
@@ -258,13 +351,13 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         return Ok(receipt(manager, host, "dry-run: preflight passed; no changes", "legacy API listening", before, 0));
     }
     let mut journal = Journal { migration: MIGRATION_ID.into(), services, pairs,
-        moves: Vec::new(), emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), committed: false, before, after: None, gap_ms: 0 };
+        moves: Vec::new(), emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false, committed: false, before, after: None, gap_ms: 0 };
     save(layout, &journal)?;
     let attempt = swap(layout, manager, &mut journal).await;
     let (protection, gap_ms) = match attempt {
         Ok(result) => result,
         Err(error) => {
-            return match rollback(layout, manager, &journal) {
+            return match rollback(layout, manager, &mut journal) {
                 Ok(()) => Err(error).context("host cutover failed before API readiness; legacy paths and services restored"),
                 Err(rollback) => Err(error).context(format!("host cutover failed and rollback needs repair: {rollback:#}; journal {} retained", layout.journal.display())),
             };
@@ -283,13 +376,26 @@ fn receipt(manager: &impl Manager, host: &str, status: &'static str, local_api: 
     Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), local_api, effective, gap_ms }
 }
 
+fn stop_legacy(manager: &mut impl Manager, journal: &Journal) -> Result<()> {
+    // The original boot/login enablement is already durable in the journal.
+    // Disable before stop/rename so a reboot cannot recreate an empty st3 root.
+    for unit in &journal.services.legacy { manager.enable(unit, false)?; }
+    for unit in journal.services.legacy.iter().rev().filter(|unit| unit.running) { manager.stop(unit)?; }
+    Ok(())
+}
+
 async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<(Protection, u128)> {
     // Quiescence is checked again immediately before changing service state.
     manager.idle().await?;
     let stopped_at = Instant::now();
-    for unit in journal.services.legacy.iter().rev().filter(|unit| unit.running) { manager.stop(unit)?; }
+    stop_legacy(manager, journal)?;
     let state_lock = st3::node_identity::lock_after_stop(&layout.directories[1].0).await
         .context("legacy daemon still owns its state after service stop")?;
+    if home_manager(&journal.services) {
+        journal.config_fence = true;
+        save(layout, journal)?;
+        install_config_fence(&layout.directories[0].0)?;
+    }
     for index in 0..journal.pairs.len() {
         let (old, new) = &journal.pairs[index];
         if !old.exists() { continue; }
@@ -300,20 +406,24 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
             fs::remove_dir(new)?;
         }
         journal.moves.push(index);
+        if index < 2 { journal.links.push(index); }
         save(layout, journal)?;
-        ensure!(!new.exists(), "destination appeared during cutover: {}", new.display());
-        fs::rename(old, new).with_context(|| format!("rename {} to {}", old.display(), new.display()))?;
+        ensure!(fs::symlink_metadata(new).is_err(), "destination appeared during cutover: {}", new.display());
+        if index < 2 {
+            // A staged self-link becomes the legacy bridge in one atomic swap:
+            // old config/state is never absent, even across a crash or reboot.
+            symlink(new, new)?;
+            exchange(old, new)?;
+        } else {
+            fs::rename(old, new).with_context(|| format!("rename {} to {}", old.display(), new.display()))?;
+        }
+        File::open(old.parent().context("source has no parent")?)?.sync_all()?;
     }
     for index in 0..2 {
-        let (old, new) = &journal.pairs[index];
+        let (_, new) = &journal.pairs[index];
         journal.receipts.push(index);
         save(layout, journal)?;
-        fs::write(new.join(RECEIPT_FILE), format!("{MIGRATION_ID}\n"))?;
-        journal.links.push(index);
-        save(layout, journal)?;
-        symlink(new, old)?;
-        File::open(new.join(RECEIPT_FILE))?.sync_all()?;
-        File::open(new)?.sync_all()?;
+        publish_receipt(new)?;
     }
     // launchd opens StandardOutPath before exec, so its parent must already exist.
     fs::create_dir_all(layout.directories[1].1.join("logs"))?;
@@ -331,32 +441,35 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     Ok((protection, stopped_at.elapsed().as_millis()))
 }
 
-fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &Journal) -> Result<()> {
+fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<()> {
     for unit in journal.services.target.iter().rev() {
         manager.stop(unit)?;
         manager.enable(unit, false)?;
     }
-    for index in journal.links.iter().rev() {
-        let (old, new) = &journal.pairs[*index];
-        if let Ok(target) = fs::read_link(old) {
-            ensure!(target == *new, "refusing to remove unrelated rollback link {}", old.display());
-            fs::remove_file(old)?;
-        }
-    }
     for index in journal.receipts.iter().rev() {
         let path = journal.pairs[*index].1.join(RECEIPT_FILE);
+        let pending = journal.pairs[*index].1.join(PENDING_RECEIPT);
+        if pending.exists() { fs::remove_file(pending)?; }
         if path.exists() {
             ensure!(fs::read_to_string(&path)? == format!("{MIGRATION_ID}\n"), "receipt changed during rollback: {}", path.display());
             fs::remove_file(path)?;
         }
     }
-    for index in journal.moves.iter().rev() {
-        let (old, new) = &journal.pairs[*index];
-        if new.exists() {
+    while let Some(index) = journal.moves.last().copied() {
+        let (old, new) = &journal.pairs[index];
+        if index < 2 {
+            reverse_root(old, new)?;
+        } else if new.exists() {
             ensure!(!old.exists(), "both rollback paths exist: {} and {}", old.display(), new.display());
             fs::rename(new, old)?;
         }
+        File::open(old.parent().context("source has no parent")?)?.sync_all()?;
+        // Persist reverse progress before recreating an empty destination.
+        // If killed after rename but before save, new is absent on replay.
+        journal.moves.pop();
+        save(layout, journal)?;
     }
+    if journal.config_fence { restore_config_fence(&layout.directories[0].0)?; }
     for (index, mode) in &journal.emptied {
         let new = &journal.pairs[*index].1;
         if !new.exists() {
@@ -365,8 +478,8 @@ fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &Journal) -> R
         }
     }
     manager.reload()?;
-    for unit in journal.services.legacy.iter().filter(|unit| unit.running) {
-        manager.start(unit)?;
+    for unit in &journal.services.legacy {
+        if unit.running { manager.start(unit)?; }
         manager.enable(unit, unit.enabled)?;
     }
     fs::remove_file(&layout.journal)?;

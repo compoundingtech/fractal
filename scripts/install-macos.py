@@ -216,6 +216,22 @@ def foreign_fractal_on_path(destination):
     return False
 
 
+def point_direct_service_at_app(plist, executable):
+    # Home Manager owns wrapper argv (including guards, config and state paths).
+    # Only known direct CLI daemon commands can safely have argv[0] replaced.
+    args = plist.get('ProgramArguments') or []
+    if len(args) < 2 or args[1] not in ('up', 'daemon', 'replication-worker'):
+        return False
+    if plist.get('Program', args[0]) != args[0]:
+        return False
+    if args[0] == executable:
+        return False
+    if 'Program' in plist:
+        plist['Program'] = executable
+    args[0] = executable
+    return True
+
+
 
 def backup(home, job, stage_fractal=False):
     previous = Path(job) / 'previous-app'
@@ -226,10 +242,22 @@ def backup(home, job, stage_fractal=False):
         command(['/usr/bin/ditto', current, previous])
     plists = Path(job) / 'previous-launchd'
     plists.mkdir(exist_ok=True)
+    disabled = {}
+    if stage_fractal:
+        output = command(['launchctl', 'print-disabled', 'gui/' + str(os.getuid())])
+        disabled = {label: value == 'true' for label, value in
+                    re.findall(r'^\s*"([^"]+)"\s*=>\s*(true|false)\s*$', output, re.M)}
+    definitions = {}
     for service in service_labels(stage_fractal):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
         if path.exists():
             shutil.copy2(path, plists / path.name)
+        definitions[service] = {'present': path.exists()}
+        if stage_fractal:
+            # No override means enabled by default. launchctl has no per-label
+            # unset operation; restore that effective state with `enable`.
+            definitions[service]['disabled'] = disabled.get(service)
+    write_atomic(Path(job) / 'previous-launchd.json', json.dumps(definitions).encode())
     entries = {}
     previous_bin = Path(job) / 'previous-bin'
     previous_bin.mkdir(exist_ok=True)
@@ -295,8 +323,7 @@ def install(app, home, job, stage_fractal=False):
             if not path.exists():
                 continue
             plist = plistlib.loads(path.read_bytes())
-            executable = (plist.get('ProgramArguments') or [plist.get('Program')])[0]
-            if executable != str(binaries(fixed(home))['st3']):
+            if point_direct_service_at_app(plist, str(binaries(fixed(home))['st3'])):
                 require_unloaded(label)
     retired = bin_dir(home) / 'stui'
     if retired.is_dir():
@@ -330,13 +357,8 @@ def install(app, home, job, stage_fractal=False):
         if not path.exists():
             continue
         plist = plistlib.loads(path.read_bytes())
-        if plist.get('ProgramArguments'):
-            plist['ProgramArguments'][0] = str(binaries(fixed(home))['st3'])
-        elif 'Program' in plist:
-            plist['Program'] = str(binaries(fixed(home))['st3'])
-        else:
-            raise RuntimeError('launchd service has no executable: ' + str(path))
-        write_atomic(path, plistlib.dumps(plist))
+        if point_direct_service_at_app(plist, str(binaries(fixed(home))['st3'])):
+            write_atomic(path, plistlib.dumps(plist))
     command([LSREGISTER, '-f', fixed(home)])
     if stage_fractal:
         # Native staging renders complete future-state definitions and disables
@@ -348,6 +370,10 @@ def install(app, home, job, stage_fractal=False):
 
 
 def restore(home, job, had_app):
+    definitions = json.loads((Path(job) / 'previous-launchd.json').read_text())
+    for service, prior in definitions.items():
+        if 'disabled' in prior:
+            require_unloaded(service)
     if had_app:
         previous = Path(job) / 'previous-app'
         metadata = json.loads((previous / 'Contents/Resources/deploy-payload.json').read_text())
@@ -360,10 +386,16 @@ def restore(home, job, had_app):
             if moved.exists():
                 shutil.rmtree(moved)
             os.replace(current, moved)
-    for original in (Path(job) / 'previous-launchd').glob('*.plist'):
-        # Only definitions captured by this transaction are eligible for restore.
-        if original.exists():
-            write_atomic(Path(home) / 'Library/LaunchAgents' / original.name, original.read_bytes())
+    for service, prior in definitions.items():
+        path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
+        if prior['present']:
+            original = Path(job) / 'previous-launchd' / path.name
+            write_atomic(path, original.read_bytes())
+        else:
+            path.unlink(missing_ok=True)
+        if 'disabled' in prior:
+            command(['launchctl', 'disable' if prior['disabled'] else 'enable',
+                     'gui/' + str(os.getuid()) + '/' + service])
 
     for name, prior in json.loads((Path(job) / 'previous-bin.json').read_text()).items():
         path = bin_dir(home) / name

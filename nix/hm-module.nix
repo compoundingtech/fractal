@@ -78,6 +78,28 @@ let
   targetState = "${config.xdg.stateHome}/fractal";
   receipt = "${targetState}/.fractal-migration-completed";
   receiptMarker = "arn:lmig:smalltalk:2026-10-16-state-dirs-fractal";
+  configFenceMarker = "# arn:lmig:smalltalk:2026-10-16-service-labels-fractal Home Manager legacy-generation fence";
+  configFenceName = "config.home-manager.toml";
+  configFence = "${config.xdg.configHome}/fractal/${configFenceName}";
+  configText =
+    "person = ${builtins.toJSON cfg.person}\n"
+    + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
+    + lib.optionalString (cfg.seatPriority != null) "seat_priority = ${builtins.toJSON cfg.seatPriority}\n"
+    + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
+    + "state_dir = ${builtins.toJSON (if completed then targetState else cfg.stateDir)}\n"
+    + lib.optionalString (cfg.ptyRoot != null) "pty_root = ${builtins.toJSON (if completed then targetArgs cfg.ptyRoot else cfg.ptyRoot)}\n"
+    + lib.optionalString (cfg.socket != null) "socket = ${builtins.toJSON (if completed then targetArgs cfg.socket else cfg.socket)}\n"
+    + lib.optionalString (cfg.clientGatewaySocket != null) "client_gateway_socket = ${builtins.toJSON (if completed then targetArgs cfg.clientGatewaySocket else cfg.clientGatewaySocket)}\n";
+  completedConfig = pkgs.writeText "fractal-config.toml" "${configText}\n${configFenceMarker}\n";
+  configFenceReady = ''
+    config=${lib.escapeShellArg "${config.xdg.configHome}/fractal/config.toml"}
+    fence=${lib.escapeShellArg configFence}
+    [ -L "$config" ] && [ "$(${pkgs.coreutils}/bin/readlink "$config")" = ${lib.escapeShellArg configFenceName} ] || exit 1
+    [ -f "$fence" ] && [ ! -L "$fence" ] || exit 1
+    marker=
+    while IFS= read -r line; do marker=$line; done < "$fence"
+    [ "$marker" = ${lib.escapeShellArg configFenceMarker} ] || exit 1
+  '';
   targetExecutable = if externallyManaged then cfg.binary.path else "${targetState}/bin/st3";
   targetArgs = lib.replaceStrings [ cfg.stateDir ] [ targetState ];
   targetUpArgs = map targetArgs upArgs ++ [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
@@ -122,6 +144,8 @@ let
   targetPlist = {
     Label = "com.compoundingtech.fractal";
     ProgramArguments = [ (toString targetLaunchScript) ];
+    RunAtLoad = true;
+    KeepAlive.SuccessfulExit = false;
     EnvironmentVariables = targetEnvironment;
     ProcessType = "Interactive";
     SoftResourceLimits.NumberOfFiles = 8192;
@@ -242,6 +266,18 @@ in
     assertions = lib.optional staging {
       assertion = cfg.stateDir == "${config.xdg.stateHome}/st3";
       message = "services.smalltalk.fractalMigration requires the default st3 stateDir.";
+    } ++ lib.optional staging {
+      assertion = !(config.xdg.configFile."st3/config.toml".force or false)
+        && !(builtins.any (forced: forced) (lib.mapAttrsToList (name: file:
+          let
+            target = file.target or name;
+            absolute = if lib.hasPrefix "/" target then target else "${config.home.homeDirectory}/${target}";
+          in
+          (file.force or false)
+          && (absolute == "${config.xdg.configHome}/st3/config.toml"
+            || lib.hasPrefix "${lib.removeSuffix "/" absolute}/" "${config.xdg.configHome}/st3/config.toml")
+        ) config.home.file));
+      message = "Fractal migration requires unforced legacy config ownership; remove forced old generations before cutover.";
     };
     home.file = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin) {
       "Library/LaunchAgents/com.compoundingtech.fractal.plist".text =
@@ -251,24 +287,24 @@ in
           text = lib.generators.toPlist { escape = true; } targetApplyPlist;
         };
     };
-    home.activation.fractalMigrationPreflight = mkIf staging (lib.hm.dag.entryBetween
+    home.activation.fractalMigrationPreflight = lib.hm.dag.entryBetween
       [ "writeBoundary" ] [ ] ''
         ${if completed then ''
-          if ! ${targetGuard}; then
-            echo "Fractal completed phase requires migration receipts, migrated directories, and an inactive legacy daemon. Run fractal migrate host first." >&2
+          if ! (${targetGuard} && (set -eu; ${configFenceReady})); then
+            echo "Fractal completed phase requires migration receipts, migrated directories, the persistent config fence, and an inactive legacy daemon. Run fractal migrate host first." >&2
             exit 1
           fi
         '' else ''
           for receipt in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" ]}; do
-            if printf '%s\n' ${lib.escapeShellArg receiptMarker} | ${pkgs.diffutils}/bin/cmp -s - "$receipt"; then
+            if [ -e "$receipt" ] || [ -L "$receipt" ]; then
               echo 'Fractal host cutover has completed. Set services.smalltalk.fractalMigration.phase = "completed" before activating Home Manager.' >&2
               exit 1
             fi
           done
         ''}
-      '');
+      '';
     home.activation.fractalStageDisabled = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin)
-      (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      (lib.hm.dag.entryBetween [ "linkGeneration" ] [ "writeBoundary" ] ''
         if [[ -z "''${DRY_RUN_CMD:-}" ]]; then
           for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
             if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
@@ -324,15 +360,26 @@ in
           )
         fi
       '');
-    xdg.configFile."st3/config.toml".text =
-      "person = ${builtins.toJSON cfg.person}\n"
-      + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
-      + lib.optionalString (cfg.seatPriority != null) "seat_priority = ${builtins.toJSON cfg.seatPriority}\n"
-      + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
-      + "state_dir = ${builtins.toJSON cfg.stateDir}\n"
-      + lib.optionalString (cfg.ptyRoot != null) "pty_root = ${builtins.toJSON cfg.ptyRoot}\n"
-      + lib.optionalString (cfg.socket != null) "socket = ${builtins.toJSON cfg.socket}\n"
-      + lib.optionalString (cfg.clientGatewaySocket != null) "client_gateway_socket = ${builtins.toJSON cfg.clientGatewaySocket}\n";
+    xdg.configFile."st3/config.toml" = mkIf (!completed) { text = configText; };
+    # The host migrator owns this foreign symlink. Keeping it outside home.file
+    # fences immutable old generations in checkLinkTargets, including backup mode.
+    home.activation.fractalConfig = mkIf completed (lib.hm.dag.entryBetween
+      [ (if pkgs.stdenv.hostPlatform.isLinux then "reloadSystemd" else "setupLaunchAgents") ]
+      [ "writeBoundary" ] ''
+        if [[ -z "''${DRY_RUN_CMD:-}" ]]; then
+          (
+            set -eu
+            ${configFenceReady}
+            if ! ${pkgs.diffutils}/bin/cmp -s ${completedConfig} "$fence"; then
+              temporary=$(${pkgs.coreutils}/bin/mktemp "''${fence}.XXXXXX")
+              trap '${pkgs.coreutils}/bin/rm -f "$temporary"' EXIT
+              ${pkgs.coreutils}/bin/cp ${completedConfig} "$temporary"
+              ${pkgs.coreutils}/bin/chmod 600 "$temporary"
+              ${pkgs.coreutils}/bin/mv -f "$temporary" "$fence"
+            fi
+          )
+        fi
+      '');
 
     # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk.service.
     systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux (lib.optionalAttrs (!completed) {
@@ -463,10 +510,7 @@ in
     } // lib.optionalAttrs completed ({
       fractal = {
         enable = true;
-        config = targetPlist // {
-          RunAtLoad = true;
-          KeepAlive.SuccessfulExit = false;
-        };
+        config = targetPlist;
       };
     } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
       fractal-apply = {

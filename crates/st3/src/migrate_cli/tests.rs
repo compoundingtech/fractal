@@ -10,6 +10,7 @@ struct FakeManager {
     target_protection: Option<Protection>,
     fail_target_enable_once: bool,
     omit_missing: bool,
+    fail_legacy_start_once: bool,
 }
 
 impl FakeManager {
@@ -45,6 +46,10 @@ impl Manager for FakeManager {
 
     fn start(&mut self, unit: &Unit) -> Result<()> {
         self.events.push(format!("start:{}", unit.name));
+        if self.fail_legacy_start_once && self.services.legacy.iter().any(|old| old.name == unit.name) {
+            self.fail_legacy_start_once = false;
+            bail!("injected legacy restart interruption");
+        }
         self.unit_mut(&unit.name)?.running = true;
         Ok(())
     }
@@ -150,7 +155,7 @@ impl Fixture {
             root, layout,
             manager: FakeManager { services, events: Vec::new(), idle_calls: 0,
                 idle_failure: None, probe_failure: false, target_protection: None,
-                fail_target_enable_once: false, omit_missing: false },
+                fail_target_enable_once: false, omit_missing: false, fail_legacy_start_once: false },
         })
     }
 
@@ -376,7 +381,7 @@ async fn explicit_rollback_recovers_an_interrupted_uncommitted_swap() -> Result<
         symlink(new, old)?;
     }
     let journal = Journal { migration: MIGRATION_ID.into(), services, moves: (0..pairs.len()).collect(),
-        pairs, emptied: Vec::new(), receipts: vec![0, 1], links: vec![0, 1], committed: false,
+        pairs, emptied: Vec::new(), receipts: vec![0, 1], links: vec![0, 1], config_fence: false, committed: false,
         before: memory_protection(), after: None, gap_ms: 0 };
     save(&fixture.layout, &journal)?;
     fixture.manager.services.legacy.iter_mut().for_each(|unit| unit.running = false);
@@ -429,6 +434,175 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
     for (index, (old, new)) in pairs.iter().skip(2).enumerate() {
         assert_eq!(*old, dropins(&services.legacy[index].file));
         assert_eq!(*new, dropins(&services.target[index].file));
+    }
+    Ok(())
+}
+
+fn interrupted_journal(fixture: &Fixture) -> Journal {
+    Journal {
+        migration: MIGRATION_ID.into(), services: fixture.manager.services.clone(),
+        pairs: fixture.layout.pairs(&fixture.manager.services), moves: Vec::new(),
+        emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false,
+        committed: false, before: memory_protection(), after: None, gap_ms: 0,
+    }
+}
+
+#[tokio::test]
+async fn reboot_after_root_exchange_cannot_start_legacy_or_fork_state() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.manager.services.legacy[1].running = false;
+    let mut journal = interrupted_journal(&fixture);
+    save(&fixture.layout, &journal)?;
+    stop_legacy(&mut fixture.manager, &journal)?;
+    assert!(fixture.manager.services.legacy.iter().all(|unit| !unit.enabled && !unit.running));
+    let first_stop = fixture.manager.events.iter().position(|event| event.starts_with("stop:")).unwrap();
+    assert_eq!(first_stop, journal.services.legacy.len());
+    journal.moves.push(1);
+    journal.links.push(1);
+    save(&fixture.layout, &journal)?;
+    let (old, new) = &journal.pairs[1];
+    symlink(new, new)?;
+    exchange(old, new)?;
+    // Reboot starts enabled jobs only. No legacy job can recreate a root;
+    // immutable generations still resolve the same authority through old.
+    assert!(!fixture.manager.services.legacy.iter().any(|unit| unit.enabled));
+    assert_eq!(fs::metadata(old)?.ino(), fs::metadata(new)?.ino());
+    fixture.run(false, true).await?;
+    assert!(fixture.manager.services.legacy.iter().all(|unit| unit.enabled));
+    assert!(!fixture.manager.services.legacy[1].running);
+    assert_eq!(fs::read(old.join("nested/authority"))?, b"preserve these exact bytes\0\xff");
+    Ok(())
+}
+
+#[tokio::test]
+async fn rollback_replay_after_empty_destination_recreation_and_restart_failure() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    for (_, new) in &fixture.layout.directories {
+        fs::create_dir(new)?;
+        fs::set_permissions(new, fs::Permissions::from_mode(0o750))?;
+    }
+    fixture.manager.probe_failure = true;
+    fixture.manager.fail_legacy_start_once = true;
+    let error = fixture.run(false, false).await.unwrap_err();
+    assert!(format!("{error:#}").contains("rollback needs repair"));
+    let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+    assert!(journal.moves.is_empty());
+    fixture.run(false, true).await?;
+    for (old, new) in &fixture.layout.directories {
+        assert_eq!(fs::read(old.join("nested/authority"))?, b"preserve these exact bytes\0\xff");
+        assert!(fs::read_dir(new)?.next().is_none());
+        assert_eq!(fs::metadata(new)?.permissions().mode() & 0o777, 0o750);
+    }
+    assert!(!fixture.layout.journal.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_receipt_publication_is_owned_and_recoverable() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let before = fixture.snapshot()?;
+    let mut journal = interrupted_journal(&fixture);
+    journal.moves.push(0);
+    journal.links.push(0);
+    journal.receipts.push(0);
+    save(&fixture.layout, &journal)?;
+    stop_legacy(&mut fixture.manager, &journal)?;
+    let (old, new) = &journal.pairs[0];
+    symlink(new, new)?;
+    exchange(old, new)?;
+    fs::write(new.join(PENDING_RECEIPT), b"arn:partial")?;
+    assert!(!new.join(RECEIPT_FILE).exists());
+    fixture.run(false, true).await?;
+    assert_eq!(fixture.snapshot()?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reserved_source_markers_are_never_claimed_by_rollback() -> Result<()> {
+    for name in [PENDING_RECEIPT, RECEIPT_FILE] {
+        let mut fixture = Fixture::new()?;
+        fs::write(fixture.layout.directories[0].0.join(name), b"foreign")?;
+        let before = fixture.snapshot()?;
+        assert!(fixture.run(false, false).await.is_err());
+        assert_eq!(fixture.snapshot()?, before);
+        assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
+
+#[test]
+fn atomic_bridge_recovery_handles_both_exchange_crash_boundaries() -> Result<()> {
+    for exchanged in [false, true] {
+        let fixture = Fixture::new()?;
+        let (old, new) = &fixture.layout.directories[0];
+        let inode = fs::metadata(old)?.ino();
+        symlink(new, new)?;
+        if exchanged { exchange(old, new)?; }
+        assert_eq!(fs::metadata(old)?.ino(), inode);
+        reverse_root(old, new)?;
+        reverse_root(old, new)?;
+        assert_eq!(fs::metadata(old)?.ino(), inode);
+        assert!(fs::symlink_metadata(new).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn home_manager_config_fence_restores_original_symlink_at_every_publication_boundary() -> Result<()> {
+    for boundary in ["intent", "backup", "partial", "published"] {
+        let fixture = Fixture::new()?;
+        let directory = &fixture.layout.directories[0].0;
+        let original = fixture.root.path().join("immutable-config");
+        fs::write(&original, b"node = \"test\"\n")?;
+        symlink(&original, directory.join("config.toml"))?;
+        let inode = fs::symlink_metadata(directory.join("config.toml"))?.ino();
+        if boundary == "published" {
+            install_config_fence(directory)?;
+            assert_eq!(fs::read_link(directory.join("config.toml"))?, Path::new(CONFIG_BACKING));
+            assert!(fs::read_to_string(directory.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
+        } else if boundary != "intent" {
+            fs::rename(directory.join("config.toml"), directory.join(CONFIG_BACKUP))?;
+            if boundary == "partial" { fs::write(directory.join(CONFIG_PENDING), b"partial")?; }
+        }
+        restore_config_fence(directory)?;
+        restore_config_fence(directory)?;
+        assert_eq!(fs::read_link(directory.join("config.toml"))?, original);
+        assert_eq!(fs::symlink_metadata(directory.join("config.toml"))?.ino(), inode);
+        assert!(!directory.join(CONFIG_PENDING).exists());
+        assert!(!directory.join(CONFIG_BACKING).exists());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn home_manager_cutover_retains_fence_and_failure_restores_original_config() -> Result<()> {
+    for failed in [false, true] {
+        let mut fixture = Fixture::new()?;
+        let old = &mut fixture.manager.services.legacy[0];
+        let name = if cfg!(target_os = "macos") { "org.nix-community.home.smalltalk" } else { "smalltalk.service" };
+        let filename = if cfg!(target_os = "macos") { format!("{name}.plist") } else { name.into() };
+        let file = old.file.parent().unwrap().join(filename);
+        fs::rename(&old.file, &file)?;
+        fs::rename(dropins(&old.file), dropins(&file))?;
+        old.name = name.into();
+        old.file = file;
+        let immutable = fixture.root.path().join("immutable-config");
+        fs::write(&immutable, b"node = \"test\"\n")?;
+        symlink(&immutable, fixture.layout.directories[0].0.join("config.toml"))?;
+        let before = fixture.snapshot()?;
+        fixture.manager.probe_failure = failed;
+        let result = fixture.run(false, false).await;
+        if failed {
+            assert!(result.is_err());
+            assert_eq!(fixture.snapshot()?, before);
+        } else {
+            result?;
+            let (legacy, target) = &fixture.layout.directories[0];
+            assert_eq!(fs::read_link(target.join("config.toml"))?, Path::new(CONFIG_BACKING));
+            assert_eq!(fs::read(legacy.join("config.toml"))?, fs::read(target.join(CONFIG_BACKING))?);
+            assert!(fs::read_to_string(target.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
+            assert!(!target.join(PENDING_RECEIPT).exists());
+        }
     }
     Ok(())
 }

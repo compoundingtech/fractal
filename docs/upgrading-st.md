@@ -123,25 +123,33 @@ are idle. Preserve the backups above. Do not move named instances or workspace r
    same-filesystem renames. Both service families running is a hard error. A populated
    `~/.config/fractal` or `~/.local/state/fractal` is never merged or overwritten, even if it
    has a receipt. Move the unrelated dotfiles Fractal TUI data to `fractalite` first.
-3. Run `fractal migrate host --json` and retain its host receipt. It stops legacy services,
-   waits for their state-directory lock, renames config/state and each **whole** service
-   `.d` directory, then leaves the old config/state paths as symlinks. Both destinations
-   receive `.fractal-migration-completed` containing exactly
+3. Run `fractal migrate host --json` and retain its host receipt. It persistently disables
+   legacy boot/login activation **before** stopping services and waiting for their state lock.
+   Atomic directory/bridge exchanges move config/state without ever leaving an absent legacy
+   root; each **whole** service `.d` directory is renamed. Both destinations receive an
+   atomically published `.fractal-migration-completed` containing exactly
    `arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` and a newline.
 4. The target daemon must answer the local health API as the same node: `Type=simple` alone
    is not readiness. The receipt reports **local API listening**, the measured gap and,
    on Linux, effective `memory.swap.max` and `MemoryLow` read from the daemon's cgroup.
    Changed memory protection or failure before readiness triggers automatic rollback.
-   Only after readiness are legacy definitions disabled/removed and target workers enabled.
+   Only after readiness are legacy definitions removed and target workers enabled.
 5. For Home Manager, select `fractalMigration.phase = "completed"` before the next
-   activation. Reactivating the staging generation after receipts exist is deliberately
-   refused, so it cannot bootstrap a legacy launchd job again.
+   activation. Legacy and staging generations reject receipt-bearing roots. A persistent
+   foreign `config.toml -> config.home-manager.toml` symlink also blocks immutable older
+   generations at their normal collision check, including backup modes. Completed activation
+   updates only the guarded backing TOML. Before cutover, remove retained generations that
+   force ownership of the legacy config or a containing directory: Home Manager's explicit
+   `force = true` bypasses collision checks and is not a supported migration configuration.
 
 The write-ahead journal lives at
 `${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`, recording the service plan,
-moves, readiness commit and before/after memory protection. If the CLI is interrupted before
-readiness, use `fractal migrate host --rollback` and then retry the cutover. If readiness
-already committed, rerun `fractal migrate host` to finish retirement; rollback is refused.
+moves, original service enablement, readiness commit and before/after memory protection.
+If interrupted before readiness, use `fractal migrate host --rollback` and then retry.
+Rollback persists reverse progress before recreating empty destinations, so recovery can
+itself be interrupted and retried; it restores the original Home Manager config object.
+If readiness already committed, rerun `fractal migrate host` to finish retirement; rollback
+is refused.
 The gap has a five-minute startup budget (individual manager calls are bounded at 30 seconds,
 and the API probe at 30 seconds); an exhausted pre-start budget restores legacy state.
 The old-path symlinks remain for already-running seats during the migration bridge.

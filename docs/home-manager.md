@@ -80,10 +80,13 @@ Apply that Home Manager configuration first. It installs `fractal.service` and,
 when declarations are configured, `fractal-apply.service` on Linux. Neither unit
 has `WantedBy`; staging does not enable or start them. On macOS it writes
 `~/Library/LaunchAgents/com.compoundingtech.fractal.plist` and the optional
-`com.compoundingtech.fractal-apply.plist` without loading them. These plists have
-neither `RunAtLoad` nor `KeepAlive`, and are deliberately outside Home Manager's
-automatic launchd agent lifecycle. This module does not manage replication;
-retain your existing replication setup and include it in the host cutover.
+`com.compoundingtech.fractal-apply.plist` without loading them. The daemon plist
+already includes `RunAtLoad` and crash-restart `KeepAlive` flags for the eventual
+cutover. Persistent launchd disablement, not missing lifecycle flags, prevents
+staging from starting it; staging never bootstraps either job. The staged plists
+remain outside Home Manager's automatic launchd agent lifecycle. This module does
+not manage replication; retain your existing replication setup and include it in
+the host cutover.
 
 Staging retains the existing legacy service definitions unchanged, so it does
 not intentionally restart or stop the legacy daemon. Stage the same package
@@ -116,13 +119,35 @@ services.smalltalk.fractalMigration.phase = "completed";
 
 Apply Home Manager again to complete the declarative ownership handoff. This
 phase removes legacy definitions and manages only the Fractal services. It
-requires valid migration receipts, migrated directories, and an inactive legacy
-daemon **before** activation's write boundary. The stage phase also fails before
-that boundary once a completed receipt exists, requiring the explicit completed
-configuration instead of resurrecting the legacy service. Completed services
-can start normally on subsequent activation/login; their runtime guards remain
-in force. Do not return to the legacy phase or a pre-staging module generation
-after migrating the host.
+requires valid migration receipts, migrated directories, an inactive legacy
+daemon, and the persistent configuration fence **before** activation's write
+boundary. Both legacy and stage phases fail before that boundary if either
+receipt path exists (including an incomplete receipt), requiring the explicit
+completed configuration instead of resurrecting the legacy service. Completed
+services can start normally on subsequent activation/login; their runtime guards
+remain in force.
+
+The host cutover preserves a foreign `fractal/config.toml` symlink pointing to
+`config.home-manager.toml`, a regular TOML file whose final line is
+`# arn:lmig:smalltalk:2026-10-16-service-labels-fractal Home Manager legacy-generation fence`.
+Completed activation atomically updates that backing file with the marker intact;
+neither configuration path is owned by Home Manager's file linker. Through the
+legacy directory bridge, an immutable pre-cutover generation sees this foreign
+symlink and fails its existing `checkLinkTargets` step before it can rewrite the
+binary, config, or service definitions. The marker makes the contents unequal
+even when the settings otherwise match. A regular TOML file alone would **not**
+be sufficient: Home Manager's backup extension/command modes accept regular-file
+collisions, but reject this foreign symlink.
+
+Home Manager's explicit `force = true` bypasses collision checks altogether.
+Stage/completed configurations reject forced ownership of `st3/config.toml` or
+a containing path. Do not remove the foreign link; old generations with force
+overrides are not safe rollback candidates and must be removed before cutover.
+Likewise, do not bypass `checkLinkTargets` when invoking
+old activation scripts. The migrator must install the journaled fence before
+publishing the legacy configuration directory bridge and disable old boot/login
+activation before moving directories, so an interrupted cutover cannot leave
+an unfenced legacy generation or job writing into migrated state.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
 
 ## Externally deployed binary

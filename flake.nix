@@ -72,6 +72,7 @@
                 xdg.configHome = lib.mkOption { type = lib.types.str; default = "/home/example/.config"; };
                 xdg.stateHome = lib.mkOption { type = lib.types.str; default = "/home/example/.local/state"; };
                 xdg.configFile = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                home.homeDirectory = lib.mkOption { type = lib.types.str; default = "/home/example"; };
                 home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 home.activation = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 home.file = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
@@ -80,13 +81,16 @@
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
               config.programs.smalltalk.fractalBinary.enable = extraConfig.fractalBinary or false;
+              config.xdg.configFile = lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
+                "st3/config.toml".force = true;
+              };
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
                 socket = "/tmp/smalltalk-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/st3/seats/claude.kdl ];
-              } // builtins.removeAttrs extraConfig [ "fractalBinary" ];
+              } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" ];
             })
           ];
         };
@@ -1069,6 +1073,21 @@
             }).config;
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
+            legacyPreflight = unstaged.home.activation.fractalMigrationPreflight;
+            collisionSource = pkgs.fetchurl {
+              url = "https://raw.githubusercontent.com/nix-community/home-manager/380c55aeae9745bc94c010996753850d975b8f59/modules/files/check-link-targets.sh";
+              hash = "sha256-B1fuVMJwkhg2AhuDSPK1440zQOsq8Wdd8+vtvghGrTg=";
+            };
+            collisionCheck = pkgs.replaceVars collisionSource {
+              initHomeManagerLib = ''
+                warnEcho() { :; }
+                verboseEcho() { :; }
+                errorEcho() { printf '%s\n' "$*" >&2; }
+                collisionErrors=()
+              '';
+              storeDir = "/nix/store";
+              forcedPaths = "";
+            };
             fakeSystemctl = pkgs.writeShellScript "fractal-migration-test-systemctl" ''
               case "$FAKE_STATE:$3" in
                 legacy-inactive:st3.service) printf 'LoadState=loaded\nActiveState=inactive\n' ;;
@@ -1079,8 +1098,19 @@
             '';
           in
           assert builtins.all (item: item.assertion) rendered.assertions;
+          assert !(builtins.all (item: item.assertion) (mkHmModuleEval {
+            fractalMigration.phase = "stage";
+            forceLegacyConfig = true;
+          }).config.assertions);
           assert preflight.before == [ "writeBoundary" ];
           assert preflight.after == [ ];
+          assert legacyPreflight.before == [ "writeBoundary" ];
+          assert legacyPreflight.after == [ ];
+          assert legacyPreflight.data == preflight.data;
+          assert !(completed.xdg.configFile ? "st3/config.toml");
+          assert !(completed.xdg.configFile ? "fractal/config.toml");
+          assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
+          assert pkgs.lib.hasInfix "config.home-manager.toml" completed.home.activation.fractalConfig.data;
           assert pkgs.lib.hasInfix receipt preflight.data;
           assert pkgs.lib.hasInfix "exit 1" preflight.data;
           assert pkgs.lib.hasInfix ''phase = "completed"'' preflight.data;
@@ -1122,17 +1152,71 @@
               escaped.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text
             && pkgs.lib.hasInfix "&lt;tag&gt;&amp;value"
               escaped.home.file."Library/LaunchAgents/com.compoundingtech.fractal-apply.plist".text
-            && !(pkgs.lib.hasInfix "RunAtLoad" daemon)
-            && !(pkgs.lib.hasInfix "KeepAlive" daemon)
+            && pkgs.lib.hasInfix "<key>RunAtLoad</key>" daemon
+            && pkgs.lib.hasInfix "<key>KeepAlive</key>" daemon
+            && pkgs.lib.hasInfix "<key>SuccessfulExit</key>" daemon
+            && pkgs.lib.hasInfix "/bin/launchctl disable" rendered.home.activation.fractalStageDisabled.data
+            && !(pkgs.lib.hasInfix "bootstrap" rendered.home.activation.fractalStageDisabled.data)
+            && rendered.home.activation.fractalStageDisabled.before == [ "linkGeneration" ]
+            && rendered.home.activation.fractalStageDisabled.after == [ "writeBoundary" ]
             && !(pkgs.lib.hasInfix "RunAtLoad" apply)
             && rendered.launchd.agents == unstaged.launchd.agents
             && !(completed.launchd.agents ? smalltalk)
             && !(completed.launchd.agents ? smalltalk-apply)
             && completed.launchd.agents.fractal.config.Label == "com.compoundingtech.fractal"
             && completed.launchd.agents.fractal.config.RunAtLoad
+            && completed.launchd.agents.fractal.config.KeepAlive.SuccessfulExit == false
             && !(noApply.home.file ? "Library/LaunchAgents/com.compoundingtech.fractal-apply.plist"));
-          pkgs.runCommand "smalltalk-hm-module-fractal-prestage-eval" { } (
-            pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+          pkgs.runCommand "smalltalk-hm-module-fractal-prestage-eval" { } (''
+            mkdir -p config/fractal state/fractal generation/.config/st3
+            # Exercise the emitted legacy/stage preflight before any write boundary.
+            substitute ${pkgs.writeText "legacy-preflight" legacyPreflight.data} preflight \
+              --replace-fail '/home/example/.local/state' "$PWD/state" \
+              --replace-fail '/home/example/.config' "$PWD/config"
+            ${pkgs.runtimeShell} preflight
+            for directory in config/fractal state/fractal; do
+              touch "$directory/.fractal-migration-completed"
+              if ${pkgs.runtimeShell} preflight; then
+                echo 'receipt-bearing legacy/stage activation passed' >&2; exit 1
+              fi
+              rm "$directory/.fractal-migration-completed"
+            done
+            # The immutable old generation has no migration preflight. Exercise
+            # upstream HM checkLinkTargets itself, including both backup modes.
+            cp ${pkgs.writeText "old-config.toml" unstaged.xdg.configFile."st3/config.toml".text} generation/.config/st3/config.toml
+            cp generation/.config/st3/config.toml config/fractal/config.home-manager.toml
+            printf '\n%s\n' '# arn:lmig:smalltalk:2026-10-16-service-labels-fractal Home Manager legacy-generation fence' >> config/fractal/config.home-manager.toml
+            ln -s config.home-manager.toml config/fractal/config.toml
+            ln -s fractal config/st3
+            mkdir -p home/.config
+            ln -s "$PWD/config/st3" home/.config/st3
+            for mode in plain extension command; do
+              export HOME_MANAGER_BACKUP_EXT= HOME_MANAGER_BACKUP_COMMAND= HOME_MANAGER_BACKUP_OVERWRITE=
+              case "$mode" in
+                extension) export HOME_MANAGER_BACKUP_EXT=backup ;;
+                command) export HOME_MANAGER_BACKUP_COMMAND=true ;;
+              esac
+              if HOME="$PWD/home" ${pkgs.runtimeShell} ${collisionCheck} "$PWD/generation" "$PWD/generation/.config/st3/config.toml"; then
+                echo "old generation bypassed persistent fence: $mode" >&2; exit 1
+              fi
+              test "$(readlink config/fractal/config.toml)" = config.home-manager.toml
+            done
+            substitute ${pkgs.writeText "completed-config-activation" completed.home.activation.fractalConfig.data} completed-config \
+              --replace-fail '/home/example/.config' "$PWD/config"
+            ${pkgs.runtimeShell} completed-config
+            while IFS= read -r fenceMarker; do lastMarker=$fenceMarker; done < config/fractal/config.home-manager.toml
+            test "$lastMarker" = '# arn:lmig:smalltalk:2026-10-16-service-labels-fractal Home Manager legacy-generation fence'
+            ${pkgs.gnugrep}/bin/grep -F 'state_dir = "/home/example/.local/state/fractal"' config/fractal/config.home-manager.toml
+            test "$(readlink config/fractal/config.toml)" = config.home-manager.toml
+            # A completed activation must not adopt a foreign or missing fence.
+            mv config/fractal/config.toml config/fractal/config.saved
+            cp config/fractal/config.home-manager.toml config/fractal/config.toml
+            if ${pkgs.runtimeShell} completed-config; then
+              echo 'completed activation adopted a regular config' >&2; exit 1
+            fi
+            rm config/fractal/config.toml
+            mv config/fractal/config.saved config/fractal/config.toml
+          '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               # Exercise the emitted ExecCondition, never a live service manager.
               mkdir -p config/fractal state/fractal
               for directory in config/fractal state/fractal; do

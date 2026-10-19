@@ -6,10 +6,13 @@ contains links to these tools, with `st` linking to `st3`. Other tools remain re
 executables in that directory. Python 3 is required on macOS.
 
 The app path and bundle identifier stay stable across updates. The installer registers
-the app with Launch Services and points existing daemon and replication LaunchAgent
-plists at its executable. It preserves their arguments and does not restart services
-or agent seats. If an existing plist needs a different executable path, stop its loaded
-service before installing; the installer refuses to rewrite a loaded definition.
+the app with Launch Services and points existing direct daemon and replication
+LaunchAgent commands at its executable, preserving their remaining arguments.
+Wrapper-based definitions, including staged and completed Home Manager wrappers,
+remain byte-for-byte unchanged: the wrapper owns its guard, config and state paths.
+The installer does not restart services or agent seats. If a direct definition needs
+a different executable path, stop its loaded service before installing; the installer
+refuses to rewrite a loaded definition.
 For a first daemon install, run `st service install` from the installed app executable;
 for an update, restart the daemon and replication services when ready.
 
@@ -87,6 +90,13 @@ Linux targets, named instances, and state/config paths outside the default migra
 The Python bundle helper also accepts `--stage-fractal`: it leaves legacy plists
 unchanged and invokes native staging from the installed app, never bootstrapping it.
 Use the same flag for `--backup-only` when preparing a staged bundle transaction.
+Staging backups record both present and absent target plists and the target labels'
+launchd disabled overrides. Restore removes definitions created by staging, restores
+previous definitions and returns each label to its prior enabled/disabled state,
+without bootstrapping jobs or changing legacy or unrelated services. An absent
+override means enabled by default; because launchctl has no per-label unset operation,
+restore uses an explicit `enable` for that case. Target jobs must still be unloaded
+when restoring a staging transaction.
 Normal installers retain legacy service names until cutover.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
 
