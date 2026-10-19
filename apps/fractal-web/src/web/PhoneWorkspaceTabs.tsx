@@ -21,7 +21,7 @@ export function PhoneWorkspaceTabs({ enabled = true, tabs, selected, onSelect, c
   const state = useTabListState({
     items: tabs,
     children: tab => <Item key={tab.id} title={tab.label}>{tab.label}</Item>,
-    selectedKey: tabs[index]!.id,
+    selectedKey: tabs[index]?.id ?? null,
     onSelectionChange: key => onSelect(String(key)),
   })
   const { tabListProps } = useTabList({ 'aria-label': 'Workspace views' }, state, list)
