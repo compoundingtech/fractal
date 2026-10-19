@@ -2498,7 +2498,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         );
     }
 
-    let server_source = /* sqlite-large-value: allow-for-now lv-hcac4fd417c19 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../st3-api/src/api.rs");
+    let server_source = /* sqlite-large-value: allow-for-now lv-hf139810ef8b7 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../st3-api-core/src/api.rs");
     for handler in [
         "watch_resource",
         "unwatch_resource",
