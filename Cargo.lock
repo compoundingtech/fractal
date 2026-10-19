@@ -3362,7 +3362,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
+source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
 dependencies = [
  "libc",
  "pty-core",
@@ -3373,7 +3373,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
+source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
 dependencies = [
  "indexmap",
  "libc",
@@ -3388,7 +3388,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
+source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",

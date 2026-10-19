@@ -341,6 +341,51 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
     );
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    // A store refilled from a peer can admit an attachment after the claim that consumed it.
+    // The capability's head is the canonical newest claim on its subject, never the one this
+    // store admitted last, so a consumed or detached capability cannot become current again.
+    #[test]
+    fn terminal_capability_head_is_pure_under_shuffled_split_and_duplicate_delivery(
+        ranks in proptest::collection::vec(any::<u64>(), 8),
+        width in 1usize..4,
+        copies in 1usize..3,
+    ) {
+        let source = Store::open_memory("alder").unwrap();
+        let append = |subject: &str, kind: &str, hash: &str| {
+            source.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: None,
+                fields: BTreeMap::from([("capability_hash".into(), json!(hash))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        let consumed = append("custom/client/attachment-a", "custom.client.terminal-attached", "consumed-digest");
+        append("custom/client/attachment-a", "custom.client.terminal-consumed", "consumed-digest");
+        let live = append("custom/client/attachment-b", "custom.client.terminal-attached", "live-digest");
+        let exchange = exchange_from(&source, &ReplicationInventory::default());
+        prop_assert!(exchange.envelopes.len() <= ranks.len());
+        let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&index| (ranks[index], index));
+        let target = Store::open_memory("birch").unwrap();
+        for chunk in order.chunks(width) {
+            let envelopes = chunk.iter().flat_map(|&index|
+                std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
+            let admission = receive_and_project(&target, "alder", &exchange_of("alder", envelopes));
+            prop_assert_eq!((admission.invalid, admission.unknown), (0, 0));
+        }
+        let head = |hash: &str| target.terminal_attachment_for_capability_hash(hash).unwrap()
+            .map(|(claim, current)| (claim.id, current));
+        prop_assert_eq!(head("consumed-digest"), Some((consumed.id, false)));
+        prop_assert_eq!(head("live-digest"), Some((live.id, true)));
+    }
+}
+
 #[test]
 fn seat_rename_persists_across_a_real_store_reopen() {
     let directory = tempfile::tempdir().unwrap();
