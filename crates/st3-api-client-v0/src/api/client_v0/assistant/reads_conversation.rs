@@ -143,7 +143,7 @@ async fn timeline(
     let agent_id = agent(parameters)?.to_owned();
     let current = state.store.index().map_err(ApiError::internal)?;
     let owner = state.store.conversation_owner_at(&agent_id, current).map_err(ApiError::internal)?;
-    let incarnation = owner.incarnation.as_deref().or(owner.runtime.as_deref());
+    let incarnation = owner.as_ref().and_then(|owner| owner.incarnation.as_deref().or(owner.runtime.as_deref()));
     let session_id = incarnation.map(|incarnation| client_session_id(&agent_id, incarnation));
     // Discovery owns a pinned metadata row, not a promise that its session is still
     // current. Only this identity transition may omit enrichment; all reader,

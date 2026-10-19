@@ -37,12 +37,10 @@ pub fn invalidated() -> ApiError {
         details: Box::new(serde_json::Map::from_iter([("full_resync".into(), json!(true))])) }
 }
 
-pub fn source(state: &AppState, session_id: &str) -> Result<ExternalSession, ApiError> {
-    let snapshot = new_client_snapshot(state);
-    if let Some((owner, incarnation, origin)) =
-        super::super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
-            .map_err(ApiError::internal)?
-    {
+pub fn source(
+    state: &AppState, session_id: &str, managed: Option<&super::super::ManagedSessionOwner>,
+) -> Result<ExternalSession, ApiError> {
+    if let Some((owner, incarnation, origin)) = managed {
         if origin
             .as_deref()
             .is_some_and(|origin| origin != state.store.origin())
@@ -52,9 +50,9 @@ pub fn source(state: &AppState, session_id: &str) -> Result<ExternalSession, Api
             )));
         }
         if let Some(incarnation) = incarnation
-            && let Some(managed) = managed_transcript(state, &owner, &incarnation)?
+            && let Some(transcript) = managed_transcript(state, owner, incarnation)?
         {
-            return managed
+            return transcript
                 .transcript
                 .map_err(|missing| transcript_unavailable(&missing.reason));
         }
@@ -919,7 +917,14 @@ pub fn assistant_text(
         serde_json::from_value(locator.native.clone()).map_err(|_| invalidated())?;
     let slots = read_slots(&locator.source.transcript);
     let _slot = read_slot(slots)?;
-    let found = source(state, session_id)?;
+    // Each read resolves the managed owner at the current frontier, as chunk_local does.
+    let current_source = || {
+        let index = state.store.index().map_err(ApiError::internal)?;
+        let managed = super::super::managed_session_owner_at(&state.store, index, session_id)
+            .map_err(ApiError::internal)?;
+        source(state, session_id, managed.as_ref())
+    };
+    let found = current_source()?;
     if basis(&found)? != locator.basis {
         return Err(invalidated());
     }
@@ -940,7 +945,7 @@ pub fn assistant_text(
         .find(|item| item["id"] == locator.entry && item["revision"] == locator.revision)
         .and_then(|mut item| item.pointer_mut(&locator.pointer).map(Value::take))
         .ok_or_else(invalidated)?;
-    if basis(&source(state, session_id)?)? != locator.basis {
+    if basis(&current_source()?)? != locator.basis {
         return Err(invalidated());
     }
     let Value::Object(mut body) = value else {

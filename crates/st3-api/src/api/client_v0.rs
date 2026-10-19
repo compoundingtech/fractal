@@ -1887,15 +1887,13 @@ pub fn native_session_messages(
     snapshot: &ClientSnapshot,
     session: &ClientSession,
     session_id: &str,
+    managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Vec<Value>, ApiError> {
     let mut items = Vec::new();
-    if let Some((owner, incarnation, _)) =
-        super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
-            .map_err(ApiError::internal)?
-    {
+    if let Some((owner, incarnation, _)) = managed {
         let messages = session_messages(
             state,
-            &owner,
+            owner,
             session_id,
             incarnation.as_deref(),
             snapshot.store_index.checked_add(1),
@@ -1927,12 +1925,10 @@ fn suppress_native_echoes(
     session_id: &str,
     graph: &[Value],
     items: &mut Vec<Value>,
+    managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<u64, ApiError> {
     let mut suppressed = 0;
-    if let Some((owner, incarnation, _)) =
-        super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
-            .map_err(ApiError::internal)?
-    {
+    if let Some((owner, incarnation, _)) = managed {
         let mut incoming = graph.iter().filter_map(|item| {
             let body = &item["body"];
             (body["to"].as_str() == Some(owner.as_str())
@@ -1940,7 +1936,7 @@ fn suppress_native_echoes(
                 .then(|| body["message_id"].as_str()).flatten()
         }).collect::<BTreeSet<_>>();
         let future = post_snapshot_native_sends(
-            state, snapshot, &owner, session_id, incarnation.as_deref(), items, &incoming,
+            state, snapshot, owner, session_id, incarnation.as_deref(), items, &incoming,
         )?;
         incoming.extend(future.iter().filter_map(|claim| {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
@@ -1952,7 +1948,7 @@ fn suppress_native_echoes(
             .filter_map(|item| item.pointer("/_delivery_correlation/thread_id").and_then(Value::as_str))
             .collect::<BTreeSet<_>>().into_iter().map(|thread| {
                 (thread.to_owned(), incoming.iter().map(|subject| {
-                    st_drivers::codex_app_server::stable_client_user_message_id(&owner, thread, subject)
+                    st_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject)
                 }).collect::<BTreeSet<_>>())
             }).collect::<BTreeMap<_, _>>();
         items.retain(|item| {
@@ -1978,14 +1974,15 @@ pub fn native_timeline_page(
     session_id: &str,
     query: &ClientListQuery,
     mut items: Vec<Value>,
+    managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Json<Value>, ApiError> {
-    let order = native_timeline_order(state, snapshot, session_id)?;
+    let order = native_timeline_order(managed);
     let graph = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session, session_id)?
+        native_session_messages(state, snapshot, session, session_id, managed)?
     } else {
         Vec::new()
     };
-    suppress_native_echoes(state, snapshot, session_id, &graph, &mut items)?;
+    suppress_native_echoes(state, snapshot, session_id, &graph, &mut items, managed)?;
     let mut keyed: Vec<_> = items.drain(..)
         .map(|item| {
             let key = crate::external_sessions::timeline_key(&item, 0);
@@ -2023,17 +2020,13 @@ pub fn native_timeline_page(
 }
 
 fn native_timeline_order(
-    state: &AppState,
-    snapshot: &ClientSnapshot,
-    session_id: &str,
-) -> Result<crate::external_sessions::TimelineOrder, ApiError> {
-    Ok(if super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
-        .map_err(ApiError::internal)?.is_some()
-    {
+    managed: Option<&super::ManagedSessionOwner>,
+) -> crate::external_sessions::TimelineOrder {
+    if managed.is_some() {
         crate::external_sessions::TimelineOrder::TimestampSequence
     } else {
         crate::external_sessions::TimelineOrder::Sequence
-    })
+    }
 }
 
 pub const NATIVE_PAGE_CURSOR_PREFIX: &str = "page/native/";
@@ -2121,7 +2114,9 @@ pub fn native_slice_page(
     query: &ClientListQuery,
     source: &crate::external_sessions::ExternalSession,
 ) -> Result<Json<Value>, ApiError> {
-    native_slice_page_at_generation(state, snapshot, session, session_id, query, source)
+    let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
+        .map_err(ApiError::internal)?;
+    native_slice_page_at_generation(state, snapshot, session, session_id, query, source, managed.as_ref())
         .map(|(page, _, _)| page)
 }
 
@@ -2133,11 +2128,12 @@ pub fn native_slice_page_at_generation(
     session_id: &str,
     query: &ClientListQuery,
     source: &crate::external_sessions::ExternalSession,
+    managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<(Json<Value>, u64, u64), ApiError> {
     let preparation = crate::profile::span("conversation/native-preparation");
     let cursor = query.cursor.as_deref().map(decode_native_page_cursor).transpose()?;
     let source_basis = conversation_blocks::basis(source)?;
-    let order = native_timeline_order(state, snapshot, session_id)?;
+    let order = native_timeline_order(managed);
     let order_name = match order {
         crate::external_sessions::TimelineOrder::Sequence => "sequence",
         crate::external_sessions::TimelineOrder::TimestampSequence => "timestamp-sequence",
@@ -2178,13 +2174,13 @@ pub fn native_slice_page_at_generation(
         limit + 1
     };
     let messages = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session, session_id)?
+        native_session_messages(state, snapshot, session, session_id, managed)?
     } else {
         Vec::new()
     };
     drop(preparation);
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2200,7 +2196,7 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS,
+                None, CLIENT_MAX_PAGE_ITEMS, managed,
             )?.0)
         } else {
             None
@@ -2316,13 +2312,14 @@ fn canonical_native_slice(
     order: crate::external_sessions::TimelineOrder,
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
+    managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<(conversation_blocks::PreparedSlice, u64), ApiError> {
     let mut slice = conversation_blocks::read_slice(
         source, session, session_id, order, before, limit,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
     let mut scanned = slice.items.len();
-    let mut suppressed = suppress_native_echoes(state, snapshot, session_id, graph, &mut slice.items)?;
+    let mut suppressed = suppress_native_echoes(state, snapshot, session_id, graph, &mut slice.items, managed)?;
     while slice.items.len() < limit && slice.has_more {
         let budget = NATIVE_ECHO_SCAN_ITEMS.saturating_sub(scanned);
         if budget == 0 && !slice.items.is_empty() {
@@ -2345,7 +2342,7 @@ fn canonical_native_slice(
         }
         boundary = next.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
         suppressed = suppressed.max(suppress_native_echoes(
-            state, snapshot, session_id, graph, &mut next.items,
+            state, snapshot, session_id, graph, &mut next.items, managed,
         )?);
         slice.has_more = next.has_more;
         slice.items.extend(next.items);
@@ -2925,9 +2922,13 @@ pub fn timeline_value(
     if let Some(cursor) = query.cursor.as_deref() {
         let _span = crate::profile::span("timeline/cached-page");
         if cursor.starts_with(NATIVE_PAGE_CURSOR_PREFIX) {
-            let source = conversation_blocks::source(state, &session_id)
+            let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                .map_err(ApiError::internal)?;
+            let source = conversation_blocks::source(state, &session_id, managed.as_ref())
                 .map_err(|_| client_page_expired("the page snapshot is no longer available; restart pagination"))?;
-            return native_slice_page(state, snapshot, session, &session_id, query, &source);
+            return native_slice_page_at_generation(
+                state, snapshot, session, &session_id, query, &source, managed.as_ref(),
+            ).map(|(page, _, _)| page);
         }
         let mut page = client_page(
             state,
@@ -2958,7 +2959,9 @@ pub fn timeline_value(
         return Ok(Json(page_value));
     }
     crate::performance::task("conversation/first-page", || {
-        timeline_first_page(state, snapshot, session, session_id, query, None)
+        let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+            .map_err(ApiError::internal)?;
+        timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
     })
 }
 
@@ -2969,13 +2972,12 @@ pub fn timeline_first_page(
     session_id: String,
     query: &ClientListQuery,
     native_read_error: Option<ApiError>,
+    managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Json<Value>, ApiError> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
         *rebuilds.entry(session_id.to_owned()).or_default() += 1;
     }
-    let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-        .map_err(ApiError::internal)?;
     let Some((owner, incarnation, _)) = managed else {
         if let Some(error) = native_read_error {
             return Err(error);
@@ -3009,7 +3011,7 @@ pub fn timeline_first_page(
                 None => external_conversation_items(other, &session_id)?,
             },
         };
-        return native_timeline_page(state, snapshot, session, &session_id, query, items);
+        return native_timeline_page(state, snapshot, session, &session_id, query, items, managed);
     };
     let owner = owner.as_str();
     let incarnation = incarnation.as_deref();
@@ -3017,18 +3019,18 @@ pub fn timeline_first_page(
     // below is shown with one entry that says why, never silently in its place.
     let mut transcript_notice_entry = None;
     if let Some(incarnation) = incarnation
-        && let Some(managed) = managed_transcript(state, owner, incarnation)?
+        && let Some(transcript) = managed_transcript(state, owner, incarnation)?
     {
         let read = if let Some(error) = native_read_error.as_ref() {
             Err(format!("the transcript could not be read: {}", error.message))
         } else {
             let _span = crate::profile::span("timeline/native-read");
-            match managed.transcript.as_ref() {
+            match transcript.transcript.as_ref() {
                 Ok(external) => match if external.driver != crate::external_sessions::ExternalDriver::OpenCode {
                     native_slice_page(state, snapshot, session, &session_id, query, external)
                 } else {
                     conversation_blocks::read(external, session, &session_id)
-                        .and_then(|items| native_timeline_page(state, snapshot, session, &session_id, query, items))
+                        .and_then(|items| native_timeline_page(state, snapshot, session, &session_id, query, items, managed))
                 } {
                     Ok(page) => Ok(page),
                     Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS || error.code == "cursor-gap" => return Err(error),
@@ -3040,7 +3042,7 @@ pub fn timeline_first_page(
         match read {
             Ok(page) => return Ok(page),
             Err(reason) => {
-                transcript_notice_entry = Some(transcript_notice(&session_id, &managed, &reason));
+                transcript_notice_entry = Some(transcript_notice(&session_id, &transcript, &reason));
             }
         }
     }
@@ -3449,8 +3451,7 @@ pub fn timeline_first_page(
 pub fn conversation_session_id(state: &AppState, id: &str) -> Result<String, ApiError> {
     if id.starts_with("agent/") {
         let frontier = state.store.index().map_err(ApiError::internal)?;
-        let owners = state.store.conversation_owners_at(frontier).map_err(ApiError::internal)?;
-        let owner = owners.get(id)
+        let owner = state.store.conversation_owner_at(id, frontier).map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::not_found(format!("agent `{id}` does not exist")))?;
         let incarnation = owner.incarnation.as_deref().or(owner.runtime.as_deref())
             .ok_or_else(|| validation("the agent has no current session"))?;
