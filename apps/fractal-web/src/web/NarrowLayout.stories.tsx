@@ -128,6 +128,8 @@ export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
   const agents = await canvas.findByRole('dialog', { name: 'Agents' })
   await expect(within(agents).getByRole('navigation', { name: 'Agent roster' })).toBeVisible()
   await expect(agents.getBoundingClientRect().left).toBe(0)
+  await expect(agents.getBoundingClientRect().width).toBeGreaterThanOrEqual(240)
+  await expect(Math.abs(agents.getBoundingClientRect().width - Math.min(320, window.innerWidth - 40))).toBeLessThanOrEqual(1)
   await waitFor(() => expect(agents.contains(document.activeElement)).toBe(true))
   await expect(chevron).toHaveAttribute('aria-expanded', 'true')
   await expect(agents.id).not.toBe('')

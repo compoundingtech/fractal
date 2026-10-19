@@ -431,7 +431,7 @@ describe('responsive agent navigation', () => {
     expect(workspace.closest('[inert], [aria-hidden="true"]')).not.toBeNull()
     expect(dialog.closest('[inert], [aria-hidden="true"]')).toBeNull()
     expect(sidebar().getAttribute('data-sidebar-presentation')).toBe('drawer')
-    expect(dialog.style.width).toBe('min(320px, calc(100vw - 40px))')
+    expect(JSON.parse(dialog.getAttribute('data-style-contract')!).width).toBe('min(320px, calc(100vw - 40px))')
     await act(async () => within(host).getByRole('button', { name: 'Close agents' }).click())
     expect(within(host).queryByRole('complementary', { name: 'Agents' })).toBeNull()
     expect(workspace.closest('[inert], [aria-hidden="true"]')).toBeNull()
