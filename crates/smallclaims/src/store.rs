@@ -1852,6 +1852,7 @@ pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Res
                  COALESCE((SELECT MAX(replica_sequence) FROM batches WHERE origin=?1), 0),
                  COALESCE((SELECT sequence FROM writer_heads WHERE writer=?1), 0),
                  COALESCE((SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1), 0),
+                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0),
                  COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0)
              ) + 1",
         )?

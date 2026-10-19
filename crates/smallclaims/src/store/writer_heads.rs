@@ -6,7 +6,8 @@
 //! peers have already seen. `writer_heads` keeps the highest (sequence, hash) per writer, raised
 //! by trigger on every batch insert and stored before any batch delete, so trimming never lowers
 //! it. Rows are never deleted. Heads trimmed before this table existed leave only their envelope
-//! tombstones, which sequence allocation also respects; their hash is not recoverable.
+//! tombstones, which sequence allocation also respects, including through the retired-envelope
+//! ledger after adoption withdraws them; their hash is not recoverable.
 
 pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdade9b126123 owner=smallclaims::store::writer_heads TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS writer_heads (
@@ -121,6 +122,14 @@ mod tests {
                 "INSERT INTO checkpoint_envelopes VALUES('other', 50, 'hash', 1, 'checkpoint/old')",
                 [],
             )
+            .unwrap();
+        assert_eq!(next(&store).0, 6);
+        // Adoption keeping only a manifest that lacks them withdraws the tombstones; the
+        // retired-envelope ledger keeps them, so the floor holds.
+        store
+            .connection
+            .write()
+            .execute("DELETE FROM checkpoint_envelopes WHERE writer='writer'", [])
             .unwrap();
         assert_eq!(next(&store).0, 6);
     }

@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rule, admission or digest change. Local sequence allocation now also respects the stored head and the writer's own envelope tombstones, which changes the allocated sequence only when a trim had deleted the writer's newest batch: before this change that reused a sequence peers had already seen."
+    "detail": "No checkpoint rule, admission or digest change. Local sequence allocation now also respects the stored head and the writer's own envelope tombstones, including those the retired-envelope ledger keeps after adoption withdraws them from checkpoint_envelopes, which changes the allocated sequence only when a trim had deleted the writer's newest batch: before this change that reused a sequence peers had already seen."
   },
   "compatibility": {
     "status": "none",

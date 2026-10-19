@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `1632ded507d817886367dacc0e08bae4a2bcd35ac6c1820bd34f8e995a726702`
+Storage digest: `a1ed0d4405efa92df65e46aaf7c62ee8780aed26ab7d27a4ed5fe53ebb335ca6`
 
 ## Subject families
 
@@ -345,5 +345,6 @@ equates with a BLOB.
 batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
 newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
 maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
-(heads trimmed before this table existed) and the writer floor; the chain's previous hash is
-the higher of the newest batch and the stored head.
+and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
+this table existed), and the writer floor; the chain's previous hash is the higher of the newest
+batch and the stored head.
