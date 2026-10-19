@@ -19,6 +19,10 @@ and reads and digests include every current note regardless of stored
 audience. Composer audience controls and audience-specific badges are
 removed; the schema's open audience enum stays.
 
+The directive/subject-note CLI split is not implemented yet. Rename coordination
+is settled: `fractal` and its `st`/`st3` aliases use the same clap CLI, so the
+new top-level command will be available through all three binary names.
+
 Client regeneration and verification are deferred until dev4 is cleared.
 Run `cargo run -p st3-client-codegen` first, commit the generated output
 separately, then run the codegen `--check` and the notes acceptance checks.
@@ -180,9 +184,19 @@ Runtime-state changes invalidate session-scoped note currency.
 st note add TARGET TEXT [--session current|ID] [--expires-at T]
 st note ls [TARGET]           # notes on TARGET, or notes by the actor
 st note archive NOTE_ID
-st note                       # unchanged: person directive notes
-st note set|clear             # unchanged: person directive notes
+st directive set|clear|show    # target: person directive note
+st note                       # deprecated alias for directive show
+st note set|clear             # deprecated aliases for directive set|clear
 ```
+
+This is the target command split, not the current implementation. DQ1 keeps
+both records: the person directive note and subject notes. `note add|ls|archive`
+continues to manage subject notes; the directive note gets its own command,
+`directive set|clear|show`. The `st` → `fractal` rename uses one clap CLI:
+`fractal` is the binary, with `st` and `st3` as aliases. Thus
+`fractal directive …` and `st directive …` expose the same command; rename
+coordination with `agent/compoundingtech/fractal-rename` is not a blocker.
+Bare `note` and `note set|clear` keep working as deprecated aliases.
 
 There is no `--for` option or audience default to choose: every note is agent
 context, including notes authored by a person. `--session current` resolves
@@ -274,9 +288,15 @@ A note kind registration includes:
 
 ## Design questions
 
-- **DQ1 Directive note relation:** Keep `person.directive-note-set` separate,
-  or express it as a note with target `person/example` and audience `agent`?
-  Resolved by the interview; the prototype keeps it separate.
+- **DQ1 Directive note relation — resolved (2026-10-19):** Johannes chose
+  `rename-only` (Axe Q4 request `ke7ykp`, answer `rpagr1`). Keep both
+  `person.directive-note-set` and subject-note records separate. Give the
+  directive note its own command, `directive set|clear|show`, while
+  `note add|ls|archive` stays for subject notes. Bare `note` and `note set|clear`
+  remain deprecated aliases. The `st` → `fractal` rename uses one clap CLI
+  with `st` and `st3` aliases, so the command lands once for all binary names.
+  Coordination with `agent/compoundingtech/fractal-rename` is settled and is
+  not a blocker. This CLI split is not implemented yet.
 - **DQ2 Session as target:** No `session` subject family exists; harness
   sessions appear only as `incarnation_id`/`session_id` fields. This spec uses
   a `session` field on agent-targeted notes. An alternative is a new
