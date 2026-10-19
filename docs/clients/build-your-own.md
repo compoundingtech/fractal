@@ -105,7 +105,7 @@ after the manual transport drain. The independently demanded session-trace provi
 Configured browsers also export `fractal.input.next_frame` through this same tracer,
 under `service.name=fractal-web` (the TUI uses `fractal`). This is a span-based
 SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint.
-Trusted control inputs count only when an owned commit occurs during dispatch
+Trusted inputs count only when an owned commit occurs during dispatch
 or its discrete React microtasks. Capture observes the initiating control, its
 `aria-controls`/`aria-owns` targets, and explicitly registered surface regions.
 The composer registers its own field and **only the final rendered transcript

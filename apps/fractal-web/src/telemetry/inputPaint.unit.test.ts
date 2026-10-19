@@ -4,13 +4,14 @@ import { registerInputPaintRegions, installInputPaint, type InputPaintSample } f
 
 const cleanups: Array<() => void> = []
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren() })
-const setup = () => {
+const setup = (overlayHosts: Iterable<Element> = []) => {
   let time = 100
   const callbacks = new Set<() => void>()
   const tasks = new Set<() => void>()
   const samples: InputPaintSample[] = []
   const listeners = vi.spyOn(window, 'addEventListener')
   const stop = installInputPaint({
+    overlayHosts,
     emit: (sample) => samples.push(sample), now: () => time,
     paint: (callback) => { callbacks.add(callback); return () => { callbacks.delete(callback) } },
     task: (callback) => { tasks.add(callback); return () => { tasks.delete(callback) } },
@@ -219,4 +220,18 @@ it('does not expand aria-controls ownership to a whole transcript', async () => 
   run.paint()
   expect(run.samples).toEqual([])
   expect(observed.mock.calls.map(([target]) => target)).toEqual([run.button])
+})
+
+it('counts a global keyboard opening through a portal host without observing the body or root', async () => {
+  const host = document.createElement('div')
+  document.body.append(host)
+  const observed = vi.spyOn(MutationObserver.prototype, 'observe')
+  const run = setup([host])
+  run.input('keydown', document.body)
+  host.append(document.createElement('dialog'))
+  await Promise.resolve()
+  run.paint()
+  expect(run.samples.map((sample) => sample.attributes.outcome)).toEqual(['painted'])
+  expect(run.samples[0]?.attributes['input.kind']).toBe('key')
+  expect(observed.mock.calls).toEqual([[host, { childList: true }]])
 })

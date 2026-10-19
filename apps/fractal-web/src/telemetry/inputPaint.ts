@@ -153,8 +153,8 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
   const capture = (event: Event) => {
     if (disposed || !event.isTrusted || document.visibilityState === 'hidden') return
     closeWindow()
-    const owner = inputOwner(event.target)
-    if (owner === null) return
+    const control = inputOwner(event.target)
+    const owner = control ?? (event.target instanceof Element ? event.target : document.body)
     const accepted = now()
     const input: Input = {
       type: event.type,
@@ -174,7 +174,7 @@ export const installInputPaint = ({ emit, now = () => performance.now(), paint =
       if (target.matches('[data-testid="transcript-scroll"],[data-testid="conversation-history-host"]') || target.querySelector('[data-testid="transcript-scroll"]') !== null) return
       observer.observe(target, { subtree, childList: true, characterData: subtree, characterDataOldValue: subtree, attributes: subtree, attributeOldValue: subtree })
     }
-    observeRegion(owner)
+    if (control !== null) observeRegion(control)
     for (const key of ['aria-controls', 'aria-owns']) {
       for (const id of (owner.getAttribute(key) ?? '').split(/\s+/)) {
         if (id === '') continue
