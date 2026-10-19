@@ -7,7 +7,7 @@ import { within } from 'storybook/test'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
 import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
-import { ResizableSplit } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { NarrowLayoutContext, ResizableSplit } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 
 // Node cannot compile StyleX. Keep its authored scalar CSS, with RAC and chrome real.
@@ -94,6 +94,14 @@ it('chrome footer adds no status or action of its own beyond the theme toggle', 
   expect(within(footer).queryByRole('status')).toBeNull()
   expect(within(footer).getAllByRole('button')).toHaveLength(1)
   expect(within(footer).queryByRole('button', { name: /Reconnect/ })).toBeNull()
+})
+
+it('the phone footer contains its full 44px chrome touch targets', async () => {
+  await act(async () => root.render(<NarrowLayoutContext.Provider value><SidebarChromeFooter onToggleScheme={() => undefined} /></NarrowLayoutContext.Provider>))
+  const footer = host.querySelector('footer')!
+  const toggle = within(footer).getByRole('button', { name: 'Toggle color scheme' })
+  expect(Number.parseFloat(footer.style.minHeight)).toBeGreaterThanOrEqual(44)
+  expect(Number.parseFloat(toggle.style.height)).toBeGreaterThanOrEqual(44)
 })
 
 describe('sidebar split (real kit ResizableSplit)', () => {

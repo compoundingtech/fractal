@@ -38,7 +38,7 @@ export function PhoneAgentDrawer({ ref, children, header }: {
     {header(open, { open: isOpen, id })}
     <div {...underlayProps} hidden={!isOpen} {...stylex.props(styles.overlay, !isOpen && styles.hidden)}>
       <FocusScope contain={isOpen}>
-        <div {...mergeProps(modalProps, dialogProps)} ref={dialog} id={id} {...stylex.props(styles.drawer)}>
+        <div {...mergeProps(modalProps, dialogProps)} ref={dialog} id={id} aria-modal="true" {...stylex.props(styles.drawer)}>
           <aside aria-label="Agents" data-sidebar-presentation="drawer" {...stylex.props(styles.sidebar)}>
           <header {...stylex.props(styles.header)}><strong>Agents</strong><ChromeControl ref={closeButton} icon="chevrons-left" label="Close agents" onPress={close} /></header>
           <UNSAFE_PortalProvider getContainer={getContainer}>{children}<div ref={portalHost} /></UNSAFE_PortalProvider>
