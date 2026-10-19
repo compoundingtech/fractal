@@ -68,6 +68,31 @@ test('an unconfirmed send reads as not confirmed yet with Send again, never as a
   assert.doesNotMatch(bare, /Send again/)
 })
 
+test('the optional host footer renders once per turn as its last child', () => {
+  const turns = [
+    { ...turn, id: 'first', prompt: undefined },
+    { ...turn, id: 'second', prompt: undefined, work: { ...turn.work, running: true } },
+    { ...turn, id: 'without-facts', prompt: undefined },
+  ]
+  const facts = new Map([['first', 'model-one · 100 tokens · $0.0100'], ['second', 'model-two · 200 tokens · $0.0200']])
+  const called = []
+  const renderTurnFooter = entry => {
+    called.push(entry)
+    const text = facts.get(entry.id)
+    return text === undefined ? undefined : React.createElement('footer', { 'data-testid': 'host-turn-footer' }, text)
+  }
+  const render = footer => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+    options: { messages: [], isRunning: true, onNew: async () => {} },
+  }, React.createElement(Transcript, { turns, title: 'Host footer', sync: { _tag: 'Live', since: now }, now, observedAt: now, renderTurnFooter: footer })))
+  const markup = render(renderTurnFooter)
+  assert.deepEqual(called, turns)
+  assert.equal([...markup.matchAll(/data-testid="host-turn-footer"/g)].length, 2)
+  assert.match(markup, /model-one · 100 tokens · \$0\.0100<\/footer><\/section>/)
+  assert.match(markup, /data-testid="live-work"[\s\S]*model-two · 200 tokens · \$0\.0200<\/footer><\/section>/)
+  assert.match(markup, /data-item-id="without-facts"[^>]*><\/section>/)
+  assert.doesNotMatch(render(undefined), /<footer|host-turn-footer|model-one|model-two/)
+})
+
 test('host-owned header omits only the duplicate band, including unavailable history', () => {
   for (const availability of [{ _tag: 'Available' }, { _tag: 'Unavailable', reason: 'Not available' }]) {
     const render = (showHeader) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {

@@ -156,6 +156,7 @@ export const prepareTranscriptTurns = (
     turnItems = []
   }
   for (const sourceItem of items) {
+    // Unsupported is always retained: F2 markers are not a system-events preference.
     if (!options.showSystemEvents && isOmittedItem(sourceItem)) continue
     // Only mixed messages carry their full body to the kit's opt-in disclosure.
     // Other unknown protocol rows remain payload-free notices under explicit inspection.

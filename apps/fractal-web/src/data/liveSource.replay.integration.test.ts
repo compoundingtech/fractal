@@ -98,7 +98,7 @@ describe('scenario replay through the real live source', () => {
       expect(initial.length).toBeGreaterThan(0)
       expect(initialIds.every((id) => thread.items.some((entry) => entry.id === id))).toBe(true)
       expect(initial).toContainEqual(expect.objectContaining({
-        _tag: 'UnknownEvent', id: thread.items.at(-1)!.id, eventType: 'diagnostic_summary',
+        _tag: 'Unsupported', id: thread.items.at(-1)!.id, harness: 'st', recordKind: 'diagnostic_summary', reason: 'unknown-entry-type',
       }))
 
       const event = world.slices.conversation.timeline[0]!
@@ -109,7 +109,8 @@ describe('scenario replay through the real live source', () => {
       expect(updated).toHaveLength(initial.length + event.items.length)
       expect(updated.map((item) => item.id)).toEqual([...initialIds, ...event.items.map((entry) => entry.id)])
       expect(updated.at(-1)).toMatchObject({
-        _tag: 'UnknownEvent', eventType: 'diagnostic_summary', data: { status: 'passed' },
+        _tag: 'Unsupported', harness: 'st', recordKind: 'diagnostic_summary', reason: 'unknown-entry-type',
+        inspect: { text: expect.stringContaining('passed'), truncated: false },
       })
     })),
   )
