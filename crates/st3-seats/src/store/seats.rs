@@ -1,10 +1,12 @@
 //! The part of `store::seats` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::AgentMessagesStore;
+use crate::MissionsStore;
 use crate::EvidenceSeatsStore;
 use crate::RosterAdmissionStore;
 use super::*;
-pub use st3_store::store::seats::*;
-pub use st3_store::store::seats::{EndedDeclaration};
+pub use st3_missions::store::seats::*;
+pub use st3_missions::store::seats::{EndedDeclaration};
 
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
@@ -359,7 +361,9 @@ pub trait SeatsStore {
             until_ms: u64,
         ) -> Result<(Vec<Value>, Vec<agent_messages::DailyUsage>)>;
     /// Resolve a terminal capability and its current-head fence with two indexed seeks, in
-    /// one SQLite snapshot. Unrelated fleet history cannot hide an unexpired capability.
+    /// one SQLite snapshot. Unrelated fleet history cannot hide an unexpired capability. Both
+    /// the attachment and its head are chosen in canonical claim order, so a store that admits
+    /// an attachment after the claim that consumed or detached it never revives it.
     fn terminal_attachment_for_capability_hash(
             &self,
             digest: &str,
@@ -2035,21 +2039,25 @@ impl SeatsStore for Store {
             &self,
             digest: &str,
         ) -> Result<Option<(ClaimRecord, bool)>> {
-        let connection = self.readers.get();
-        Ok(connection
-            .prepare_cached(
+        static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
                         predecessors, accepted_at_unix_ms,
                         NOT EXISTS (
                             SELECT 1 FROM claims AS newer
-                            WHERE newer.subject=claims.subject
-                              AND newer.store_index>claims.store_index
+                            WHERE newer.subject=claims.subject AND {}
                         )
                  FROM claims
                  WHERE kind='custom.client.terminal-attached'
                    AND json_extract(body, '$.fields.capability_hash')=?1
-                 ORDER BY store_index DESC LIMIT 1",
-            )?
+                 ORDER BY {} LIMIT 1",
+                smallclaims::store::canonical::after_sql("newer", "claims"),
+                smallclaims::store::canonical::order_sql("claims", true),
+            )
+        });
+        let connection = self.readers.get();
+        Ok(connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h858ff9cdbb49 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?
             .query_row(/* sqlite-large-value: allow-for-now lv-h468749e75d70 owner=st3_seats::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
             .optional()?)
     }

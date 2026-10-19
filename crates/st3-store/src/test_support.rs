@@ -5,20 +5,6 @@ pub use st3_secrets::test_support::*;
 
 use std::sync::OnceLock;
 
-/// Exercise the real Store admission in isolated integration fixtures, without an API bypass
-/// in the installed CLI. This module exists only for test/test-support builds.
-pub fn bind_fixture_mailbox(store: &crate::store::Store, fence: &crate::mailbox::Fence)
-    -> Result<crate::mailbox::Fence, crate::St3Error>
-{
-    store.bind_mailbox(fence)
-}
-
-pub fn check_fixture_mailbox(store: &crate::store::Store, fence: &crate::mailbox::Fence)
-    -> Result<(), crate::St3Error>
-{
-    store.check_mailbox(fence)
-}
-
 /// Only this fixture thread records; production exporter state is not changed.
 pub fn roster_export_scope() -> impl Drop {
     crate::otel::fixture_export_scope()

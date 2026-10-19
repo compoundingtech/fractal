@@ -6,8 +6,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-pub use st3_store::rollout::*;
-pub use st3_store::rollout::{Mode, Operation, Policy, Selection, blockers, hold_render, launched_member, manual, pending_manual_launch, pending_manual_launch_at, status, target};
+pub use st3_missions::rollout::*;
+pub use st3_missions::rollout::{Mode, Operation, Policy, Selection, blockers, hold_render, launched_member, manual, pending_manual_launch, pending_manual_launch_at, status, target};
 
 pub const OPERATION_ENV: &str = "ST3_ROLLOUT_OPERATION";
 

@@ -1,8 +1,9 @@
 //! The part of `store::message_subscriptions` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::MissionsStore;
 use super::*;
-pub use st3_store::store::message_subscriptions::*;
-pub use st3_store::store::message_subscriptions::{validate, validate_actor, validate_publisher, validate_replicated};
+pub use st3_missions::store::message_subscriptions::*;
+pub use st3_missions::store::message_subscriptions::{validate, validate_actor, validate_publisher, validate_replicated};
 
 #[cfg(test)]
 mod tests {

@@ -66,50 +66,6 @@ impl Store {
         Ok((rows, valid_until))
     }
 
-    /// The mission context of a person ask a mission step made: its mission, and the step that
-    /// waits on the answer with its goal. `None` for a standalone ask or an update, which belong
-    /// to no mission of their own.
-    pub fn person_ask_context(&self, subject: &str) -> Result<Option<Value>> {
-        let connection = self.readers.get();
-        let Some(ask) = person_work::request(&connection, subject)? else {
-            return Ok(None);
-        };
-        let fields = &ask.body["fields"];
-        let (Some(origin), Some(view)) = (
-            fields["origin_step"].as_str(),
-            person_work::step(&connection, subject)?,
-        ) else {
-            return Ok(None);
-        };
-        let Some(blocked) = person_work::step(&connection, origin)? else {
-            return Ok(None);
-        };
-        // Runs are stored without their `mission-run/` prefix, and missions without `mission/`.
-        let mission: Option<String> = connection
-            .query_row(
-                "SELECT mission_id FROM mission_runs WHERE id=?1",
-                [view.run.strip_prefix("mission-run/").unwrap_or(&view.run)],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|id| {
-                if id.starts_with("mission/") {
-                    id
-                } else {
-                    format!("mission/{id}")
-                }
-            });
-        Ok(Some(json!({
-            "mission_id": mission,
-            "blocked": {
-                "step_run_id": origin,
-                "step": blocked.step,
-                "goal": blocked.goals.join("\n"),
-                "attempt": blocked.attempt,
-            },
-        })))
-    }
-
     /// One alert per seat whose harness waits on a person at a native prompt: a permission, a
     /// question or a review it shows in its terminal. It lives in the seat's conversation and
     /// clears when the harness reports the prompt gone, however it was answered, or when the
@@ -290,15 +246,6 @@ impl Store {
         Ok(items)
     }
 
-    /// Whether `agent` is declared and not stopped or retired: the same test that lets an agent
-    /// own a fault.
-    pub fn agent_is_live(&self, agent: &str) -> Result<bool> {
-        let connection = self.readers.get();
-        Ok(agent.starts_with("agent/")
-            && current_desired_row(&connection, agent)?.is_some_and(|row| row.kind == "agent")
-            && person_work::declaration_live(&connection, agent)?)
-    }
-
     /// The fleet's fault agent: the first live agent, by subject, whose declaration carries
     /// `handles-faults`. It takes each fault that no step assignee or agent requester owns.
     pub fn fleet_fault_agent(&self) -> Result<Option<String>> {
@@ -396,16 +343,7 @@ impl Store {
         self.record_failure(episode, input, "observed")
     }
 
-    pub fn record_runtime_failure(
-        &self,
-        episode: &str,
-        input: &AttentionRequest,
-        condition: &str,
-    ) -> Result<AttentionRequestView, St3Error> {
-        self.record_failure(episode, input, condition)
-    }
-
-    fn record_failure(
+    pub fn record_failure(
         &self,
         episode: &str,
         input: &AttentionRequest,
@@ -479,63 +417,7 @@ impl Store {
             .find(|failure| failure.subject == episode))
     }
 
-    pub fn pending_operational_failures(
-        &self,
-        actor: &str,
-        origin: &str,
-    ) -> Result<Vec<AttentionRequestView>> {
-        let connection = self.readers.get();
-        let mut failures = Vec::new();
-        for failure in self.operational_failures()? {
-            if failure.status == "pending"
-                && failure.actor == actor
-                && connection.query_row(
-                    "SELECT origin=?2 FROM claims WHERE id=?1",
-                    params![failure.request, origin],
-                    |row| row.get::<_, bool>(0),
-                )?
-            {
-                failures.push(failure);
-            }
-        }
-        Ok(failures)
-    }
-
-    pub fn recover_operational_failure(
-        &self,
-        episode: &str,
-        reason: &str,
-        key: &str,
-    ) -> Result<AttentionRequestView, St3Error> {
-        let current = self
-            .operational_failure(episode)
-            .map_err(internal)?
-            .ok_or_else(|| {
-                St3Error::new("missing-operational-failure", "the episode does not exist")
-            })?;
-        let source = current
-            .targets
-            .first()
-            .ok_or_else(|| St3Error::new("missing-failure-source", "the episode has no source"))?;
-        self.append_claim(&ClaimInput {
-            subject: source.clone(),
-            kind: "operational.recovered".into(),
-            actor: Some("daemon/runtime".into()),
-            fields: BTreeMap::from([
-                ("episode".into(), json!(episode)),
-                ("failure".into(), json!(current.request)),
-                ("reason".into(), json!(reason)),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(key.into()),
-        })?;
-        self.operational_failure(episode)
-            .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the recovery was not recorded"))
-    }
-
-    fn operational_failures(&self) -> Result<Vec<AttentionRequestView>> {
+    pub fn operational_failures(&self) -> Result<Vec<AttentionRequestView>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0b8812c8c24d owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
             FROM claims WHERE kind IN ('operational.failure','operational.recovered') ORDER BY CANONICAL_ASC(claims)"))?;
@@ -1583,7 +1465,7 @@ pub fn conversation_agent(
 }
 
 /// Whether a record with this idempotency key exists.
-fn recorded(connection: &Connection, key: &str) -> Result<bool> {
+pub fn recorded(connection: &Connection, key: &str) -> Result<bool> {
     Ok(connection
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
@@ -1636,21 +1518,6 @@ impl Store {
     ) -> Result<Option<(String, u128, Value)>> {
         let connection = self.readers.get();
         open_screen_prompt(&connection, seat, incarnation)
-    }
-
-    /// Whether a record with the idempotency key `key` exists.
-    pub fn operation_recorded(&self, key: &str) -> Result<bool> {
-        let connection = self.readers.get();
-        recorded(&connection, key)
-    }
-
-    /// The person's answer to the screen prompt `claim` recorded, and whether st pressed its keys.
-    pub fn screen_prompt_answer(&self, claim: &str) -> Result<(Option<String>, bool)> {
-        let connection = self.readers.get();
-        Ok((
-            native_prompt_answer(&connection, claim)?,
-            recorded(&connection, &screen_prompt_delivered_key(claim))?,
-        ))
     }
 
     /// The alert for the seat's open screen prompt: only while its incarnation runs, and until it
@@ -1770,14 +1637,6 @@ pub struct PromptAnswer {
 const DENIAL_ANSWERS: [&str; 3] = ["approve-once", "approve-kind", "dismiss"];
 
 impl Store {
-    /// The person's answer to the native prompt or denial `episode` recorded, if any.
-    pub fn prompt_answer(&self, episode: &str) -> Result<PromptAnswer> {
-        let connection = self.readers.get();
-        Ok(PromptAnswer {
-            answer: native_prompt_answer(&connection, episode)?,
-        })
-    }
-
     /// The calls Claude's auto mode classifier denied on `seat` since its running incarnation
     /// started, that its person has not answered: each an alert, in the seat's conversation.
     fn denial_items(
@@ -2244,7 +2103,7 @@ fn native_prompt_answer_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusq
 }
 
 /// The answer recorded for the prompt `observation` opened, if any.
-fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Option<String>> {
+pub fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Option<String>> {
     let operation = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation));
     Ok(connection
         .prepare_cached(
@@ -2792,75 +2651,5 @@ mod native_prompt_tests {
         assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
         assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
         assert_eq!(resolve(answered.store_index), expected);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::attention_snapshot_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
-use super::*;
-    use crate::model::ClaimInput;
-
-    /// Registered custom attention is admitted with its request, so an active custom card
-    /// leaves no future change, and only its recipient ever sees it.
-    #[test]
-    fn registered_custom_attention_has_no_future_change_once_active() {
-        let store = Store::open_memory("garden").unwrap();
-        let manifest: st3_schema::custom::Manifest = serde_json::from_str(include_str!(
-            "../../../../examples/st3/custom-review.json"
-        ))
-        .unwrap();
-        store
-            .register_custom_kind(&custom::RegistrationRequest {
-                manifest,
-                actor: "agent/garden/seed".into(),
-            })
-            .unwrap();
-        store
-            .append_claim(&ClaimInput {
-                subject: "custom/garden/review/v1/fence".into(),
-                kind: "custom.garden.review.v1.requested".into(),
-                actor: Some("agent/garden/seed".into()),
-                fields: serde_json::from_value(json!({
-                    "title": "Retain the seed history?",
-                    "detail": "Choose Keep or Discard.",
-                    "recipient": "person/lichen"
-                }))
-                .unwrap(),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        assert!(
-            store
-                .attention_snapshot(Some("person/lichen"), now_ms())
-                .unwrap()
-                .iter()
-                .any(|item| item.subject == "custom/garden/review/v1/fence")
-        );
-        assert_eq!(
-            store
-                .attention_collection_snapshot(Some("person/lichen"), now_ms())
-                .unwrap()
-                .1,
-            None
-        );
-        assert_eq!(
-            store.attention_collection_snapshot(None, now_ms()).unwrap().1,
-            None
-        );
-        parity(&store, Some("person/lichen"), now_ms());
-        parity(&store, None, now_ms());
-        parity(&store, Some("person/avery"), now_ms());
-        assert!(store
-            .attention_snapshot(Some("person/avery"), now_ms())
-            .unwrap()
-            .is_empty());
     }
 }

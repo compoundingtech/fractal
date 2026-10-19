@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use rusqlite::StatementStatus;
-use st3_store::store::person_work::reconcile_candidates_tests_shared_seats::*;
-use st3_store::store::person_work::reconcile_candidates_tests_shared_seats::{insert_retained_ask};
+use st3_missions::store::person_work::reconcile_candidates_tests_shared_seats::*;
+use st3_missions::store::person_work::reconcile_candidates_tests_shared_seats::{insert_retained_ask};
 
 
 #[test]
