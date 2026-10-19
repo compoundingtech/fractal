@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Configured Fractal web browsers export bounded input-to-paint spans through existing OTLP traces, using React-root microtask completion and explicit frame-ingest exclusion to avoid attributing timer or stream updates to unrelated input.",
+  "summary": "Configured Fractal web browsers export bounded input-to-paint spans through existing OTLP traces, using React-root and portal microtask completion and explicit frame-ingest exclusion to avoid attributing timer or stream updates to unrelated input.",
   "replay": {"status": "none", "detail": "No runtime replay changes."},
   "schema": {"status": "none", "detail": "No persisted schema changes."},
   "rules": {"status": "none", "detail": "No checkpoint rules changes."},

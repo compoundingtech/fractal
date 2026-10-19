@@ -10,6 +10,7 @@ import { setTheme } from '../ui-compat/foundations.ts'
 import { App } from './App.tsx'
 import { live, telemetry } from './liveRuntime.ts'
 import { installPageLifecycle } from './pageLifecycle.ts'
+import { PortalContainerRegistrationContext } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { markStart } from './perfMarks.ts'
 
 markStart('sidebar_interactive', { startTime: 0 })
@@ -51,7 +52,7 @@ void Promise.all([live.ready, stylesReady]).then(() => {
   if (disposed) return
   root.render(
     <StrictMode>
-      <App />
+      <PortalContainerRegistrationContext.Provider value={telemetry.registerReactRoot}><App /></PortalContainerRegistrationContext.Provider>
     </StrictMode>,
   )
 })

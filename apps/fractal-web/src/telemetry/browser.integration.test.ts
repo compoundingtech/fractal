@@ -4,9 +4,11 @@ import * as OtlpTracer from 'effect/observability/OtlpTracer'
 import { afterEach, beforeEach, expect, vi } from 'vitest'
 
 import { makeTelemetry, type Telemetry } from './browser.ts'
+import * as InputPaint from './inputPaint.ts'
 
 // Preserve the real scoped exporter while observing its factory through Vitest's ESM-safe spy.
 vi.mock('effect/observability/OtlpTracer', { spy: true })
+vi.mock('./inputPaint.ts', { spy: true })
 
 vi.mock('virtual:build-identity', () => ({
   buildIdentity: { machineVersion: 'test', sourceKind: 'git', dirty: false }, deploymentId: undefined,
@@ -75,6 +77,7 @@ const firstFrame = (tracer: Tracer.Tracer, parent: Tracer.Span) => {
 
 beforeEach(() => {
   vi.mocked(OtlpTracer.make).mockClear()
+  vi.mocked(InputPaint.installInputPaint).mockClear()
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   frames.clear()
   painted.length = 0
@@ -492,6 +495,26 @@ it.live('does not construct input observation or task windows in ring-only mode'
   const uninstall = telemetry.install()
   expect(observer).not.toHaveBeenCalled()
   expect(OtlpTracer.make).not.toHaveBeenCalled()
+  uninstall()
+  yield* Scope.close(scope, Exit.void)
+}))
+
+it.live('reference-counts shared portal containers with idempotent unregistration', () => Effect.gen(function* () {
+  vi.stubGlobal('window', new EventTarget())
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }))
+  vi.stubGlobal('PerformanceObserver', class { static readonly supportedEntryTypes: string[] = [] })
+  const telemetry = make()
+  const { scope } = yield* open(telemetry)
+  const root = new EventTarget() as Element
+  const first = telemetry.registerReactRoot(root)
+  const second = telemetry.registerReactRoot(root)
+  const uninstall = telemetry.install()
+  const roots = vi.mocked(InputPaint.installInputPaint).mock.calls.at(-1)![0].reactRoots!
+  expect([...roots]).toEqual([root])
+  first(); first()
+  expect([...roots]).toEqual([root])
+  second()
+  expect([...roots]).toEqual([])
   uninstall()
   yield* Scope.close(scope, Exit.void)
 }))

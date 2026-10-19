@@ -18,13 +18,17 @@ const vite = await createServer({ root, configFile: false, optimizeDeps: { entri
     server.middlewares.use('/input-paint-proof', async (req, res, next) => {
       if (req.url?.includes('html-proxy')) { next(); return }
       res.setHeader('Content-Type', 'text/html')
-      const html = `<!doctype html><div id="react"></div><button id="hide">Hide before paint</button><output></output>
+      const html = `<!doctype html><div id="react"></div><div id="portal"></div><button id="hide">Hide before paint</button><output></output>
 <script type="module">
 import { createElement, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import { installInputPaint } from '/apps/fractal-web/src/telemetry/inputPaint.ts'
 import { makeFrameIngest } from '/apps/fractal-web/src/data/frameIngest.ts'
+import { PortalContainerRegistrationContext, RegisteredPortal } from '/packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
+const portalContainer = document.querySelector('#portal')
+const reactRoots = new Set()
+const registerPortal = container => { reactRoots.add(container); return () => reactRoots.delete(container) }
 window.samples = []
 window.streams = 0
 const ingest = makeFrameIngest({ write: ({ value }) => {
@@ -53,12 +57,29 @@ const App = () => {
       event.stopPropagation()
       setTimeout(() => { flushSync(() => setCount(n => n + 1)); window.timerReactDone = true }, 0)
     } }, 'No-op React timer'),
+    createElement(RegisteredPortal, { container: portalContainer, children: createElement('div', {},
+      ...['bubble', 'capture'].flatMap(phase => {
+        const handler = phase === 'capture' ? 'onClickCapture' : 'onClick'
+        return [
+          createElement('button', { id: 'portal-' + phase, [handler]: event => { event.stopPropagation(); setCount(n => n + 1) } }, 'Portal ' + phase + count),
+          ...['dom', 'react'].map(kind => createElement('button', { id: 'portal-' + phase + '-' + kind, [handler]: event => {
+            event.stopPropagation()
+            setTimeout(() => {
+              if (kind === 'dom') document.querySelector('output').textContent = 'portal timer'
+              else flushSync(() => setCount(n => n + 1))
+              window['portal-' + phase + '-' + kind] = true
+            }, 0)
+          } }, 'Portal timer ' + phase + kind)),
+        ]
+      }),
+    ) }),
   )
 }
 const container = document.querySelector('#react')
 const reactRoot = createRoot(container)
-flushSync(() => reactRoot.render(createElement(App)))
-window.stopCapture = installInputPaint({ reactRoots: [container], emit: sample => window.samples.push(sample) })
+reactRoots.add(container)
+flushSync(() => reactRoot.render(createElement(PortalContainerRegistrationContext.Provider, { value: registerPortal }, createElement(App))))
+window.stopCapture = installInputPaint({ reactRoots, emit: sample => window.samples.push(sample) })
 document.querySelector('#hide').onclick = () => {
   document.querySelector('output').textContent = 'unpainted'
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
@@ -98,11 +119,25 @@ try {
     await page.locator('#stopped').click()
     await page.waitForFunction(() => window.samples.length === 2)
     if (await page.evaluate(() => window.samples[1].attributes.outcome) !== 'painted') throw new Error('Stopped propagation lost the React microtask commit')
+    for (const phase of ['bubble', 'capture']) {
+      for (const kind of ['dom', 'react']) {
+        const id = 'portal-' + phase + '-' + kind
+        await page.locator('#' + id).click()
+        await page.waitForFunction(id => window[id], id)
+      }
+    }
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    if (await page.evaluate(() => window.samples.length) !== 2) throw new Error('External portal timer commit attributed to stopped no-op')
+    for (const [phase, count] of [['bubble', 3], ['capture', 4]]) {
+      await page.locator('#portal-' + phase).click()
+      await page.waitForFunction(count => window.samples.length === count, count)
+      if (await page.evaluate(() => window.samples.at(-1).attributes.outcome) !== 'painted') throw new Error('Lost stopped external portal commit')
+    }
     await page.locator('#hide').click()
     const samples = await page.evaluate(() => { window.stopCapture(); return window.samples })
-    if (samples.length !== 3 || samples[2].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
-    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, samples }))
-    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, samples }
+    if (samples.length !== 5 || samples[4].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
+    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, samples }))
+    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, samples }
   }`])
 } finally {
   try { await run(['close']) } finally { await vite.close() }

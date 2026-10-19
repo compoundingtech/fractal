@@ -108,7 +108,11 @@ SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint
 Trusted pointer/key/paste/focus/resize/input events count only if a DOM mutation
 commits during their discrete-event dispatch or its microtasks. Capture starts
 observation. Immediately after `createRoot`, the app registers that container
-with telemetry. Same-event completion listeners run after React's native root
+with telemetry. The optional kit `PortalContainerRegistrationContext` registers
+every production portal container for its mounted lifetime: `ThemePortal` and
+workspace Aria hosts, workspace bodies, pane layers and error overlays. Shared
+containers are reference-counted; consumers without this context do nothing.
+Same-event completion listeners run after React's native delegated root/portal
 listeners: bubble handles stopped React bubble handlers; capture handles
 `cancelBubble` already set by React capture handlers. Native `stopPropagation`
 does not skip later same-node listeners. Their queued microtask drains after
