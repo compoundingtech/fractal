@@ -1,5 +1,6 @@
 //! The part of `maintenance` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::ProjectionDivergenceStore;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use anyhow::Result;

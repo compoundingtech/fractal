@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
+use crate::DeliveryStore;
 use super::*;
 use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, Judged, fields_signing_bytes};
 use st3_store::store::message_send_tests_shared_delivery::*;

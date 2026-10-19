@@ -45,11 +45,11 @@ pub fn sqlite(code: i32) -> anyhow::Error {
 
 #[derive(Debug)]
 pub struct Pages {
-    count: i64,
-    max: i64,
-    free: i64,
-    size: i64,
-    journal: String,
+    pub count: i64,
+    pub max: i64,
+    pub free: i64,
+    pub size: i64,
+    pub journal: String,
 }
 
 pub fn pages(c: &Connection) -> Pages {

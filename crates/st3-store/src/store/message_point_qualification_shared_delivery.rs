@@ -104,13 +104,13 @@ pub fn wide(component: &'static str, limit: usize) -> Cause {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Accounting {
-    own_rows: usize,
-    auxiliary_rows: usize,
-    metadata_bytes: usize,
+    pub own_rows: usize,
+    pub auxiliary_rows: usize,
+    pub metadata_bytes: usize,
     // Conservative admitted copies, including repeated calls to the canonical readers.
     // Not a SQLite page/overflow/VM or process allocation measurement.
-    source_bytes: usize,
-    core_bytes: usize,
+    pub source_bytes: usize,
+    pub core_bytes: usize,
 }
 
 pub fn charge(value: &mut usize, bytes: usize, limit: usize, component: &'static str) -> Qualified<()> {
@@ -122,10 +122,10 @@ pub fn charge(value: &mut usize, bytes: usize, limit: usize, component: &'static
 }
 
 impl Accounting {
-    fn source(&mut self, bytes: usize) -> Qualified<()> {
+    pub fn source(&mut self, bytes: usize) -> Qualified<()> {
         charge(&mut self.source_bytes, bytes, SOURCE_BYTES, "source copies")
     }
-    fn metadata(&mut self, bytes: usize) -> Qualified<()> {
+    pub fn metadata(&mut self, bytes: usize) -> Qualified<()> {
         charge(&mut self.metadata_bytes, bytes, METADATA_BYTES, "metadata")
     }
     fn auxiliary(&mut self) -> Qualified<()> {
@@ -150,11 +150,11 @@ pub struct PointCore {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Domains {
-    global_exists: bool,
+    pub global_exists: bool,
     // Evidence for the canonical recipient only. Other persons still fail equality.
-    person_candidate: bool,
-    any_closed: bool,
-    open: bool,
+    pub person_candidate: bool,
+    pub any_closed: bool,
+    pub open: bool,
 }
 
 #[derive(Debug)]
@@ -167,7 +167,7 @@ pub struct Point {
 }
 
 impl Point {
-    fn require_public_detail(&self) -> Qualified<()> {
+    pub fn require_public_detail(&self) -> Qualified<()> {
         if self.reminder.is_some() {
             return Err(Cause::Unsupported(
                 "global/person reminder winner and superseded classification",
@@ -188,8 +188,8 @@ pub enum Stage {
 }
 
 pub struct Header {
-    index: u64,
-    widths: Vec<usize>,
+    pub index: u64,
+    pub widths: Vec<usize>,
 }
 
 pub fn metadata_sql(fields: &[&str]) -> String {

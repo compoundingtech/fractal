@@ -1,5 +1,6 @@
 //! The part of `store::coordination` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::DeliveryStore;
 use super::*;
 pub use st3_store::store::coordination::*;
 pub use st3_store::store::coordination::{backfill, cover_synced_sends, create_schema, initialize, sync};

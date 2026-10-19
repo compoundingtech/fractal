@@ -2,8 +2,8 @@
 use std::{path::{Path, PathBuf}, sync::OnceLock, time::{Duration, Instant}};
 use crate::model::St3Error;
 pub struct Gate {
-    root: PathBuf,
-    grant_subject: Option<String>,
+    pub root: PathBuf,
+    pub grant_subject: Option<String>,
 }
 pub static GATE: OnceLock<Gate> = OnceLock::new();
 

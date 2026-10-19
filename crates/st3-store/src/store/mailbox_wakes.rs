@@ -15,18 +15,18 @@ pub enum Dependency {
 #[derive(Default)]
 pub struct Registry {
     next: u64,
-    subscribers: HashMap<Dependency, HashMap<u64, watch::Sender<u64>>>,
+    pub subscribers: HashMap<Dependency, HashMap<u64, watch::Sender<u64>>>,
 }
 
 #[derive(Default)]
 pub struct Wakes {
-    registry: Mutex<Registry>,
-    failures: AtomicU64,
-    degraded: AtomicBool,
+    pub registry: Mutex<Registry>,
+    pub failures: AtomicU64,
+    pub degraded: AtomicBool,
 }
 
 pub struct Subscription {
-    wakes: Arc<Wakes>,
+    pub wakes: Arc<Wakes>,
     id: u64,
     sender: watch::Sender<u64>,
     pub changed: watch::Receiver<u64>,
@@ -35,7 +35,7 @@ pub struct Subscription {
 }
 
 impl Wakes {
-    fn subscribe(self: &Arc<Self>, fence: &crate::mailbox::Fence) -> Subscription {
+    pub fn subscribe(self: &Arc<Self>, fence: &crate::mailbox::Fence) -> Subscription {
         let base = HashSet::from([
             Dependency::Subject(fence.subject.clone()),
             Dependency::Recipient(normalize_message_party(&fence.subject)),
@@ -62,7 +62,7 @@ impl Wakes {
         }
     }
 
-    fn notify(&self, dependencies: impl IntoIterator<Item = Dependency>) {
+    pub fn notify(&self, dependencies: impl IntoIterator<Item = Dependency>) {
         let registry = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
         let mut notified = HashSet::new();
         for key in dependencies {
@@ -76,13 +76,13 @@ impl Wakes {
         }
     }
 
-    fn failure(&self, stage: &str, error: impl std::fmt::Display) {
+    pub fn failure(&self, stage: &str, error: impl std::fmt::Display) {
         self.failures.fetch_add(1, Ordering::Relaxed);
         self.degraded.store(true, Ordering::Relaxed);
         tracing::warn!(stage, error = %error, "mailbox wake dispatcher failed; safety reads remain active; retrying in five seconds");
     }
 
-    fn resync(&self) {
+    pub fn resync(&self) {
         let keys = self
             .registry
             .lock()

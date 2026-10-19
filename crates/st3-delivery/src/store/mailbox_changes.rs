@@ -1,5 +1,6 @@
 //! The part of `store::mailbox_changes` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::DeliveryStore;
 use super::*;
 pub use st3_store::store::mailbox_changes::*;
 
