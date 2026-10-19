@@ -23,6 +23,9 @@ export type ResponsiveAgentSidebarProps = {
   readonly children: React.ReactNode
 }
 
+// Dialog filters aria-modal from its props; its DOM renderer preserves the modal declaration.
+const renderModalDialog = (props: React.ComponentPropsWithRef<'section'>) => <section {...props} aria-modal="true" />
+
 /** The dock consumes layout space; the modal drawer never resizes the thread. */
 export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, children }: ResponsiveAgentSidebarProps) => {
   const portalContainer = React.useRef<HTMLDivElement>(null)
@@ -30,11 +33,6 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
   const focusDrawerClose = React.useCallback((button: HTMLButtonElement | null) => {
     if (narrow) button?.focus()
   }, [narrow])
-  // Dialog filters aria-modal and keyboard-capture props; its DOM renderer owns both.
-  const renderModalDialog = (props: React.ComponentPropsWithRef<'section'>) => <section {...props} aria-modal="true" onKeyDownCapture={event => {
-    props.onKeyDownCapture?.(event)
-    if (event.key === 'Escape') onDrawerOpenChange(false)
-  }} />
   const sidebar = <aside aria-label="Agents" data-sidebar-presentation={narrow ? 'drawer' : 'dock'} style={{ width: Math.max(sidebarMinimumWidth, width) }} {...stylex.props(styles.sidebar)}>
     <header {...stylex.props(styles.brand)}>
       <ChromeControl ref={focusDrawerClose} icon="chevrons-left" label={narrow ? 'Close agents' : 'Collapse agents'} onPress={() => narrow ? onDrawerOpenChange(false) : onToggleCollapsed()} />
@@ -46,7 +44,6 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
   return <div ref={portalContainer} {...stylex.props(styles.portal)}>
     <Aria.ModalOverlay isOpen={drawerOpen} onOpenChange={onDrawerOpenChange} isDismissable UNSTABLE_portalContainer={portalContainer.current ?? undefined} {...stylex.props(styles.overlay)}>
       <Aria.Modal {...stylex.props(styles.modal)}>
-        {/* The drawer owns Escape even when its focused close control has an open tooltip. */}
         <Aria.Dialog id={drawerId} aria-label="Agent navigation" render={renderModalDialog} {...stylex.props(styles.dialog)}>{sidebar}</Aria.Dialog>
       </Aria.Modal>
     </Aria.ModalOverlay>
