@@ -438,12 +438,12 @@ request durations.
 
 ### Isolated native message-selector cost receipts
 
-The ignored native controls in `crates/st3-api/src/api/client_messages_selector_tests.rs`
+The ignored native controls in `crates/st3-api-core/src/api/client_messages_selector_tests.rs`
 use fresh temporary stores, not daemon databases. Run them in the admitted native
 proof lane with the same optimized build, filesystem and durability settings for
 both designs; retain the exact source/build identity, command, machine/filesystem,
 complete stderr JSON and exit status. Focused Cargo filters (with
-`cargo test --release -p st3-api --lib FILTER -- --ignored --nocapture --test-threads=1`):
+`cargo test --release -p st3-api-core --lib FILTER -- --ignored --nocapture --test-threads=1`):
 
 - `benchmark_client_messages_selector_scaling`: 128/1,280/12,800 real messages,
   each with 32 metadata claims, explicit native rebuild and first/next pages.
@@ -1064,7 +1064,7 @@ not browser-specific back/forward-cache eligibility. This proves the early path 
 is loading; it does not promise that every network's WebSocket handshake outruns an already-cached
 bundle. Both commands close their ephemeral servers and browser sessions in `finally`.
 
-The daemon's existing [`CollectionSubscribe`](../../crates/st3-api/src/api/client_v0.rs)
+The daemon's existing [`CollectionSubscribe`](../../crates/st3-api-core/src/api/client_v0.rs)
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 

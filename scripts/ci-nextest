@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Compile the workspace and preserve the selected test binaries with nextest filters.
 set -euo pipefail
 action=${1:?usage: scripts/ci-nextest run|list [nextest options]}
@@ -30,7 +31,8 @@ launch=(exec)
 # seeds: 48 s against 160 s). CI never takes this branch, so the hosted runs keep real disks and every test that
 # syncs to one. It applies only when TMPDIR is unset or one of the two ordinary directories, and when /dev/shm
 # has 4 GiB free (a check at start, not a reservation: concurrent local runs share that RAM); ST_NEXTEST_TMPDIR=disk turns it off, and a TMPDIR you set yourself is kept.
-if [[ "$action" == run && -z "${GITHUB_ACTIONS:-}" && "$(uname -s)" == Linux && "${ST_NEXTEST_TMPDIR:-}" != disk ]]; then
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if [[ "$action" == run && -z "${GITHUB_ACTIONS:-}" && "$(uname -s)" == Linux && "${FRACTAL_NEXTEST_TMPDIR-${ST_NEXTEST_TMPDIR:-}}" != disk ]]; then
   case "${TMPDIR:-}" in
     ''|/tmp|/tmp/|/var/tmp|/var/tmp/)
       if [[ -d /dev/shm && -w /dev/shm ]] && [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ]]; then
