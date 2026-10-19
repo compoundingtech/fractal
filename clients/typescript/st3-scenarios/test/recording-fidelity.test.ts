@@ -86,7 +86,7 @@ describe('recorded transport fidelity', () => {
     const { world } = loadRecordedProof()
     expect(world.id).toBe('recorded-fleet-mid-refactor-proof')
     expect(SLICE_KINDS.map((kind) => world.slices[kind].source._tag)).toEqual(SLICE_KINDS.map(() => 'recorded'))
-    expect(catalog).toHaveLength(24)
+    expect(catalog).toHaveLength(25)
     expect(catalog.some(({ id }) => id.startsWith('recorded-'))).toBe(false)
   })
 
