@@ -182,6 +182,11 @@ impl Manager for Native {
     fn enable(&mut self, unit: &Unit, enabled: bool) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
+            if enabled && unit.name.starts_with("fractal") {
+                // HM stages static units (no WantedBy) specifically to prevent activation.
+                // Add the boot relationship only at the explicit, committed host cutover.
+                return Self::command("systemctl", &["--user", "add-wants", "default.target", &unit.name]);
+            }
             let output = Self::output("systemctl", &["--user", if enabled { "enable" } else { "disable" }, &unit.name])?;
             if !output.status.success() {
                 let status = Self::systemd(&unit.name, unit.file.parent().context("unit has no parent")?)?;
