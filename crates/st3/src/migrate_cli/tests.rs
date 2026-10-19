@@ -115,6 +115,9 @@ impl Fixture {
             fs::write(old.join("nested/authority"), b"preserve these exact bytes\0\xff")?;
             fs::write(old.join(".hidden"), b"hidden state")?;
         }
+        // A running daemon already owns this lock file and has its log parent.
+        fs::write(layout.directories[1].0.join("node-identity.lock"), b"")?;
+        fs::create_dir(layout.directories[1].0.join("logs"))?;
         let mut legacy = Vec::new();
         let mut target = Vec::new();
         let names: &[(&str, &str)] = if cfg!(target_os = "macos") {
@@ -405,5 +408,26 @@ async fn committed_journal_rerun_finishes_retirement_without_reswapping_state() 
     assert!(fixture.manager.services.target.iter().all(|unit| unit.enabled && unit.running));
     assert!(!fixture.manager.events.iter().any(|event| event.starts_with("stop:")));
     assert!(fixture.run(false, true).await.is_err());
+    Ok(())
+}
+
+#[test]
+fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let base = fixture.root.path().join("LaunchAgents");
+    let unit = |name: &str| Unit {
+        name: name.into(), file: base.join(format!("{name}.plist")),
+        installed: true, running: false, enabled: false,
+    };
+    let services = Services {
+        legacy: vec![unit("org.nix-community.home.smalltalk"), unit("org.nix-community.home.smalltalk-apply")],
+        target: vec![unit("com.compoundingtech.fractal"), unit("com.compoundingtech.fractal-apply")],
+    };
+    let pairs = fixture.layout.pairs(&services);
+    assert_eq!(pairs.len(), 4);
+    for (index, (old, new)) in pairs.iter().skip(2).enumerate() {
+        assert_eq!(*old, dropins(&services.legacy[index].file));
+        assert_eq!(*new, dropins(&services.target[index].file));
+    }
     Ok(())
 }

@@ -88,6 +88,10 @@ impl Layout {
                 "fractal.service".into()
             } else if old.name == "smalltalk-apply.service" {
                 "fractal-apply.service".into()
+            } else if old.name == "org.nix-community.home.smalltalk" {
+                "com.compoundingtech.fractal".into()
+            } else if old.name == "org.nix-community.home.smalltalk-apply" {
+                "com.compoundingtech.fractal-apply".into()
             } else {
                 old.name.replacen("st3", "fractal", 1)
             };
@@ -181,12 +185,15 @@ fn destination_free(old: &Path, new: &Path) -> Result<()> {
     ensure!(source.is_dir() && !source.file_type().is_symlink(), "{} must be a real legacy directory", old.display());
     let parent = new.parent().context("destination has no parent")?;
     ensure!(source.dev() == fs::metadata(parent)?.dev(), "{} and {} are on different filesystems; this cutover only performs same-filesystem renames", old.display(), new.display());
-    if let Ok(destination) = fs::symlink_metadata(new) {
-        ensure!(destination.is_dir() && !destination.file_type().is_symlink(), "destination {} is not a free directory", new.display());
-        ensure!(fs::read_dir(new)?.next().is_none(),
-            "destination {} is non-empty; refusing to overwrite it{}; move the dotfiles Fractal TUI state to fractalite first if applicable",
-            new.display(), if new.join(RECEIPT_FILE).exists() { " (a receipt does not authorize merging two directories)" } else { " and has no migration receipt" });
-    }
+    let destination = match fs::symlink_metadata(new) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("inspect destination {}", new.display())),
+    };
+    ensure!(destination.is_dir() && !destination.file_type().is_symlink(), "destination {} is not a free directory", new.display());
+    ensure!(fs::read_dir(new)?.next().is_none(),
+        "destination {} is non-empty; refusing to overwrite it{}; move the dotfiles Fractal TUI state to fractalite first if applicable",
+        new.display(), if new.join(RECEIPT_FILE).exists() { " (a receipt does not authorize merging two directories)" } else { " and has no migration receipt" });
     Ok(())
 }
 
