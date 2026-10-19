@@ -5309,6 +5309,7 @@ dependencies = [
  "st3-schema",
  "st3-seats",
  "st3-secrets",
+ "st3-store",
  "tempfile",
  "tokio",
  "tracing",
