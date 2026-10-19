@@ -141,11 +141,13 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       }
     };
     void Linking.getInitialURL().then(handle);
-    handle(process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
-    handle(process.env.EXPO_PUBLIC_ST3_TEST_PAIR_LINK ?? null);
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — keep literal Expo lookups; empty masks legacy.
+    handle(process.env.EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK ?? process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
+    handle(process.env.EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK ?? process.env.EXPO_PUBLIC_ST3_TEST_PAIR_LINK ?? null);
     // Links to follow at launch, six seconds apart, for headless screenshots: the simulator asks
     // before opening each link it is handed, and nobody is there to answer.
-    (process.env.EXPO_PUBLIC_ST3_TEST_LINKS ?? '').split(/\s+/).filter(Boolean).forEach((link: string, index: number) => setTimeout(() => handle(link), 6000 * (index + 1)));
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    (process.env.EXPO_PUBLIC_FRACTAL_TEST_LINKS ?? process.env.EXPO_PUBLIC_ST3_TEST_LINKS ?? '').split(/\s+/).filter(Boolean).forEach((link: string, index: number) => setTimeout(() => handle(link), 6000 * (index + 1)));
     const subscription = Linking.addEventListener('url', event => handle(event.url));
     return () => subscription.remove();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -155,7 +157,8 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       <Stack.Screen name="NowRoot" component={PairScreen} options={{ title: 'Pair this device' }} />
     </Stack.Navigator>;
   }
-  const initial = (__DEV__ ? tabNamed(process.env.EXPO_PUBLIC_ST3_TEST_TAB) : null) ?? order[0];
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  const initial = (__DEV__ ? tabNamed(process.env.EXPO_PUBLIC_FRACTAL_TEST_TAB ?? process.env.EXPO_PUBLIC_ST3_TEST_TAB) : null) ?? order[0];
   const systemSurface = shownName === 'NowRoot' || shownName === 'Attention';
   return <ThemeProvider value={systemSurface ? {
     ...(scheme === 'dark' ? DarkTheme : DefaultTheme),
@@ -190,7 +193,8 @@ export default function App() {
       // or trial uses a fresh pairing link, whose challenge id changes this key.
       current?.node === input.node && current.service === input.service && current.id === input.id ? current : input); } };
     void Linking.getInitialURL().then(handle);
-    handle(process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    handle(process.env.EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK ?? process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
     const subscription = Linking.addEventListener('url', event => handle(event.url));
     return () => subscription.remove();
   }, []);
