@@ -83,6 +83,7 @@ mod document_pages;
 pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
+pub mod retired;
 pub mod runtime;
 pub mod transport_observation_index;
 pub mod writer_heads;
@@ -969,6 +970,9 @@ impl Store {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1ef8ba031b42 owner=smallclaims::store TODO=trace-statement-and-value-representation */ writer_heads::SCHEMA).map_err(Into::into)
