@@ -1876,6 +1876,26 @@ export type MissionWake = {
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
 
+export type NoticeSnapshot = {
+  body: string;
+  control_revision: string;
+  delivery: "pending" | "delivered" | "failed" | "suppressed";
+  dismissed_at: string | null;
+  id: string;
+  kind: "attention-notice";
+  producer: string;
+  recipient: string;
+  revision: string;
+  runtime_actor: string;
+  schema_version: 1;
+  seen_at: string | null;
+  snoozed_until: string | null;
+  source_id: string;
+  source_revision: string;
+  title: string;
+  updated_at: string;
+};
+
 export type ObservationAccepted = {
   accepted: true;
 };

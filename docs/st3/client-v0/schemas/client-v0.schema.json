@@ -15,6 +15,30 @@
     { "$ref": "#/$defs/PairingAdvertisement" }
   ],
   "$defs": {
+    "NoticeSnapshot": {
+      "description": "Design spike: runtime-owned Attention notice read model. Person controls have an independent fence from delivery updates.",
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "id", "schema_version", "updated_at", "recipient", "producer", "runtime_actor", "source_id", "source_revision", "revision", "control_revision", "title", "body", "delivery", "seen_at", "dismissed_at", "snoozed_until"],
+      "properties": {
+        "kind": {"const": "attention-notice"},
+        "id": {"type": "string"},
+        "schema_version": {"const": 1},
+        "updated_at": {"type": "string"},
+        "recipient": {"type": "string"},
+        "producer": {"type": "string"},
+        "runtime_actor": {"type": "string"},
+        "source_id": {"type": "string"},
+        "source_revision": {"type": "string"},
+        "revision": {"type": "string"},
+        "control_revision": {"type": "string"},
+        "title": {"type": "string", "maxLength": 512},
+        "body": {"type": "string", "maxLength": 8192},
+        "delivery": {"enum": ["pending", "delivered", "failed", "suppressed"]},
+        "seen_at": {"type": ["string", "null"]},
+        "dismissed_at": {"type": ["string", "null"]},
+        "snoozed_until": {"type": ["string", "null"]}
+      }
+    },
     "AgentEndReason": {
       "type": "object",
       "additionalProperties": false,

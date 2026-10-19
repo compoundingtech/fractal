@@ -3924,6 +3924,29 @@ export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
 export type MessageBody = typeof MessageBody.Type
 export type MessageBodyEncoded = typeof MessageBody.Encoded
 
+/** Design spike: runtime-owned Attention notice read model. Person controls have an independent fence from delivery updates. */
+export const NoticeSnapshot = /*#__PURE__*/ (() => Schema.Struct({
+  "body": Schema.String.check(Schema.isMaxLength(8192)),
+  "control_revision": Schema.String,
+  "delivery": Schema.Literals(["pending","delivered","failed","suppressed"]),
+  "dismissed_at": Schema.OptionFromNullOr(Schema.String),
+  "id": Schema.String,
+  "kind": Schema.Literal("attention-notice"),
+  "producer": Schema.String,
+  "recipient": Schema.String,
+  "revision": Schema.String,
+  "runtime_actor": Schema.String,
+  "schema_version": Schema.Literal(1),
+  "seen_at": Schema.OptionFromNullOr(Schema.String),
+  "snoozed_until": Schema.OptionFromNullOr(Schema.String),
+  "source_id": Schema.String,
+  "source_revision": Schema.String,
+  "title": Schema.String.check(Schema.isMaxLength(512)),
+  "updated_at": Schema.String
+}).annotate({ identifier: "NoticeSnapshot", description: "Design spike: runtime-owned Attention notice read model. Person controls have an independent fence from delivery updates." }))()
+export type NoticeSnapshot = typeof NoticeSnapshot.Type
+export type NoticeSnapshotEncoded = typeof NoticeSnapshot.Encoded
+
 export const ObservationAccepted = /*#__PURE__*/ (() => Schema.Struct({
   "accepted": Schema.Literal(true)
 }).annotate({ identifier: "ObservationAccepted" }))()
