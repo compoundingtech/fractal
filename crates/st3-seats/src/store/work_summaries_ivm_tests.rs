@@ -1,9 +1,10 @@
 #![allow(unused_imports)]
+use crate::MissionsStore;
 use super::*;
 use smallclaims::ivm::{SourceCut, events};
-use st3_store::store::tests_shared::{exchange_from, receive_and_project};
-use st3_store::store::work_summaries_ivm::tests_shared_seats::*;
-use st3_store::store::work_summaries_ivm::tests_shared_seats::{ResetClock, advance, append, append_at, capture, fixture, freeze, parity, register};
+use st3_missions::store::tests_shared::{exchange_from, receive_and_project};
+use st3_missions::store::work_summaries_ivm::tests_shared_seats::*;
+use st3_missions::store::work_summaries_ivm::tests_shared_seats::{ResetClock, advance, append, append_at, capture, fixture, freeze, parity, register};
 
 
 fn mission(store: &Store) -> MissionRunView {
@@ -137,7 +138,7 @@ fn future_claims_require_bounded_captured_time_pages() {
 #[test]
 fn signed_replication_permutations_and_duplicates_match_canonical_reader() {
     use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let at = 1_800_000_000_000;
     let _reset = freeze(at);
     let source = Store::open_memory("cedar").unwrap();
@@ -174,6 +175,27 @@ fn signed_replication_permutations_and_duplicates_match_canonical_reader() {
         parity(&target, &views, &run.steps, at);
         receive_and_project(&target, "cedar", &permuted);
         parity(&target, &views, &run.steps, at);
+        assert_eq!(
+            row(&target.readers.get(), &views, &run.steps[0].subject, 1, at)
+                .unwrap()
+                .completion_summary
+                .as_deref(),
+            Some("complete")
+        );
+    }
+    // Split: reverse order in batches of one and two, each batch's predecessor delivered again
+    // with it, with parity against the canonical reader after every batch.
+    for width in [1, 2] {
+        let (target, views) = fixture();
+        let order = exchange.envelopes.iter().rev().cloned().collect::<Vec<_>>();
+        let mut previous = Vec::new();
+        for chunk in order.chunks(width) {
+            let mut batch = chunk.to_vec();
+            batch.extend(previous.iter().cloned());
+            receive_and_project(&target, "cedar", &st3_store::store::tests_shared_seats::exchange_of("cedar", batch));
+            parity(&target, &views, &run.steps, at);
+            previous = chunk.to_vec();
+        }
         assert_eq!(
             row(&target.readers.get(), &views, &run.steps[0].subject, 1, at)
                 .unwrap()

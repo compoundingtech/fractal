@@ -1,4 +1,5 @@
 //! Lifetimes of open PEEK streams, independent of single-use acquisition capabilities.
+use crate::MissionsStore;
 use super::*;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use std::sync::{LazyLock, Mutex};

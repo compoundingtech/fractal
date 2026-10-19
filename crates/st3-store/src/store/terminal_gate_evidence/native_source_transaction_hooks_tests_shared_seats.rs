@@ -28,12 +28,6 @@ use crate::store::terminal_gate_evidence::native_source_transaction_hooks_shared
 
 pub type Saved = (Root, (i64, bool, Option<String>, bool), String, String);
 
-pub struct Fixture {
-    pub adapter: Arc<Adapter>,
-    pub store: Store,
-    pub dir: tempfile::TempDir,
-}
-
 pub fn binding() -> Binding {
     Binding {
         origin: "node".into(),
@@ -45,6 +39,12 @@ pub fn binding() -> Binding {
         gate: "prepared".into(),
         exec: "exec/one/probe".into(),
     }
+}
+
+pub struct Fixture {
+    pub adapter: Arc<Adapter>,
+    pub store: Store,
+    pub dir: tempfile::TempDir,
 }
 
 impl Fixture {

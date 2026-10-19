@@ -181,7 +181,7 @@ pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
     Ok(inputs.views)
 }
 
-fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
+pub fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
     let connection = store.readers.get();
     let mut views = connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hba5d9054968a owner=st3_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ &seat_work_at_snapshot_query(false))?

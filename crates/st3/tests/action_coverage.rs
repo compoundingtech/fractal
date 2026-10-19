@@ -1,6 +1,8 @@
 //! Product actions over the real client/CLI Unix transport, with disk-backed daemon restarts.
 #![cfg(unix)]
 
+use st3::DeliveryStore;
+use st3::MissionsStore;
 use st3::SeatsStore;
 use st3::EvidenceStore;
 use st3::OwnedSetsStore;

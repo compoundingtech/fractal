@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use crate::harness_events::Publication;
-use st3_store::store::harness_event_tests_shared_seats::*;
-use st3_store::store::harness_event_tests_shared_seats::{SEAT, event, runtime};
+use st3_missions::store::harness_event_tests_shared_seats::*;
+use st3_missions::store::harness_event_tests_shared_seats::{SEAT, event, runtime};
 
 
 #[test]
@@ -42,7 +42,7 @@ fn harness_todo_event_replay_and_runtime_fencing_preserve_latest_snapshot() {
     assert_eq!(store.append_harness_event(&input).unwrap_err().code, "stale-harness-event-session");
     let current = store.latest_observation(SEAT, "harness.todo.observed").unwrap().unwrap();
     assert_eq!(current.body["fields"]["source_op"], "clear");
-    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let peer = Store::open_memory("blue").unwrap();
     store.bind_fleet(FLEET).unwrap();
     peer.bind_fleet(FLEET).unwrap();

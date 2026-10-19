@@ -64,8 +64,8 @@
         "crates/st3-api/src/api/client_v0/arrangements.rs::arrangement_create_race_returns_typed_exists_and_exact_retry_receipt",
         "crates/st3-api/src/api/client_v0/arrangements.rs::arrangement_folder_race_and_validation_refusals_stay_typed",
         "crates/st3-api/src/api/client_v0/arrangements.rs::selected_arrangement_survives_byte_window_edits_and_retirement",
-        "crates/st3-store/src/store/arrangements_tests.rs::owner_admission_real_agent_and_atomic_identity_fences",
-        "crates/st3-store/src/store/arrangements_tests.rs::heads_survive_reopen_and_an_upgrade_backfills_once"
+        "crates/st3-missions/src/store/arrangements_tests.rs::owner_admission_real_agent_and_atomic_identity_fences",
+        "crates/st3-missions/src/store/arrangements_tests.rs::heads_survive_reopen_and_an_upgrade_backfills_once"
       ],
       "behavior": "real API handler and store tests: stale layout fences merge; fenced retirement compares the current revision and refuses concurrent edits without writes; unfenced retirement remains unconditional; stale authority and launch fences refuse without edits; replay preserves receipts and rejects changed action identity; fenced retirement recovers receipt gaps; agent attribution preserves person ownership; projected heads survive reopen, upgrade backfill and replication"
     },
