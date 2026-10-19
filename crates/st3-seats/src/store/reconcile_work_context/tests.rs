@@ -1,16 +1,19 @@
 #![allow(unused_imports)]
+use crate::AdhocWorkStore;
+use crate::MissionsStore;
+use crate::PersonWorkStore;
 use super::*;
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
 use std::time::Instant;
-use st3_store::store::shared_seats::*;
-use st3_store::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
-use st3_store::store::reconcile_work_context_shared_seats::*;
-use st3_store::store::reconcile_work_context_shared_seats::{AFTER_OWNERS, AFTER_SUPPORT, MAX_SNAPSHOT_CALL_NS};
-use st3_store::store::reconcile_work_context::tests_shared_seats::*;
-use st3_store::store::reconcile_work_context::tests_shared_seats::{ACTOR, SEED, claim_for_handoff, handoff_to_peer, measured, oracle, parity};
+use st3_missions::store::shared_seats::*;
+use st3_missions::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
+use st3_missions::store::reconcile_work_context_shared_seats::*;
+use st3_missions::store::reconcile_work_context_shared_seats::{AFTER_OWNERS, AFTER_SUPPORT, MAX_SNAPSHOT_CALL_NS};
+use st3_missions::store::reconcile_work_context::tests_shared_seats::*;
+use st3_missions::store::reconcile_work_context::tests_shared_seats::{ACTOR, SEED, claim_for_handoff, handoff_to_peer, measured, oracle, parity};
 
 
-fn fixture(count: usize) -> Store {
+pub fn fixture(count: usize) -> Store {
     let store = Store::open_memory("alder").unwrap();
     if count > 0 {
         add_run(&store, count, "batch-work");

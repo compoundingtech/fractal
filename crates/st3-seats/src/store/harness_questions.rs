@@ -5,8 +5,8 @@ use smallclaims::store::checkpoint::claims_of_kind_in_order;
 use st3_schema::harness_questions::{
     Answer, OBSERVED, Question, RESOLVED, Receipt, Status, actor_key, answers, questions, subject,
 };
-pub use st3_store::store::harness_questions::*;
-pub use st3_store::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
+pub use st3_missions::store::harness_questions::*;
+pub use st3_missions::store::harness_questions::{HarnessQuestion, QuestionResolution, question_at};
 
 /// A native question as the harness shows it, without its text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,8 +190,8 @@ impl HarnessQuestionsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::harness_questions_tests_shared_seats::*;
-    use st3_store::store::harness_questions_tests_shared_seats::{DAY, answer};
+    use st3_missions::store::harness_questions_tests_shared_seats::*;
+    use st3_missions::store::harness_questions_tests_shared_seats::{DAY, answer};
 
     fn observation() -> QuestionObservation {
         QuestionObservation {
@@ -329,5 +329,147 @@ mod tests {
         other.native_id = "call-2".into();
         let pending = store.observe_harness_question(&other).unwrap();
         assert!(store.harness_question(&pending.id, 1000 * DAY).unwrap().is_some());
+    }
+
+    // A seat's current harness, its status history and its native questions fold replicated
+    // runtime, harness and question claims. Two writers record them, several in one
+    // millisecond, and resolve different revisions of one question: every delivery order,
+    // batching and repetition must read the same.
+    fn harness_fixture() -> &'static (crate::model::ReplicationExchange, String) {
+        static FIXTURE: std::sync::OnceLock<(crate::model::ReplicationExchange, String)> =
+            std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let alder = Store::open_memory("alder").unwrap();
+            let birch = Store::open_memory("birch").unwrap();
+            let relay = Store::open_memory("cedar").unwrap();
+            let seat = observation().agent;
+            let state = |store: &Store, kind: &str, fields: Value| {
+                store
+                    .append_claim(&ClaimInput {
+                        subject: seat.clone(),
+                        kind: kind.into(),
+                        actor: Some(seat.clone()),
+                        fields: serde_json::from_value(fields).unwrap(),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
+            };
+            alder.set_write_clock_at(10 * DAY).unwrap();
+            state(&alder, "runtime.observed", json!({"status": "running", "runtime_id": "runtime-1", "incarnation_id": "inc-1"}));
+            state(&alder, "harness.observed", json!({"state": "working", "driver": "claude", "incarnation_id": "inc-1"}));
+            let first = alder.observe_harness_question(&observation()).unwrap();
+            st3_store::store::tests_shared::receive_and_project(
+                &birch,
+                "alder",
+                &st3_store::store::tests_shared::exchange_from(&alder, &ReplicationInventory::default()),
+            );
+            // Both writers in the same later millisecond.
+            for store in [&alder, &birch] {
+                store.set_write_clock_at(10 * DAY + 5_000).unwrap();
+            }
+            state(&birch, "harness.observed", json!({"state": "idle", "driver": "claude", "incarnation_id": "inc-1"}));
+            state(&alder, "harness.observed", json!({"state": "blocked", "driver": "claude", "incarnation_id": "inc-1"}));
+            let mut changed = observation();
+            changed.questions[0].options = 3;
+            let second = birch.observe_harness_question(&changed).unwrap();
+            birch
+                .resolve_harness_question(&second.id, Status::Answered, &second.revision, &answer(2), None)
+                .unwrap();
+            alder
+                .resolve_harness_question(&first.id, Status::Expired, &first.revision, &answer(1), None)
+                .unwrap();
+            for (name, source) in [("alder", &alder), ("birch", &birch)] {
+                let exchange =
+                    st3_store::store::tests_shared::exchange_from(source, &ReplicationInventory::default());
+                st3_store::store::tests_shared::receive_and_project(&relay, name, &exchange);
+            }
+            (
+                st3_store::store::tests_shared::exchange_from(&relay, &ReplicationInventory::default()),
+                first.id,
+            )
+        })
+    }
+
+    fn harness_snapshot(store: &Store) -> Value {
+        let (_, question) = harness_fixture();
+        let seat = observation().agent;
+        let connection = store.readers.get();
+        let index = store.index().unwrap();
+        json!({
+            "harness": st3_store::store::current_harness_at(&connection, &seat, None).unwrap(),
+            "history": st3_store::store::seat_status::history_at(&connection, &seat, 20 * DAY, index).unwrap(),
+            "question": store.harness_question(question, u128::MAX).unwrap(),
+        })
+    }
+
+    fn deliver_harness(target: &Store, order: &[usize], width: usize, copies: usize) {
+        let (exchange, _) = harness_fixture();
+        for chunk in order.chunks(width) {
+            let envelopes = chunk
+                .iter()
+                .flat_map(|&index| std::iter::repeat_n(exchange.envelopes[index].clone(), copies))
+                .collect();
+            let admission = st3_store::store::tests_shared::receive_and_project(
+                target,
+                "cedar",
+                &st3_store::store::tests_shared_seats::exchange_of("cedar", envelopes),
+            );
+            assert_eq!((admission.invalid, admission.unknown), (0, 0));
+        }
+    }
+
+    fn harness_reference() -> &'static Value {
+        static REFERENCE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        REFERENCE.get_or_init(|| {
+            let target = Store::open_memory("dogwood").unwrap();
+            let count = harness_fixture().0.envelopes.len();
+            deliver_harness(&target, &(0..count).collect::<Vec<_>>(), usize::MAX, 1);
+            harness_snapshot(&target)
+        })
+    }
+
+    #[test]
+    fn the_harness_fixture_resolves_the_question_once() {
+        let reference = harness_reference();
+        assert!(reference["harness"].is_object());
+        assert!(reference["question"]["resolution"].is_object());
+    }
+
+    #[test]
+    fn harness_folds_survive_redelivery_restart_and_replay() {
+        let (exchange, _) = harness_fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let target = Store::open(&path, "dogwood").unwrap();
+        deliver_harness(&target, &(0..exchange.envelopes.len()).rev().collect::<Vec<_>>(), 1, 1);
+        assert_eq!(&harness_snapshot(&target), harness_reference());
+        st3_store::store::tests_shared::receive_and_project(&target, "cedar", exchange);
+        assert_eq!(&harness_snapshot(&target), harness_reference());
+        drop(target);
+        let target = Store::open(&path, "dogwood").unwrap();
+        assert_eq!(&harness_snapshot(&target), harness_reference());
+        target.replay_replication_graph().unwrap();
+        assert_eq!(&harness_snapshot(&target), harness_reference());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn harness_folds_are_pure_under_shuffled_split_and_duplicate_delivery(
+            ranks in proptest::collection::vec(proptest::prelude::any::<u64>(), 32),
+            width in 1usize..5,
+            copies in 1usize..3,
+        ) {
+            let count = harness_fixture().0.envelopes.len();
+            proptest::prop_assert!(count <= ranks.len());
+            let mut shuffled = (0..count).collect::<Vec<_>>();
+            shuffled.sort_by_key(|&index| (ranks[index], index));
+            let target = Store::open_memory("dogwood").unwrap();
+            deliver_harness(&target, &shuffled, width, copies);
+            proptest::prop_assert_eq!(&harness_snapshot(&target), harness_reference());
+        }
     }
 }

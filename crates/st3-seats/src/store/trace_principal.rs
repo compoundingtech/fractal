@@ -1,7 +1,8 @@
 //! The part of `store::trace_principal` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::MissionsStore;
 use super::*;
-pub use st3_store::store::trace_principal::*;
+pub use st3_missions::store::trace_principal::*;
 
 pub trait TracePrincipalStore {
     /// The accountable person declared once by a fleet root. This does not answer whose
@@ -72,8 +73,8 @@ impl TracePrincipalStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::trace_principal_tests_shared_seats::*;
-    use st3_store::store::trace_principal_tests_shared_seats::{declare, store};
+    use st3_missions::store::trace_principal_tests_shared_seats::*;
+    use st3_missions::store::trace_principal_tests_shared_seats::{declare, store};
 
     #[test]
     fn trace_principal_follows_only_declaring_seats_to_an_explicit_root() {
