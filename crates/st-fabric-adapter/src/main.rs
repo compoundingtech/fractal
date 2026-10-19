@@ -39,11 +39,14 @@ struct Args {
 #[derive(Debug, clap::Subcommand)]
 enum PairingCommand {
     /// Attach a restricted Fabric permit to an existing invite ({code} on stdin).
-    PairingInvite,
+    #[command(name = "pairing-invite")]
+    Invite,
     /// Exchange signed admission over Fabric's restricted pairing ALPN.
-    PairingJoin,
+    #[command(name = "pairing-join")]
+    Join,
     /// Read an authenticated retained pairing receipt without presenting a token.
-    PairingStatus,
+    #[command(name = "pairing-status")]
+    Receipt,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,10 +279,10 @@ async fn main() -> Result<()> {
         Some(path) => path,
         None => reconcile::control_socket()?,
     };
-    if matches!(args.command, Some(PairingCommand::PairingJoin)) {
+    if matches!(args.command, Some(PairingCommand::Join)) {
         return pairing::join(&fabric_socket, &state).await;
     }
-    if matches!(args.command, Some(PairingCommand::PairingStatus)) {
+    if matches!(args.command, Some(PairingCommand::Receipt)) {
         return pairing::status(&fabric_socket).await;
     }
     let st_socket = match args.st_socket {
@@ -291,7 +294,7 @@ async fn main() -> Result<()> {
         .unix_socket(st_socket)
         .timeout(Duration::from_secs(10))
         .build()?;
-    if matches!(args.command, Some(PairingCommand::PairingInvite)) {
+    if matches!(args.command, Some(PairingCommand::Invite)) {
         return pairing::invite(&client, &fabric_socket, &state).await;
     }
     std::fs::create_dir_all(&state)?;
