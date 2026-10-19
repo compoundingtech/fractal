@@ -1,8 +1,8 @@
 //! The part of `store::seat_status` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::seat_status::*;
-pub use st3_store::store::seat_status::{MAX_TRANSITIONS, WINDOW_MS, enrich_harness, history_at, history_at_with_sources, history_source, observation_time, permission_blocked, state_run_since, transition_positions};
+pub use st3_missions::store::seat_status::*;
+pub use st3_missions::store::seat_status::{MAX_TRANSITIONS, WINDOW_MS, enrich_harness, history_at, history_at_with_sources, history_source, observation_time, permission_blocked, state_run_since, transition_positions};
 
 pub const STALE_MS: u128 = 90_000;
 
@@ -98,8 +98,8 @@ impl SeatStatusStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use st3_store::store::seat_status_tests_shared_seats::*;
-    use st3_store::store::seat_status_tests_shared_seats::{checked_harness, input, observe, runtime};
+    use st3_missions::store::seat_status_tests_shared_seats::*;
+    use st3_missions::store::seat_status_tests_shared_seats::{checked_harness, input, observe, runtime};
 
     #[test]
     fn approval_observation_is_blocked_in_current_then_clears() {

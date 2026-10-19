@@ -3,8 +3,8 @@
 use super::*;
 use opentelemetry::trace::TraceContextExt as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-pub use st3_store::store::roster_admission::*;
-pub use st3_store::store::roster_admission::{AdmissionState, Blocked, Holder};
+pub use st3_missions::store::roster_admission::*;
+pub use st3_missions::store::roster_admission::{AdmissionState, Blocked, Holder};
 
 pub struct AdmissionGuard {
     // Snapshot, publication, and release all serialize with the actual mutex poll.

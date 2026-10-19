@@ -2,7 +2,7 @@
 use super::checkpoint::*;
 use super::*;
 
-const FLEET: &str = "fleet/test";
+pub const FLEET: &str = "fleet/test";
 const CHECKPOINT: &str = "checkpoint/2026-09-27";
 
 fn diagnostic(subject: &str, n: usize, reason: &str) -> ClaimInput {

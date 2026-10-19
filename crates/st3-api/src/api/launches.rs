@@ -1,3 +1,4 @@
+use crate::MissionsStore;
 use crate::SeatsStoreCore;
 use super::*;
 

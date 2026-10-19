@@ -1,9 +1,6 @@
 //! Body-free message selectors: ordered eligibility seeks, then page-only claim folds.
 use super::*;
 
-#[cfg(test)]
-mod reminder_deletion_tests;
-
 #[cfg(any(test, feature = "test-support"))]
 const TABLE: &str = "local_client_message_selectors_v1";
 const MARKER: &str = "client_message_selectors_v1_cut";
@@ -12,10 +9,10 @@ const FOLD_MARKER: &str = "client_message_selectors_v1_fold";
 const MALFORMED_MARKER: &str = "client_message_selectors_v1_malformed_desired";
 const TRIGGER_MARKER: &str = "client_message_selectors_v1_trigger_generation";
 // Leave ample room for SQLite's durable commit below the 100ms transaction target.
-const BACKFILL_SUBJECTS: usize = 16;
-const BACKFILL_CLEAR_ROWS: usize = 64;
-const FOLD_CLAIMS: usize = 64;
-const PRUNE_ROWS: usize = 64;
+pub const BACKFILL_SUBJECTS: usize = 16;
+pub const BACKFILL_CLEAR_ROWS: usize = 64;
+pub const FOLD_CLAIMS: usize = 64;
+pub const PRUNE_ROWS: usize = 64;
 const BACKFILL_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
 const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha8020839be9b owner=st3_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_selectors_v1(
@@ -276,9 +273,9 @@ struct FoldWork {
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FoldBudget {
-    claims: usize,
-    subjects: usize,
-    scratch_rows: usize,
+    pub claims: usize,
+    pub subjects: usize,
+    pub scratch_rows: usize,
     #[cfg(any(test, feature = "test-support"))]
     phase: &'static str,
     #[cfg(any(test, feature = "test-support"))]
@@ -1441,71 +1438,6 @@ mod tests {
             assert_eq!(target.index().unwrap(), admitted);
             assert_eq!(target.message("message/keyed").unwrap().unwrap().content, "keyed lookup");
         }
-    }
-
-    #[test]
-    fn cancellation_apply_with_many_claimants_has_one_selector_commit_allowance() {
-        let store = Store::open_memory("node").unwrap();
-        let count = BACKFILL_SUBJECTS * 3 + 3;
-        let mut source = String::from(
-            "version 2\nagent \"worker\" { workspace \".\"; command \"true\" }\n\
-             mission \"cancel-batch\" state=\"ready\" {\n goal \"Cancel all leased steps.\"\n",
-        );
-        for index in 0..count {
-            source.push_str(&format!(
-                "step \"work-{index}\" {{ assigned-to \"agent/node.worker\" }}\n",
-            ));
-        }
-        source.push_str("}\n");
-        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
-        let planned = store.mission(
-            &intent, IntentInput { kdl: source, source_name: None },
-        ).unwrap();
-        store.apply(&intent, &planned.subject_tokens, "publish-cancel-batch").unwrap();
-        let run = store.create_mission_run(&MissionRunRequest {
-            mission: "cancel-batch".into(), revision: None, workspace: ".".into(),
-            requester: Some("person/test".into()), mode: None, inputs: BTreeMap::new(),
-            idempotency_key: "run-cancel-batch".into(),
-        }).unwrap();
-        // The real cancellation helper consumes the persisted claimant on every
-        // open step; seed those leases together rather than involving a daemon.
-        {
-            let mut connection = store.connection.write();
-            let transaction = connection.transaction().unwrap();
-            for step in &run.steps {
-                transaction.execute(
-                    "UPDATE step_runs SET lease_owner='agent/node.worker' WHERE subject=?1",
-                    [&step.subject],
-                ).unwrap();
-            }
-            transaction.commit().unwrap();
-        }
-        while store.maintain_client_message_selectors().unwrap() {}
-        let baseline = paged_backfill_rows(&store, None, None, true);
-        let cancellation = format!(
-            "version 2\nmission-run {:?} {{ cancellation \"operator\" {{ reason \"cancel batch\" }} }}\n",
-            run.subject,
-        );
-        let intent = crate::graph::parse_test_intent(&cancellation, "node").unwrap();
-        let planned = store.mission(
-            &intent, IntentInput { kdl: cancellation, source_name: None },
-        ).unwrap();
-        store.apply(&intent, &planned.subject_tokens, "cancel-batch").unwrap();
-        assert_commit_budget(&store);
-        assert!(store.client_message_selectors_pending().unwrap());
-        assert_eq!(paged_backfill_rows(&store, None, None, true), baseline);
-        let cancellation_claims: usize = store.readers.get().query_row(
-            "SELECT COUNT(*) FROM claims WHERE kind='message.sent' AND subject LIKE 'message/mission-cancelled-%'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(cancellation_claims, count);
-        while store.client_message_selectors_pending().unwrap() {
-            store.maintain_client_message_selectors().unwrap();
-            assert_commit_budget(&store);
-        }
-        let rows = paged_backfill_rows(&store, Some("agent/node.worker"), None, true);
-        assert_eq!(rows.iter().filter(|row|
-            row["message"]["title"] == "Mission work cancelled").count(), count);
     }
 
     #[test]

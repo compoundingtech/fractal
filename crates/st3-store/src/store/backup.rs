@@ -374,9 +374,9 @@ impl Store {
         envelopes: u64,
         checkpoint: Option<&CheckpointManifest>,
     ) -> Result<RestoreReport> {
-        self.validate_replication_backlog()?;
+        self.admit_restored_backlog()?;
         self.apply_replication_repairs()?;
-        // Reject any held or undecodable envelope rather than silently restoring a partial log.
+        // Reject any undecodable or invalid envelope rather than silently restoring a partial log.
         {
             let connection = self.readers.get();
             let unresolved: u64 = connection.query_row(
@@ -748,51 +748,60 @@ mod tests {
 
     #[test]
     fn restore_keeps_history_admitted_before_a_later_keyed_membership() {
-        let root = tempfile::tempdir().unwrap();
-        let legacy = Store::open_memory("alder").unwrap();
-        diagnostic(&legacy, "history already admitted");
-        let source = Store::open_memory("birch").unwrap();
-        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
-        source.bind_fleet("test-fleet").unwrap();
-        source.pin_fleet_anchor(key.public()).unwrap();
-        source.set_member_key(Some(key.clone())).unwrap();
-        source
-            .admit_fleet_anchor("test-fleet", key.public(), "listening")
-            .unwrap();
-        let exchange = legacy
-            .export_replication_exchange("test-fleet", &ReplicationInventory::default())
-            .unwrap();
-        source
-            .receive_replication_exchange("alder", "test-fleet", &exchange)
-            .unwrap();
-        source.validate_replication_backlog().unwrap();
-        source.project_replication_backlog().unwrap();
-        let later_key = crate::fleet::MemberKey::generate().unwrap().0;
-        source
-            .append_claim(&ClaimInput {
-                subject: "host/alder".into(),
-                kind: "fleet.member-admitted".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("fleet_id".into(), json!("test-fleet")),
-                    ("member_key".into(), json!(later_key.public())),
-                    ("via".into(), json!("invite")),
-                    ("sponsor".into(), json!("host/birch")),
-                    ("mode".into(), json!("listening")),
-                    ("writer_floor".into(), json!(0)),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        source.replication_snapshot().unwrap();
-        assert!(!source.fleet_admission_residue().unwrap().is_empty());
-        let archive_path = root.path().join("history.jsonl");
-        let header = archive(&source, &archive_path);
-        let report = backup::restore(&archive_path, &root.path().join("restored.db")).unwrap();
-        assert!(report.projections_match);
-        assert_eq!(report.log_digest, header.log_digest);
+        // Restore receives the log in writer order. The legacy writer's history must survive
+        // whether it sorts before the member that later keys it or after, when that member's
+        // admission claim is replayed first.
+        for name in ["alder", "cedar"] {
+            let root = tempfile::tempdir().unwrap();
+            let legacy = Store::open_memory(name).unwrap();
+            diagnostic(&legacy, "history already admitted");
+            let source = Store::open_memory("birch").unwrap();
+            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            source.bind_fleet("test-fleet").unwrap();
+            source.pin_fleet_anchor(key.public()).unwrap();
+            source.set_member_key(Some(key.clone())).unwrap();
+            source
+                .admit_fleet_anchor("test-fleet", key.public(), "listening")
+                .unwrap();
+            let exchange = legacy
+                .export_replication_exchange("test-fleet", &ReplicationInventory::default())
+                .unwrap();
+            source
+                .receive_replication_exchange(name, "test-fleet", &exchange)
+                .unwrap();
+            source.validate_replication_backlog().unwrap();
+            source.project_replication_backlog().unwrap();
+            let later_key = crate::fleet::MemberKey::generate().unwrap().0;
+            source
+                .append_claim(&ClaimInput {
+                    subject: format!("host/{name}"),
+                    kind: "fleet.member-admitted".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("fleet_id".into(), json!("test-fleet")),
+                        ("member_key".into(), json!(later_key.public())),
+                        ("via".into(), json!("invite")),
+                        ("sponsor".into(), json!("host/birch")),
+                        ("mode".into(), json!("listening")),
+                        ("writer_floor".into(), json!(0)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            source.replication_snapshot().unwrap();
+            assert!(
+                !source.fleet_admission_residue().unwrap().is_empty(),
+                "{name}"
+            );
+            let archive_path = root.path().join("history.jsonl");
+            let header = archive(&source, &archive_path);
+            let report = backup::restore(&archive_path, &root.path().join("restored.db"))
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert!(report.projections_match, "{name}");
+            assert_eq!(report.log_digest, header.log_digest, "{name}");
+        }
     }
 
     #[test]
