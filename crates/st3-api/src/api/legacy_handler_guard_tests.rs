@@ -26,7 +26,12 @@ fn removed_legacy_handlers_are_absent_from_api_and_its_route_families() {
         .unwrap()
         .lines()
         .skip(2)
-        .map_while(|line| line.strip_prefix("mod ")?.strip_suffix(';'))
+        .map_while(|line| {
+            line.strip_prefix("pub ")
+                .unwrap_or(line)
+                .strip_prefix("mod ")?
+                .strip_suffix(';')
+        })
         .collect();
     assert_eq!(
         declared,

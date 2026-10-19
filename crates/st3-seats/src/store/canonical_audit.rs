@@ -57,6 +57,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "peer_replica_cursors",
         "replica_envelopes",
         "replica_records",
+        "claim_positions",
         "retired_claim_ids",
         "retired_envelopes",
         "retired_claim_withdrawals",
