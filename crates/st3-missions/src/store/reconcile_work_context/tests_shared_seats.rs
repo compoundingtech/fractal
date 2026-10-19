@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_delivery::store::reconcile_work_context::tests_shared_seats::*;
+pub use st3_store::store::reconcile_work_context::tests_shared_seats::*;
 use crate::store::reconcile_work_context::*;
 use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
 use std::time::Instant;

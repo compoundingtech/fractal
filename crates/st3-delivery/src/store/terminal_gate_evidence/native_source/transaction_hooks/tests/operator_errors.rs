@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use super::super::operator_error::{Cell, Disposition, Origin};
+use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_operator_error_shared_seats::{Cell, Disposition, Origin};
 use st3_store::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::*;
 use super::*;
 use rusqlite::{ErrorCode, ffi};

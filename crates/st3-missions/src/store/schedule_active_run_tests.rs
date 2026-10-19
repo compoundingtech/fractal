@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use rusqlite::StatementStatus;
-use st3_delivery::store::schedule_active_run_tests_shared_missions::*;
-use st3_delivery::store::schedule_active_run_tests_shared_missions::{LEGACY_QUERY, insert_claim, insert_run};
+use st3_store::store::schedule_active_run_tests_shared_missions::*;
+use st3_store::store::schedule_active_run_tests_shared_missions::{LEGACY_QUERY, insert_claim, insert_run};
 
 
 fn assert_result(store: &Store, subject: &str, expected: bool) {

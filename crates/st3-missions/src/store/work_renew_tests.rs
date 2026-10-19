@@ -2,8 +2,8 @@
 use super::*;
 use st3_delivery::store::shared_missions::*;
 use st3_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
-use st3_delivery::store::work_renew_tests_shared_missions::*;
-use st3_delivery::store::work_renew_tests_shared_missions::{Renewal, request, timeless, view_enriched_in_writer, writer_work};
+use st3_store::store::work_renew_tests_shared_missions::*;
+use st3_store::store::work_renew_tests_shared_missions::{Renewal, request, timeless, view_enriched_in_writer, writer_work};
 
 
 /// One claimed step whose claim history holds `history` progress reports.

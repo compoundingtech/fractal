@@ -367,7 +367,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_replicated_claim(&connection, &batch, &forged)
+            st3_store::store::validate_replicated_claim(&connection, &batch, &forged)
                 .err()
                 .unwrap()
                 .code,

@@ -25,8 +25,8 @@ use st3_delivery::store::shared_missions::*;
 use st3_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use st3_delivery::store::shared_seats_shared_missions::*;
 use st3_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
-use st3_delivery::store::tests_shared_missions::*;
-use st3_delivery::store::tests_shared_missions::{CARRY_SOURCE, carry_request, listed, misproject_a_step, publish_carry, request_fault};
+use st3_store::store::tests_shared_missions::*;
+use st3_store::store::tests_shared_missions::{CARRY_SOURCE, carry_request, listed, misproject_a_step, publish_carry, request_fault};
 
 
 #[test]

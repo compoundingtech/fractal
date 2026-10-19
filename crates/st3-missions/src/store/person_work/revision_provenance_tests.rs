@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_delivery::store::person_work::revision_provenance_tests_shared_missions::*;
-use st3_delivery::store::person_work::revision_provenance_tests_shared_missions::{definition_row, mission, ordered_claims, publish_below, receive_both, retain_noncanonical_source, revision_row};
+use st3_store::store::person_work::revision_provenance_tests_shared_missions::*;
+use st3_store::store::person_work::revision_provenance_tests_shared_missions::{definition_row, mission, ordered_claims, publish_below, receive_both, retain_noncanonical_source, revision_row};
 
 
 fn post_update(store: &Store) -> ClaimRecord {

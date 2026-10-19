@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_delivery::store::resource_preparation::tests_shared_seats::*;
+pub use st3_store::store::resource_preparation::tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_delivery::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
+pub use st3_store::store::resource_preparation::tests_shared_seats::{ResetHook, fixture, fixture_for};
 use super::*;
 
 

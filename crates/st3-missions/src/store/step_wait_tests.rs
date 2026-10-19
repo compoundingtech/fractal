@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 use super::*;
-use st3_delivery::store::step_wait_tests_shared_missions::*;
-use st3_delivery::store::step_wait_tests_shared_missions::{HOUR, MINUTE, Waiting, request};
+use st3_store::store::step_wait_tests_shared_missions::*;
+use st3_store::store::step_wait_tests_shared_missions::{HOUR, MINUTE, Waiting, request};
 
 
 fn claimed_step() -> Waiting {

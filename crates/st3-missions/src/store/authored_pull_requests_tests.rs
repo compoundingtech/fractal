@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use rusqlite::StatementStatus;
-use st3_delivery::store::authored_pull_requests_tests_shared_missions::*;
-use st3_delivery::store::authored_pull_requests_tests_shared_missions::{insert};
+use st3_store::store::authored_pull_requests_tests_shared_missions::*;
+use st3_store::store::authored_pull_requests_tests_shared_missions::{insert};
 
 
 #[test]

@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use st3_delivery::store::tests_shared_seats::*;
+pub use st3_store::store::tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::tests_shared::*;

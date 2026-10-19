@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use super::*;
 use std::time::Duration;
-use st3_delivery::store::writer_bound_tests_shared_missions::*;
-use st3_delivery::store::writer_bound_tests_shared_missions::{BOUND, stage};
+use st3_store::store::writer_bound_tests_shared_missions::*;
+use st3_store::store::writer_bound_tests_shared_missions::{BOUND, stage};
 
 
 /// A late claim about one request under a standing root with 200 child runs rebuilds that
