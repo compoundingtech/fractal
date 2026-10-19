@@ -11,10 +11,17 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { Schema } from 'effect'
 import { persistedAtom } from '../state/persistence.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+import { ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
-const renders = vi.hoisted(() => ({ thread: 0 }))
-vi.mock('./ConversationPane.tsx', () => ({ ConversationPane: () => { renders.thread++; return <textarea aria-label="Message agent" /> } }))
+const renders = vi.hoisted(() => ({ thread: 0, mounts: 0, viewportStore: undefined as unknown }))
+vi.mock('./ConversationPane.tsx', () => ({ ConversationPane: () => {
+  renders.thread++
+  renders.viewportStore = React.useContext(ViewportStoreContext)
+  const [instance] = React.useState(() => ++renders.mounts)
+  const [draft, setDraft] = React.useState('')
+  return <div data-testid="retained-conversation" data-instance={instance} style={{ overflow: 'auto', height: 200 }}><div style={{ height: 2000 }}>Conversation history</div><textarea aria-label="Message agent" value={draft} onChange={event => setDraft(event.target.value)} /></div>
+} }))
 vi.mock('./ChangesInspector.tsx', () => ({ ChangesInspector: () => <section aria-label="Captured changes">Captured changes</section> }))
 let root: Root
 let host: HTMLDivElement
@@ -31,7 +38,7 @@ beforeEach(async () => {
   const visualViewport = new EventTarget()
   Object.defineProperty(visualViewport, 'height', { configurable: true, value: 844 })
   vi.stubGlobal('visualViewport', visualViewport)
-  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('max-width'), media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }))
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('max-width') && window.innerWidth < 900, media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }))
   Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() })
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
   window.localStorage.clear()
@@ -104,4 +111,33 @@ it('keeps the workspace within the visual viewport when the on-screen keyboard r
   Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 400 })
   await act(async () => window.visualViewport!.dispatchEvent(new Event('resize')))
   expect(host.querySelector<HTMLElement>('[data-testid="live-agent-workspace"]')!.style.height).toContain('400px')
+})
+
+it('retains the draft, scroll position and WorkspaceBody viewport store across the breakpoint in both directions', async () => {
+  const field = host.querySelector<HTMLTextAreaElement>('[aria-label="Message agent"]')!
+  const history = host.querySelector<HTMLDivElement>('[data-testid="retained-conversation"]')!
+  const paneHost = history.parentElement!.parentElement!.parentElement!
+  const viewportStore = renders.viewportStore
+  const mounts = renders.mounts
+  const instance = history.dataset.instance
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'Unsent rotation draft')
+    field.dispatchEvent(new Event('input', { bubbles: true }))
+    history.scrollTop = 672
+    history.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
+  for (const width of [900, 899, 1200, 390]) {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+    await act(async () => window.dispatchEvent(new Event('resize')))
+    expect(host.querySelector('[aria-label="Expand sidebar"]') !== null).toBe(width < 900)
+    expect(host.querySelector('[aria-label="Message agent"]')).toBe(field)
+    expect(field.value).toBe('Unsent rotation draft')
+    expect(host.querySelector('[data-testid="retained-conversation"]')).toBe(history)
+    expect(history.scrollTop).toBe(672)
+    expect(history.dataset.instance).toBe(instance)
+    expect(history.parentElement!.parentElement!.parentElement!).toBe(paneHost)
+    expect(renders.mounts).toBe(mounts)
+    // This store is allocated by WorkspaceBody itself, so its identity detects a parent remount.
+    expect(renders.viewportStore).toBe(viewportStore)
+  }
 })
