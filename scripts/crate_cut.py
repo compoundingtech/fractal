@@ -1142,7 +1142,7 @@ def _dev_dependencies(lower_ident):
     names = [m.group(1).replace("-", "_") for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", section)]
     normal = text.split("[dependencies]", 1)[1].split("\n[", 1)[0] if "[dependencies]" in text else ""
     normal_names = {m.group(1).replace("-", "_") for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", normal)}
-    return [n for n in names if not n.endswith("_self") and not n.startswith("st3") and n not in normal_names]
+    return [n for n in names if not n.endswith("_self") and not n.startswith("fractal_") and n not in normal_names]
 
 
 TEST_SUPPORT_CFG = '#[cfg(any(test, feature = "test-support"))]'
@@ -1960,7 +1960,7 @@ def wire_crate(args, top_mods):
            "# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.",
            f'test-support = ["{lower}/test-support"]', "", "[dependencies]", f'{lower} = {{ path = "../{lower}" }}']
     out += [ln for k, ln in lines.items() if k not in skip and uses(k)]
-    internal = sorted({m.replace("_", "-") for m in re.findall(r"\b(st3_[a-z0-9_]+)::", text)} - skip - {crate} - set(lines))
+    internal = sorted({m.replace("_", "-") for m in re.findall(r"\b(fractal_[a-z0-9_]+)::", text)} - skip - {crate} - set(lines))
     out += [f'{n} = {{ path = "../{n}" }}' for n in internal if os.path.isdir(f"crates/{n}") and n not in {l.split(" ")[0] for l in out}]
     out += ["", "[dev-dependencies]", f'{ident}_self = {{ package = "{crate}", path = ".", features = ["test-support"] }}']
     out += [ln for k, ln in devlines.items() if k != "fractal_daemon_self" and uses(k)]
@@ -2123,16 +2123,12 @@ def _make_fields_pub(roots, struct, fields):
 
 
 def _daemon_root(crate_name):
-    """How a crate outside the chain names the daemon library (`st3`, the alias most use, or `fractal_daemon`),
-    and whether it only has it for tests."""
+    """The canonical daemon library name, and whether it is only available for tests."""
     manifest = Path("crates") / crate_name / "Cargo.toml"
     text = manifest.read_text() if manifest.exists() else ""
-    for pat, name in ((r"(?m)^st3\s*=", "st3"), (r"(?m)^st3[-_]daemon\s*=", "fractal_daemon")):
-        m = re.search(pat, text)
-        if m:
-            dev = text.find("[dev-dependencies]")
-            return name, dev != -1 and m.start() > dev
-    return "st3", False
+    match = re.search(r"(?m)^fractal[-_]daemon\s*=", text)
+    dev = text.find("[dev-dependencies]")
+    return "fractal_daemon", match is not None and dev != -1 and match.start() > dev
 
 
 def _drop_spans(dropped):
@@ -2625,7 +2621,7 @@ def _uses_with_context(text, items, in_test):
 
 
 def _imported_names(src):
-    """The names the `use` items of a crate's files import from the crates below (by `st3_*`, `crate`, `super`)."""
+    """The names the `use` items of a crate's files import from the crates below (by `fractal_*`, `crate`, `super`)."""
     names = set()
     for rel in module_files(src):
         text = open(os.path.join(src, rel)).read()
@@ -2636,7 +2632,7 @@ def _imported_names(src):
             if not parsed:
                 continue
             for segs, alias in parsed[2]:
-                if segs[-1] != "*" and (segs[0] in ("crate", "super", "self") or segs[0].startswith("st3_")):
+                if segs[-1] != "*" and (segs[0] in ("crate", "super", "self") or segs[0].startswith("fractal_")):
                     names.add(segs[-1])
     return names
 

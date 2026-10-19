@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Print rename statistics, hunk kinds and exact-tree runtime invariant checks.
+
+Run: nix develop -c python3 scripts/r15-rename-proof --base origin/main --head HEAD
+The script reads Git trees, not uncommitted files. Cargo metadata does not build.
+"""
+import argparse
+from collections import Counter
+import importlib.util
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE_SUFFIXES = {'.rs', '.ts', '.tsx', '.swift', '.py', '.json', '.toml', '.yaml', '.yml', '.nix', '.sh'}
+
+
+def git(*args):
+    return subprocess.check_output(['git', *args], cwd=ROOT)
+
+
+def snapshot(revision, destination):
+    archive = subprocess.Popen(['git', 'archive', revision], cwd=ROOT, stdout=subprocess.PIPE)
+    try:
+        subprocess.run(['tar', '-x', '-C', str(destination)], stdin=archive.stdout, check=True)
+    finally:
+        archive.stdout.close()
+    if archive.wait():
+        raise RuntimeError('git archive failed')
+
+
+def binaries(tree):
+    command = ['cargo', 'metadata', '--no-deps', '--offline', '--format-version', '1']
+    result = subprocess.run(command, cwd=tree, text=True, capture_output=True, check=True)
+    metadata = json.loads(result.stdout)
+    members = set(metadata['workspace_members'])
+    return sorted(target['name'] for package in metadata['packages'] if package['id'] in members
+                  for target in package['targets'] if 'bin' in target['kind'])
+
+
+def literals(text, suffix):
+    """Yield string payloads and their source positions; skip comments and Rust lifetimes."""
+    cursor = 0
+    while cursor < len(text):
+        if text.startswith('//', cursor) or (suffix == '.py' and text[cursor] == '#'):
+            end = text.find('\n', cursor)
+            cursor = len(text) if end < 0 else end + 1
+            continue
+        if text.startswith('/*', cursor):
+            depth = 1
+            cursor += 2
+            while cursor < len(text) and depth:
+                if text.startswith('/*', cursor):
+                    depth += 1
+                    cursor += 2
+                elif text.startswith('*/', cursor):
+                    depth -= 1
+                    cursor += 2
+                else:
+                    cursor += 1
+            continue
+        raw = re.match(r'(?:br|r)(#{0,16})"', text[cursor:]) if suffix == '.rs' and text[cursor] in 'br' else None
+        if raw:
+            start = cursor
+            begin = cursor + raw.end()
+            end = text.find('"' + raw[1], begin)
+            if end < 0:
+                raise ValueError('unterminated Rust raw string')
+            yield text[begin:end], start
+            cursor = end + 1 + len(raw[1])
+            continue
+        char = text[cursor]
+        if char not in ('"', "'", '`'):
+            cursor += 1
+            continue
+        if suffix == '.rs' and char == "'":
+            # Rust lifetime/character tokens are not serialized string values.
+            match = re.match(r"'(?:\\.|[^'\\])'", text[cursor:])
+            cursor += len(match[0]) if match else 1
+            continue
+        start = cursor
+        quote = char * 3 if suffix == '.py' and text.startswith(char * 3, cursor) else char
+        cursor += len(quote)
+        begin = cursor
+        while cursor < len(text):
+            if text[cursor] == '\\':
+                cursor += 2
+            elif text.startswith(quote, cursor):
+                yield text[begin:cursor], start
+                cursor += len(quote)
+                break
+            else:
+                cursor += 1
+
+
+def source_mapping():
+    spec = importlib.util.spec_from_file_location('rename_docs', ROOT / 'scripts/r15-rename-docs.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.CRATES, module.PACKAGES
+
+
+def source_literal(value, crates, packages):
+    """Normalize only source-tree locations/imports, never runtime namespace strings."""
+    for old, new in sorted(crates.items(), key=lambda pair: -len(pair[0])):
+        value = re.sub(r'crates/' + re.escape(old) + r'(?=[/\\"\s]|$)', 'crates/' + new, value)
+        value = re.sub(r'(?<=\.\./)' + re.escape(old) + r'(?=[/\\\"\'\s]|$)', new, value)
+    for stem in ('client', 'views', 'scenarios'):
+        value = value.replace('clients/typescript/st3-' + stem, 'clients/typescript/fractal-' + stem)
+    value = value.replace('clients/swift/St3Client', 'clients/swift/FractalClient')
+    value = value.replace('Sources/St3Client', 'Sources/FractalClient').replace('Tests/St3ClientTests', 'Tests/FractalClientTests')
+    value = value.replace('apps/fractal-web/packages/st3-sdk', 'apps/fractal-web/packages/fractal-sdk')
+    value = value.replace('packages/st3-sdk', 'packages/fractal-sdk')
+    for old, new in packages.items():
+        value = value.replace(old, new)
+    return value
+
+
+def inventory(path, relative, crates, packages):
+    text = path.read_text(errors='replace')
+    if relative == 'flake.nix':
+        # Provider output basenames are compared separately below. The symbol
+        # changes because the renamed build input and stable output now differ.
+        text = text.replace('$out/share/st2/providers/${wasmName}', '$out/share/st2/providers/${installedName}')
+    found = {kind: Counter() for kind in ('serialized_constants', 'wire_storage', 'environment', 'on_disk_paths')}
+    for value, position in literals(text, path.suffix):
+        value = source_literal(value, crates, packages)
+        prefix = text[max(0, position - 200):position]
+        import_path = bool(re.search(r'(?:\bfrom|\bimport|\brequire\(|include_(?:str|bytes)!\(|include!\()\s*$', prefix))
+        for token in re.findall(r'\b(?:ST|ST2|ST3|STUI|FRACTAL)_[A-Z][A-Z0-9_]*\b', value):
+            found['environment'][token] += 1
+        runtime_env = re.search(r'(?:\b(?:option_)?env!|\b(?:var|var_os|set_var|remove_var)|os\.(?:getenv|environ\.get))\s*\(\s*$', prefix)
+        if runtime_env and not value.startswith('CARGO_'):
+            found['environment'][value] += 1
+        for token in re.findall(r'\b(?:st3\.[A-Za-z0-9_.-]+|custom\.[A-Za-z0-9_.-]+|x-(?:st3|fractal)-[a-z0-9-]+|(?:st3|fractal)\.cap\.[A-Za-z0-9_.-]+)\b', value):
+            found['wire_storage'][token] += 1
+        # Runtime path-like tokens; canonical source-tree locations are not runtime state.
+        for token in re.findall(r'(?:[A-Za-z0-9_.$~{}@+-]*/)+[A-Za-z0-9_.$~{}@/+:-]+|\b[A-Za-z0-9_.-]+\.(?:sock|sqlite3?|db)\b', value):
+            if path.name == 'Cargo.toml':
+                # Manifest paths and dependency/feature selectors describe source
+                # builds. Executable target names are compared with Cargo metadata.
+                continue
+            if import_path or any(part in token for part in ('crates/', 'clients/', '/src/', '/tests/', '/templates/', 'docs/', 'node_modules/', 'target/', 'packages/', 'scripts/')):
+                continue
+            if token.endswith(('.rs', '.toml', '.ts', '.tsx', '.py', '.sh')) or re.fullmatch(r'\.\./fractal-[a-z-]+', token):
+                continue
+            found['on_disk_paths'][token] += 1
+        if re.search(r'\b(?:join|push|set_file_name)\s*\(\s*$', prefix) and value in ('st', 'st2', 'st3', '.st-instance', '.fractal-instance'):
+            found['on_disk_paths'][value] += 1
+        constant = re.search(r'\b(?:const|static|let)\s+([A-Za-z_][A-Za-z0-9_]*)[^;\n]*=\s*(?:[brf]*#*)?$', prefix)
+        if constant and re.search(r'VERSION|SCHEMA|DOMAIN|KIND|PROTOCOL|HEADER|PREFIX|SOCKET|CONFIG|STATE|PATH|DIRECTOR|ENV', constant[1], re.I):
+            found['serialized_constants'][value] += 1
+        if re.search(r'#\[serde\([^\]]*\b(?:rename|alias|tag|content)\s*=\s*$', prefix):
+            found['serialized_constants'][value] += 1
+    found['environment'].update(re.findall(r'\bprocess\.env\.([A-Z][A-Z0-9_]*)\b', text))
+    if not relative.startswith('scripts/'):
+        for name, value in re.findall(r'\bconst\s+(\w*(?:VERSION|SCHEMA|DOMAIN|KIND)\w*)\s*:\s*[ui]\d+\s*=\s*([^;]+);', text):
+            found['serialized_constants']['numeric:' + name + '=' + value.strip()] += 1
+    # Cargo's package identity is observable in this persisted cache identity even
+    # though env!(CARGO_PKG_NAME) is not a literal. Expand it before comparing.
+    if relative.endswith('resource-wasip2/src/lib.rs'):
+        body = re.search(r'fn executor_build_identity\([^)]*\)[^{]*\{(.*?)\n[ \t]*\}', text, re.S)
+        if not body:
+            raise ValueError('executor_build_identity is missing')
+        manifest = tomllib.loads((path.parent.parent / 'Cargo.toml').read_text())
+        expanded = body[1].replace('env!("CARGO_PKG_NAME")', json.dumps(manifest['package']['name']))
+        found['serialized_constants'].update('executor:' + value for value, _ in literals(expanded, '.rs'))
+    return found
+
+
+def hunk_kinds(patch):
+    counts = Counter({'Cargo.toml/package.json names': 0, 'use or import paths': 0, 'docs': 0, 'other': 0})
+    path = ''
+    changed = []
+    active = False
+
+    def record():
+        if not active:
+            return
+        if path.endswith(('Cargo.toml', 'package.json', 'package.json.genie.ts')):
+            kind = 'Cargo.toml/package.json names'
+        elif path.endswith('.md') or path.startswith('docs/'):
+            kind = 'docs'
+        elif changed and all(re.search(r'\b(?:use|import|export|extern)\b|(?:st3|st2|stui|st_|fractal)[A-Za-z0-9_]*::', line) for line in changed):
+            kind = 'use or import paths'
+        else:
+            kind = 'other'
+        counts[kind] += 1
+
+    for line in patch.splitlines():
+        if line.startswith('diff --git '):
+            record()
+            active = False
+            path = line.split(' b/', 1)[1]
+        elif line.startswith('@@ '):
+            record()
+            active = True
+            changed = []
+        elif active and line.startswith(('+', '-')) and not line.startswith(('+++', '---')):
+            changed.append(line[1:])
+    record()
+    return dict(counts)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base', default='origin/main')
+    parser.add_argument('--head', default='HEAD')
+    args = parser.parse_args()
+    head = git('rev-parse', args.head).decode().strip()
+    base = git('merge-base', args.base, head).decode().strip()
+    status = git('diff', '-M', '--name-status', '-z', base, head).decode().split('\0')
+    pairs = []
+    statuses = []
+    cursor = 0
+    while cursor < len(status) and status[cursor]:
+        code, old = status[cursor:cursor + 2]
+        cursor += 2
+        new = old
+        if code.startswith(('R', 'C')):
+            new = status[cursor]
+            cursor += 1
+        pairs.append((code, old, new))
+        statuses.append(code)
+    pure = statuses.count('R100')
+    moved = sum(code.startswith('R') for code in statuses)
+    print(json.dumps({'rename_share': {'base': base, 'head': head, 'files': len(statuses), 'R100': pure,
+                                     'percent_all': round(100 * pure / len(statuses), 2) if statuses else 0,
+                                     'moved': moved, 'percent_moved': round(100 * pure / moved, 2) if moved else 0}}, sort_keys=True))
+    patch = git('diff', '-M', '--unified=0', base, head).decode(errors='replace')
+    print(json.dumps({'non_rename_hunks': hunk_kinds(patch)}, sort_keys=True))
+    crates, packages = source_mapping()
+    differences = []
+    totals = Counter()
+    scratch = ROOT / 'tmp/r15'
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='proof-', dir=scratch) as directory:
+        trees = [Path(directory) / name for name in ('base', 'head')]
+        for revision, tree in zip((base, head), trees):
+            tree.mkdir()
+            snapshot(revision, tree)
+        binary_lists = [binaries(tree) for tree in trees]
+        if binary_lists[0] != binary_lists[1]:
+            differences.append({'category': 'binary_names', 'before': binary_lists[0], 'after': binary_lists[1]})
+        provider_names = []
+        for tree in trees:
+            flake = (tree / 'flake.nix').read_text()
+            block = re.search(r'providerComponentPackages\s*=\s*\{(.*?)\};', flake, re.S)
+            if not block:
+                raise ValueError('providerComponentPackages is missing')
+            provider_names.append(sorted(re.findall(r'=\s*"([^"]+)"', block[1])))
+        if provider_names[0] != provider_names[1]:
+            differences.append({'category': 'installed_provider_paths', 'before': provider_names[0], 'after': provider_names[1]})
+        frozen = git('ls-tree', '-r', '--name-only', base, '--',
+                     'docs/st3/client-v0/schemas', 'docs/st3/client-v0/fixtures',
+                     'docs/st3/schema.md').decode().splitlines()
+        for relative in frozen:
+            before = (trees[0] / relative).read_bytes()
+            after = (trees[1] / relative).read_bytes()
+            if relative == 'docs/st3/schema.md':
+                # Only the generator crate's provenance label is source identity.
+                before = before.replace(b'This file is generated from `st3-schema`',
+                                        b'This file is generated from `fractal-schema`')
+            if before != after:
+                differences.append({'path': relative, 'category': 'serialized_contract_artifact'})
+        # Git may report tiny heavily rewritten moved files as delete/add pairs.
+        # Pair those by the committed source rename map rather than omitting them.
+        deleted = {old: source_literal(old, crates, packages) for code, old, _ in pairs if code == 'D'}
+        additions = {new for code, _, new in pairs if code == 'A'}
+        recovered = [(old, new) for old, new in deleted.items() if new in additions]
+        recovered_new = {new for _, new in recovered}
+        recovered_old = {old for old, _ in recovered}
+        comparisons = [('R', old, new) for old, new in recovered]
+        comparisons += [item for item in pairs if item[1] not in recovered_old and item[2] not in recovered_new]
+        for code, old, new in comparisons:
+            if code == 'R100' or new.startswith(('scripts/r15-rename-', 'docs/', 'release-notes/')):
+                continue
+            if not (Path(new).suffix in SOURCE_SUFFIXES or new.startswith('scripts/')):
+                continue
+            if code.startswith(('A', 'D')):
+                differences.append({'path': new, 'category': 'unpaired_runtime_source', 'status': code})
+                continue
+            expected = source_literal(old, crates, packages)
+            if old != expected and (trees[1] / expected).is_file():
+                new = expected
+            before, after = trees[0] / old, trees[1] / new
+            if not before.is_file() or not after.is_file():
+                continue
+            values = [inventory(path, relative, crates, packages) for path, relative in ((before, old), (after, new))]
+            for kind in values[0]:
+                totals[kind] += sum(values[0][kind].values())
+                removed, added = values[0][kind] - values[1][kind], values[1][kind] - values[0][kind]
+                if removed or added:
+                    differences.append({'path': new, 'category': kind, 'removed': dict(removed), 'added': dict(added)})
+    print(json.dumps({'invariants': 'PASS' if not differences else 'FAIL', 'binary_names': binary_lists[1],
+                      'serialized_contract_artifacts': len(frozen),
+                      'protected_occurrences': dict(totals), 'differences': differences}, sort_keys=True))
+    return bool(differences)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f'rename proof failed: {error}', file=sys.stderr)
+        sys.exit(1)

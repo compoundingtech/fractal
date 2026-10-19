@@ -1102,8 +1102,9 @@ mod runtime {
     }
 
     fn executor_build_identity() -> &'static str {
+        // Keep the persisted cache identity unchanged by the source crate rename.
         option_env!("ST2_EXECUTOR_BUILD_IDENTITY").unwrap_or(concat!(
-            env!("CARGO_PKG_NAME"),
+            "st2-resource-wasip2",
             "@",
             env!("CARGO_PKG_VERSION")
         ))

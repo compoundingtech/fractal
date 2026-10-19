@@ -56,13 +56,20 @@ class ReleaseNotes(unittest.TestCase):
         path.write_text(content)
 
     def test_rules_version_reads_the_path_it_had_before_the_library_moved(self):
-        self.git('mv', 'crates/fractal-store/src/store/checkpoint_rules.rs', 'crates/fractal-store/src/store/old.rs')
-        (self.repo / 'crates/st3/src/store').mkdir(parents=True)
-        self.git('mv', 'crates/fractal-store/src/store/old.rs', 'crates/st3/src/store/checkpoint_rules.rs')
-        before_move = self.commit('Library still in crates/st3')
-        self.assertEqual(version(self.repo, before_move, 'rules'), 10)
-        self.assertEqual(version(self.repo, self.base, 'rules'), 10)
-        self.git('rm', '-q', 'crates/st3/src/store/checkpoint_rules.rs')
+        current = 'crates/fractal-store/src/store/checkpoint_rules.rs'
+        for legacy in (
+            'crates/st3-store/src/store/checkpoint_rules.rs',
+            'crates/st3-daemon/src/store/checkpoint_rules.rs',
+            'crates/st3/src/store/checkpoint_rules.rs',
+        ):
+            with self.subTest(path=legacy):
+                (self.repo / legacy).parent.mkdir(parents=True, exist_ok=True)
+                self.git('mv', current, legacy)
+                before_move = self.commit(f'Library still in {legacy}')
+                self.assertEqual(version(self.repo, before_move, 'rules'), 10)
+                self.assertEqual(version(self.repo, self.base, 'rules'), 10)
+                current = legacy
+        self.git('rm', '-q', current)
         with self.assertRaisesRegex(ImpactError, 'is missing'):
             version(self.repo, self.commit('No rules file anywhere'), 'rules')
 
@@ -290,7 +297,7 @@ class ReleaseNotes(unittest.TestCase):
 
     def test_shared_storage_version_is_read_from_the_pinned_tree(self):
         self.write('crates/smallclaims/src/store.rs',
-                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
         self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
         value = fragment()
         value['schema'] = {'status': 'changed', 'detail': 'Forward migration.', 'transitions': [[16, 19]]}
@@ -306,6 +313,19 @@ class ReleaseNotes(unittest.TestCase):
         malformed = self.commit('Malformed shared version')
         with self.assertRaisesRegex(ImpactError, 'cannot identify schema version'):
             version(self.repo, malformed, 'schema')
+
+    def test_storage_crate_rename_preserves_historical_version_discovery(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
+        before = self.commit('Historical storage crate')
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        (self.repo / 'crates/fractal-storage-version/src').mkdir(parents=True)
+        self.git('mv', 'crates/st-storage-version/src/lib.rs', 'crates/fractal-storage-version/src/lib.rs')
+        after = self.commit('Rename storage crate without a schema change')
+        self.assertEqual(version(self.repo, before, 'schema'), 19)
+        self.assertEqual(version(self.repo, after, 'schema'), 19)
 
     def test_explicit_source_backfill_and_source_pinning(self):
         self.write('fix.rs', '// Direct fix\n')

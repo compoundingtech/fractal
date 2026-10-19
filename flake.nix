@@ -809,11 +809,15 @@
           installPhase = ''
             runHook preInstall
             mkdir -p "$out/share/st2/providers"
-            ${pkgs.lib.concatMapStringsSep "\n" (wasmName: ''
+            ${pkgs.lib.concatMapStringsSep "\n" (package:
+              let
+                wasmName = builtins.replaceStrings [ "-" ] [ "_" ] package;
+                installedName = providerComponentPackages.${package};
+              in ''
               wasm-tools component new \
                 "target/wasm32-unknown-unknown/release/${wasmName}.wasm" \
-                -o "$out/share/st2/providers/${wasmName}.component.wasm"
-            '') (pkgs.lib.attrValues providerComponentPackages)}
+                -o "$out/share/st2/providers/${installedName}.component.wasm"
+            '') (pkgs.lib.attrNames providerComponentPackages)}
             runHook postInstall
           '';
         };

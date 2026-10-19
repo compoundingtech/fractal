@@ -1,7 +1,7 @@
-"""Production module graph of the st3 source tree, and the layering rule checked against it.
+"""Production module graph of the Fractal source tree, and the layering rule checked against it.
 
-A module is a top-level file or directory under a source directory of st3 (crates/fractal/src, and the
-crates that st3's library is split into). A reference from module A to module B is a path in
+A module is a top-level file or directory under a source directory of Fractal (crates/fractal/src, and the
+crates that Fractal's library is split into). A reference from module A to module B is a path in
 non-test code that starts `crate::B` or `fractal_daemon::B`, or a name in a `crate::{...}` group. Comments,
 `#[cfg(test)]` items, `*_tests.rs`, `tests/` and `test_support.rs` are left out. Re-exported items
 that the library names at its root count toward the module that defines them (REEXPORTS).
@@ -124,7 +124,7 @@ def _skip_literal(source, cursor):
 
 def path_targets(source):
     counts = collections.Counter()
-    for match in re.finditer(r"\b(?:crate|st3)::", source):
+    for match in re.finditer(r"\b(?:crate|fractal_daemon)::", source):
         start = match.end()
         if source[start:start + 1] == "{":
             depth, cursor, begin, items = 0, start + 1, start + 1, []
@@ -305,7 +305,7 @@ def client_boundary_findings(root):
                             code.append(source[cursor])
                             cursor += 1
                     source = "".join(code)
-                    for match in re.finditer(r"\bst3_client\b", source):
+                    for match in re.finditer(r"\bfractal_client\b", source):
                         allowed = False
                         # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-state-dirs-fractal — DELETE at contraction — #3032
                         # The standalone client owns the single R11 directory resolver.
@@ -320,7 +320,7 @@ def client_boundary_findings(root):
 
 
 def crate_findings(root):
-    """Facts about the st3 and fractal-daemon packages that docs/st3/crate-contract.md promises.
+    """Facts about the fractal and fractal-daemon packages that docs/st3/crate-contract.md promises.
 
     They apply once crates/fractal-daemon exists: the library does not depend on a binary-side crate,
     the two packages carry the same version (the library reports CARGO_PKG_VERSION), a dependency both
@@ -365,7 +365,7 @@ def crate_findings(root):
                     if "filter" in entry:
                         filters.append((f"profile.{profile}.{kind}[{index}]", entry["filter"]))
             for where, expression in filters:
-                if re.search(r"package\(=?st3\)", expression) and "fractal-daemon" not in expression \
+                if re.search(r"package\(=?fractal\)", expression) and "fractal-daemon" not in expression \
                         and "binary(=integration)" not in expression:
                     problems.append(f".config/nextest.toml {where} names package fractal but not fractal-daemon, "
                                     "so it no longer selects the library's tests")
