@@ -43,7 +43,7 @@ fn read_credential(path: &Path) -> io::Result<String> {
 }
 
 const TOOLS: &[(&str, &str, bool)] = &[
-    ("st_alerts_list", "List owner alert identifiers and counts.", true),
+    ("st_alerts_list", "List bounded owner alerts with actionable question/options, episode, target and evidence when present. Set agent_id to an exact canonical agent ID to select its published alerts. An empty page does not mean no work. Use st_alert_get only when further exact detail is needed.", true),
     ("st_alert_get", "Read one exact owner alert, including its episode and named answer options.", true),
     ("st_alert_answer", "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
     ("st_missions_list", "List mission metadata.", true),
@@ -84,6 +84,7 @@ fn schema(name: &str) -> Value {
         "st_message_send" => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
         "st_alert_get" => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         "st_conversation_read" => json!({"agent_id":{"type":"string"},"session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        "st_alerts_list" => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
     };
     let required = match name {
@@ -130,6 +131,12 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     }
     if !matches_schema(args, &schema(name)) {
         return Err(json!({"code":"invalid-arguments","message":"Use the exact published tool schema."}));
+    }
+    if name == "st_alerts_list"
+        && let Some(id) = args.get("agent_id").and_then(Value::as_str)
+        && (!(7..=256).contains(&id.len()) || !id.starts_with("agent/")
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte))) {
+        return Err(json!({"code":"invalid-arguments","message":"agent_id must be an exact canonical agent identifier, not an alias."}));
     }
     if matches!(name, "st_alert_answer" | "st_message_send") {
         let action_id = args["action_id"].as_str().expect("validated action ID string");

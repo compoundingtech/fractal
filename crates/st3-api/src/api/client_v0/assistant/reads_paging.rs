@@ -13,7 +13,19 @@ pub async fn page(
     binding: &str,
     context: &response_body::Context,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
-    allow(parameters, METADATA_FIELDS, max_bytes)?;
+    let agent_id = if matches!(projection, "attention" | "attention-rich") {
+        allow(parameters, &["cursor", "limit", "max_response_bytes", "agent_id"], max_bytes)?;
+        parameters.get("agent_id").map(|id| {
+            if identifier_allowed(id) && id.starts_with("agent/") && id.len() > "agent/".len() {
+                Ok(id.clone())
+            } else {
+                Err(validation("agent_id must be an exact canonical agent identifier"))
+            }
+        }).transpose()?
+    } else {
+        allow(parameters, METADATA_FIELDS, max_bytes)?;
+        None
+    };
     let limit = parameters.get("limit").map(|limit| {
         limit.parse::<usize>().ok()
             .filter(|limit| (1..=CLIENT_MAX_PAGE_ITEMS).contains(limit))
@@ -24,7 +36,10 @@ pub async fn page(
     };
     // The native cursor's collection field also binds the disclosure class, grant and
     // policy revision. Authorization still precedes every first and subsequent page.
-    let collection = format!("assistant.{projection}:{binding}");
+    let collection = match &agent_id {
+        Some(id) => format!("assistant.{projection}:{binding}:agent_id={id}"),
+        None => format!("assistant.{projection}:{binding}"),
+    };
     let cursor = query.cursor.as_deref().map(decode_client_cursor).transpose()?;
     if let Some(cursor) = &cursor
         && (cursor.collection != collection
@@ -42,7 +57,7 @@ pub async fn page(
     let projection = projection.to_owned();
     let context = context.clone();
     blocking_store(move || reader.store.clone().read_snapshot(|index| {
-        Ok(read_page(&reader, snapshot, &projection, &collection, &person, &query, cursor, index, &context, max_bytes))
+        Ok(read_page(&reader, snapshot, &projection, &collection, &person, agent_id.as_deref(), &query, cursor, index, &context, max_bytes))
     })).await?
 }
 
@@ -53,6 +68,7 @@ fn read_page(
     projection: &str,
     collection: &str,
     person: &str,
+    agent_id: Option<&str>,
     query: &ClientListQuery,
     cursor: Option<ClientPageCursor>,
     index: u64,
@@ -95,15 +111,17 @@ fn read_page(
             .ok_or_else(|| published_view_not_ready("attention"))?;
         let marker = format!("assistant-attention:{cut}:{published_at}");
         check_source(&cursor, &marker)?;
-        if cursor.is_some() && offset >= rows.len() {
-            return Err(client_page_expired("the attention cursor is outside its source publication"));
-        }
-        let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
-        let end = offset.saturating_add(limit).min(rows.len());
-        let items = rows.get(offset..end).unwrap_or_default().iter()
+        let mut matching = rows.iter().filter(|row|
+            agent_id.is_none_or(|target| attention_agent_id(row) == Some(target))).skip(offset);
+        let items = matching.by_ref().take(limit)
             .map(|row| attention_row(row, rich)).collect::<anyhow::Result<Vec<_>>>()
             .map_err(ApiError::internal)?;
-        (snapshot, items, end < rows.len(), marker)
+        if cursor.is_some() && items.is_empty() {
+            return Err(client_page_expired("the attention cursor is outside its source publication"));
+        }
+        let has_more = matching.next().is_some();
+        let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
+        (snapshot, items, has_more, marker)
     } else if state.store.agent_roster_refresher_running() {
         let publication = if cursor.is_some() {
             state.store.published_agent_roster_at(snapshot.store_index, false)

@@ -1351,6 +1351,16 @@ every request and revalidate it immediately before returning the response. Envel
 default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
 `response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
 
+`attention` and `attention-rich` accept optional `agent_id` for one exact canonical agent.
+`st_alerts_list` exposes this selector and already returns the rich actionable request,
+episode, target and evidence when present; an extra detail call is not routinely required.
+Matching uses the same agent association disclosed in each row's `agent_id`, never title
+search or alias resolution. Only matching owner-visible published alerts are paged, with
+filtering before offset selection and byte packing. Continuations bind the exact selector,
+grant, policy and disclosure class; unfiltered requests retain existing fleet pagination.
+An empty page means no matching published alerts, not absence of work or priorities.
+This narrows output pagination, not native publication scanning, and adds no read authority.
+
 The adapter uses `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
 under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
 the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only

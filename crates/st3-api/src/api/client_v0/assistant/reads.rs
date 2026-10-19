@@ -244,11 +244,17 @@ fn attention_request(item: &Value) -> &Value {
         .unwrap_or(&item["update"])
 }
 
+/// The same disclosed association drives exact attention targeting and row projection.
+pub fn attention_agent_id(item: &Value) -> Option<&str> {
+    [item["conversation_id"].as_str(), item["requester_id"].as_str()]
+        .into_iter().flatten().find(|agent| agent.starts_with("agent/"))
+        .filter(|agent| identifier_allowed(agent))
+}
+
 /// Translate one published native attention row; metadata never copies source prose.
 pub fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
     let episode = ident(item["episode"].as_str()).unwrap_or_default();
-    let agent = [item["conversation_id"].as_str(), item["requester_id"].as_str()]
-        .into_iter().flatten().find(|agent| agent.starts_with("agent/"));
+    let agent = attention_agent_id(item);
     let mut row = json!({
         "id": client_attention_id(
             item["source_id"].as_str().ok_or_else(|| anyhow::anyhow!("attention source id absent"))?,
