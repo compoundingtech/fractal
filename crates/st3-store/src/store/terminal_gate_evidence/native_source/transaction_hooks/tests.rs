@@ -1,5 +1,11 @@
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_delivery::{answer, update_exit};
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
 pub use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -14,12 +20,6 @@ use std::time::Duration;
 
 mod operator_errors;
 
-fn update_exit(tx: &rusqlite::Connection, code: i64) {
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h770eefcd497a owner=st3_store::store::terminal_gate_evidence::native_source::transaction_hooks::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.exit_code',?1) WHERE subject='exec/one/probe' AND kind='runtime.observed'", [code]).unwrap();
-}
-fn answer(rx: Receiver<Result<(), String>>) -> Result<(), String> {
-    rx.recv_timeout(Duration::from_secs(10)).unwrap()
-}
 #[test]
 fn managed_gate_explicit_bootstrap_slot_and_missing_metadata_refusal() {
     let dir = tempfile::tempdir().unwrap();

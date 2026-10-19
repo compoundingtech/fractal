@@ -12,18 +12,13 @@ pub struct AssistantWriteAuthorization {
     pub approval_subject: Option<String>,
 }
 
-/// The connection must be the writer transaction that commits the protected mutation.
-pub fn authorize(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<(), St3Error> {
-    authorized_grant(connection, origin, authorization).map(|_| ())
-}
-
 pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, St3Error> {
     let granted = authorized_grant(connection, origin, authorization)?;
     granted.body["fields"]["grant_id"].as_str().filter(|id| id.starts_with("assistant-grant/") && id.len() > "assistant-grant/".len())
         .map(str::to_owned).ok_or_else(|| St3Error::new("forbidden", "assistant grant identity is absent"))
 }
 
-fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, St3Error> {
+pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, St3Error> {
     let denied = || St3Error::new("forbidden", "assistant write authorization changed or expired before commit");
     let claim = |kind: &str| -> Result<Option<ClaimRecord>, St3Error> {
         connection.query_row(/* sqlite-large-value: allow-for-now lv-h45d00adfd56b owner=st3_store::store::assistant_write TODO=trace-statement-and-value-representation */ &latest_claim_of_kind_query(),

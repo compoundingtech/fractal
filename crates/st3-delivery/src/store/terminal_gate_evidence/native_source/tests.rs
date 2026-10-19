@@ -1,14 +1,15 @@
+#![allow(unused_imports)]
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::terminal_gate_evidence::native_source_tests_shared::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
+pub use crate::store::terminal_gate_evidence::native_source_tests_shared::seed_native;
 use super::*;
-
 use crate::store::Store;
 use serde_json::json;
 use smallclaims::sqlite::work::SqliteWorkScope;
+
 
 #[test]
 fn native_gate_derives_eight_native_facts_and_preserves_canonical_selection() {
@@ -479,4 +480,3 @@ fn native_gate_guard_inventory_and_default_store_have_no_public_wiring() {
     assert_eq!(f.line()["status"], "warn");
     assert_eq!(f.store.connection.write().total_changes(), before);
 }
-

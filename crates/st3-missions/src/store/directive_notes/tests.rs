@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_store::store::directive_notes::tests_shared_seats::*;
+pub use st3_delivery::store::directive_notes::tests_shared_seats::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use st3_store::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
+pub use st3_delivery::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 use super::*;
 use crate::fleet::MemberKey;
 use rusqlite::StatementStatus;

@@ -1,7 +1,7 @@
 //! The part of `store::operations` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::operations::*;
+pub use st3_delivery::store::operations::*;
 
 /// The generated fleet fixture, a `Store` method before the cut.
 #[cfg(any(test, feature = "test-support"))]

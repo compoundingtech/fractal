@@ -1,8 +1,8 @@
 //! The part of `store::mission_list` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::mission_list::*;
-pub use st3_store::store::mission_list::{MissionKey, MissionRows, RosterFleet};
+pub use st3_delivery::store::mission_list::*;
+pub use st3_delivery::store::mission_list::{MissionKey, MissionRows, RosterFleet};
 
 /// What claims between two cuts changed in the missions list.
 #[derive(Debug, Default, PartialEq, Eq)]

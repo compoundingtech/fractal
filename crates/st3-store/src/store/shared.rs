@@ -56,7 +56,7 @@ pub use crate::incremental::{Change, ChangeFeed};
 pub use crate::model::canonical_child_string;
 use crate::store::*;
 use crate::store::{AgentStatusEntry, AgentWorkQueue, CachedUsageFold, ChildMissionContext, ClaimAdmission, ClaimCommitContext, ClaimsReduction, CumulativeUsage, DesiredRow};
-use crate::store::{GATE_BROKEN_CONDITION, HumanAttention, IdempotencyConflict, MailboxWatermark, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, StatusEntry, StepLabel, StepTiming};
+use crate::store::{GATE_BROKEN_CONDITION, HumanAttention, IdempotencyConflict, MessageCacheEntry, RANGE_SUBJECTS, RECENTLY_ENDED_MS, StatusEntry, StepLabel, StepTiming};
 use crate::store::{Store, SubjectCache, SubjectStatusInputs, UNREPAIRED_CLAIM, USAGE_RESPONSE_HORIZON_MS, UsageFold, UsageFolds, UsageSpend, ViewEntry, WORK_NUDGED_KIND, analyze_mission_revision, append_claim_fenced_outcome};
 use crate::store::{append_claim_tx, append_claim_with_commit_context, check_mailbox_fence, claim_append_error, claim_log_order, desired_from_row, desired_revision, fold_step_clock, fold_step_timing, generation_id_from_subject};
 use crate::store::{insert_local_observation_tx, local_retention, loop_run_views_tx, migrate_local_usage_seen, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, normalize_message_party, project_mission_run_created, project_replicated_mission_runs, rebuild_planning_tx};

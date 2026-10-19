@@ -1,10 +1,12 @@
 // Literal recipient predicates shared with the private point qualification reader.
 // Callers choose their own indexed subject/candidate traversal, not a new eligibility domain.
+#[macro_export]
 macro_rules! message_sent_recipient_match {
     () => {
         "json_extract(body, '$.fields.to') IN (?1, ?2)"
     };
 }
+#[macro_export]
 macro_rules! message_desired_recipient_match {
     () => {
         "json_extract(child.value, '$.name')='to' AND json_extract(child.value, '$.arguments[0]') IN (?1, ?2)"
@@ -1583,65 +1585,6 @@ fn runtime_view_entry_from(
         declared: true,
         owners,
     })
-}
-
-/// A single-origin runtime-only history cannot have rival runtime authority. Runtime observations
-/// append fields, so an omitted field retains its newest earlier value; explicit null replaces it.
-/// Other actual kinds and origins use the general fold and causal source selection instead.
-pub fn runtime_only_authority(
-    connection: &Connection,
-    subject: &str,
-    through: u64,
-    fields: &[&str],
-) -> Result<Option<(Value, String)>> {
-    let mut sources = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9891440d7982 owner=st3_store::store TODO=trace-statement-and-value-representation */ &format!(
-        "SELECT DISTINCT claims.kind, claims.origin FROM claims INDEXED BY claims_subject_kind_index
-         WHERE claims.subject=?1 AND claims.store_index<=?2 AND {ACTUAL_STATE_CLAIM}
-           AND {UNREPAIRED_CLAIM} LIMIT 2"
-    ))?;
-    let mut rows = sources.query(params![subject, through])?;
-    let Some(row) = rows.next()? else { return Ok(None); };
-    if row.get::<_, String>(0)? != "runtime.observed" {
-        return Ok(None);
-    }
-    let origin = row.get::<_, String>(1)?;
-    if rows.next()?.is_some() {
-        return Ok(None);
-    }
-    let body: String = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9528a3e72b8b owner=st3_store::store TODO=trace-statement-and-value-representation */ &format!(
-        "{} LIMIT 1", newest_claims_of_kind_query("claims.body", "runtime.observed"),
-    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h1c9720a2cf39 owner=st3_store::store TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
-    let latest: Value = serde_json::from_str(&body)?;
-    let latest = latest.get("fields").unwrap_or(&latest);
-    let mut older = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he27033da738c owner=st3_store::store TODO=trace-statement-and-value-representation */ &format!(
-        "SELECT claims.body FROM claims INDEXED BY claims_subject_kind_accepted_index
-         JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND claims.kind='runtime.observed' AND claims.store_index<=?4
-           AND {UNREPAIRED_CLAIM}
-           AND json_type(claims.body, CASE WHEN json_type(claims.body, '$.fields') IS NULL
-                         THEN ?2 ELSE ?3 END) IS NOT NULL
-         ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
-    ))?;
-    let mut actual = serde_json::Map::new();
-    for &field in fields {
-        let root_path = format!("$.{field}");
-        let fields_path = format!("$.fields.{field}");
-        if let Some(value) = latest.get(field) {
-            actual.insert(field.into(), value.clone());
-        } else {
-            let body: Option<String> = older.query_row(
-                /* sqlite-large-value: allow-for-now lv-h9f7b93264cbb owner=st3_store::store TODO=trace-statement-and-value-representation */ params![subject, root_path, fields_path, through],
-                |row| row.get(0),
-            ).optional()?;
-            if let Some(body) = body {
-                let value: Value = serde_json::from_str(&body)?;
-                if let Some(value) = value.get("fields").unwrap_or(&value).get(field) {
-                    actual.insert(field.into(), value.clone());
-                }
-            }
-        }
-    }
-    Ok(Some((Value::Object(actual), origin)))
 }
 
 /// Which claims — and, for agent cards, which provenance — a status reduction reads.
@@ -3686,30 +3629,6 @@ impl Store {
         self.graph.append_claim_outcome(input)
     }
 
-    pub fn append_assistant_claim_outcome(
-        &self,
-        input: &ClaimInput,
-        authorization: &assistant_write::AssistantWriteAuthorization,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
-        if input.kind != "message.sent" || authorization.scope != "write.assistant.messages"
-            || authorization.recipient.as_deref() != input.fields.get("to").and_then(Value::as_str)
-            || input.actor.as_deref() != Some("assistant/chatgpt")
-            || input.fields.get("from").and_then(Value::as_str) != Some("assistant/chatgpt")
-        { return Err(St3Error::new("forbidden", "assistant authorization does not bind this message")); }
-        #[cfg(feature = "test-support")]
-        let _gate = assistant_write_gate::pause(&authorization.grant_subject)?;
-        append_claim_with_commit_context(&self.graph, input, None, None, None, None,
-            ClaimCommitContext { assistant: Some(authorization), ..Default::default() })
-    }
-
-    pub fn append_claim_fenced_outcome(
-        &self,
-        input: &ClaimInput,
-        fence: Option<&crate::mailbox::Fence>,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
-        append_claim_fenced_outcome(&self.graph, input, fence)
-    }
-
     pub fn claims_page(
         &self,
         subject: Option<&str>,
@@ -5021,45 +4940,10 @@ impl Store {
         Ok(unreadable)
     }
 
-    pub fn unread_mail_count_before(&self, before_unix_ms: u128) -> Result<u64> {
-        smallclaims::touched::note_read(|| "kind:message.sent".to_owned());
-        if self.readers.has_pinned_reader() {
-            return unread_mail::count_in_snapshot(&self.readers.get(), before_unix_ms);
-        }
-        let mut connection = self.connection.write();
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let count = unread_mail::count_before(&transaction, before_unix_ms)?;
-        transaction.commit()?;
-        Ok(count)
-    }
-
     pub fn held_mail_count_before(&self, before: u128) -> Result<u64> {
         Ok(self.readers.get().query_row(
             "SELECT COUNT(*) FROM coordination_sends INDEXED BY coordination_sends_held WHERE held=1 AND sent_ms<?1",
             [i64::try_from(before).unwrap_or(i64::MAX)], |row| row.get(0))?)
-    }
-
-    /// Each seat's unread held mail sent before the cutoff: its count and oldest send time.
-    /// A read: it never folds the unread queue, and reads the queued subjects as they stand.
-    pub fn held_mail_before(&self, before_unix_ms: u128) -> Result<Vec<(String, u64, u128)>> {
-        let mut seats = BTreeMap::<String, (u64, u128)>::new();
-        for sent in unread_mail::sent_before(&self.readers.get(), before_unix_ms)? {
-            if sent
-                .tags
-                .iter()
-                .any(|tag| crate::silent::is_silent_tag(tag))
-                && !crate::silent::always_wakes(&sent.from, &sent.tags)
-            {
-                let seat = seats.entry(sent.to).or_insert((0, sent.sent_unix_ms));
-                seat.0 += 1;
-                seat.1 = seat.1.min(sent.sent_unix_ms);
-            }
-        }
-        Ok(seats
-            .into_iter()
-            .map(|(seat, (count, oldest))| (seat, count, oldest))
-            .collect())
     }
 
     /// Latest member-pass fault, independently of runtime observations and unrelated diagnostics.
@@ -7482,7 +7366,7 @@ fn validate_claim_subject(subject: &str) -> Result<(), St3Error> {
         .map_err(|error| St3Error::new(error.code, error.message))
 }
 
-fn validate_actor(actor: &str) -> Result<(), St3Error> {
+pub fn validate_actor(actor: &str) -> Result<(), St3Error> {
     if actor == "requester" {
         return Ok(());
     }
@@ -9644,7 +9528,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h01fb1e54a2fa owner=st3_store
     Ok(())
 }
 
-fn message_view_tx(
+pub fn message_view_tx(
     connection: &Connection,
     subject: &str,
     created_index: u64,
@@ -10023,7 +9907,7 @@ pub fn newest_claims_of_kind_query(columns: &str, kind: &str) -> String {
     )
 }
 
-fn check_mailbox_incarnation(
+pub fn check_mailbox_incarnation(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
 ) -> Result<(), St3Error> {
@@ -10232,15 +10116,6 @@ fn change_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Change> {
         actor: row.get(2)?,
         body: row.get(3)?,
     })
-}
-
-/// See [`Store::mailbox_watermark`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct MailboxWatermark {
-    index: u64,
-    local: i64,
-    owner: Option<(String, i64, bool)>,
-    desired: Option<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -11437,7 +11312,7 @@ fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<Opti
 
 const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
 
-fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
+pub fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
     let mut keys = BTreeMap::<String, canonical::ClaimKey>::new();
     for chunk in messages.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
         let subjects = serde_json::to_string(
@@ -11536,46 +11411,11 @@ pub fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Resul
 #[path = "store/message_canonical_sort_tests.rs"]
 pub mod message_canonical_sort_tests;
 
-fn message_bare_recipient(value: &str) -> &str {
+pub fn message_bare_recipient(value: &str) -> &str {
     value
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(value)
-}
-
-fn message_reminder_rank(tags: &[String]) -> Option<(&str, u64)> {
-    let reminder = tags.iter().find_map(|tag| tag.strip_prefix("reminder:"))?;
-    let version = tags
-        .iter()
-        .find_map(|tag| tag.strip_prefix("version:"))
-        .and_then(|version| version.parse::<u64>().ok())
-        .unwrap_or_default();
-    Some((reminder, version))
-}
-
-fn selected_actionable_messages(
-    connection: &Connection,
-    messages: Vec<MessageView>,
-) -> Result<Vec<MessageView>> {
-    let mut selected_reminders = BTreeMap::<String, (u64, MessageView)>::new();
-    let mut selected = Vec::new();
-    for message in messages {
-        let Some((reminder, version)) = message_reminder_rank(&message.tags) else {
-            selected.push(message);
-            continue;
-        };
-        let replace = selected_reminders
-            .get(reminder)
-            .is_none_or(|(current, selected)| {
-                version > *current || (version == *current && message.subject > selected.subject)
-            });
-        if replace {
-            selected_reminders.insert(reminder.to_owned(), (version, message));
-        }
-    }
-    selected.extend(selected_reminders.into_values().map(|(_, message)| message));
-    sort_messages_canonically(connection, &mut selected)?;
-    Ok(selected)
 }
 
 /// Why the step whose end closes an attention request has ended since `attempt`, or `None`
@@ -17451,7 +17291,7 @@ pub fn fresh_context_ready_tx(
     )
 }
 
-fn enrich_step_wake_at(
+pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -20405,3 +20245,27 @@ pub mod work_renew_tests_shared_missions;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod writer_bound_tests_shared_missions;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod agent_messages_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod fleet_admission_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod glasses_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod mailbox_wakes_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod message_point_qualification_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod message_point_qualification_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod message_send_tests_shared_delivery;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod writer_bound_tests_shared_delivery;

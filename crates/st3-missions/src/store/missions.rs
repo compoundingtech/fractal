@@ -1,7 +1,7 @@
 //! The part of `store::missions` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
-pub use st3_store::store::missions::*;
+pub use st3_delivery::store::missions::*;
 
 pub type StepStateRow = (String, bool, u32, String, String, String, String, String);
 

@@ -3,10 +3,10 @@
 pub use super::*;
 use smallclaims::store::canonical;
 use st3_schema::directive_notes::KIND;
-pub use st3_store::store::directive_notes::*;
+pub use st3_delivery::store::directive_notes::*;
 #[cfg(any(test, feature = "test-support"))]
-pub use st3_store::store::directive_notes::tests_shared_seats;
-pub use st3_store::store::directive_notes::{DirectiveNote, create_schema, current, flush, rebuild, validate_publication};
+pub use st3_delivery::store::directive_notes::tests_shared_seats;
+pub use st3_delivery::store::directive_notes::{DirectiveNote, create_schema, current, flush, rebuild, validate_publication};
 #[cfg(test)]
 #[allow(hidden_glob_reexports)] // st3-store's module of the same name is private; this one holds the tests that moved
 mod tests;

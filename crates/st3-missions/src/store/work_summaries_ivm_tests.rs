@@ -6,8 +6,8 @@ pub use crate::store::work_summaries_ivm::tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::work_summaries_ivm::tests_shared_seats::{ResetClock, append, append_at, capture, freeze};
 use super::*;
-use st3_store::store::work_summaries_ivm::tests_shared_missions::*;
-use st3_store::store::work_summaries_ivm::tests_shared_missions::{change, synthetic};
+use st3_delivery::store::work_summaries_ivm::tests_shared_missions::*;
+use st3_delivery::store::work_summaries_ivm::tests_shared_missions::{change, synthetic};
 
 
 #[test]
