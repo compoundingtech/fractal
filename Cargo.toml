@@ -39,6 +39,7 @@ members = [
   "crates/st3-peer",
   "crates/st3-reconcile",
   "crates/st3-api",
+  "crates/st3-api-mailbox",
   "crates/st3-client",
   "crates/st3-client-codegen",
   "crates/st3-conversation-ui",
