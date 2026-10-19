@@ -98,6 +98,8 @@ opener); at and above it the sidebar is a non-modal docked region with its split
 The **Expand sidebar** button keeps its accessible name and exposes the Cmd/Ctrl+B
 shortcut through the kit tooltip. `wf/Sidebar/Responsive navigation` covers light
 and dark surfaces at 440px and 1440px, with both themes included in `AllStates`.
+The sidebar's **Collapse agents** and **Close agents** buttons use the same shared
+chrome control and named kit tooltip; opening the drawer focuses **Close agents**.
 
 ## Observation and unavailable states
 

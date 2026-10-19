@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { assistantDarkTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
@@ -10,6 +10,7 @@ import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
 import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
+import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 
 const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark' }: {
   readonly width?: number
@@ -53,6 +54,14 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   if (canvas.queryByRole('complementary', { name: 'Agents' }) === null) await userEvent.click(canvas.getByRole('button', { name: 'Open agents' }))
   const sidebar = canvas.getByRole('complementary', { name: 'Agents' })
   assertChrome(sidebar)
+  const collapse = within(sidebar).getByRole('button', { name: /^(Collapse|Close) agents$/ })
+  const collapseName = sidebar.dataset.sidebarPresentation === 'drawer' ? 'Close agents' : 'Collapse agents'
+  await expect(collapse).toHaveAccessibleName(collapseName)
+  if (sidebar.dataset.sidebarPresentation === 'drawer') await expect(collapse).toHaveFocus()
+  await userEvent.hover(sidebar.querySelector('header')!)
+  await userEvent.hover(collapse)
+  await expect(await tooltipFor(collapse, collapseName)).toHaveTextContent(collapseName)
+  await userEvent.unhover(collapse)
   const field = within(sidebar).getByRole('textbox', { name: 'Search agents' })
   const wordmark = sidebar.querySelector<HTMLElement>('header strong')!
   // Inject the reported failures into the real rendered nodes; the same criterion must reject each.
@@ -66,7 +75,6 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
     try { await expect(() => assertChrome(sidebar)).toThrow(control.error) }
     finally { if (original === null) control.node.removeAttribute('style'); else control.node.setAttribute('style', original) }
   }
-  const collapse = within(sidebar).getByRole('button', { name: /^(Collapse|Close) agents$/ })
   const icon = collapse.querySelector('svg')!
   const glyph = document.createTextNode('«')
   icon.replaceWith(glyph)
@@ -81,6 +89,8 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   else await userEvent.keyboard('{Escape}')
   await expect(field).toHaveValue('')
   assertChrome(sidebar)
+  await userEvent.click(collapse)
+  await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull())
 }
 
 const meta = { title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. The chrome footer adds no status or reconnect action; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
