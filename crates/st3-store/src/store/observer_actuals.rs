@@ -167,7 +167,8 @@ fn record_rank_changed(connection: &Connection, rowid: i64, previous_frontier: i
 impl WriterObserver for Actuals {
     fn tables(&self) -> &'static [(&'static str, &'static str)] {
         &[("main", "claims"), ("main", "batches"), ("main", "replica_records"),
-          ("main", "projection_digest_repaired_claims"), ("main", "desired")]
+          ("main", "projection_digest_repaired_claims"), ("main", "desired"),
+          ("main", "operations")]
     }
 
     fn mutated(&self, database: &str, table: &str) {
@@ -184,6 +185,7 @@ impl WriterObserver for Actuals {
             "projection_digest_repaired_claims" => "projection_digest_repaired_claims",
             "batches" => "batches",
             "desired" => "desired",
+            "operations" => "operations",
             _ => return,
         };
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -192,7 +194,10 @@ impl WriterObserver for Actuals {
         state.serial = state.serial.wrapping_add(1);
         // Updates/deletions may have changed the old subject/claim identity; bulk work and
         // missing rows are deliberately global. Rollback notifications over-invalidate only.
-        if table == "desired" || action != rusqlite::hooks::Action::SQLITE_INSERT
+        // Operations can invalidate another subject's authority through a shared idempotency
+        // key, without changing any of that subject's claim rows.
+        if matches!(table, "desired" | "operations")
+            || action != rusqlite::hooks::Action::SQLITE_INSERT
             || state.pending.len() >= PENDING_LIMIT {
             state.global = true;
         } else if !state.global {
