@@ -131,6 +131,7 @@ it('retains the draft, scroll position and WorkspaceBody viewport store across t
     await act(async () => window.dispatchEvent(new Event('resize')))
     expect(host.querySelector('[aria-label="Expand sidebar"]') !== null).toBe(width < 900)
     expect(host.querySelector('[aria-label="Message agent"]')).toBe(field)
+    expect(host.querySelector('[role="tablist"]') !== null).toBe(width < 900)
     expect(field.value).toBe('Unsent rotation draft')
     expect(host.querySelector('[data-testid="retained-conversation"]')).toBe(history)
     expect(history.scrollTop).toBe(672)

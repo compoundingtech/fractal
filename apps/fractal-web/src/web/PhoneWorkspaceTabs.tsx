@@ -27,7 +27,7 @@ export function PhoneWorkspaceTabs({ enabled = true, tabs, selected, onSelect, c
   const { tabListProps } = useTabList({ 'aria-label': 'Workspace views' }, state, list)
   const panelId = `${prefix}-panel`
   return <div {...stylex.props(styles.root)}>
-    <div {...tabListProps} ref={list} hidden={!enabled} {...stylex.props(styles.list, !enabled && styles.hidden)}>
+    <div {...(enabled ? tabListProps : {})} ref={list} hidden={!enabled} {...stylex.props(styles.list, !enabled && styles.hidden)}>
       {tabs.map((tab, i) => <PhoneTabButton key={tab.id} tab={tab} state={state} id={`${prefix}-tab-${i}`} panelId={panelId} />)}
     </div>
     <div id={panelId} role={enabled ? 'tabpanel' : undefined} aria-labelledby={enabled ? `${prefix}-tab-${index}` : undefined} tabIndex={enabled ? 0 : undefined} {...stylex.props(styles.panel)}>{children}</div>
