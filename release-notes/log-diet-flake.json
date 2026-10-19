@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The busy-daemon log diet test stops the daemon's observer timers before it counts and replicates",
+  "replay": {"status": "none", "detail": "Test only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product behaviour change."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commits."}
+}
