@@ -419,6 +419,11 @@ the principal it claims, it is a full-tier single-note commit about this commit 
 is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
 accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
 
+A step-based job may record extra named inputs next to the fixed ones: `STEP_INPUTS` is a JSON object of short
+lower-case names with nonempty string values (a shard number, a test set). It can add a name but never replace a fixed
+one, and anything malformed makes no note. The aggregate note ignores jobs of the separate `fractal-web` lane
+(`fractal-web-*`): that lane is skipped whenever no web path changed, which must not stop the `linux-gate` verdict.
+
 ### Shadow verification
 
 After publishing, the aggregate note job runs `scripts/ci-evidence-shadow` (from the base commit, fail-soft,
