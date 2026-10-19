@@ -551,7 +551,7 @@ agent "example/bridge" {
         let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
         let planned = state.store.mission(&intent, crate::model::IntentInput { kdl: source, source_name: None }).unwrap();
         state.store.apply(&intent, &planned.subject_tokens, "adapter-route").unwrap();
-        let app = router_for_transport(state.clone(), ClientTransportBoundary::Unix);
+        let app = router_for_transport(state.clone(), ClientTransportBoundary::Unix, &[]);
         let image = png(32, 7);
         let (status, _, bytes) = call(&app, "POST", "/v1/client/blobs", actor, Some("image/png"), image.clone()).await;
         assert_eq!(status, StatusCode::OK, "{}", json_of(&bytes));
@@ -666,7 +666,7 @@ agent "example/bridge" {
         let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
         let planned = state.store.mission(&intent, crate::model::IntentInput { kdl: source, source_name: None }).unwrap();
         state.store.apply(&intent, &planned.subject_tokens, "ask-images").unwrap();
-        let app = router_for_transport(state.clone(), ClientTransportBoundary::Unix);
+        let app = router_for_transport(state.clone(), ClientTransportBoundary::Unix, &[]);
         let image = png(64, 3);
         let hash = hex::encode(Sha256::digest(&image));
         let (status, _, bytes) = call(&app, "POST", "/v1/client/blobs", actor, Some("image/png"), image.clone()).await;
@@ -724,7 +724,7 @@ agent "example/bridge" {
     async fn an_image_uploaded_by_one_person_reaches_a_message_and_only_its_readers() {
         let root = tempfile::tempdir().unwrap();
         let state = crate::api::tests::state(root.path());
-        let app = router_for_transport(state.clone(), ClientTransportBoundary::Unix);
+        let app = router_for_transport(state.clone(), ClientTransportBoundary::Unix, &[]);
         let image = png(700 * 1024, 7);
         let hash = hex::encode(Sha256::digest(&image));
 

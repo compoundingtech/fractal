@@ -72,7 +72,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
     rows
 }
 
-fn count(window: &Value) -> u64 {
+pub fn count(window: &Value) -> u64 {
     window["count"].as_u64().unwrap_or_default()
 }
 
@@ -80,7 +80,7 @@ fn share_of(window: &Value) -> f64 {
     window["over_target_share"].as_f64().unwrap_or_default()
 }
 
-fn ms(value: f64) -> String {
+pub fn ms(value: f64) -> String {
     if value >= 10.0 { format!("{} ms", value.round()) } else { format!("{:.1} ms", value) }
 }
 

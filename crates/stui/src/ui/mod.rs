@@ -3827,7 +3827,7 @@ impl Ui {
                 theme::QUIET,
                 "not started by st, so st cannot see inside it",
             ),
-            ("✉", theme::SAPPHIRE, "a Small Talk message"),
+            ("✉", theme::SAPPHIRE, "a Fractal message"),
         ] {
             marks.lines(text::wrap(
                 &[text::run(meaning, theme::soft())],

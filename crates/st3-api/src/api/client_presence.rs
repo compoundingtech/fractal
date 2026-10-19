@@ -19,7 +19,7 @@ const MAX_NAME_CHARS: usize = 120;
 
 /// Who a request or stream came from, as one row groups it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct Key {
+pub struct Key {
     member: String,
     actor: String,
     client: Option<String>,
@@ -27,14 +27,14 @@ struct Key {
 }
 
 #[derive(Clone, Debug)]
-struct Seen {
+pub struct Seen {
     person: String,
     first_ms: u128,
     last_ms: u128,
 }
 
 #[derive(Clone, Debug)]
-struct Stream {
+pub struct Stream {
     key: Key,
     person: String,
     since_ms: u128,
@@ -63,7 +63,7 @@ pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
     changes().subscribe()
 }
 
-fn changed(member: &str) {
+pub fn changed(member: &str) {
     let _ = changes().send(member.to_owned());
 }
 
