@@ -72,6 +72,42 @@ env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" FRACTAL_MISSION_RUN=fixt
   bash "$repo/evals/st3/ghost-bug/judges/graph.sh" >/dev/null
 IFS= read -r cleared <"$work/observed"
 test "$cleared" = : || fail 'operator command retained an inherited identity alias'
+# Daemon-owned hooks still hand the exact event and payload to their selected st3 binary.
+cat >"$work/bin/preferred-driver" <<'SH'
+#!/bin/sh
+printf '%s\n' "$0" "$@" >"$OBSERVED"
+cat >"$PAYLOAD"
+SH
+cp "$work/bin/preferred-driver" "$work/bin/legacy-driver"
+chmod +x "$work/bin/preferred-driver" "$work/bin/legacy-driver"
+printf '{"event":"fixture"}\n' >"$work/input"
+run_native_hook() {
+  rm -f "$work/observed" "$work/payload"
+  env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" PAYLOAD="$work/payload" "$@" \
+    bash "$repo/crates/st3-daemon/hooks/$native_hook.sh" UserPromptSubmit test-event \
+    <"$work/input" >"$work/out" 2>"$work/err"
+}
+for native_hook in claude-observe claude-statusline; do
+  for mode in preferred legacy equal precedence; do
+    case "$mode" in
+      preferred) run_native_hook FRACTAL_BIN="$work/bin/preferred-driver" ;;
+      legacy) run_native_hook ST3_BIN="$work/bin/legacy-driver" ;;
+      equal) run_native_hook FRACTAL_BIN="$work/bin/preferred-driver" ST3_BIN="$work/bin/preferred-driver" ;;
+      precedence) run_native_hook FRACTAL_BIN="$work/bin/preferred-driver" ST3_BIN="$work/bin/legacy-driver" ;;
+    esac
+    selected=preferred-driver
+    if [[ $mode == legacy ]]; then selected=legacy-driver; fi
+    printf '%s\n' "$work/bin/$selected" driver-hook "$native_hook" UserPromptSubmit test-event >"$work/expected"
+    cmp "$work/expected" "$work/observed" || fail "$native_hook $mode did not dispatch the exact driver event"
+    cmp "$work/input" "$work/payload" || fail "$native_hook $mode changed the native payload"
+  done
+  result=0
+  run_native_hook FRACTAL_BIN= ST3_BIN="$work/bin/legacy-driver" || result=$?
+  expected_result=0
+  if [[ $native_hook == claude-observe ]]; then expected_result=1; fi
+  test "$result" -eq "$expected_result" || fail "$native_hook changed its missing-binary exit status"
+  test ! -e "$work/observed" || fail "$native_hook fell back to a masked legacy binary"
+done
 # The installer hands both updated config aliases to its macOS child, replacing inherited values.
 cat >"$work/bin/uname" <<'SH'
 #!/bin/sh
