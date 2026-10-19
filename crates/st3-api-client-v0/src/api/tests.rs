@@ -6,7 +6,7 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 use crate::api::tests_shared::{probe_claim, state};
-use st3_api::api::tests_shared_client_v0_tests::{checked_agent_cache, get_request, json_request, materialize_run_agents};
+use st3_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, get_request, json_request, materialize_run_agents};
 
 
 #[cfg(target_os = "linux")]

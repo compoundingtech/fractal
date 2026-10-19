@@ -2,8 +2,8 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::ArrangementsStore;
 use super::*;
-pub use st3_api::api::client_v0::arrangements::*;
-pub use st3_api::api::client_v0::arrangements::{list, person, window_end};
+pub use st3_api_core::api::client_v0::arrangements::*;
+pub use st3_api_core::api::client_v0::arrangements::{list, person, window_end};
 
 pub async fn get(
     State(state): State<AppState>,
