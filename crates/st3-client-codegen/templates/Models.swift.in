@@ -83,6 +83,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case pageCursorExpired
     case rateLimited
     case agentRosterCutNotReady
+    case messageSelectorsNotReady
     case projectionDetailTooLarge
     case projectionDetailInvalidSource
     case runtimeNotLocal
@@ -145,6 +146,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "projection-detail-invalid-source": .projectionDetailInvalidSource
         case "rate-limited": .rateLimited
         case "agent-roster-cut-not-ready": .agentRosterCutNotReady
+        case "message-selectors-not-ready": .messageSelectorsNotReady
         case "runtime-not-local": .runtimeNotLocal
         case "timeline-history-incomplete": .timelineHistoryIncomplete
         case "conversation-content-invalidated": .conversationContentInvalidated
@@ -205,6 +207,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .projectionDetailInvalidSource: "projection-detail-invalid-source"
         case .rateLimited: "rate-limited"
         case .agentRosterCutNotReady: "agent-roster-cut-not-ready"
+        case .messageSelectorsNotReady: "message-selectors-not-ready"
         case .runtimeNotLocal: "runtime-not-local"
         case .timelineHistoryIncomplete: "timeline-history-incomplete"
         case .conversationContentInvalidated: "conversation-content-invalidated"

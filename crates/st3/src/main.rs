@@ -309,6 +309,11 @@ enum Command {
         #[command(subcommand)]
         command: RepairCommand,
     },
+    /// Maintain an existing store offline, without contacting the daemon.
+    Store {
+        #[command(subcommand)]
+        command: StoreCommand,
+    },
     /// Remove st3 from this machine: leave its fleet, then its services, state, and settings.
     Uninstall(UninstallArgs),
     /// Join machines into a fleet: create, invite, join, and inspect members.
@@ -2076,6 +2081,16 @@ enum RepairCommand {
     DryRun,
     /// Apply exactly the plan identified by a dry-run token.
     Apply { token: String },
+}
+
+#[derive(Subcommand)]
+enum StoreCommand {
+    /// Build and verify mandatory owner indexes offline; stop all store writers first.
+    PrepareIndexes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4835,6 +4850,11 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Evidence(args) = cli.command {
         return st3::evidence::cli::run(args);
     }
+    if let Command::Store {
+        command: StoreCommand::PrepareIndexes { ref store },
+    } = cli.command {
+        return st3::owner_indexes::prepare(store, &mut cli_output::stdout());
+    }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
         let code = st3::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
@@ -5004,6 +5024,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Doctor(args) => run_doctor(&immediate, args, cli.json, &unknown_config_keys).await,
         Command::Recorder { command } => run_recorder(command, &config, cli.json),
         Command::Repair { command } => run_repair(&client, command, cli.json).await,
+        Command::Store {
+            command: StoreCommand::PrepareIndexes { store },
+        } => st3::owner_indexes::prepare(&store, &mut cli_output::stdout()),
         Command::Backup { command } => match command {
             BackupCommand::Create {
                 file,
@@ -6112,6 +6135,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 ready_at.duration_since(started_at).as_secs_f64() * 1_000.0,
             );
             startup.serving();
+            // Index population must not compete with either API's first bind.
+            tokio::spawn(st3::maintenance::run_client_message_selectors(
+                Arc::downgrade(&store), notify.clone(), event_notify.clone(),
+            ));
             eprintln!("st: local API listening at {}", config.socket.display());
             eprintln!(
                 "st: paired client gateway listening at {}",
