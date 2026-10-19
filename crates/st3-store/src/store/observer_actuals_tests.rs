@@ -28,6 +28,42 @@ fn read(store: &Store) -> (Option<Value>, u64) {
 }
 
 #[test]
+fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
+    let store = Store::open_memory("owner").unwrap();
+    let subject = "resource/terminal-coverage";
+    let id = append(&store, subject, 10, json!({"state": "open"}));
+    let mut changes = store.subscribe_runtime_authority(subject);
+    assert!(store.runtime_authority(subject).unwrap().unwrap().actual.is_some());
+    changes.borrow_and_update();
+    store.connection.write().execute_batch(
+        "DROP TABLE projection_digest_repaired_claims;
+         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
+    ).unwrap();
+    assert!(store.runtime_authority_coverage_failed());
+    assert!(changes.has_changed().unwrap(), "coverage failure must immediately wake readers");
+    changes.borrow_and_update();
+    store.connection.write().execute(
+        "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id],
+    ).unwrap();
+    assert!(changes.has_changed().unwrap(), "WITHOUT ROWID repair must wake despite disabled publication");
+    changes.borrow_and_update();
+    assert!(store.runtime_authority(subject).unwrap().unwrap().actual.is_none());
+    changes.borrow_and_update();
+    append(&store, "resource/other", 20, json!({"state": "closed"}));
+    assert!(changes.has_changed().unwrap(), "disabled coverage needs conservative resolution wakes");
+    changes.borrow_and_update();
+    store.connection.write().execute_batch(
+        "DROP TABLE projection_digest_repaired_claims;
+         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
+    ).unwrap();
+    assert!(!store.runtime_authority_coverage_failed());
+    assert!(changes.has_changed().unwrap(), "verified recovery must publish invalidation");
+    changes.borrow_and_update();
+    append(&store, "resource/other", 30, json!({"state": "open"}));
+    assert!(!changes.has_changed().unwrap(), "verified coverage restores selective waking");
+}
+
+#[test]
 fn terminal_authority_operation_conflict_wakes_without_subject_claim_changes() {
     let store = Store::open_memory("owner").unwrap();
     let subject = "agent/terminal-operation";

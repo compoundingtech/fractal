@@ -10204,6 +10204,7 @@ async fn terminal_stream_socket(
 ) {
     let subject = terminal_subject(&id);
     let mut graph = state.store.subscribe_runtime_authority(&subject);
+    let mut broad_graph = state.event_notify.subscribe();
     let live_store = state.store.clone();
     let live_subject = subject.clone();
     let live_incarnation = expected_incarnation.clone();
@@ -10265,6 +10266,14 @@ async fn terminal_stream_socket(
                     }
                 }
                 changed = graph.changed(), if fence_check_at.is_none() => {
+                    if changed.is_ok() {
+                        let earliest = last_fence_check + TERMINAL_FENCE_CHECK_INTERVAL;
+                        fence_check_at = Some(earliest.max(tokio::time::Instant::now()));
+                    }
+                    None
+                }
+                changed = broad_graph.changed(), if fence_check_at.is_none()
+                    && state.store.runtime_authority_coverage_failed() => {
                     if changed.is_ok() {
                         let earliest = last_fence_check + TERMINAL_FENCE_CHECK_INTERVAL;
                         fence_check_at = Some(earliest.max(tokio::time::Instant::now()));
