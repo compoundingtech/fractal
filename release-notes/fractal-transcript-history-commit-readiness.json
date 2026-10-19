@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Make TranscriptPress and TranscriptComposer story readiness follow the existing full-history commit signal instead of racing progressive mounting against a one-second assertion deadline.",
+  "summary": "Make TranscriptPress and TranscriptComposer story readiness observe the existing full-history commit signal, retaining the configured async assertion deadline with state and mounted-count diagnostics.",
   "replay": { "status": "none", "detail": "Story test synchronization only; no replay or rebuild." },
   "schema": { "status": "none", "detail": "No database schema changes." },
   "rules": { "status": "none", "detail": "Checkpoint rules and fleet coordination are unchanged." },
