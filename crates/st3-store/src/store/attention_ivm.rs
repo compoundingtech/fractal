@@ -50,7 +50,7 @@ pub fn definitions() -> Vec<Box<dyn View>> {
 }
 
 #[derive(Clone, Copy)]
-enum Family {
+pub enum Family {
     Person,
     Custom,
 }
@@ -687,3 +687,6 @@ pub fn row(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests_shared_seats;

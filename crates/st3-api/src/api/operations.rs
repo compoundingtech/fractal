@@ -1,3 +1,6 @@
+use crate::LimitsStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
 use super::*;
 
 pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
@@ -514,6 +517,7 @@ pub async fn events(
             || tokio::time::Instant::now() >= deadline
         {
             let next = page.next_after.unwrap_or(query.after).to_string();
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): retain x-st-* until receivers accept aliases; sunset 60 days after first shipping release.
             return Ok((
                 [
                     ("x-st-next-after", next),
@@ -530,6 +534,7 @@ pub async fn events(
             Ok(Ok(()))
         ) {
             let page = read_event_page(&state, &query).await?;
+            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): retain x-st-* until receivers accept aliases; sunset 60 days after first shipping release.
             return Ok((
                 [
                     (

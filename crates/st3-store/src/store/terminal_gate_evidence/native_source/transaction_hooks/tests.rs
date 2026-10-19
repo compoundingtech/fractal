@@ -1,134 +1,25 @@
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence::native_source_transaction_hooks_tests_shared_seats::{Fixture, Saved, binding, observation};
 use super::*;
 use crate::store::{ClaimInput, append_claim_record_tx};
 use serde_json::json;
-use smallclaims::ivm::install::Root;
-use smallclaims::sqlite::WriterJob;
-use std::sync::mpsc::{Receiver, sync_channel};
-use std::time::{Duration, Instant};
+
+
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 mod operator_errors;
 
-type Saved = (Root, (i64, bool, Option<String>, bool), String, String);
-
-struct Fixture {
-    adapter: Arc<Adapter>,
-    store: Store,
-    dir: tempfile::TempDir,
-}
-fn binding() -> Binding {
-    Binding {
-        origin: "node".into(),
-        mission: "one".into(),
-        run: "mission-run/one".into(),
-        generation: "run-generation/one".into(),
-        step: "step-run/one/prepare".into(),
-        path: "prepare".into(),
-        gate: "prepared".into(),
-        exec: "exec/one/probe".into(),
-    }
-}
-impl Fixture {
-    fn new(seed: bool) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
-        let adapter = Adapter::install(&store).unwrap();
-        adapter.bootstrap(&store, binding(), seed).unwrap();
-        let fixture = Self {
-            adapter,
-            store,
-            dir,
-        };
-        fixture.reset_counts();
-        fixture
-    }
-    fn source(&self) -> &NativeSource {
-        self.adapter.source.get().unwrap()
-    }
-    fn read<T>(&self, read: impl FnOnce(&Transaction<'_>) -> T) -> T {
-        // A pinned read, never a managed writer transaction or a hook invocation.
-        let mut c = rusqlite::Connection::open_with_flags(
-            self.dir.path().join("claims.sqlite3"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let tx = c.transaction().unwrap();
-        read(&tx)
-    }
-    fn line(&self) -> Value {
-        self.read(|tx| self.source().doctor_line(tx))
-    }
-    fn saved(&self) -> Saved {
-        self.read(|tx| (self.source().installer.root(tx, VIEW).unwrap(), self.source().scoped_state(tx).unwrap(),
-            tx.query_row("SELECT body FROM claims WHERE subject='exec/one/probe' AND kind='runtime.observed' ORDER BY store_index DESC LIMIT 1", [], |r|r.get(0)).unwrap(),
-            tx.query_row("SELECT body FROM test_terminal_members WHERE key='gate/native'", [], |r|r.get(0)).unwrap()))
-    }
-    fn reset_counts(&self) {
-        self.adapter.prepare_calls.store(0, Ordering::Relaxed);
-        self.adapter.finalize_calls.store(0, Ordering::Relaxed);
-        self.adapter.work.lock().unwrap().clear();
-    }
-    fn counts(&self) -> (usize, usize) {
-        (
-            self.adapter.prepare_calls.load(Ordering::Relaxed),
-            self.adapter.finalize_calls.load(Ordering::Relaxed),
-        )
-    }
-    fn raw(&self, job: impl FnOnce(&mut rusqlite::Connection)) {
-        let mut writer = self.store.connection.write();
-        job(writer.connection.as_mut().unwrap());
-    }
-    fn commit(&self, job: impl FnOnce(&Transaction<'_>)) {
-        let mut writer = self.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        job(&tx);
-        tx.commit().unwrap();
-    }
-    fn enqueue(
-        &self,
-        job: impl FnOnce(&Transaction<'_>) -> bool + Send + 'static,
-    ) -> Receiver<Result<(), String>> {
-        let (done, answer) = sync_channel(1);
-        self.store.connection.send(WriterJob::Batched {
-            run: Box::new(job),
-            profile: None,
-            wait: None,
-            holder: smallclaims::windows::holds::Holder::current(),
-            enqueued: Instant::now(),
-            done,
-        });
-        answer
-    }
-}
 fn update_exit(tx: &rusqlite::Connection, code: i64) {
     tx.execute(/* sqlite-large-value: allow-for-now lv-h770eefcd497a owner=st3_store::store::terminal_gate_evidence::native_source::transaction_hooks::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.exit_code',?1) WHERE subject='exec/one/probe' AND kind='runtime.observed'", [code]).unwrap();
 }
 fn answer(rx: Receiver<Result<(), String>>) -> Result<(), String> {
     rx.recv_timeout(Duration::from_secs(10)).unwrap()
 }
-fn observation(f: &Fixture, code: i64) -> ClaimInput {
-    let desired: String = f.read(|tx| {
-        tx.query_row(
-            "SELECT claim_id FROM desired WHERE subject='exec/one/probe'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap()
-    });
-    ClaimInput {
-        subject: "exec/one/probe".into(),
-        kind: "runtime.observed".into(),
-        actor: None,
-        fields: BTreeMap::from([
-            ("status".into(), json!("exited")),
-            ("exit_code".into(), json!(code)),
-            ("incarnation_id".into(), json!(format!("managed-{code}"))),
-        ]),
-        evidence: vec![desired],
-        expected_subject: None,
-        idempotency_key: None,
-    }
-}
-
 #[test]
 fn managed_gate_explicit_bootstrap_slot_and_missing_metadata_refusal() {
     let dir = tempfile::tempdir().unwrap();

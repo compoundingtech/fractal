@@ -16,7 +16,7 @@ const SAMPLES: &str = "database_size_samples";
 const KEEP_MS: u128 = 49 * 60 * 60 * 1000;
 /// At most this many samples are kept, whatever the restarts.
 const MAX_SAMPLES: usize = 128;
-const DAY_MS: u128 = 24 * 60 * 60 * 1000;
+pub const DAY_MS: u128 = 24 * 60 * 60 * 1000;
 /// The shortest span a daily growth is extrapolated from.
 const MIN_SPAN_MS: u128 = 60 * 60 * 1000;
 /// How far from exactly a day ago a physical baseline may be.
@@ -91,7 +91,34 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
     Some((i64::try_from(per_day).ok()?, span))
 }
 
+/// The free pages one write gives back to the filesystem: 2 MiB of 4 KiB pages. On a 32 GB
+/// store a chunk of 2,048 took 132 ms (p99 226 ms); this keeps each write near 35 ms.
+pub const FREE_PAGE_CHUNK: u64 = 512;
+
 impl Store {
+    /// Give up to [`FREE_PAGE_CHUNK`] free pages back to the filesystem in one short write, and
+    /// return how many went. Only a store with incremental auto-vacuum can: a fresh one, or one
+    /// converted by a VACUUM. Any other store's file never shrinks, so this gives back nothing.
+    pub fn release_free_pages(&self) -> Result<u64> {
+        let connection = self.connection.write_background();
+        let free = || -> Result<u64> {
+            Ok(connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?)
+        };
+        // 2 is INCREMENTAL.
+        let mode: u64 = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+        let before = free()?;
+        if mode != 2 || before == 0 {
+            return Ok(0);
+        }
+        // FREE_PAGE_CHUNK pages. Each step gives back one, so the pragma runs to its end.
+        let mut statement = connection.prepare("PRAGMA incremental_vacuum(512)")?;
+        let mut steps = statement.query([])?;
+        while steps.next()?.is_some() {}
+        drop(steps);
+        drop(statement);
+        Ok(before.saturating_sub(free()?))
+    }
+
     /// Measure the store and remember the sample. The daemon calls it hourly.
     pub fn record_database_size(&self, now: u128) -> Result<DatabaseSize> {
         let (page_size, pages, free) = {
@@ -232,6 +259,81 @@ mod tests {
         assert!(next.physical_growth_bytes_per_day.is_some(), "the earlier sample is a day old");
         assert_eq!(next.physical_bytes, next.main_file_bytes + next.wal_bytes);
         assert_eq!((next.main_file_bytes, next.wal_bytes), before);
+    }
+
+    fn pragma(store: &Store, name: &str) -> u64 {
+        store.readers.get().query_row(&format!("PRAGMA {name}"), [], |row| row.get(0)).unwrap()
+    }
+
+    /// The file's pages less its pointer maps. An incremental auto-vacuum file keeps a pointer
+    /// map at page 2 and then every `page_size / 5 + 1` pages, and drops any that a truncation
+    /// leaves past the end, so the file can shrink by one page more than it gave back.
+    fn content_pages(store: &Store) -> u64 {
+        let pages = pragma(store, "page_count");
+        let mapped = pragma(store, "page_size") / 5 + 1;
+        pages - if pages < 2 { 0 } else { (pages - 2) / mapped + 1 }
+    }
+
+    /// Delete rows the way a trim does, leaving their pages free; return how many.
+    fn free_some_pages(store: &Store) -> u64 {
+        store
+            .connection
+            .write()
+            .execute_batch(
+                "CREATE TABLE trimmed(value BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 600)
+                 INSERT INTO trimmed SELECT zeroblob(8000) FROM n;
+                 DROP TABLE trimmed;",
+            )
+            .unwrap();
+        pragma(store, "freelist_count")
+    }
+
+    #[test]
+    fn a_new_store_gives_freed_pages_back_a_chunk_at_a_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let store = Store::open(&path, "alder").unwrap();
+        assert_eq!(pragma(&store, "auto_vacuum"), 2, "incremental");
+        let free = free_some_pages(&store);
+        let pages = content_pages(&store);
+        assert!(free > 1_000, "{free} free pages");
+        assert_eq!(store.release_free_pages().unwrap(), FREE_PAGE_CHUNK);
+        assert_eq!(
+            (content_pages(&store), pragma(&store, "freelist_count")),
+            (pages - FREE_PAGE_CHUNK, free - FREE_PAGE_CHUNK)
+        );
+        let mut released = FREE_PAGE_CHUNK;
+        loop {
+            match store.release_free_pages().unwrap() {
+                0 => break,
+                pages => released += pages,
+            }
+        }
+        assert_eq!(released, free);
+        assert_eq!(pragma(&store, "freelist_count"), 0);
+        assert_eq!(content_pages(&store), pages - free);
+        drop(store);
+
+        // A store from before incremental auto-vacuum keeps its free pages. One VACUUM, run
+        // with the daemon stopped, converts it.
+        let vacuum = |mode: &str| {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute_batch(&format!("PRAGMA auto_vacuum = {mode}; VACUUM;"))
+                .unwrap();
+        };
+        vacuum("NONE");
+        let store = Store::open(&path, "alder").unwrap();
+        assert_eq!(pragma(&store, "auto_vacuum"), 0, "reopening keeps the file's setting");
+        assert!(free_some_pages(&store) > 1_000);
+        assert_eq!(store.release_free_pages().unwrap(), 0);
+        drop(store);
+        vacuum("INCREMENTAL");
+        let store = Store::open(&path, "alder").unwrap();
+        assert_eq!(pragma(&store, "auto_vacuum"), 2);
+        assert!(free_some_pages(&store) > 1_000);
+        assert_eq!(store.release_free_pages().unwrap(), FREE_PAGE_CHUNK);
     }
 
     #[test]

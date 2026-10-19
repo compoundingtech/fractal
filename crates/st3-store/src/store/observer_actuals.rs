@@ -15,7 +15,7 @@ mod tests;
 pub struct Actuals(Mutex<State>);
 
 #[derive(Default)]
-struct State {
+pub struct State {
     serial: u64,
     native: Option<(i64, i64)>,
     frontier: i64,
