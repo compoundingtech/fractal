@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Dock captured Changes beside the Fractal thread with shared compact pane headers and a keyboard-accessible, workspace-persisted 320–720 px split.",
+  "summary": "Dock captured Changes beside the Fractal thread with shared compact pane headers and a keyboard-accessible, workspace-persisted split that reserves usable thread space.",
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No database or wire schema changes." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },

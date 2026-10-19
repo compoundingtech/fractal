@@ -220,12 +220,19 @@ with decoded public conversation frames; `capturedChanges.unit.test.ts` guards t
 capture, count, provenance and selection rules.
 
 On desktop, the shared kit `DockedSplit` places captured Changes beside the thread.
-Both panes use the compact 32 px header. The separator clamps to 320–720 px:
+Both panes use the compact 32 px header. The separator normally clamps to 320–720 px:
 arrow keys resize by 8 px (Shift: 32 px), Home/End select the bounds, Enter closes,
 and double-click restores the default. Width persists in browser storage per reported
 host/workspace, with the conversation identity used when the workspace is unknown.
 Pointer resize updates a CSS variable and separator ARIA values without re-rendering
 the thread. Closing Changes unmounts its lazy inspector and releases its demand.
+The live split reserves the kit's general `geometryNumbers.panelMin` (360 px) for the
+thread/composer lane; RM1 has no separate thread-width minimum. Its effective dock
+maximum is the lesser of 720 px and actual container width minus 360 px and the
+separator. At constrained desktop widths, the dock may temporarily become narrower
+than 320 px rather than hiding the thread. Restore and container/window shrink apply
+the same bounds and ARIA maximum without changing the saved preference; more space
+restores that preference.
 Native header actions share one horizontal slot. On desktop, an unavailable Resources
 control retains its refusal reason as its accessible description and hover title rather
 than expanding the compact header; the narrow sheet keeps its visible explanation.

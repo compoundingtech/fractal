@@ -8,7 +8,7 @@ import { DiffPanel } from './assistant-ui/composition/DiffPanel'
 import { Button } from './assistant-ui/composition/Controls'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { borderVars as border, geometryVars as g, geometryNumbers, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 const workspaces = ['alpha', 'beta'] as const
 type Workspace = typeof workspaces[number]
@@ -42,13 +42,33 @@ function DockedSplitStory({ scheme }: { readonly scheme: Scheme }) {
   </div>
 }
 
+function BoundedSplitStory({ scheme }: { readonly scheme: Scheme }) {
+  const [generation, setGeneration] = React.useState(0)
+  const container = React.useRef<HTMLDivElement>(null)
+  const sidebar = React.useRef<HTMLElement>(null)
+  return <div data-scheme={scheme} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.root)}>
+    <div role="toolbar" aria-label="Story controls" {...stylex.props(styles.toolbar)}>
+      <Button onPress={() => { container.current!.style.width = '900px' }}>900px window</Button>
+      <Button onPress={() => { container.current!.style.width = '1440px' }}>1440px window</Button>
+      <Button onPress={() => { sidebar.current!.style.width = '256px' }}>256px sidebar</Button>
+      <Button onPress={() => { window.localStorage.setItem(dockedSplitStorageKey('bounded-story'), '720'); setGeneration(value => value + 1) }}>Restore 720px</Button>
+    </div>
+    <div ref={container} style={{ display: 'flex', width: 1440, flex: 1, minHeight: 0 }}>
+      <aside ref={sidebar} style={{ width: 208, flexShrink: 0 }}>Sidebar</aside>
+      <DockedSplit key={generation} persistKey="bounded-story" label="Resize changes" minMainSize={geometryNumbers.panelMin} dock={<DiffPanel open width="100%" diff={diff} path="src/sidebar/row-fit.ts" added={2} removed={1} />}>
+        <p data-bounded-thread>Thread and composer stay usable.</p>
+      </DockedSplit>
+    </div>
+  </div>
+}
+
 const meta = {
   title: 'Fractal UI/Docked split',
   component: DockedSplitStory,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Main pane with a right-docked, resizable Changes panel: 320–720 px, persisted per workspace key, sized through a CSS variable so a drag never re-renders the host. Pane headers share the 32px geometry.' } } },
   args: { scheme: 'dark' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
-  beforeEach: () => { for (const workspace of workspaces) window.localStorage.removeItem(dockedSplitStorageKey(persistKey(workspace))) },
+  beforeEach: () => { for (const workspace of workspaces) window.localStorage.removeItem(dockedSplitStorageKey(persistKey(workspace))); window.localStorage.removeItem(dockedSplitStorageKey('bounded-story')) },
 } satisfies Meta<typeof DockedSplitStory>
 export default meta
 type Story = StoryObj<typeof meta>
@@ -66,6 +86,37 @@ const drag = (node: HTMLElement, fromX: number, toX: number, finish: 'pointerup'
 
 export const Default: Story = {}
 export const DefaultLight: Story = { args: { scheme: 'light' } }
+
+export const AvailableWidth: Story = {
+  render: args => <BoundedSplitStory {...args} />,
+  tags: ['critical'],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const thread = canvasElement.querySelector('[data-bounded-thread]')!.parentElement!
+    const handle = () => separator(canvasElement)
+    handle().focus()
+    await userEvent.keyboard('{End}')
+    await expect(handle()).toHaveAttribute('aria-valuenow', '720')
+    await userEvent.click(canvas.getByRole('button', { name: '900px window' }))
+    await waitFor(() => expect(handle()).toHaveAttribute('aria-valuemax', '331'))
+    await expect(thread.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
+    await expect(window.localStorage.getItem(dockedSplitStorageKey('bounded-story'))).toBe('720')
+    handle().focus()
+    await userEvent.keyboard('{End}')
+    await expect(handle()).toHaveAttribute('aria-valuenow', '331')
+    await userEvent.click(canvas.getByRole('button', { name: 'Restore 720px' }))
+    await expect(handle()).toHaveAttribute('aria-valuenow', '331')
+    await expect(window.localStorage.getItem(dockedSplitStorageKey('bounded-story'))).toBe('720')
+    await userEvent.click(canvas.getByRole('button', { name: '256px sidebar' }))
+    await waitFor(() => expect(handle()).toHaveAttribute('aria-valuemax', '283'))
+    await expect(canvasElement.querySelector('[data-bounded-thread]')!.parentElement!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
+    await expect(handle()).toHaveAttribute('aria-valuemin', '283')
+    await expect(window.localStorage.getItem(dockedSplitStorageKey('bounded-story'))).toBe('720')
+    await userEvent.click(canvas.getByRole('button', { name: '1440px window' }))
+    await waitFor(() => expect(handle()).toHaveAttribute('aria-valuenow', '720'))
+    await expect(handle()).toHaveAttribute('aria-valuemax', '720')
+  },
+}
 
 /** Dragging previews the width with no host re-render, commits once on pointerup, clamps at both bounds and cancels cleanly. */
 export const PointerResize: Story = {

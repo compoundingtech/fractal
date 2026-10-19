@@ -33,6 +33,8 @@ export interface DockedSplitProps {
   readonly min?: number
   readonly max?: number
   readonly defaultSize?: number
+  /** Reserve this width for the main pane. Space constraints may temporarily reduce the dock below `min`. */
+  readonly minMainSize?: number
   /** Enter on the separator: the host hides the dock. */
   readonly onCollapse?: () => void
 }
@@ -43,10 +45,13 @@ export interface DockedSplitProps {
  * re-renders the host or the main pane; pointerup and every key press persist the width per `persistKey`.
  * Keyboard: ←/→ ±8px (Shift ±32px; ← widens the dock), Home/End min/max, Enter collapses, double-click resets.
  */
-export function DockedSplit({ persistKey, label, children, dock, min = dockedSplitBounds.min, max = dockedSplitBounds.max, defaultSize = dockedSplitBounds.defaultSize, onCollapse }: DockedSplitProps) {
+export function DockedSplit({ persistKey, label, children, dock, min = dockedSplitBounds.min, max = dockedSplitBounds.max, defaultSize = dockedSplitBounds.defaultSize, minMainSize = 0, onCollapse }: DockedSplitProps) {
   const rootRef = React.useRef<HTMLDivElement>(null)
   const separatorRef = React.useRef<HTMLDivElement>(null)
   const sizeRef = React.useRef<number | undefined>(undefined)
+  const preferredRef = React.useRef<number>(defaultSize)
+  const minimumRef = React.useRef(min)
+  const maximumRef = React.useRef(max)
   const dockId = React.useId()
   const docked = dock !== undefined
   const { separatorProps } = useSeparator({ orientation: 'vertical', elementType: 'div' })
@@ -63,12 +68,28 @@ export function DockedSplit({ persistKey, label, children, dock, min = dockedSpl
   const persist = React.useCallback((size: number) => {
     try { window.localStorage.setItem(dockedSplitStorageKey(persistKey), String(size)) } catch { /* persistence is best-effort */ }
   }, [persistKey])
-  const commit = (next: number) => { const size = clamp(next, min, max); apply(size); persist(size) }
+  const constrain = (size: number) => clamp(size, minimumRef.current, maximumRef.current)
+  const commit = (next: number) => { const size = constrain(next); preferredRef.current = size; apply(size); persist(size) }
 
-  // Before paint, every time the dock appears or the key/bounds change: restore that key's width.
+  // Restore the preference before paint. Container changes only constrain its presentation, never the saved width.
   React.useLayoutEffect(() => {
-    if (docked) apply(readDockedSize(persistKey, { min, max, defaultSize }))
-  }, [docked, persistKey, min, max, defaultSize, apply])
+    if (!docked) return
+    preferredRef.current = readDockedSize(persistKey, { min, max, defaultSize })
+    const root = rootRef.current!
+    const measure = () => {
+      const boundedMax = minMainSize > 0 ? Math.min(max, Math.max(0, Math.floor(root.getBoundingClientRect().width - (separatorRef.current?.getBoundingClientRect().width ?? 0) - minMainSize))) : max
+      minimumRef.current = Math.min(min, boundedMax)
+      maximumRef.current = boundedMax
+      separatorRef.current?.setAttribute('aria-valuemin', String(minimumRef.current))
+      separatorRef.current?.setAttribute('aria-valuemax', String(boundedMax))
+      apply(clamp(preferredRef.current, minimumRef.current, boundedMax))
+    }
+    measure()
+    if (minMainSize === 0) return
+    const observer = new ResizeObserver(measure)
+    observer.observe(root)
+    return () => observer.disconnect()
+  }, [docked, persistKey, min, max, defaultSize, minMainSize, apply])
 
   const current = () => sizeRef.current ?? readDockedSize(persistKey, { min, max, defaultSize })
 
@@ -85,8 +106,8 @@ export function DockedSplit({ persistKey, label, children, dock, min = dockedSpl
     node.setPointerCapture(pointerId)
     rootRef.current?.setAttribute('data-resizing', '')
     const move = (moveEvent: PointerEvent) => {
-      latest = clamp(before + startX - moveEvent.clientX, min, max)
-      if (frame === undefined) frame = window.requestAnimationFrame(() => { frame = undefined; apply(latest) })
+      latest = constrain(before + startX - moveEvent.clientX)
+      if (frame === undefined) frame = window.requestAnimationFrame(() => { frame = undefined; apply(constrain(latest)) })
     }
     const finish = (cancelled: boolean) => {
       if (finished) return
@@ -97,8 +118,8 @@ export function DockedSplit({ persistKey, label, children, dock, min = dockedSpl
       node.removeEventListener('pointercancel', cancel)
       node.removeEventListener('lostpointercapture', cancel)
       rootRef.current?.removeAttribute('data-resizing')
-      if (cancelled) apply(before)
-      else { apply(latest); persist(latest) }
+      if (cancelled) apply(constrain(before))
+      else { const size = constrain(latest); preferredRef.current = size; apply(size); persist(size) }
       if (node.hasPointerCapture(pointerId)) node.releasePointerCapture(pointerId)
     }
     const up = () => finish(false)
@@ -113,8 +134,8 @@ export function DockedSplit({ persistKey, label, children, dock, min = dockedSpl
     const step = event.shiftKey ? 32 : 8
     if (event.key === 'ArrowLeft') { event.preventDefault(); commit(current() + step) }
     else if (event.key === 'ArrowRight') { event.preventDefault(); commit(current() - step) }
-    else if (event.key === 'Home') { event.preventDefault(); commit(min) }
-    else if (event.key === 'End') { event.preventDefault(); commit(max) }
+    else if (event.key === 'Home') { event.preventDefault(); commit(minimumRef.current) }
+    else if (event.key === 'End') { event.preventDefault(); commit(maximumRef.current) }
     else if (event.key === 'Enter' && onCollapse !== undefined) { event.preventDefault(); onCollapse() }
   }
 
@@ -127,8 +148,8 @@ export function DockedSplit({ persistKey, label, children, dock, min = dockedSpl
         tabIndex={0}
         aria-label={label}
         aria-controls={dockId}
-        aria-valuemin={min}
-        aria-valuemax={max}
+        aria-valuemin={minimumRef.current}
+        aria-valuemax={maximumRef.current}
         data-resizer={persistKey}
         onPointerDown={onPointerDown}
         onKeyDown={onKeyDown}

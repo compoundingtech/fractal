@@ -55,10 +55,29 @@ let host: HTMLDivElement
 let registry: AtomRegistry.AtomRegistry
 let source: DataSource
 let now: Atom.Writable<number>
+let splitObservers: Set<() => void>
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  splitObservers = new Set()
+  vi.stubGlobal('ResizeObserver', class {
+    private notify: () => void
+    constructor(callback: ResizeObserverCallback) { this.notify = () => callback([], this as unknown as ResizeObserver) }
+    observe(node: Element) { if (node.hasAttribute('data-docked-split')) splitObservers.add(this.notify) }
+    unobserve() { splitObservers.delete(this.notify) }
+    disconnect() { splitObservers.delete(this.notify) }
+  })
+  const originalRect = HTMLElement.prototype.getBoundingClientRect
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const split = this.hasAttribute('data-docked-split') ? this : this.parentElement?.hasAttribute('data-docked-split') ? this.parentElement : undefined
+    if (split) {
+      const sidebar = split.closest('[data-testid="live-agent-workspace"]')?.querySelector<HTMLElement>('aside[aria-label="Agents"]')
+      const available = window.innerWidth - Number.parseFloat(sidebar?.style.width ?? '0') - 1
+      const width = this === split ? available : this.hasAttribute('role') ? 1 : this.hasAttribute('data-dock') ? Number.parseFloat(split.style.getPropertyValue('--dock-size')) : available - Number.parseFloat(split.style.getPropertyValue('--dock-size')) - 1
+      return new DOMRect(0, 0, width, 900)
+    }
+    return originalRect.call(this)
+  })
   // Keep speculative frame work out of assertions; selected threads still load normally.
   vi.stubGlobal('requestAnimationFrame', () => 1)
   vi.stubGlobal('cancelAnimationFrame', () => undefined)
@@ -89,6 +108,7 @@ afterEach(async () => {
   registry.dispose()
   host.remove()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
   window.history.replaceState(null, '', '/')
 })
 
@@ -222,5 +242,53 @@ describe('live captured Changes dock', () => {
     await selectAgent('agent/changes-b')
     await openChanges()
     expect(panelWidth()).toBe(320)
+  })
+  it('keeps a 360px thread at the 900px desktop boundary when End is pressed', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
+    await mount()
+    await act(async () => host.querySelector('[role="separator"][aria-label="Agent sidebar width"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })))
+    await openChanges()
+    await key('End')
+    const split = separator().parentElement!
+    expect(split.firstElementChild!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
+    expect(panelWidth()).toBe(330)
+    expect(separator().getAttribute('aria-valuemax')).toBe('330')
+  })
+
+  it('bounds a restored 720px preference at 900px without replacing the preference', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
+    await mount()
+    await act(async () => host.querySelector('[role="separator"][aria-label="Agent sidebar width"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })))
+    const split = host.querySelector<HTMLElement>('[data-docked-split]')!
+    const storageKey = `composition.${split.getAttribute('data-docked-split')}`
+    window.localStorage.setItem(storageKey, '720')
+    await openChanges()
+    expect(split.firstElementChild!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
+    expect(Number.parseFloat(host.querySelector<HTMLElement>('aside[aria-label="Agents"]')!.style.width)).toBeGreaterThanOrEqual(208)
+    expect(panelWidth()).toBe(split.getBoundingClientRect().width - 361)
+    expect(separator().getAttribute('aria-valuemax')).toBe(String(panelWidth()))
+    expect(window.localStorage.getItem(storageKey)).toBe('720')
+  })
+
+  it('constrains a shrinking window and restores the preferred width when space returns', async () => {
+    await mount()
+    await openChanges()
+    await key('End')
+    const split = separator().parentElement!
+    const storageKey = `composition.${split.getAttribute('data-docked-split')}`
+    expect(panelWidth()).toBe(720)
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
+    await act(async () => { window.dispatchEvent(new Event('resize')) })
+    await act(async () => host.querySelector('[role="separator"][aria-label="Agent sidebar width"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })))
+    await act(async () => { for (const notify of splitObservers) notify() })
+    expect(split.firstElementChild!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
+    expect(panelWidth()).toBeLessThanOrEqual(330)
+    expect(separator().getAttribute('aria-valuemax')).toBe(String(panelWidth()))
+    expect(window.localStorage.getItem(storageKey)).toBe('720')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1600 })
+    await act(async () => { window.dispatchEvent(new Event('resize')) })
+    await act(async () => { for (const notify of splitObservers) notify() })
+    expect(panelWidth()).toBe(720)
+    expect(window.localStorage.getItem(storageKey)).toBe('720')
   })
 })
