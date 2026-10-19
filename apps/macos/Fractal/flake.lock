@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1789178647,
+        "narHash": "sha256-QKzNhJrBkLagm1tF3ifpCptUygt5eBYUxjdNWRSgzHc=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "4ba99f3209788ed04f01af38f77ddb803ad6ec63",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "4ba99f3209788ed04f01af38f77ddb803ad6ec63",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "smalltalk": "smalltalk"
+      }
+    },
+    "smalltalk": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792443904,
+        "narHash": "sha256-qltZJ8P533+1HaT5jSr7Fzkhsev3ro7Ax9FMu6HGAvA=",
+        "owner": "compoundingtech",
+        "repo": "smalltalk",
+        "rev": "e9a9167884ea56ae22ed0605bdf284610b6fa9fb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "smalltalk",
+        "rev": "e9a9167884ea56ae22ed0605bdf284610b6fa9fb",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
