@@ -74,6 +74,14 @@ const operator: Sender = { kind: 'human', label: 'Operator' }
 const assistant: Sender = { kind: 'agent', label: 'Assistant' }
 /** Transcript defers turns beyond its tail plus one history batch; sections of at most this many turns mount whole. */
 const sectionTurns = 6
+/** The scenario factories and recordings currently emit shell/edit; reads remain read operations. */
+const toolKinds: Readonly<Record<'shell' | 'edit' | 'read' | 'read_file', 'run' | 'edit' | 'read'>> = { shell: 'run', edit: 'edit', read: 'read', read_file: 'read' }
+const kindFor = (name: string) => {
+  switch (name) {
+    case 'shell': case 'edit': case 'read': case 'read_file': return toolKinds[name]
+    default: throw new Error(`Unclassified scenario tool: ${name}`)
+  }
+}
 function conversationItem(entry: WireEntry, results: ReadonlyMap<string, ToolResultEntry>): TextItem | ToolCallItem | undefined {
   if (entry.type === 'content' && entry.role === 'assistant' && typeof entry.body.text === 'string') return { _tag: 'Text', id: entry.id, role: 'assistant', text: entry.body.text, attachments: [], streaming: !entry.final, at: entry.timestamp, sender: assistant }
   if (entry.type !== 'tool_call') return undefined
@@ -81,16 +89,22 @@ function conversationItem(entry: WireEntry, results: ReadonlyMap<string, ToolRes
   return { _tag: 'ToolCall', id: entry.id, callId: entry.body.call_id, name: entry.body.name, input: entry.body.arguments, status: result === undefined ? 'running' : result.body.status, callSeen: true, at: entry.timestamp, sender: assistant, ...(result === undefined ? {} : { result: { content: result.body.content, mediaType: result.body.media_type, isError: result.body.status === 'error', at: result.timestamp } }) }
 }
 /** Story projection of wire entries: each user content opens a turn; assistant content and tool calls, joined with their results, follow it. */
-function threadTurns(entries: readonly WireEntry[]): TranscriptTurn[] {
+function threadTurns(entries: readonly WireEntry[], hasMore: boolean): TranscriptTurn[] {
   const results = new Map(entries.flatMap(entry => entry.type === 'tool_result' ? [[entry.body.call_id, entry] as const] : []))
   const turns: TranscriptTurn[] = []
-  let open: { id: string; prompt?: Prompt; items: (TextItem | ToolCallItem)[]; startedAt: string } | undefined
+  let open: { id: string; prompt?: Prompt; items: (TextItem | ToolCallItem)[]; startedAt: string; lifecycle?: string } | undefined
   const close = () => {
     if (open === undefined) return
-    const { id, prompt, items, startedAt } = open
-    turns.push({ id, prompt, items, work: workLogTurnFromItems(prompt === undefined ? items : [prompt, ...items], { kindFor: () => 'read', running: false, failed: false, interrupted: false, startedAt, completeHistory: true }) })
+    const { id, prompt, items, startedAt, lifecycle } = open
+    const running = items.some(item => item._tag === 'ToolCall' ? item.status === 'running' : item.streaming) || lifecycle === 'running'
+    const failed = lifecycle === 'failed' || items.some(item => item._tag === 'ToolCall' && item.status === 'error')
+    turns.push({ id, prompt, items, work: workLogTurnFromItems(prompt === undefined ? items : [prompt, ...items], { kindFor, running, failed, interrupted: lifecycle === 'interrupted', startedAt, completeHistory: !hasMore }) })
   }
   for (const entry of entries) {
+    if (entry.type === 'status') {
+      if (open !== undefined) open.lifecycle = entry.body.status
+      continue
+    }
     if (entry.type === 'content' && entry.role === 'user' && typeof entry.body.text === 'string') {
       close()
       open = { id: entry.id, prompt: { _tag: 'Text', id: entry.id, role: 'user', text: entry.body.text, attachments: [], streaming: false, at: entry.timestamp, sender: operator }, items: [], startedAt: entry.timestamp }
@@ -109,13 +123,13 @@ const scenarioSections = ({ loading, state }: WireSlice<'conversation'>): { read
   loading,
   instant: loading ? 0 : state.threads.reduce((latest, thread) => thread.items.reduce((at, entry) => Math.max(at, Date.parse(entry.timestamp)), latest), 0),
   sections: loading ? [] : state.threads.flatMap(thread => {
-    const turns = threadTurns(thread.items)
+    const turns = threadTurns(thread.items, thread.has_more || (thread.history?.committed_from_sequence ?? 1) > 1)
     const count = Math.max(1, Math.ceil(turns.length / sectionTurns))
     return Array.from({ length: count }, (_, index) => ({ id: `${thread.agent}/${index}`, title: count === 1 ? thread.agent : `${thread.agent} · part ${index + 1} of ${count}`, turns: turns.slice(index * sectionTurns, (index + 1) * sectionTurns) }))
   }),
 })
 function SectionTranscript({ section, status, instant }: { section: TranscriptSection; status: SyncStatus; instant: number }) {
-  const options = React.useMemo(() => ({ messages: section.turns.flatMap(entry => entry.prompt === undefined ? entry.items : [entry.prompt, ...entry.items]), isRunning: false, onNew: async () => {} }), [section.turns])
+  const options = React.useMemo(() => ({ messages: section.turns.flatMap(entry => entry.prompt === undefined ? entry.items : [entry.prompt, ...entry.items]), isRunning: section.turns.some(turn => turn.work.running), onNew: async () => {} }), [section.turns])
   return <EmbraceRuntimeProvider options={options}>
     <div {...stylex.props(styles.transcript)}><Transcript title={section.title} turns={section.turns} sync={status} now={instant} observedAt={instant - 8000} /></div>
   </EmbraceRuntimeProvider>

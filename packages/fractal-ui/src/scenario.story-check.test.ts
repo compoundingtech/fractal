@@ -4,7 +4,7 @@ import meta, { AllStates } from './Markdown.stories.tsx'
 import syncMeta, { Scenario, LocalFailure, UnknownFailure, ServerFailure } from './SyncLine.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
 import declarationMeta, { MissionStructuredFallback, ScenarioMissionDeclarations } from './DeclarationPanel.stories.tsx'
-import composerMeta, { ReadingColumn, ReadingColumnLight, HostWidth } from './TranscriptComposer.stories.tsx'
+import composerMeta, { ReadingColumn, ReadingColumnLight, HostWidth, ScenarioConversation as ComposerScenarioConversation, ScenarioConversationLight as ComposerScenarioConversationLight } from './TranscriptComposer.stories.tsx'
 import * as pressModule from './TranscriptPress.stories.tsx'
 
 test('Markdown AllStates consumes the declared conversation slice', () => {
@@ -49,7 +49,7 @@ for (const [name, story] of Object.entries({ MissionStructuredFallback, Scenario
   })
 }
 
-for (const [name, story] of Object.entries({ ReadingColumn, ReadingColumnLight, HostWidth })) {
+for (const [name, story] of Object.entries({ ReadingColumn, ReadingColumnLight, HostWidth, ComposerScenarioConversation, ComposerScenarioConversationLight })) {
   test(`TranscriptComposer ${name} consumes its declared conversation slice`, () => {
     const result = scenarioStoryCheck(story, composerMeta)
     expect(result.failures).toEqual([])
