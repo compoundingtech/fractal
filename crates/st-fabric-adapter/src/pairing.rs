@@ -517,6 +517,48 @@ struct Resume {
     sponsor_key: String,
 }
 
+#[derive(Deserialize)]
+struct StatusRequest {
+    gateway: String,
+    attempt: String,
+    node_id: String,
+}
+
+async fn query_status(socket: &Path, request: &StatusRequest) -> Result<Value> {
+    let node = identity(socket).await?;
+    ensure!(
+        node == request.node_id,
+        "pairing status daemon identity differs from recovery identity"
+    );
+    let reply = remote(
+        socket,
+        &request.gateway,
+        tokio::time::Instant::now() + Duration::from_secs(20),
+        json!({"operation":"status","attempt_id":request.attempt}),
+    )
+    .await?;
+    let status = &reply["status"];
+    ensure!(
+        status["bound_node_id"] == node && status["attempt_id"] == request.attempt,
+        "pairing status receipt identity or attempt mismatch"
+    );
+    ensure!(
+        matches!(
+            status["state"].as_str(),
+            Some("pending" | "confirmed" | "expired" | "rejected")
+        ),
+        "pairing status receipt is unknown"
+    );
+    Ok(json!({"node_id":node,"status":status}))
+}
+
+/// Read-only recovery probe. Callers may supersede a recovery journal only on
+/// authenticated expired/rejected status, never unknown, errors or confirmation.
+pub async fn status(socket: &Path) -> Result<()> {
+    let request: StatusRequest = input(&mut std::io::stdin().lock())?;
+    output(query_status(socket, &request).await?)
+}
+
 async fn resume_status(socket: &Path, gateway: &str, attempt: &str, node: &str) -> Result<bool> {
     // A terminal receipt outlives the invitation. Observe it without presenting
     // the erased bearer secret or renewing the expired exchange deadline.

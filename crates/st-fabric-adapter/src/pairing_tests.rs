@@ -456,3 +456,60 @@ async fn crash_recovery_observes_confirmed_receipt_after_original_deadline_witho
     );
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn supersession_status_uses_same_daemon_and_pinned_gateway_without_presenting() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("fabric.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let retained = json!({
+        "state":"rejected","terminal_reason":"exchange_lost",
+        "attempt_id":"old-attempt","bound_node_id":"joining-node","deadline":1
+    });
+    let server = tokio::spawn(fabric(
+        listener,
+        vec![
+            (
+                json!({"type":"status"}),
+                json!({"type":"status","node_id":"joining-node"}),
+            ),
+            (
+                json!({"type":"pairing_remote","gateway":"old-gateway",
+            "request":{"operation":"status","attempt_id":"old-attempt"}}),
+                json!({"type":"pairing","reply":{"error":null,"status":retained.clone()}}),
+            ),
+        ],
+    ));
+    let request = StatusRequest {
+        gateway: "old-gateway".into(),
+        attempt: "old-attempt".into(),
+        node_id: "joining-node".into(),
+    };
+    let observed = query_status(&socket, &request).await.unwrap();
+    assert_eq!(
+        observed,
+        json!({"node_id":"joining-node","status":retained})
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn supersession_status_refuses_a_changed_local_daemon_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("fabric.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(fabric(
+        listener,
+        vec![(
+            json!({"type":"status"}),
+            json!({"type":"status","node_id":"replacement-node"}),
+        )],
+    ));
+    let request = StatusRequest {
+        gateway: "old-gateway".into(),
+        attempt: "old-attempt".into(),
+        node_id: "original-node".into(),
+    };
+    assert!(query_status(&socket, &request).await.is_err());
+    server.await.unwrap();
+}

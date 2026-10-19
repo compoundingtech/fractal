@@ -42,6 +42,8 @@ enum PairingCommand {
     PairingInvite,
     /// Exchange signed admission over Fabric's restricted pairing ALPN.
     PairingJoin,
+    /// Read an authenticated retained pairing receipt without presenting a token.
+    PairingStatus,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +278,9 @@ async fn main() -> Result<()> {
     };
     if matches!(args.command, Some(PairingCommand::PairingJoin)) {
         return pairing::join(&fabric_socket, &state).await;
+    }
+    if matches!(args.command, Some(PairingCommand::PairingStatus)) {
+        return pairing::status(&fabric_socket).await;
     }
     let st_socket = match args.st_socket {
         Some(path) => path,

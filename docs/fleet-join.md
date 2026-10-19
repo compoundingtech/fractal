@@ -292,6 +292,11 @@ authenticated answer before irreversible confirmation; the helper queries the
 retained receipt without presenting the spent bearer token. Confirmed recovery
 does not reinstall Fabric policy. A restart-lost or expired unconfirmed exchange
 still requires a fresh invite.
+When given a fresh code, st replaces a saved recovery only after `pairing-status`
+observes an authenticated expired or rejected receipt for the old attempt and
+the same Fabric NodeID. Pending, confirmed, unknown, and unreachable outcomes
+preserve the recovery journal; use the original code rather than discarding a
+possibly confirmed admission.
 
 ### Loopback and plain HTTP
 

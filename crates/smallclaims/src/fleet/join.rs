@@ -424,6 +424,8 @@ struct PairingRecovery {
     code_digest: String,
     name: String,
     member_key: String,
+    gateway: String,
+    attempt: String,
     resume: PairingResume,
 }
 
@@ -436,7 +438,7 @@ fn code_digest(code: &JoinCode) -> Result<String> {
     Ok(hex::encode(sha2::Sha256::digest(code.encode()?.as_bytes())))
 }
 
-fn load_pairing_recovery(state_dir: &Path, code: &JoinCode, name: &str, key: &MemberKey) -> Result<Option<PairingRecovery>> {
+fn read_pairing_recovery(state_dir: &Path) -> Result<Option<PairingRecovery>> {
     let path = pairing_recovery_path(state_dir);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -446,6 +448,11 @@ fn load_pairing_recovery(state_dir: &Path, code: &JoinCode, name: &str, key: &Me
     anyhow::ensure!(fs::metadata(&path)?.permissions().mode() & 0o077 == 0,
         "authenticated pairing recovery must be private");
     let recovery: PairingRecovery = serde_json::from_slice(&bytes).context("decode authenticated pairing recovery")?;
+    Ok(Some(recovery))
+}
+
+fn load_pairing_recovery(state_dir: &Path, code: &JoinCode, name: &str, key: &MemberKey) -> Result<Option<PairingRecovery>> {
+    let Some(recovery) = read_pairing_recovery(state_dir)? else { return Ok(None) };
     anyhow::ensure!(
         recovery.code_digest == code_digest(code)?
             && recovery.name == name && recovery.member_key == key.public()
@@ -460,6 +467,43 @@ fn load_pairing_recovery(state_dir: &Path, code: &JoinCode, name: &str, key: &Me
     verify_response(code, &recovery.resume.request, &recovery.resume.response)?;
     Ok(Some(recovery))
 }
+async fn resume_or_supersede_pairing(
+    state_dir: &Path,
+    code: &JoinCode,
+    name: &str,
+    key: &MemberKey,
+    adapter: Option<&Path>,
+) -> Result<Option<PairingRecovery>> {
+    let Some(recovery) = read_pairing_recovery(state_dir)? else { return Ok(None) };
+    if recovery.code_digest == code_digest(code)? {
+        return load_pairing_recovery(state_dir, code, name, key);
+    }
+    anyhow::ensure!(
+        recovery.member_key == key.public()
+            && recovery.resume.request.member_key == key.public()
+            && recovery.resume.request.name == recovery.name
+            && recovery.resume.authenticated.sponsor_node_id.as_deref() == Some(recovery.gateway.as_str()),
+        "the retained pairing recovery identity is inconsistent"
+    );
+    let node_id = recovery.resume.request.node_id.as_deref()
+        .context("the retained pairing recovery has no Fabric node identity")?;
+    let mut helper = PairingHelper::launch("pairing-status", adapter)?;
+    helper.send(&serde_json::json!({
+        "gateway": recovery.gateway, "attempt": recovery.attempt, "node_id": node_id,
+    })).await?;
+    let reply = helper.receive().await.context("cannot resolve the previous pairing; retry its original code")?;
+    helper.finish().await?;
+    anyhow::ensure!(
+        reply["node_id"].as_str() == Some(node_id)
+            && reply["status"]["bound_node_id"].as_str() == Some(node_id)
+            && matches!(reply["status"]["state"].as_str(), Some("expired" | "rejected")),
+        "the previous pairing is not conclusively expired or rejected; resume its original code"
+    );
+    fs::remove_file(pairing_recovery_path(state_dir))?;
+    fs::File::open(fleet_dir(state_dir))?.sync_all()?;
+    Ok(None)
+}
+
 
 /// JSON-lines transport to the external adapter. st authenticates the sealed answer
 /// before allowing the adapter to install reciprocal trust or acknowledge confirmation.
@@ -470,7 +514,7 @@ struct PairingHelper {
 }
 
 impl PairingHelper {
-    async fn start(code: &str, executable: Option<&Path>, resume: Option<&PairingResume>) -> Result<(Self, String)> {
+    fn launch(command: &str, executable: Option<&Path>) -> Result<Self> {
         use std::process::Stdio;
         use tokio::io::AsyncBufReadExt as _;
         let executable = executable.map(Path::to_path_buf)
@@ -483,16 +527,20 @@ impl PairingHelper {
             .or_else(|| resolve_tool(None, "st-fabric-adapter"))
             .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
         let mut child = tokio::process::Command::new(executable)
-            .arg("pairing-join")
+            .arg(command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .context("start st-fabric-adapter pairing-join")?;
+            .with_context(|| format!("start st-fabric-adapter {command}"))?;
         let input = child.stdin.take().context("open adapter input")?;
         let output = tokio::io::BufReader::new(child.stdout.take().context("open adapter output")?).lines();
-        let mut helper = Self { child, input, output };
+        Ok(Self { child, input, output })
+    }
+
+    async fn start(code: &str, executable: Option<&Path>, resume: Option<&PairingResume>) -> Result<(Self, String)> {
+        let mut helper = Self::launch("pairing-join", executable)?;
         let mut initial = serde_json::json!({"code": code});
         if let Some(resume) = resume {
             initial["resume"] = serde_json::to_value(resume)?;
@@ -528,6 +576,10 @@ impl PairingHelper {
         self.send(&serde_json::json!({"authenticated": sealed, "sponsor_key": sponsor_key})).await?;
         let result = self.receive().await?;
         anyhow::ensure!(result["confirmed"] == true, "Fabric pairing was not confirmed");
+        self.finish().await
+    }
+
+    async fn finish(mut self) -> Result<()> {
         drop(self.input);
         let status = tokio::time::timeout(std::time::Duration::from_secs(10), self.child.wait())
             .await.context("pairing adapter did not exit after confirmation")??;
@@ -604,7 +656,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
             .map(|(sequence, hash)| WriterHead { sequence, hash })
     };
     let mode = options.settings.mode.as_str();
-    let recovery = load_pairing_recovery(state_dir, &code, &name, &key)?;
+    let recovery = resume_or_supersede_pairing(state_dir, &code, &name, &key, adapter).await?;
     anyhow::ensure!(recovery.is_none() || code.pairing.is_some(), "pairing recovery requires a pairing code");
     let (session, mut helper, sponsor_route, url) = if let Some(pairing) = &code.pairing {
         anyhow::ensure!(options.via.is_none(), "--via cannot override a pairing code");
@@ -679,6 +731,8 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
             code_digest: code_digest(&code)?,
             name: name.clone(),
             member_key: key.public().into(),
+            gateway: pairing.gateway.clone(),
+            attempt: pairing.attempt.clone(),
             resume: PairingResume {
                 request, response: answer, authenticated: sealed.clone(), sponsor_key: sponsor_key.clone(),
             },
@@ -912,6 +966,51 @@ mod tests {
                 assert!(load_pairing_recovery(&joining_dir, &code, "wrong-name", &member).is_err());
                 let wrong_member = MemberKey::generate().unwrap().0;
                 assert!(load_pairing_recovery(&joining_dir, &code, name, &wrong_member).is_err());
+                let fresh_invite = invite(&store, &founded.fleet_id, "sponsor", &InviteOptions {
+                    name: Some("replacement".into()), lifetime: std::time::Duration::from_secs(600),
+                    via: "fabric".into(), person: "person/test".into(), migrate: false,
+                }).unwrap();
+                let mut fresh_code = JoinCode::decode(&fresh_invite.code).unwrap();
+                fresh_code.pairing = Some(PairingData {
+                    gateway: gateway.clone(), attempt: "replacement".into(), secret: "new-permit".into(),
+                });
+                for state in ["pending", "confirmed", "unknown", "network-error", "expired", "rejected"] {
+                    let fresh_dir = root.path().join(format!("supersede-{state}"));
+                    write_private(&fresh_dir.join("fleet/node.key"), &fs::read(joining_dir.join("fleet/node.key")).unwrap()).unwrap();
+                    let recovery_bytes = serde_json::to_vec(&recovery).unwrap();
+                    write_private(&pairing_recovery_path(&fresh_dir), &recovery_bytes).unwrap();
+                    let status_reply = serde_json::json!({
+                        "node_id": node_id,
+                        "status": {"state": state, "bound_node_id": node_id},
+                    }).to_string();
+                    let status_action = if state == "network-error" {
+                        "exit 1".into()
+                    } else {
+                        format!("printf '%s\\n' '{status_reply}'\nexit 0")
+                    };
+                    let fresh_script = format!(
+                        "#!{}\nif [ \"$1\" = pairing-status ]; then\nread -r query\n{status_action}\nfi\n{}",
+                        shell.display(),
+                        script.split_once('\n').unwrap().1.replace("\"confirmed\":false", "\"confirmed\":true"),
+                    );
+                    let fresh_helper = root.path().join(format!("status-helper-{state}"));
+                    write_private(&fresh_helper, fresh_script.as_bytes()).unwrap();
+                    fs::set_permissions(&fresh_helper, fs::Permissions::from_mode(0o700)).unwrap();
+                    let fresh_options = JoinOptions {
+                        state_dir: fresh_dir.clone(), configured_node: "replacement".into(),
+                        code: fresh_code.encode().unwrap(), ..options.clone()
+                    };
+                    let replaced = join_inner(&fresh_options, Some(&fresh_helper)).await;
+                    if matches!(state, "expired" | "rejected") {
+                        assert_eq!(replaced.unwrap().name, "replacement");
+                        assert!(FleetFile::load(&fresh_dir).unwrap().is_some());
+                        assert!(!pairing_recovery_path(&fresh_dir).exists());
+                    } else {
+                        assert!(replaced.is_err());
+                        assert!(FleetFile::load(&fresh_dir).unwrap().is_none());
+                        assert_eq!(fs::read(pairing_recovery_path(&fresh_dir)).unwrap(), recovery_bytes);
+                    }
+                }
                 for lose_confirmation in [true, false] {
                     let answer = serde_json::to_string(&serde_json::json!({"response": recovery.resume.response})).unwrap();
                     let finish = if lose_confirmation { "exit 1" } else { "printf '%s\\n' '{\"confirmed\":true}'" };
