@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "summary": "Move the Cargo and flake pty pins to c3d86d9d: the pty daemon batches its event-log writes in 250 ms windows",
+  "replay": { "status": "none", "detail": "No Smalltalk replay change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Move pty from 4f703c7d to c3d86d9d. pty#137: the daemon publishes `<id>.events.jsonl` in 250 ms batches, with one event-lock hold, one read and one atomic replacement per batch, instead of one whole-log rewrite per record. That removes the write amplification behind pty#45. Record bytes, order within each writer, the JSONL format and retention are unchanged. A daemon record can reach disk up to 250 ms later, a one-shot record (emit, metadata, tags, exec, gc) can land before daemon records from up to one window earlier, and SIGKILL or the forced exit at the shutdown deadline can lose the open window. Session exit and orderly shutdown flush. pty#161 adds tests and docs only. pty#159 changes `TerminalHandle` in the `pty` crate, which Smalltalk does not depend on. Smalltalk reads no pty event log. No Smalltalk database or wire API changes."
+  },
+  "downtime": { "status": "none", "detail": "No additional service interruption introduced." },
+  "manual": { "status": "none", "detail": "No manual action required; matching Cargo and flake pins keep the evaluation-time assertion." },
+  "recovery": { "status": "none", "detail": "No Smalltalk recovery change." }
+}
