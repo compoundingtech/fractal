@@ -66,6 +66,10 @@ pub mod events;
 pub mod idempotency;
 mod inventory_generation;
 mod checkpoint_capture_epoch;
+mod checkpoint_space;
+pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
+#[cfg(feature = "test-support")]
+pub use checkpoint_space::checkpoint_test_fixture_headroom;
 pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
@@ -80,6 +84,7 @@ pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
 pub mod runtime;
+pub mod transport_observation_index;
 
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
 
@@ -753,6 +758,9 @@ pub type MemberRoots = BTreeSet<(String, String)>;
 /// projections read and write through the same connections.
 pub struct Store {
     pub connection: WriterConnection,
+    /// Same-code baseline for the isolated transport benchmark only.
+    #[cfg(feature = "transport-bench")]
+    pub transport_bench_original_lookup: AtomicBool,
     pub readers: ReadPool,
     pub committed_index: Arc<AtomicU64>,
     pub seeded_batch_rowid: AtomicI64,
@@ -959,6 +967,9 @@ impl Store {
         runtime.migrate_schema(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
         install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
             idempotency::initialize(connection)
         })?;
@@ -1042,6 +1053,8 @@ impl Store {
                 )?,
                 None => WriterConnection::new(connection, committed_index.clone()),
             },
+            #[cfg(feature = "transport-bench")]
+            transport_bench_original_lookup: AtomicBool::new(false),
             readers,
             committed_index,
             seeded_batch_rowid: AtomicI64::new(seeded_batch_rowid),
@@ -1800,6 +1813,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
     }
     promote_claim_blobs(transaction, body)?;
     crate::touched::note_wrote(|| format!("{kind} {subject}"));
+    canonical::record_local_position_tx(transaction, id, batch_id)?;
     // Reuse the compiled claim insert and its projection triggers across local writes.
     transaction
         .prepare_cached(
@@ -7821,19 +7835,32 @@ impl Store {
         let subject = format!("host/{peer}");
         let now = now_ms();
         // Another member's observation of this peer cannot renew this node's evidence.
-        let latest: Option<(String, String)> = self
-            .readers
-            .get()
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-h8a2bbaecbc1f owner=smallclaims::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-                    "SELECT body, accepted_at_unix_ms FROM claims
+        #[cfg(feature = "transport-bench")]
+        let latest = if self.transport_bench_original_lookup.load(Ordering::Relaxed) {
+            // Preserve main's uncached query_row path, including per-call SQL expansion.
+            let latest: Option<(String, String)> = self
+                .readers
+                .get()
+                .query_row(
+                    /* sqlite-large-value: allow-for-now lv-h8a2bbaecbc1f owner=smallclaims::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+                        "SELECT body, accepted_at_unix_ms FROM claims
                 WHERE subject=?1 AND kind='transport.observed' AND origin=?2
                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-                ),
-                params![subject, self.origin],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
+                    ),
+                    params![subject, self.origin],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            latest
+        } else {
+            transport_observation_index::latest(
+                &self.readers.get(), &subject, &self.origin,
+            )?
+        };
+        #[cfg(not(feature = "transport-bench"))]
+        let latest = transport_observation_index::latest(
+            &self.readers.get(), &subject, &self.origin,
+        )?;
         let already_current = latest.is_some_and(|(body, accepted_at)| {
             let body: Value = serde_json::from_str(&body).unwrap_or_default();
             let observed_at = body

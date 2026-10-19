@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Cut the client-v0 API (api::client_v0: the client contract's collections, streams, assistant reads, arrangements, raw-terminal leases and their routes) out of st3-api into the new st3-api-client-v0 crate; the session, scope and paging helpers the rest of the API uses stay in st3-api. The client-v0 routes are a route family that st3-daemon serves with the mailbox family, added before the same envelope and leave layers, so every route, path, wire byte and response is unchanged and every module keeps its old path.",
+  "replay": {
+    "status": "none",
+    "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Source files moved between crates of this workspace; same code, same binary behaviour, protocol, schema and CLI output."
+  }
+}

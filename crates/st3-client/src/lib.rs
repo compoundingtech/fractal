@@ -4051,14 +4051,126 @@ fn websocket_request(
     Ok(request)
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+// Sunset: 60 days after the first release shipping this bridge. Requests still offer
+// only the deployed spelling; tungstenite must continue rejecting unoffered protocols.
+fn selected_subprotocol(
+    response: &tokio_tungstenite::tungstenite::handshake::client::Response,
+) -> Option<&str> {
+    let mut values = response
+        .headers()
+        .get_all(hyper::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter();
+    let selected = values.next()?.to_str().ok()?;
+    values.next().is_none().then_some(selected)
+}
+
+fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
+    selected == expected
+        || expected
+            .strip_prefix("st3.")
+            .is_some_and(|suffix| selected.strip_prefix("fractal.") == Some(suffix))
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
+#[cfg(test)]
+mod wire_receiver_tests {
+    use super::*;
+
+    #[test]
+    fn stream_receivers_accept_both_spellings_but_only_one_selected_protocol() {
+        type Validator = fn(
+            &tokio_tungstenite::tungstenite::handshake::client::Response,
+        ) -> Result<(), ClientError>;
+        let receivers: [(&str, Validator); 4] = [
+            (RAW_TERMINAL_SUBPROTOCOL, validate_raw_terminal_subprotocol),
+            (TERMINAL_SUBPROTOCOL, validate_terminal_subprotocol),
+            (
+                "st3.client.conversation.v0",
+                validate_conversation_subprotocol,
+            ),
+            ("st3.client.collections.v0", validate_collection_subprotocol),
+        ];
+        for (old, validate) in receivers {
+            let new = old.replacen("st3.", "fractal.", 1);
+            let mut response = hyper::Response::new(None);
+            assert!(validate(&response).is_err());
+            for protocol in [old, new.as_str()] {
+                response.headers_mut().insert(
+                    hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                    protocol.parse().unwrap(),
+                );
+                validate(&response).unwrap();
+            }
+            for invalid in [
+                "fractal.client.unknown.v0",
+                "fractal.client.pty.v1",
+                "st3.terminal.v1",
+            ] {
+                response.headers_mut().insert(
+                    hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                    invalid.parse().unwrap(),
+                );
+                assert!(validate(&response).is_err());
+            }
+            response.headers_mut().insert(
+                hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                format!("{old}, {new}").parse().unwrap(),
+            );
+            assert!(validate(&response).is_err());
+            response
+                .headers_mut()
+                .insert(hyper::header::SEC_WEBSOCKET_PROTOCOL, old.parse().unwrap());
+            response
+                .headers_mut()
+                .append(hyper::header::SEC_WEBSOCKET_PROTOCOL, new.parse().unwrap());
+            assert!(validate(&response).is_err());
+        }
+    }
+
+    #[test]
+    fn version_strings_remain_lossless_in_existing_permissive_models() {
+        for (api, error) in [
+            ("st3.client.v0", "st3.client.error.v0"),
+            ("fractal.client.v0", "fractal.client.error.v0"),
+            ("unknown.client.v1", "unknown.client.error.v1"),
+        ] {
+            let wire = serde_json::json!({
+                "api_version": api,
+                "request_id": "request/wire",
+                "snapshot": {"id": "snapshot/wire", "host_id": "host/wire", "store_index": 0,
+                    "projection_version": "client-projection.v0", "created_at": "2026-10-19T00:00:00Z"},
+                "value": {}
+            });
+            let decoded: Envelope<serde_json::Value> =
+                serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.api_version, api);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            let wire = serde_json::json!({
+                "api_version": api, "error_version": error, "request_id": "request/wire",
+                "code": "not-found", "message": "missing", "retryable": false, "details": {}
+            });
+            let decoded: ErrorEnvelope = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.api_version, api);
+            assert_eq!(decoded.error_version, error);
+            assert_eq!(decoded.code, ErrorCode::NotFound);
+        }
+        // Alias readers must never change emitted request bytes.
+        let request = websocket_request("ws://localhost/stream", None, None, None).unwrap();
+        assert_eq!(
+            request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
+            TERMINAL_SUBPROTOCOL
+        );
+        assert_eq!(API_VERSION, "st3.client.v0");
+        assert_eq!(ERROR_VERSION, "st3.client.error.v0");
+    }
+}
+
 fn validate_raw_terminal_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    if selected != Some(RAW_TERMINAL_SUBPROTOCOL) {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, RAW_TERMINAL_SUBPROTOCOL)) {
         return Err(ClientError::Protocol(format!(
             "raw terminal WebSocket selected {selected:?}, expected {RAW_TERMINAL_SUBPROTOCOL}"
         )));
@@ -4187,11 +4299,8 @@ where
 fn validate_terminal_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    if selected != Some(TERMINAL_SUBPROTOCOL) {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, TERMINAL_SUBPROTOCOL)) {
         return Err(ClientError::Protocol(format!(
             "terminal WebSocket selected {selected:?}, expected {TERMINAL_SUBPROTOCOL}"
         )));
@@ -4202,12 +4311,8 @@ fn validate_terminal_subprotocol(
 fn validate_conversation_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-    if selected != Some("st3.client.conversation.v0") {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, "st3.client.conversation.v0")) {
         return Err(ClientError::Protocol(format!(
             "conversation WebSocket selected {selected:?}"
         )));
@@ -4218,12 +4323,8 @@ fn validate_conversation_subprotocol(
 fn validate_collection_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Result<(), ClientError> {
-    let selected = response
-        .headers()
-        .get(hyper::header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok());
-    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-    if selected != Some("st3.client.collections.v0") {
+    let selected = selected_subprotocol(response);
+    if !selected.is_some_and(|value| wire_protocol_matches(value, "st3.client.collections.v0")) {
         return Err(ClientError::Protocol(format!(
             "collection WebSocket selected {selected:?}"
         )));

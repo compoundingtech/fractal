@@ -12,6 +12,10 @@ import type {
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
 } from './Models.generated.ts';
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both:
+// receiver-only alias; sunset 60 days after the first release shipping the bridge.
+const acceptsApiVersion = (value: unknown): boolean => value === API_VERSION || value === 'fractal.client.v0';
+
 export type PageOptions = { cursor?: string; limit?: number };
 /** Transport options, never serialized into a query or action body. */
 export type RequestOptions = { signal?: AbortSignal };
@@ -291,7 +295,7 @@ export class St3Client {
             payload = await response.json();
             options.signal?.throwIfAborted();
         }
-        if (!payload || typeof payload !== 'object' || (payload as { api_version?: unknown }).api_version !== API_VERSION) {
+        if (!payload || typeof payload !== 'object' || !acceptsApiVersion((payload as { api_version?: unknown }).api_version)) {
             throw new Error('Unexpected st client API response');
         }
         if (!response.ok || 'error_version' in payload) {
@@ -436,7 +440,7 @@ export class St3Client {
         socket.onmessage = event => {
             let payload: unknown;
             try { payload = JSON.parse(String(event.data)); } catch { fail(new Error('A terminal stream message is not JSON')); return; }
-            if (!payload || typeof payload !== 'object' || (payload as { api_version?: unknown }).api_version !== API_VERSION) { fail(new Error('Unexpected st terminal stream message')); return; }
+            if (!payload || typeof payload !== 'object' || !acceptsApiVersion((payload as { api_version?: unknown }).api_version)) { fail(new Error('Unexpected st terminal stream message')); return; }
             if ('error_version' in payload) { fail(new ClientError(payload as ErrorEnvelope, 0)); return; }
             const screen = payload as EnvelopeOf<TerminalScreen>;
             if (screen.value?.kind !== 'terminal-screen') { fail(new Error('A terminal stream message is not a screen')); return; }
@@ -463,7 +467,7 @@ export class St3Client {
         socket.onmessage = event => {
             try {
                 const payload = JSON.parse(String(event.data)) as EnvelopeOf<ConversationChanges> | ErrorEnvelope;
-                if (!payload || payload.api_version !== API_VERSION) throw new Error('Unexpected st conversation stream message');
+                if (!payload || !acceptsApiVersion(payload.api_version)) throw new Error('Unexpected st conversation stream message');
                 if ('error_version' in payload) throw new ClientError(payload, 0);
                 if (payload.value?.kind !== 'conversation-changes') throw new Error('A conversation stream message is not a change');
                 options.onChange(payload);
