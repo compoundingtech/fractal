@@ -109,9 +109,12 @@ Trusted pointer/key/paste/focus/resize/input events count only if a DOM mutation
 commits during their discrete-event dispatch or its microtasks. Capture starts
 observation. Immediately after `createRoot`, the app registers that container
 with telemetry. The optional kit `PortalContainerRegistrationContext` registers
-every production portal container for its mounted lifetime: `ThemePortal` and
-workspace Aria hosts, workspace bodies, pane layers and error overlays. Shared
-containers are reference-counted; consumers without this context do nothing.
+every production portal container for its mounted lifetime. `App` owns the Aria
+provider above both the status bar and workspace, reusing the existing themed
+workspace host; status-bar overlays therefore cannot fall back to document.body.
+Nested `ThemePortal` hosts, workspace bodies, pane layers and error overlays are
+also registered. Shared containers are reference-counted; consumers without this
+context do nothing.
 Same-event completion listeners run after React's native delegated root/portal
 listeners: bubble handles stopped React bubble handlers; capture handles
 `cancelBubble` already set by React capture handlers. Native `stopPropagation`

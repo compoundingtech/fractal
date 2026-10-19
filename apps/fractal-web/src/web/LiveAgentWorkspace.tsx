@@ -187,9 +187,11 @@ const initialAgentFromUrl = () => {
  * provider sits above the shell state, so its context value never changes on a switch and the
  * portalled panes inherit it without a context scan.
  */
-export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
-  const overlayHost = React.useRef<HTMLDivElement>(null)
-  const getContainer = React.useCallback(() => overlayHost.current, [])
+export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly overlayHost?: React.RefObject<HTMLDivElement | null> }) {
+  // Standalone workspace fixtures retain their host; App shares it with the status bar.
+  const standaloneHost = React.useRef<HTMLDivElement>(null)
+  const overlayHost = props.overlayHost ?? standaloneHost
+  const getContainer = React.useCallback(() => overlayHost.current, [overlayHost])
   usePortalContainerRegistration(getContainer)
   return <UNSAFE_PortalProvider getContainer={getContainer}><Workspace {...props} overlayHost={overlayHost} /></UNSAFE_PortalProvider>
 }

@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import { createServer } from 'vite'
 import { fileURLToPath } from 'node:url'
 
+import { createStylexVitePlugins } from './stylex.mjs'
 const root = fileURLToPath(new URL('../../..', import.meta.url))
 const session = `input-paint-${randomBytes(4).toString('hex')}`
 const run = (args) => new Promise((resolve, reject) => {
@@ -13,7 +14,26 @@ const run = (args) => new Promise((resolve, reject) => {
   child.once('error', reject)
   child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`playwright-cli exited ${code}`)))
 })
+const shellFixtures = {
+  'shell-runtime': 'export const live={};export const telemetry={onCommit(){},ux:undefined}',
+  'shell-data': 'export const DataSourceProvider=({children})=>children',
+  'shell-workspace': `import {createElement} from 'react';export const LiveAgentWorkspace=({overlayHost})=>createElement('div',{ref:overlayHost,'data-app-overlay-host':''})`,
+  'shell-meters': 'export const acquireMeasurementEngine=()=>()=>{};export const getDebug=()=>0',
+  'shell-build': 'export const buildIdentity={machineVersion:"smoke",dirty:false};export const deploymentId=undefined',
+}
 const vite = await createServer({ root, configFile: false, optimizeDeps: { entries: [] }, server: { host: '127.0.0.1', port: 0 }, plugins: [{
+  name: 'input-paint-shell-fixtures',
+  enforce: 'pre',
+  resolveId(id, importer) {
+    if (id === 'virtual:build-identity') return '\0shell-build'
+    if (id.endsWith('/meters.tsx')) return '\0shell-meters'
+    if (!importer?.endsWith('/web/App.tsx')) return
+    if (id === './liveRuntime.ts') return '\0shell-runtime'
+    if (id === '../data/react.tsx') return '\0shell-data'
+    if (id === './LiveAgentWorkspace.tsx') return '\0shell-workspace'
+  },
+  load(id) { return shellFixtures[id.slice(1)] },
+}, ...createStylexVitePlugins({ externalPackages: ['@smalltalk/fractal-ui'], entries: [] }), {
   name: 'input-paint-proof', configureServer(server) {
     server.middlewares.use('/input-paint-proof', async (req, res, next) => {
       if (req.url?.includes('html-proxy')) { next(); return }
@@ -26,6 +46,8 @@ import { flushSync } from 'react-dom'
 import { installInputPaint } from '/apps/fractal-web/src/telemetry/inputPaint.ts'
 import { makeFrameIngest } from '/apps/fractal-web/src/data/frameIngest.ts'
 import { PortalContainerRegistrationContext, RegisteredPortal } from '/packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
+import { App as RealAppShell } from '/apps/fractal-web/src/web/App.tsx'
+import 'virtual:overeng-stylex.css'
 const portalContainer = document.querySelector('#portal')
 const reactRoots = new Set()
 const registerPortal = container => { reactRoots.add(container); return () => reactRoots.delete(container) }
@@ -85,6 +107,29 @@ document.querySelector('#hide').onclick = () => {
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
   document.dispatchEvent(new Event('visibilitychange'))
 }
+window.startShell = () => {
+  window.stopCapture()
+  reactRoot.unmount()
+  document.body.replaceChildren()
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  const shell = document.createElement('div')
+  document.body.append(shell)
+  const shellRoot = createRoot(shell)
+  const roots = new Set([shell])
+  const register = element => { roots.add(element); return () => roots.delete(element) }
+  const Fixture = () => {
+    const [count, setCount] = useState(0)
+    return createElement('div', { onClick: event => {
+      if (event.target.closest('[data-changelog-popover]')) {
+        event.stopPropagation()
+        setTimeout(() => { flushSync(() => setCount(n => n + 1)); window.shellTimerDone = true }, 0)
+      }
+    } }, createElement(RealAppShell), createElement('output', { id: 'shell-timer' }, count))
+  }
+  flushSync(() => shellRoot.render(createElement(PortalContainerRegistrationContext.Provider, { value: register }, createElement(Fixture))))
+  window.shellSamples = []
+  window.stopCapture = installInputPaint({ reactRoots: roots, emit: sample => window.shellSamples.push(sample) })
+}
 window.ready = true
 </script>`
       res.end(await server.transformIndexHtml('/input-paint-proof.html', html))
@@ -136,8 +181,21 @@ try {
     await page.locator('#hide').click()
     const samples = await page.evaluate(() => { window.stopCapture(); return window.samples })
     if (samples.length !== 5 || samples[4].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
-    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, samples }))
-    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, samples }
+    await page.evaluate(() => window.startShell())
+    await page.getByRole('button', { name: /^Changes/ }).click()
+    await page.getByRole('dialog', { name: 'Recent changes' }).waitFor()
+    const shellHost = await page.evaluate(() => document.querySelector('[data-app-overlay-host]').contains(document.querySelector('[data-changelog-popover]')))
+    if (!shellHost) throw new Error('Status-bar changelog escaped registered app host')
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    const beforeNoop = await page.evaluate(() => window.shellSamples.length)
+    if (beforeNoop < 1) throw new Error('Status-bar real opening produced no sample')
+    await page.getByRole('heading', { name: \"What's new\" }).click()
+    await page.waitForFunction(() => window.shellTimerDone)
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    if (await page.evaluate(() => window.shellSamples.length) !== beforeNoop) throw new Error('Status-bar no-op attributed a timer commit')
+    await page.evaluate(() => window.stopCapture())
+    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, samples }))
+    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, samples }
   }`])
 } finally {
   try { await run(['close']) } finally { await vite.close() }

@@ -6,13 +6,24 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { makeFrameIngest } from '../data/frameIngest.ts'
 import { installInputPaint, type InputPaintSample } from './inputPaint.ts'
 import { PortalContainerRegistrationContext, RegisteredPortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
+import { App as RealAppShell } from '../web/App.tsx'
+
+vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
+vi.mock('virtual:build-identity', () => ({ buildIdentity: { machineVersion: 'test', dirty: false }, deploymentId: undefined }))
+vi.mock('./meters.tsx', () => ({ acquireMeasurementEngine: () => () => {}, getDebug: () => 0 }))
+vi.mock('../web/liveRuntime.ts', () => ({ live: {}, telemetry: { onCommit: () => {}, ux: undefined } }))
+vi.mock('../data/react.tsx', () => ({ DataSourceProvider: ({ children }: { children: React.ReactNode }) => children }))
+// Backend workspace content is irrelevant; retain the real App provider, status bar and changelog.
+vi.mock('../web/LiveAgentWorkspace.tsx', () => ({
+  LiveAgentWorkspace: ({ overlayHost }: { overlayHost: React.RefObject<HTMLDivElement | null> }) => createElement('div', { ref: overlayHost, 'data-app-overlay-host': '' }),
+}))
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup()
   vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren()
 })
-const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer = '', portal = false, captureNoop = false } = {}) => {
+const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer = '', portal = false, captureNoop = false, appShell = false } = {}) => {
   const frames = new Map<number, FrameRequestCallback>()
   const paints = new Set<() => void>()
   const samples: InputPaintSample[] = []
@@ -60,6 +71,12 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
   const ingest = makeFrameIngest<string, string>({ write: ({ value }) => { stream.textContent = value } })
   const App = () => {
     const [count, setCount] = useState(0)
+    if (appShell) return createElement('div', { onClick: (event: React.MouseEvent) => {
+      if ((event.target as Element).closest('[data-changelog-popover]') !== null) {
+        event.stopPropagation()
+        setTimeout(() => flushSync(() => setCount((value) => value + 1)), 0)
+      }
+    } }, createElement(RealAppShell), createElement('output', { id: 'shell-timer' }, count))
     const content = createElement('div', {},
       createElement('button', { id: 'real', onClick: (event) => {
         if (stopped) event.stopPropagation()
@@ -80,7 +97,7 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
   }
   const root = createRoot(container)
   flushSync(() => root.render(createElement(PortalContainerRegistrationContext.Provider, { value: registerPortal }, createElement(App))))
-  for (const target of [container, portalContainer]) {
+  for (const target of [container, portalContainer, ...document.querySelectorAll('[data-app-overlay-host]')]) {
     const rootAdd = target.addEventListener.bind(target)
     const rootRemove = target.removeEventListener.bind(target)
     vi.spyOn(target, 'addEventListener').mockImplementation((type, listener, options) => {
@@ -194,6 +211,27 @@ it.each([
   await new Promise<void>((resolve) => setTimeout(resolve, 0))
   if (timer === 'dom') expect(run.stream.textContent).toBe('timer')
   else expect(document.querySelector('#real')!.textContent).toBe('1')
+  await run.frame()
+  expect(run.samples).toEqual([])
+})
+
+it('uses the registered app-shell host for the real status-bar changelog and excludes its stopped no-op timer', async () => {
+  const run = setup({ appShell: true })
+  const changes = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('Changes'))
+  expect(changes).toBeDefined()
+  // Opening is setup, not a measured trusted input.
+  flushSync(() => changes!.click())
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  const popover = document.querySelector('[data-changelog-popover]')!
+  expect(popover).not.toBeNull()
+  const host = document.querySelector('[data-app-overlay-host]')!
+  expect(host.contains(popover)).toBe(true)
+  expect(run.reactRoots.has(host)).toBe(true)
+  const heading = popover.querySelector('h1')!
+  heading.id = 'changelog-noop'
+  run.click('#changelog-noop')
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  expect(document.querySelector('#shell-timer')!.textContent).toBe('1')
   await run.frame()
   expect(run.samples).toEqual([])
 })

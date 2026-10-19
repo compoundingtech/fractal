@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  // jsdom's Vite import analysis needs a resolved id before vi.mock supplies its test value.
+  plugins: [{ name: 'test-build-identity', resolveId: (id) => id === 'virtual:build-identity' ? id : undefined }],
   test: {
     globalSetup: ['scripts/changelog-registry-setup.mjs'],
     setupFiles: ['src/testEnvironment.ts'],
