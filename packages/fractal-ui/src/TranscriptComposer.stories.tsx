@@ -1,13 +1,16 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useScenarioSlice, type WireSlice } from '@smalltalk/st3-scenarios/react'
+import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import type { AppendMessage } from '@assistant-ui/react'
 import { Button } from 'react-aria-components'
 import { Transcript, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
-import type { TextItem } from './assistant-ui/embrace-data/model'
+import type { Sender, TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
+import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
@@ -30,20 +33,80 @@ const historyTurns = Array.from({ length: 30 }, (_, index) => turn(index, prompt
 function Surface({ scheme, children }: { scheme: Scheme; children: React.ReactNode }) {
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>{children}</main>
 }
-const columnTurns = historyTurns.slice(0, 12)
-const columnMessages = columnTurns.flatMap(entry => entry.prompt === undefined ? entry.items : [entry.prompt, ...entry.items])
 const columnSync = { _tag: 'Live', since: now - 5000 } as const
+
+type WireEntry = WireSlice<'conversation'>['state']['threads'][number]['items'][number]
+type ToolResultEntry = Extract<WireEntry, { type: 'tool_result' }>
+type Prompt = TextItem & { readonly role: 'user' }
+interface TranscriptSection { readonly id: string; readonly title: string; readonly turns: readonly TranscriptTurn[] }
+const operator: Sender = { kind: 'human', label: 'Operator' }
+const assistant: Sender = { kind: 'agent', label: 'Assistant' }
+/** Transcript defers turns beyond its tail plus one history batch; sections of at most this many turns mount whole. */
+const sectionTurns = 6
+function conversationItem(entry: WireEntry, results: ReadonlyMap<string, ToolResultEntry>): TextItem | ToolCallItem | undefined {
+  if (entry.type === 'content' && entry.role === 'assistant' && typeof entry.body.text === 'string') return { _tag: 'Text', id: entry.id, role: 'assistant', text: entry.body.text, attachments: [], streaming: !entry.final, at: entry.timestamp, sender: assistant }
+  if (entry.type !== 'tool_call') return undefined
+  const result = results.get(entry.body.call_id)
+  return { _tag: 'ToolCall', id: entry.id, callId: entry.body.call_id, name: entry.body.name, input: entry.body.arguments, status: result === undefined ? 'running' : result.body.status, callSeen: true, at: entry.timestamp, sender: assistant, ...(result === undefined ? {} : { result: { content: result.body.content, mediaType: result.body.media_type, isError: result.body.status === 'error', at: result.timestamp } }) }
+}
+/** Story projection of wire entries: each user content opens a turn; assistant content and tool calls, joined with their results, follow it. */
+function threadTurns(entries: readonly WireEntry[]): TranscriptTurn[] {
+  const results = new Map(entries.flatMap(entry => entry.type === 'tool_result' ? [[entry.body.call_id, entry] as const] : []))
+  const turns: TranscriptTurn[] = []
+  let open: { id: string; prompt?: Prompt; items: (TextItem | ToolCallItem)[]; startedAt: string } | undefined
+  const close = () => {
+    if (open === undefined) return
+    const { id, prompt, items, startedAt } = open
+    turns.push({ id, prompt, items, work: workLogTurnFromItems(prompt === undefined ? items : [prompt, ...items], { kindFor: () => 'read', running: false, failed: false, interrupted: false, startedAt, completeHistory: true }) })
+  }
+  for (const entry of entries) {
+    if (entry.type === 'content' && entry.role === 'user' && typeof entry.body.text === 'string') {
+      close()
+      open = { id: entry.id, prompt: { _tag: 'Text', id: entry.id, role: 'user', text: entry.body.text, attachments: [], streaming: false, at: entry.timestamp, sender: operator }, items: [], startedAt: entry.timestamp }
+      continue
+    }
+    const item = conversationItem(entry, results)
+    if (item === undefined) continue
+    open ??= { id: item.id, items: [], startedAt: item.at }
+    open.items.push(item)
+  }
+  close()
+  return turns
+}
+/** The whole conversation as bounded sections per thread; the newest wire instant stands in for the host clock. */
+const scenarioSections = ({ loading, state }: WireSlice<'conversation'>): { readonly loading: boolean; readonly instant: number; readonly sections: readonly TranscriptSection[] } => ({
+  loading,
+  instant: loading ? 0 : state.threads.reduce((latest, thread) => thread.items.reduce((at, entry) => Math.max(at, Date.parse(entry.timestamp)), latest), 0),
+  sections: loading ? [] : state.threads.flatMap(thread => {
+    const turns = threadTurns(thread.items)
+    const count = Math.max(1, Math.ceil(turns.length / sectionTurns))
+    return Array.from({ length: count }, (_, index) => ({ id: `${thread.agent}/${index}`, title: count === 1 ? thread.agent : `${thread.agent} · part ${index + 1} of ${count}`, turns: turns.slice(index * sectionTurns, (index + 1) * sectionTurns) }))
+  }),
+})
+function SectionTranscript({ section, sync, instant, children }: { section: TranscriptSection; sync: SyncStatus; instant: number; children?: React.ReactNode }) {
+  const options = React.useMemo(() => ({ messages: section.turns.flatMap(entry => entry.prompt === undefined ? entry.items : [entry.prompt, ...entry.items]), isRunning: false, onNew: async () => {} }), [section.turns])
+  return <EmbraceRuntimeProvider options={options}>
+    <div {...stylex.props(styles.transcript)}><Transcript title={section.title} turns={section.turns} sync={sync} now={instant} observedAt={instant - 8000} /></div>
+    {children}
+  </EmbraceRuntimeProvider>
+}
+const noSection: TranscriptSection = { id: 'conversation', title: 'Conversation', turns: [] }
+/** The scenario conversation in one reading column; the composer docks under the last section. */
 function ColumnStory({ scheme, readingColumn }: { scheme: Scheme; readingColumn: boolean }) {
-  const options = React.useMemo(() => ({ messages: columnMessages, isRunning: false, onNew: async () => {} }), [])
-  return <Surface scheme={scheme}><EmbraceRuntimeProvider options={options}>
-    <div {...stylex.props(styles.transcript)}><Transcript title="Row projection" turns={columnTurns} sync={columnSync} now={now} observedAt={now - 8000} /></div>
-    <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn={readingColumn} /></div>
-  </EmbraceRuntimeProvider></Surface>
+  const { loading, instant, sections } = useScenarioSlice('conversation', scenarioSections)
+  const sync: SyncStatus = loading ? { _tag: 'Connecting', attempt: 1, since: instant } : { _tag: 'Live', since: instant - 5000 }
+  const shown = sections.length === 0 ? [noSection] : sections
+  return <Surface scheme={scheme}>{shown.map((section, index) => <SectionTranscript key={section.id} section={section} sync={sync} instant={instant}>
+    {index === shown.length - 1 ? <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn={readingColumn} /></div> : null}
+  </SectionTranscript>)}</Surface>
 }
 
-const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ColumnStory>
+/** Scenario slice variants chosen through Storybook controls (`scenarioArgTypes`). */
+type ColumnArgs = React.ComponentProps<typeof ColumnStory> & { conversation?: string }
+const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
 export default meta
-type Story = StoryObj<typeof meta>
+type Story = StoryObj<ColumnArgs>
+const scenarioColumn = { parameters: { scenario: { slices: ['conversation'] } }, argTypes: scenarioArgTypes(['conversation']) } satisfies Story
 
 const bounds = (element: Element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, width: rect.width } }
 async function columns(canvasElement: HTMLElement) {
@@ -57,7 +120,7 @@ async function columns(canvasElement: HTMLElement) {
 }
 
 /** The composer and the transcript rows share one column: equal edges, capped at the lane maximum. */
-export const ReadingColumn: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
+export const ReadingColumn: Story = { ...scenarioColumn, tags: ['critical'], play: async ({ canvasElement }) => {
   const { row, composer, lane } = await columns(canvasElement)
   await expect(Math.abs(composer.left - row.left), `composer left ${composer.left} vs transcript left ${row.left}`).toBeLessThanOrEqual(0.5)
   await expect(Math.abs(composer.right - row.right), `composer right ${composer.right} vs transcript right ${row.right}`).toBeLessThanOrEqual(0.5)
@@ -66,7 +129,7 @@ export const ReadingColumn: Story = { tags: ['critical'], play: async ({ canvasE
 } }
 export const ReadingColumnLight: Story = { ...ReadingColumn, args: { scheme: 'light' } }
 /** Without the opt-in, the composer keeps filling its host. */
-export const HostWidth: Story = { tags: ['critical'], args: { readingColumn: false }, play: async ({ canvasElement }) => {
+export const HostWidth: Story = { ...scenarioColumn, tags: ['critical'], args: { readingColumn: false }, play: async ({ canvasElement }) => {
   const { composer, dock } = await columns(canvasElement)
   await expect(Math.abs(composer.width - dock.width)).toBeLessThanOrEqual(0.5)
 } }

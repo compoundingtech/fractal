@@ -1,11 +1,13 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useScenarioSlice, type WireSlice } from '@smalltalk/st3-scenarios/react'
+import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button } from 'react-aria-components'
 import { EmbraceScrollViewport } from './assistant-ui/EmbraceScrollViewport'
 import { SidebarAgentRow } from './assistant-ui/sidebar/SidebarAgentRow'
-import type { AgentStatus, SidebarAgentRow as Row } from './assistant-ui/sidebar/model'
+import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './assistant-ui/sidebar/model'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
 import { ConnectionStatus, SystemNotice, type ConnectionState } from './assistant-ui/composition/SystemState'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -13,22 +15,40 @@ import { darkTheme, liveAccentTheme } from './assistant-ui/embrace-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { accentVars as accent, borderVars as border, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
 
-const now = Date.parse('2026-01-15T12:00:00Z')
-const minutes = (count: number) => now - count * 60_000
-/** The roster as last observed before the connection dropped: the app marks every row stale. */
-const agent = (name: string, host: string, status: AgentStatus, since: number): Row => ({
-  ref: `agent/${name}`, id: `agent/${name}`, title: name, host, status, statusLabel: status, freshness: 'stale', harness: 'omp',
-  statusSince: minutes(since), lastActivityAt: minutes(since), lastTurn: { _tag: 'Known', kind: 'turn-completed', at: minutes(since) },
-  childrenKnown: false, children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' },
-})
-const rows: readonly Row[] = [
-  agent('fractal-web', 'workstation-a', 'working', 12),
-  agent('st-gateway', 'build-host-a', 'idle', 95),
-  agent('ui-design', 'workstation-a', 'waiting', 4),
-  agent('hypermerge', 'build-host-a', 'working', 31),
-  agent('nix-infra', 'build-host-b', 'idle', 240),
-  agent('pr-review', 'build-host-b', 'waiting', 18),
-]
+type WireAgent = WireSlice<'roster'>['state']['agents'][number]
+const agentStatus = (state: WireAgent['state']): AgentStatus => {
+  switch (state) {
+    case 'running': return 'working'
+    case 'waiting': return 'waiting'
+    case 'desired': case 'starting': return 'pending'
+    case 'down': return 'offline'
+    case 'stopped': case 'failed': return 'ended'
+    case 'suspended': return 'suspended'
+    case 'retired': return 'retired'
+    default: return 'unobserved'
+  }
+}
+/**
+ * The roster as last observed before the connection dropped: the app marks every row stale, and the newest
+ * agent update is the instant the rows were last observed.
+ */
+const lastObservedRoster = ({ loading, state }: WireSlice<'roster'>): { readonly rows: readonly Row[]; readonly observedAt: number } => {
+  if (loading || state.agents.length === 0) return { rows: [], observedAt: 0 }
+  const hosts = new Map(state.machines.map(machine => [machine.host_id, machine.name]))
+  const rank = new Map(state.order.map((id, index) => [id, index]))
+  const rows = [...state.agents].sort((a, b) => (rank.get(a.id) ?? state.order.length) - (rank.get(b.id) ?? state.order.length)).map((agent): Row => {
+    const status = agentStatus(agent.state)
+    const lastActivityAt = agent.last_activity_at == null ? undefined : Date.parse(agent.last_activity_at)
+    return {
+      ref: agent.id, id: agent.id, title: agent.name, host: agent.host_id == null ? 'Unknown host' : hosts.get(agent.host_id) ?? agent.host_id,
+      status, statusLabel: statuses[status].label, freshness: 'stale',
+      statusSince: agent.since == null ? undefined : Date.parse(agent.since), lastActivityAt,
+      lastTurn: lastActivityAt === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', kind: 'activity', at: lastActivityAt },
+      childrenKnown: false, children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' },
+    }
+  })
+  return { rows, observedAt: Math.max(...state.agents.map(agent => Date.parse(agent.updated_at))) }
+}
 const countdown = 'Next try in 2s · attempt 1'
 
 /**
@@ -37,6 +57,8 @@ const countdown = 'Next try in 2s · attempt 1'
  * Retry) keep quiet one-line rows and never repeat the connection. Reconnect and Retry are live for the plays.
  */
 function SystemStatesStory({ scheme, connection: initial, failure, ticking = false }: { scheme: Scheme; connection: ConnectionState; failure?: string; ticking?: boolean }) {
+  const { rows, observedAt } = useScenarioSlice('roster', lastObservedRoster)
+  const active = rows[0]
   const [connection, setConnection] = React.useState<ConnectionState>(initial)
   const [terminal, setTerminal] = React.useState<'ended' | 'loading'>('ended')
   const countdownText = useCountdown(ticking && connection === 'reconnecting')
@@ -46,12 +68,12 @@ function SystemStatesStory({ scheme, connection: initial, failure, ticking = fal
     <aside aria-label="Agents" {...stylex.props(styles.sidebar)}>
       <header {...stylex.props(styles.brand)}><strong>Fractal</strong></header>
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>
-        {rows.map(row => <SidebarAgentRow key={row.ref} item={row} now={now} active={row.ref === 'agent/fractal-web'} onOpen={() => {}} />)}
+        {rows.map(row => <SidebarAgentRow key={row.ref} item={row} now={observedAt} active={row.ref === active?.ref} onOpen={() => {}} />)}
       </nav>
       <SystemNotice scope="rail" kind="stale" connection title="Last observed roster" detail="Live updates pending" />
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" statusSince={minutes(12)} freshness="stale" now={now} terminalAvailable panelOpen drawerOpen onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+      {active === undefined ? null : <ThreadHeader folder={active.host} title={active.title} status={active.status} statusLabel={active.statusLabel} statusSince={active.statusSince} freshness="stale" now={observedAt} terminalAvailable panelOpen drawerOpen onTogglePanel={() => {}} onToggleDrawer={() => {}} />}
       <ConnectionStatus state={connection} {...(text === undefined ? {} : { text })} {...(connection === 'offline' || connection === 'reconnecting' ? { onReconnect: reconnect } : {})} />
       <div {...stylex.props(styles.body)}>
         <section aria-label="Missions" {...stylex.props(styles.missions)}>
@@ -84,23 +106,26 @@ function useCountdown(ticking: boolean) {
   return ticking ? `Next try in ${3 - (tick % 3)}s · attempt ${1 + Math.floor(tick / 3)}` : countdown
 }
 
-const transcript = Array.from({ length: 48 }, (_, index) => ({
-  id: `turn-${index}`,
-  who: index % 2 === 0 ? 'You' : 'fractal-web',
-  text: index % 2 === 0 ? `Check step ${index / 2 + 1} of the reconnect path and tell me what you observe.` : `Step ${(index + 1) / 2}: the gateway answered, the roster refreshed and the pane kept its rows; nothing on screen was replaced while the socket was away.`,
-}))
+/** Every thread's content entries, oldest first per thread; user turns read as "You", others as their agent. */
+const conversationTranscript = ({ loading, state }: WireSlice<'conversation'>) => ({
+  agent: loading ? undefined : state.threads[0]?.agent,
+  turns: loading ? [] : state.threads.flatMap(thread => thread.items.flatMap(entry => entry.type === 'content' && 'text' in entry.body && typeof entry.body.text === 'string'
+    ? [{ id: `${thread.agent}/${entry.id}`, version: `${entry.revision}`, who: entry.role === 'user' ? 'You' : thread.agent, text: entry.body.text }]
+    : [])),
+})
 /**
  * A populated conversation under the band, on the kit's transcript scroller. The band enters and leaves above the
  * history: a reader following the end stays at the end; a reader up in history keeps their place.
  */
 function ConnectionGeometryStory({ scheme }: { scheme: Scheme }) {
+  const { agent, turns } = useScenarioSlice('conversation', conversationTranscript)
   const [connection, setConnection] = React.useState<ConnectionState>('live')
   return <main aria-label="Workspace" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" statusSince={minutes(12)} freshness={connection === 'live' ? 'live' : 'stale'} now={now} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+      {agent === undefined ? null : <ThreadHeader title={agent} freshness={connection === 'live' ? 'live' : 'stale'} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />}
       <ConnectionStatus state={connection} {...(connection === 'offline' ? { onReconnect: () => setConnection('live') } : {})} />
-      <EmbraceScrollViewport items={transcript} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(styles.turns)}>
-        {transcript.map(turn => <article key={turn.id} data-item-id={turn.id} {...stylex.props(styles.turn)}><strong {...stylex.props(styles.turnWho)}>{turn.who}</strong><p {...stylex.props(styles.turnText)}>{turn.text}</p></article>)}
+      <EmbraceScrollViewport items={turns} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(styles.turns)}>
+        {turns.map(turn => <article key={turn.id} data-item-id={turn.id} {...stylex.props(styles.turn)}><strong {...stylex.props(styles.turnWho)}>{turn.who}</strong><p {...stylex.props(styles.turnText)}>{turn.text}</p></article>)}
       </EmbraceScrollViewport>
       <div role="toolbar" aria-label="Story connection" {...stylex.props(styles.harness)}>
         <Button onPress={() => setConnection('offline')} {...stylex.props(styles.harnessButton)}>Drop connection</Button>
@@ -110,15 +135,17 @@ function ConnectionGeometryStory({ scheme }: { scheme: Scheme }) {
   </main>
 }
 
+/** Scenario slice variants chosen through Storybook controls (`scenarioArgTypes`). */
+type SystemStatesArgs = React.ComponentProps<typeof SystemStatesStory> & { roster?: string; conversation?: string }
 const meta = {
   title: 'Fractal UI/System states',
   component: SystemStatesStory,
-  parameters: { layout: 'fullscreen' },
+  parameters: { layout: 'fullscreen', scenario: { slices: ['roster'] } },
   args: { scheme: 'dark', connection: 'offline' },
-  argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, connection: { options: ['live', 'offline', 'reconnecting', 'stale', 'failed'], control: 'radio' }, failure: { control: 'text' }, ticking: { control: 'boolean' } },
-} satisfies Meta<typeof SystemStatesStory>
+  argTypes: { ...scenarioArgTypes(['roster']), scheme: { options: ['dark', 'light'], control: 'radio' }, connection: { options: ['live', 'offline', 'reconnecting', 'stale', 'failed'], control: 'radio' }, failure: { control: 'text' }, ticking: { control: 'boolean' } },
+} satisfies Meta<SystemStatesArgs>
 export default meta
-type Story = StoryObj<typeof meta>
+type Story = StoryObj<SystemStatesArgs>
 
 const band = (canvasElement: HTMLElement) => canvasElement.querySelectorAll('[data-connection-state]')
 /** One band under the thread header, none in the sidebar; every pane keeps its own quiet row. */
@@ -208,8 +235,15 @@ const dropAndRestore = async (canvasElement: HTMLElement, between: () => Promise
   await waitFor(() => expect(band(canvasElement)).toHaveLength(0))
   await geometryFrame()
 }
+/** The geometry plays need history several viewports tall, so they select the `long` conversation variant. */
+const geometry = {
+  args: { conversation: 'long' },
+  parameters: { scenario: { slices: ['conversation'] } },
+  argTypes: { ...scenarioArgTypes(['conversation']), roster: { table: { disable: true } } },
+  render: ({ scheme }) => <ConnectionGeometryStory scheme={scheme} />,
+} satisfies Story
 /** Following the end of a populated conversation: live → offline → live keeps the end in view (distance 0). */
-export const BandKeepsFollow: Story = { render: ({ scheme }) => <ConnectionGeometryStory scheme={scheme} />, play: async ({ canvasElement }) => {
+export const BandKeepsFollow: Story = { ...geometry, play: async ({ canvasElement }) => {
   const viewport = within(canvasElement).getByTestId('transcript-scroll')
   await waitFor(() => expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight * 2))
   await waitFor(() => expect(distanceFromEnd(viewport)).toBeLessThanOrEqual(1))
@@ -220,7 +254,7 @@ export const BandKeepsFollow: Story = { render: ({ scheme }) => <ConnectionGeome
   await expect(within(canvasElement).queryByRole('button', { name: 'New messages ↓' })).toBeNull()
 } }
 /** Negative control: a reader up in history keeps their row in place while the band comes and goes; no jump to the end. */
-export const BandKeepsReadingPosition: Story = { render: ({ scheme }) => <ConnectionGeometryStory scheme={scheme} />, play: async ({ canvasElement }) => {
+export const BandKeepsReadingPosition: Story = { ...geometry, play: async ({ canvasElement }) => {
   const viewport = within(canvasElement).getByTestId('transcript-scroll')
   await waitFor(() => expect(distanceFromEnd(viewport)).toBeLessThanOrEqual(1))
   viewport.focus()
