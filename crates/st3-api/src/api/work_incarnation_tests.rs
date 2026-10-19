@@ -3,7 +3,7 @@ use super::*;
 
 const SEAT: &str = "agent/garden/chooser";
 
-struct Fixture {
+pub struct Fixture {
     _root: tempfile::TempDir,
     state: AppState,
     client: crate::client::Client,

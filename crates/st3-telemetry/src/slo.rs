@@ -660,6 +660,7 @@ mod tests {
         let source = [
             include_str!("../../st3-api/src/api.rs"),
             include_str!("../../st3-api-mailbox/src/api/mailbox.rs"),
+            include_str!("../../st3-api-client-v0/src/api/client_v0.rs"),
         ]
         .concat();
         for latency in &targets().latency {
