@@ -1937,12 +1937,16 @@ mod memory_tests {
 
 #[cfg(test)]
 mod proof_position_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
     use super::*;
     use crate::store::runtime::Plain;
 
     /// The proof copy's numbering of the sealed set, after keeping only that set.
-    fn proof_order(copy: &Path, sealed: &[String]) -> Vec<String> {
-        let connection = open_checkpoint_copy(copy).unwrap();
+    fn proof_order(copy: &Path, sealed: &[String], vfs: Option<&ProofVfs>) -> Vec<String> {
+        let connection = open_checkpoint_copy(copy, vfs).unwrap();
+        if let Some(vfs) = vfs {
+            vfs.begin_proof(&connection).unwrap();
+        }
         connection
             .execute_batch(
                 "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
@@ -2004,12 +2008,26 @@ mod proof_position_tests {
             transaction.commit().unwrap();
             ids
         };
-        let plain = scratch.path().join("plain.sqlite3");
-        store
-            .connection
-            .write()
-            .execute("VACUUM INTO ?1", [plain.to_str().unwrap()])
-            .unwrap();
+        // File-backed stores prove through the space-guarded VFS; prove both ways.
+        let proofs = scratch.path().join("proofs");
+        let ownership = ProofOwnership::acquire(&proofs).unwrap();
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let vfs = ProofVfs::register(&space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = |name: &str| {
+            let plain = scratch.path().join(format!("{name}.sqlite3"));
+            let guarded = proofs.join(format!("proof-{name}.sqlite3"));
+            ownership.mark(&guarded).unwrap();
+            for path in [&plain, &guarded] {
+                store
+                    .connection
+                    .write()
+                    .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+                    .unwrap();
+            }
+            (plain, guarded)
+        };
+        let plain = copy("plain");
         // Another member also holds an unsealed duplicate envelope carrying the third claim first.
         store
             .connection
@@ -2021,13 +2039,11 @@ mod proof_position_tests {
                 [&sealed[2]],
             )
             .unwrap();
-        let with_duplicate = scratch.path().join("duplicate.sqlite3");
-        store
-            .connection
-            .write()
-            .execute("VACUUM INTO ?1", [with_duplicate.to_str().unwrap()])
-            .unwrap();
-        assert_eq!(proof_order(&plain, &sealed), sealed);
-        assert_eq!(proof_order(&with_duplicate, &sealed), sealed);
+        let with_duplicate = copy("duplicate");
+        for (copy, guarded) in [plain, with_duplicate] {
+            assert_eq!(proof_order(&copy, &sealed, None), sealed);
+            assert_eq!(proof_order(&guarded, &sealed, Some(&vfs)), sealed);
+        }
+        vfs.check_closed().unwrap();
     }
 }
