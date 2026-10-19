@@ -220,6 +220,45 @@ async function assertBreadcrumbEllipsis(canvas: HTMLElement) {
 }
 export const Modal240: Story = { render: () => <Pair width={240} />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
 export const Modal240Light: Story = { render: () => <Pair width={240} light />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
+const chevronPaths = { open: 'M3.5 6 8 10.5 12.5 6', closed: 'M6 3.5 10.5 8 6 12.5' } as const
+/** A disclosure chevron is one 12px kit SVG with the state's stroke path and no text; a Unicode glyph fails every attribute check. */
+const svgChevron = (host: Element, state: keyof typeof chevronPaths) => {
+  const svg = host.firstElementChild
+  return host.childElementCount === 1 && host.textContent === '' && svg instanceof SVGSVGElement && svg.getAttribute('viewBox') === '0 0 16 16' && svg.getAttribute('width') === '12' && svg.getAttribute('height') === '12' && svg.getAttribute('aria-hidden') === 'true' && svg.querySelector('path')?.getAttribute('d') === chevronPaths[state]
+}
+const box = (element: Element) => { const { width, height } = element.getBoundingClientRect(); return { width, height } }
+/** Real and pinned disclosure chevrons are the same kit SVG at the same 24px box and 12px glyph; the negative controls prove the check rejects a Unicode glyph and the wrong state. */
+export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement }) => {
+  const [yes, no] = examples(canvasElement)
+  // At 100px the outer parents are pinned while deeper parent rows are still mounted; at the default 600 only leaves stay mounted.
+  await frames(); await scroll(yes, 100); await scroll(no)
+  const realChevrons = [...yes.querySelectorAll('[data-sidebar-tree-key] button')]
+  const pinnedChevrons = [...stack(yes).querySelectorAll('[data-pinned-chevron]')]
+  await expect(realChevrons.length).toBeGreaterThan(0)
+  await expect(pinnedChevrons.length).toBeGreaterThan(0)
+  for (const chevron of realChevrons) {
+    const state = chevron.closest('[data-sidebar-tree-key]')!.getAttribute('aria-expanded') === 'true' ? 'open' : 'closed'
+    await expect(svgChevron(chevron, state)).toBe(true)
+    await expect(svgChevron(chevron, state === 'open' ? 'closed' : 'open')).toBe(false)
+    await expect(chevron.getAttribute('aria-label')).toBeTruthy()
+  }
+  for (const chevron of pinnedChevrons) await expect(svgChevron(chevron, 'open')).toBe(true)
+  const reference = realChevrons.find(chevron => svgChevron(chevron, 'open'))!
+  for (const chevron of pinnedChevrons) {
+    await expect(box(chevron)).toEqual(box(reference))
+    await expect(box(chevron.firstElementChild!)).toEqual(box(reference.firstElementChild!))
+    await expect(box(reference.firstElementChild!)).toEqual({ width: 12, height: 12 })
+    await expect(getComputedStyle(chevron).color).toBe(getComputedStyle(reference).color)
+  }
+  await expect(box(reference)).toEqual({ width: 24, height: 24 })
+  for (const legacy of ['⌄', '›']) { const glyph = document.createElement('span'); glyph.textContent = legacy; await expect(svgChevron(glyph, legacy === '⌄' ? 'open' : 'closed')).toBe(false) }
+  await expect(no.querySelectorAll('[data-pinned-chevron]')).toHaveLength(0)
+  await userEvent.click(within(no as HTMLElement).getByRole('button', { name: 'Collapse all' }))
+  await frames()
+  const collapsed = [...no.querySelectorAll('[data-sidebar-tree-key] button')]
+  await expect(collapsed.length).toBeGreaterThan(0)
+  for (const chevron of collapsed) await expect(svgChevron(chevron, 'closed')).toBe(true)
+} }
 export const AllStates: Story = { render: () => <main {...stylex.props(styles.matrix)}>{[240, 440, 1440].flatMap(width => [false, true].map(light => <Example key={`${width}-${light}`} width={width} light={light} />))}</main> }
 const styles = stylex.create({
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl, padding: s.xl, backgroundColor: surface.canvas },
