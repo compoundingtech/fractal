@@ -47,7 +47,6 @@ import { installInputPaint } from '/apps/fractal-web/src/telemetry/inputPaint.ts
 import { makeFrameIngest } from '/apps/fractal-web/src/data/frameIngest.ts'
 import { PortalContainerRegistrationContext, RegisteredPortal } from '/packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { App as RealAppShell } from '/apps/fractal-web/src/web/App.tsx'
-import 'virtual:overeng-stylex.css'
 const portalContainer = document.querySelector('#portal')
 const reactRoots = new Set()
 const registerPortal = container => { reactRoots.add(container); return () => reactRoots.delete(container) }
