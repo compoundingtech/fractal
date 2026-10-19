@@ -7424,8 +7424,11 @@ fn roster_fixture_random(state: &mut u64) -> u64 {
 }
 
 proptest::proptest! {
+    // Each round shuffles the whole 27-operation deck, so one case already exercises every
+    // operation; more cases only change the order. Pull requests run one; the daily long-lane
+    // run (ST_TEST_SCALE=full, docs/ci.md) runs four.
     #![proptest_config(proptest::test_runner::Config {
-        cases: 4,
+        cases: if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") { 4 } else { 1 },
         rng_seed: proptest::test_runner::RngSeed::Fixed(0x51a7_2026),
         ..proptest::test_runner::Config::default()
     })]
