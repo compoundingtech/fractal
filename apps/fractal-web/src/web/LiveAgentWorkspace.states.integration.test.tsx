@@ -246,6 +246,29 @@ describe('RM1 workspace source states', () => {
     expect(transcript().textContent).toContain('The retained answer remains readable.')
   })
 
+  it('keeps a disconnected in-progress run completion-unverified after a tool has completed', async () => {
+    const inProgress: ConversationPage = {
+      ...page,
+      items: [
+        page.items[0]!,
+        { _tag: 'ToolCall', id: 'tool/completed', callId: 'call/completed', name: 'bash', input: { command: 'pnpm test' }, status: 'success', callSeen: true, result: { content: 'Tests passed', mediaType: 'text/plain', isError: false, at: '1970-01-01T00:00:02.000Z' }, at: '1970-01-01T00:00:01.500Z' },
+        ...page.items.slice(1),
+      ],
+    }
+    registry.set(conversation, observed({ value: inProgress }))
+    registry.set(conversationSync, liveSync(inProgress))
+    await mount()
+    await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 2 }))
+    const log = transcript().querySelector('[data-testid="work-log"]')!
+    expect(log.textContent).toContain('Work · completion unverified')
+    expect(log.textContent).not.toContain('Worked')
+    expect(log.querySelector('[data-testid="work-log-children"]')).not.toBeNull()
+    expect(log.querySelector('[data-tool-status="success"]')).not.toBeNull()
+    expect(log.querySelector('button[aria-expanded="true"]')).not.toBeNull()
+    expect(host.textContent).toContain('Last seen working · 18 s ago')
+    expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
+  })
+
   it('freezes the working cue on disconnect without requiring replacement feed values', async () => {
     await mount()
     const retainedAgents = registry.get(agents)

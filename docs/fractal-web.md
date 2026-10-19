@@ -88,6 +88,9 @@ claims that a working agent is still working. Observation ages come from the sou
 retained `sync.*.last.observedAt`, not the moment a component renders or a connection
 fails. Sources without that evidence show no invented age. Relative-time leaves share
 the source clock; roster rows do not acquire timers or rerender on clock ticks.
+An in-progress run remains completion-unverified when frozen, even when some tool
+calls already completed. Its recorded calls stay expanded; disconnecting never
+turns unfinished work into a settled “Worked” summary.
 
 Waiting feeds show loading, observed empty feeds show empty content, and a filtered
 roster with no results offers Clear filters. A failed roster read exposes Retry through

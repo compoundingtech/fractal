@@ -316,7 +316,7 @@ export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly t
       return {
         ...turn,
         items: turn.items.filter(item => !running.has(item.id)),
-        work: { ...turn.work, running: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
+        work: { ...turn.work, running: false, foldable: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
       }
     }),
     lastSeen: {
