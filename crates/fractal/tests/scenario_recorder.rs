@@ -99,7 +99,7 @@ impl Script {
 }
 
 fn decode_script(bytes: &[u8]) -> Result<Script> {
-    let schema: Value = serde_json::from_str(include_str!("../../../clients/typescript/st3-scenarios/scripts/recording-script.schema.json"))?;
+    let schema: Value = serde_json::from_str(include_str!("../../../clients/typescript/fractal-scenarios/scripts/recording-script.schema.json"))?;
     let value: Value = serde_json::from_slice(bytes)?;
     let validator = jsonschema::options().should_validate_formats(true).build(&schema)?;
     validator.validate(&value).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -497,7 +497,7 @@ fn temporary_paths_never_reach_output() {
 
 #[test]
 fn committed_script_matches_shared_schema() {
-    let bytes = include_bytes!("../../../clients/typescript/st3-scenarios/recordings/fleet-mid-refactor-proof.script.json");
+    let bytes = include_bytes!("../../../clients/typescript/fractal-scenarios/recordings/fleet-mid-refactor-proof.script.json");
     let script = decode_script(bytes).unwrap();
     assert!(script.id_map.contains_key(&script.agent));
     let mut value: Value = serde_json::from_slice(bytes).unwrap();
@@ -544,7 +544,7 @@ fn scratch_commands_have_only_owned_environment_and_curl_ignores_config() {
 
 #[test]
 fn additive_scripts_preserve_primary_defaults_and_validate_cast() {
-    let bytes = include_bytes!("../../../clients/typescript/st3-scenarios/recordings/fleet-mid-refactor-proof.script.json");
+    let bytes = include_bytes!("../../../clients/typescript/fractal-scenarios/recordings/fleet-mid-refactor-proof.script.json");
     let mut script: Script = serde_json::from_slice(bytes).unwrap();
     assert_eq!(script.cast().unwrap(), vec![script.agent.as_str()]);
     assert_eq!(script.historical_turns, 0);
@@ -567,7 +567,7 @@ fn additive_scripts_preserve_primary_defaults_and_validate_cast() {
 
 #[test]
 fn script_boundaries_reject_unrecorded_agents_and_invalid_indices() {
-    let bytes = include_bytes!("../../../clients/typescript/st3-scenarios/recordings/fleet-mid-refactor-proof.script.json");
+    let bytes = include_bytes!("../../../clients/typescript/fractal-scenarios/recordings/fleet-mid-refactor-proof.script.json");
     let mut script: Script = serde_json::from_slice(bytes).unwrap();
     script.historical_turns = script.turns.len() + 1;
     assert!(script.cast().is_err());
@@ -617,7 +617,7 @@ fn native_content_fence_preserves_identity_without_inventing_revision_numbers() 
 
 #[test]
 fn primary_proof_harness_shape_and_viewport_bounds_are_preserved() {
-    let bytes = include_bytes!("../../../clients/typescript/st3-scenarios/recordings/fleet-mid-refactor-proof.script.json");
+    let bytes = include_bytes!("../../../clients/typescript/fractal-scenarios/recordings/fleet-mid-refactor-proof.script.json");
     let mut script: Script = serde_json::from_slice(bytes).unwrap();
     let proof = harness_record(&script, 0, &script.turns[0]);
     assert_eq!(proof.as_object().unwrap().len(), 5);
@@ -636,7 +636,7 @@ fn primary_proof_harness_shape_and_viewport_bounds_are_preserved() {
 
 #[test]
 fn native_anchor_shift_preserves_historical_span_and_leaves_proof_unchanged() {
-    let bytes = include_bytes!("../../../clients/typescript/st3-scenarios/recordings/fleet-mid-refactor-proof.script.json");
+    let bytes = include_bytes!("../../../clients/typescript/fractal-scenarios/recordings/fleet-mid-refactor-proof.script.json");
     let mut script: Script = serde_json::from_slice(bytes).unwrap();
     let captured_at = chrono::DateTime::parse_from_rfc3339("2026-10-13T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
     let original = script.turns[0].timestamp.clone();

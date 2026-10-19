@@ -69,11 +69,11 @@ class FixturePathCheck(unittest.TestCase):
                                      ("pty", sys.executable), ("git", sys.executable),
                                      ("env", sys.executable), ("sleep", sys.executable)):
                 (tools / tool).symlink_to(executable)
-            for fixture in ("fractal-boot-canaries", "fractal-no-st2-eval", "fractal-subagents-eval"):
+            for fixture in ("st3-boot-canaries", "st3-no-st2-eval", "st3-subagents-eval"):
                 with self.subTest(fixture=fixture):
                     node_class = runpy.run_path(str(HERE / fixture / "run"))["Node"]
                     arguments = [root / fixture, Path(sys.executable)]
-                    if fixture == "fractal-boot-canaries":
+                    if fixture == "st3-boot-canaries":
                         arguments.append("claude")
                     with patch.dict(os.environ, {"PATH": str(tools)}):
                         node = node_class(*arguments)

@@ -16,8 +16,8 @@
 //! | `st <machine_version>`, `st agents ls`, `st alerts ls`, `st conversations read` | `Cli` | crates/fractal/src/main.rs (`st {machine_version}` and CLI subcommands) |
 //! | `st3 doctor` | `Cli` | crates/fractal/src/main.rs (CLI command family) |
 //! | `fractal` | `Fractal` | reserved external client name; docs/st3/observability.md vocabulary |
-//! | `smalltalk-ios <version> (<build>)` | `App` | clients/swift/St3Client/Sources/St3Client/Client.swift:11-13, apps/ios/store.tsx:112, clients/typescript/st3-views/clientName.ts:2-4 |
-//! | `smalltalk-ide <version>` | `App` | clients/typescript/st3-views/clientName.ts:7 (test clientName.test.mjs:7), docs/clients/build-your-own.md:98 |
+//! | `smalltalk-ios <version> (<build>)` | `App` | clients/swift/FractalClient/Sources/St3Client/Client.swift:11-13, apps/ios/store.tsx:112, clients/typescript/fractal-views/clientName.ts:2-4 |
+//! | `smalltalk-ide <version>` | `App` | clients/typescript/fractal-views/clientName.ts:7 (test clientName.test.mjs:7), docs/clients/build-your-own.md:98 |
 //! | `smalltalk-example-tui <version>` | `App` | examples/client-tui via docs/clients/build-your-own.md:79 — the `smalltalk-` product family prefix |
 //! | `st3 replication-worker` | `ReplicationWorker` | crates/fractal-daemon/src/service.rs (worker command), crates/fractal-peer/src/peer.rs (`run_worker`); reserved header shape |
 //! | `st3 driver omp-channel`, `agent/<seat> · st3 driver omp-channel` | `OmpChannel` | reserved channel header shape; `omp-channel` wins over the `driver` rule below |
