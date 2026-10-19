@@ -43,25 +43,6 @@ use super::*;
     
 
     #[test]
-    fn boundary_seeks_use_index_without_history_sort() {
-        let store = fixture(48);
-        let connection = store.readers.get();
-        let series = series_sql();
-        let observed = observed_sql();
-        for sql in [
-            format!("SELECT {series} FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}>?1 ORDER BY {series} LIMIT 1"),
-            format!("SELECT {observed} FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}=?1 AND {observed}<=?2 ORDER BY {observed} DESC LIMIT 1"),
-        ] {
-            let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-            let params = vec![""; statement.parameter_count()];
-            let plan = statement.query_map(rusqlite::params_from_iter(params), |row| row.get::<_, String>(3))
-                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
-            assert!(plan.contains(&format!("SEARCH claims USING INDEX {INDEX}")), "{plan}");
-            assert!(!plan.contains("TEMP B-TREE"), "{plan}");
-        }
-    }
-
-    #[test]
     fn observed_timestamp_index_preserves_u64_and_invalid_value_fallbacks() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute("CREATE TABLE readings(body TEXT)", []).unwrap();

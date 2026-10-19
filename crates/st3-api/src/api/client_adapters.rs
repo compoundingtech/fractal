@@ -1,5 +1,6 @@
 //! Enrolled provider transports: external attribution and resumable reply notifications.
 
+use crate::DeliveryStore;
 use super::client_v0::{ClientSession, require_scope};
 use super::*;
 
