@@ -109,7 +109,8 @@ describe('scenario replay through the real live source', () => {
       expect(updated).toHaveLength(initial.length + event.items.length)
       expect(updated.map((item) => item.id)).toEqual([...initialIds, ...event.items.map((entry) => entry.id)])
       expect(updated.at(-1)).toMatchObject({
-        _tag: 'UnknownEvent', eventType: 'diagnostic_summary', data: { status: 'passed' },
+        _tag: 'Unsupported', harness: 'st', recordKind: 'diagnostic_summary', reason: 'unknown-entry-type',
+        inspect: { text: expect.stringContaining('passed'), truncated: false },
       })
     })),
   )
