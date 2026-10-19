@@ -33,18 +33,31 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
 /// into this router: real native custody controls and the daemon use `router`.
 #[cfg(feature = "test-support")]
 pub fn admitted_mailbox_protocol_router(state: AppState) -> Router {
+    admitted_mailbox_protocol_router_with(state, &[routes])
+}
+
+/// [`admitted_mailbox_protocol_router`] over st3-api's router with these route families (st3-daemon
+/// passes every family it serves).
+#[cfg(feature = "test-support")]
+pub fn admitted_mailbox_protocol_router_with(state: AppState, families: &[RouteFamily]) -> Router {
     Router::new()
         .route("/v1/mailbox/bind", post(bind_admitted_fixture))
         .route("/v1/mailbox", get(subscribe_admitted_fixture))
-        .fallback_service(router(state.clone()))
+        .fallback_service(router_with(state.clone(), families))
         .with_state(state)
 }
 
 /// Synthetic private-store transport controls; never physical native admission.
 #[cfg(feature = "test-support")]
 pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
+    synthetic_mailbox_protocol_router_with(state, subject, &[routes])
+}
+
+/// [`synthetic_mailbox_protocol_router`] over st3-api's router with these route families.
+#[cfg(feature = "test-support")]
+pub fn synthetic_mailbox_protocol_router_with(state: AppState, subject: &str, families: &[RouteFamily]) -> Router {
     assert!(subject.starts_with("agent/example/"));
-    admitted_mailbox_protocol_router(state).layer(Extension(NativeDeliveryPeer {
+    admitted_mailbox_protocol_router_with(state, families).layer(Extension(NativeDeliveryPeer {
         agent: subject.into(),
         transport: "omp-channel",
         pid: std::process::id(),

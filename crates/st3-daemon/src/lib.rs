@@ -11,7 +11,7 @@ pub use st3_kernel::{cli_print, cli_println};
 mod ci_test_paths;
 
 pub use st3_kernel::accounts;
-pub use st3_api_mailbox::api;
+pub mod api;
 pub use st3_kernel::archive;
 pub mod attach_image;
 pub use st3_store::backup;
@@ -112,7 +112,7 @@ pub use st3_reconcile::seat_snapshot;
 pub use st3_telemetry::telemetry;
 pub use smallclaims::task_cpu;
 #[cfg(any(test, feature = "test-support"))]
-pub use st3_api_mailbox::test_support;
+pub mod test_support;
 #[cfg(test)]
 mod kernel_tests;
 #[cfg(test)]

@@ -134,7 +134,8 @@ pub use st3_api::api::{router_with, serve_reserved_unix_with_ready, serve_tcp, s
 pub use st3_api::api::{unix_reservation_path};
 pub mod mailbox;
 
-/// The route families of the crates up to this one, added to st3-api's route table.
+/// This crate's route family. st3-daemon serves it beside every other family (its `api::router`);
+/// this crate's router is st3-api's routes and the mailbox routes, for its own tests.
 const ROUTE_FAMILIES: &[RouteFamily] = &[mailbox::routes];
 
 /// Build routes only. The owner starts background publications with

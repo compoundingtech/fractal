@@ -5011,6 +5011,7 @@ dependencies = [
  "smallclaims",
  "st-drivers",
  "st-runtime",
+ "st3-api",
  "st3-api-mailbox",
  "st3-attention",
  "st3-client",
