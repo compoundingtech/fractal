@@ -3515,9 +3515,38 @@ mod early_recovery {
 
 #[tokio::test]
 async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn backoff_after(
+        store: &Store,
+        preferred: &AtomicUsize,
+        fallback: &AtomicUsize,
+        attempts: usize,
+    ) -> crate::replication::ReplicationWorkerStatus {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                assert_eq!(fallback.load(Ordering::SeqCst), 0, "fallback was selected");
+                let worker = store
+                    .replication_sync
+                    .lock()
+                    .unwrap()
+                    .get("peer")
+                    .and_then(|progress| progress.worker.clone());
+                if let Some(worker) = worker
+                    && worker.phase == "backoff"
+                    && preferred.load(Ordering::SeqCst) >= attempts
+                {
+                    return worker;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the real dialer must retry the application failure with backoff")
+    }
+
     let fleet_id = "fdf00ee7-a1f7-4ed7-a5ec-a6558b61cd92";
     let auth = FleetAuth::test(fleet_id, &[53; 32]);
-    let fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
     let state = PeerState::new(
         Local(Arc::new(plain_memory("peer").unwrap())),
         "peer".into(),
@@ -3538,12 +3567,20 @@ async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route
         (StatusCode::UNPROCESSABLE_ENTITY, "invalid-exchange"),
         (StatusCode::OK, "invalid-protocol"),
     ] {
+        let root = tempfile::tempdir().unwrap();
+        let local = Arc::new(plain_open(&root.path().join("local.sqlite3"), "local").unwrap());
+        local.bind_fleet(fleet_id).unwrap();
+        let preferred_attempts = Arc::new(AtomicUsize::new(0));
+        let fallback_attempts = Arc::new(AtomicUsize::new(0));
+        let observed = preferred_attempts.clone();
         let state = state.clone();
         let app = Router::new().route(
             EXCHANGE_PATH,
             post(move |body: Bytes| {
                 let state = state.clone();
+                let observed = observed.clone();
                 async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
                     // A signed success carrying the wrong type exercises protocol decoding;
                     // all other cases are signed application refusals.
                     let mut response = signed_response(
@@ -3559,34 +3596,46 @@ async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route
             }),
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let peer = PeerConfig {
-            name: "peer".into(),
-            url: format!("http://{}", listener.local_addr().unwrap()),
-        };
+        let preferred = Route::Http(format!("http://{}", listener.local_addr().unwrap()));
         let server = tokio::spawn(axum::serve(listener, app).into_future());
-        let error = post_signed_to::<_, Vec<String>>(
-            &replication_http_client(),
-            &peer,
-            "local",
-            &auth,
-            &fleet,
+        let observed = fallback_attempts.clone();
+        let fallback_app = Router::new().route(
             EXCHANGE_PATH,
-            &serde_json::json!({}),
-            false,
-        )
-        .await
-        .unwrap_err();
-        server.abort();
-        let mut route = 0;
-        assert_eq!(
-            route_failure(&error),
-            RouteFailure::Application,
-            "{code}: {error:#}"
+            post(move |_: Bytes| {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
         );
-        assert!(!advance_failed_route(&mut route, &error), "{code}");
-        assert_eq!(route, 0);
-        // Application failures still use the same accumulating normal backoff.
-        let mut backoff = PeerBackoff::default();
-        assert!(backoff.next() < backoff.next());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fallback = Route::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let fallback_server = tokio::spawn(axum::serve(listener, fallback_app).into_future());
+        let (_routes, routes) = watch::channel(vec![preferred, fallback]);
+        let (notify, _) = watch::channel(0);
+        let dialer = tokio::spawn(dial_peer(
+            Local(local.clone()),
+            "local".into(),
+            "peer".into(),
+            routes,
+            auth.clone(),
+            FleetContext::legacy(BTreeSet::from(["peer".into()])),
+            notify.subscribe(),
+        ));
+        let first = backoff_after(&local, &preferred_attempts, &fallback_attempts, 1).await;
+        let second = backoff_after(&local, &preferred_attempts, &fallback_attempts, 2).await;
+        dialer.abort();
+        server.abort();
+        fallback_server.abort();
+        assert_eq!(first.route_is_preferred, Some(true), "{code}");
+        assert_eq!(second.route_is_preferred, Some(true), "{code}");
+        assert!(first.next_retry_at_unix_ms.is_some(), "{code}");
+        assert!(second.next_retry_at_unix_ms.is_some(), "{code}");
+        assert!(
+            second.last_attempt_at_unix_ms > first.last_attempt_at_unix_ms,
+            "{code}: the normal backoff must lead to another preferred-route attempt"
+        );
+        assert_eq!(fallback_attempts.load(Ordering::SeqCst), 0, "{code}");
     }
 }

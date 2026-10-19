@@ -430,3 +430,26 @@ async fn malformed_chunk_framing_is_application_not_stream_failure() {
     assert!(!advance_failed_route(&mut route, &error));
     assert_eq!(route, 0);
 }
+
+#[test]
+fn post_handshake_tls_alert_and_bad_record_causes_advance_the_route() {
+    for error in [
+        rustls::Error::DecryptError,
+        rustls::Error::AlertReceived(rustls::AlertDescription::BadRecordMac),
+    ] {
+        let class = stream_route_failure(&error);
+        assert_transport_advances(anyhow::Error::new(error).context(class), RouteFailure::Stream);
+    }
+    for error in [
+        rustls::Error::DecryptError,
+        rustls::Error::AlertReceived(rustls::AlertDescription::BadRecordMac),
+    ] {
+        // Tokio-rustls wraps post-handshake TLS errors in InvalidData. Retain the
+        // typed cause: InvalidData alone also describes application framing errors.
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, error);
+        let class = stream_route_failure(&error);
+        assert_transport_advances(anyhow::Error::new(error).context(class), RouteFailure::Stream);
+    }
+    let error = std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid application framing");
+    assert_eq!(stream_route_failure(&error), RouteFailure::Application);
+}

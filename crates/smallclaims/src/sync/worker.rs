@@ -1454,7 +1454,14 @@ fn stream_route_failure(error: &(dyn std::error::Error + 'static)) -> RouteFailu
                 || error.is_closed()
                 || error.is_body_write_aborted();
         }
+        // Tokio-rustls reports post-handshake alerts/bad records inside an I/O
+        // InvalidData wrapper. The kind alone is ambiguous (HTTP framing can use
+        // it too), so require the typed TLS cause rather than widening all I/O.
+        stream |= error.is::<rustls::Error>();
         if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            stream |= error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<rustls::Error>());
             stream |= matches!(
                 error.kind(),
                 std::io::ErrorKind::ConnectionRefused

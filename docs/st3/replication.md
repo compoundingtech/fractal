@@ -426,10 +426,12 @@ See [Tailscale setup](tailscale.md) for direct-host setup and
 for replacing a legacy local dial helper.
 
 Only transport failures advance to the next configured route: connection failures,
-broken request/response streams, HTTP transport timeouts, and unavailable carriers
-(including Fabric's typed `fault` class or no installed carrier). The worker marks
-failures at the outbound HTTP send/raw-body boundary using typed Hyper/I/O causes,
-not by parsing error text; broad reqwest request/decode categories are insufficient.
+broken request/response streams (including typed TLS fatal alerts and bad records),
+HTTP transport timeouts, and unavailable carriers (including Fabric's typed `fault`
+class or no installed carrier). The worker marks failures at the outbound HTTP
+send/raw-body boundary using typed Hyper/I/O/TLS causes, not by parsing error text;
+broad reqwest request/decode categories are insufficient. An I/O `InvalidData`
+error is transport evidence only when its retained cause identifies the TLS layer.
 An HTTP error response, backend/export/receive failure, metadata budget rejection,
 authentication or grant refusal, invalid protocol/JSON/compression, request-builder
 error, Fabric `usage` error, or ambiguous/untyped error keeps the current route and
