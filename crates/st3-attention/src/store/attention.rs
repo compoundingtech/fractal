@@ -177,10 +177,11 @@ impl AttentionStore for Store {
     }
 
     fn discard_desired_owned_by(&self, owner_run: &str) -> Result<usize> {
-        let connection = self.connection.write();
-        connection
-            .execute(/* sqlite-large-value: allow-for-now lv-h201b3810ef97 owner=st3_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1", [owner_run])
-            .map_err(Into::into)
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h201b3810ef97 owner=st3_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1", [owner_run])?;
+        transaction.commit()?;
+        Ok(removed)
     }
 
     fn human_review_refusal(&self, owner: &str) -> Result<String> {

@@ -48,6 +48,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "rules",
             "tiles",
             "repair",
+            "store",
             "uninstall",
         ],
     ),
