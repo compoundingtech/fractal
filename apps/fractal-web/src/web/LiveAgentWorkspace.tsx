@@ -292,7 +292,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     // as closing the card, without replacing any roster nodes during a switch.
     hoverOwner.current?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     hoverOwner.current = null
-    setSidebarDrawerOpen(false)
+    agentsDrawer.current?.close()
   }, [location])
   const agents = fleet._tag === 'Observed' ? fleet.value.agents : emptyAgents
   const rosterObserved = fleet._tag === 'Observed'
