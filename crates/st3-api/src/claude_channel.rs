@@ -21,7 +21,7 @@ pub struct State {
     lines: st_drivers::reexec::LineBuffer,
 }
 #[derive(Default, Deserialize, Serialize)]
-struct Handoffs {
+pub struct Handoffs {
     incarnation: String,
     attempted: BTreeSet<String>,
     confirmed: BTreeSet<String>,
@@ -449,7 +449,7 @@ async fn announce_initialization(client: &Client, input: &ClaimInput) -> Result<
 }
 
 #[derive(Default)]
-struct Retry {
+pub struct Retry {
     failures: u32,
     due: Option<Instant>,
 }
@@ -466,12 +466,12 @@ fn retry_failed(retries: &mut BTreeMap<String, Retry>, key: &str) {
 fn retry_delay(failures: u32) -> Duration {
     Duration::from_secs((1_u64 << failures.saturating_sub(1).min(5)).min(30))
 }
-struct DiagnosticReport {
+pub struct DiagnosticReport {
     reason: String,
     recorded: bool,
 }
 
-struct PreparationReport {
+pub struct PreparationReport {
     input: ClaimInput,
     recorded: bool,
 }
@@ -621,7 +621,7 @@ fn save_handoffs(path: &Path, state: &State) -> Result<()> {
     Ok(())
 }
 #[derive(Default)]
-struct Transcript {
+pub struct Transcript {
     path: std::path::PathBuf,
     identity: Option<(u64, u64)>,
     offset: u64,
@@ -727,7 +727,7 @@ fn user_text(record: &Value) -> Vec<&str> {
         _ => Vec::new(),
     }
 }
-async fn body(client: &Client, message: &MessageView) -> Result<String> {
+pub async fn body(client: &Client, message: &MessageView) -> Result<String> {
     if message.body_ref.is_some() {
         crate::message_body::full_text(client, message).await
     } else if message.content.starts_with("doc/") {
