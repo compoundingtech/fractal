@@ -237,8 +237,3 @@ pub fn backfill(transaction: &Transaction<'_>) -> Result<bool> {
     )?;
     Ok(complete)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

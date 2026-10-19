@@ -62,17 +62,6 @@ pub fn lease(
         .map_err(internal)
 }
 
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::mailbox_lease_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::mailbox_lease_tests_shared_seats::{authority, change_after_precheck, finished_without_the_writer, precheck_was_reached, promote_elsewhere, request};
-use super::*;
-
-}
 
 pub fn refused(reason: &str) -> St3Error {
     St3Error::new("stale-mailbox-session", reason)
@@ -327,4 +316,3 @@ pub fn record(
         .map_err(internal)?;
     Ok(())
 }
-

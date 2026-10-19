@@ -200,15 +200,3 @@ pub fn flush_with_coordination(
     }
     Ok(pending)
 }
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::agent_messages_tests_shared_delivery::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::agent_messages_tests_shared_delivery::{send};
-use super::*;
-
-}

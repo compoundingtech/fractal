@@ -86,9 +86,3 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-}

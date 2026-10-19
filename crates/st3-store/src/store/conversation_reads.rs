@@ -16,15 +16,3 @@ pub struct Owner {
 }
 
 pub type Owners = BTreeMap<String, Owner>;
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::conversation_reads_tests_shared_seats::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::conversation_reads_tests_shared_seats::{append};
-use super::*;
-
-}

@@ -176,16 +176,3 @@ impl Store {
             .remove(&Dependency::Recipient(normalize_message_party(subject)));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::mailbox_wakes_tests_shared_delivery::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::mailbox_wakes_tests_shared_delivery::{sent};
-use super::*;
-    use crate::mailbox::Fence;
-
-}

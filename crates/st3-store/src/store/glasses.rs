@@ -118,17 +118,3 @@ pub fn prepare(
     );
     Ok(Some(fields))
 }
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::glasses_tests_shared_delivery::*;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub use crate::store::glasses_tests_shared_delivery::{history_oracle, input, sync};
-use super::super::tests::{exchange_from, exchange_of, receive_and_project};
-    use super::*;
-    use crate::model::ReplicationInventory;
-
-}
