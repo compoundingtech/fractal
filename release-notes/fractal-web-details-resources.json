@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fractal web's agent inspector opens on a native Details tab built on the Fractal UI DetailsPane, with Changes as its second tab. Details shows identity, mission, status, managed-session timing, context, spend, resources and traced subagents from native observations and names every unreported or ungranted value. Per-field pending durations and first-read resources reserve skeletons; provenance stays in tooltips, Subagents shows the reported total including known zero, and traced titles and reported spend windows wrap at narrow widths. Resources opens in a new non-modal Fractal UI SidePanel instead of a modal dialog, lists the agent's Todos first, and prefetches and retains its reads so a reopen shows the last observation.",
+  "summary": "The agent inspector opens on a Details tab that shows what the session reports, with short summaries for anything it doesn't, and marks context percentages derived from token counts as estimates. On wider screens, Resources opens as a side panel that keeps the conversation usable, starts with the agent's Todos and reopens instantly with its last reading.",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
