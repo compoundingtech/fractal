@@ -159,7 +159,8 @@ export const RichText: Story = { ...contractFixture, tags: ['critical'],
     resource.click()
     await settle()
     if (canvasElement.querySelector('[data-testid="opened-resource"]')?.textContent !== 'Opened src/model.ts') throw new Error('Resource chip lost its open callback')
-  }, }
+  },
+}
 export const Languages: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'languages' },
   play: async ({ canvasElement }) => {
@@ -175,12 +176,15 @@ export const Languages: Story = { ...contractFixture, tags: ['critical'],
       } else if (fence.querySelector('[data-syntax-token], script') !== null) throw new Error('Unknown language should remain safe literal text')
       if (fence.querySelector('code')?.textContent !== `${code}\n`) throw new Error(`${language || 'text'} highlighting changed the source text`)
     }
-  }, }
+  },
+}
 export const Light: Story = { ...RichText, args: { scheme: 'light' } }
-export const AllStates: Story = { ...contractFixture, args: { scenario: 'all' },
-parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } },
-argTypes: scenarioArgTypes(['conversation']),
-render: args => <ScenarioMarkdown {...args} />, }
+export const AllStates: Story = {
+  args: { scenario: 'all' },
+  parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } },
+  argTypes: scenarioArgTypes(['conversation']),
+  render: args => <ScenarioMarkdown {...args} />,
+}
 export const LanguagesLight: Story = { ...Languages, args: { scenario: 'languages', scheme: 'light' } }
 export const AllStatesLight: Story = { ...contractFixture, args: { scenario: 'all', scheme: 'light' } }
 export const StreamingControlsPersistence: Story = { ...contractFixture, tags: ['critical'],
@@ -223,7 +227,8 @@ export const StreamingControlsPersistence: Story = { ...contractFixture, tags: [
       if (clipboardDescriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
       else Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
     }
-  }, }
+  },
+}
 export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPersistence, args: { scenario: 'streaming', scheme: 'light' } }
 export const StreamingInlineMarkup: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'inline-streaming' },
@@ -261,7 +266,8 @@ export const StreamingInlineMarkup: Story = { ...contractFixture, tags: ['critic
       flushSync(() => append.click())
       await settle()
     }
-  }, }
+  },
+}
 
 export const CopyFailure: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'streaming' },
@@ -285,7 +291,8 @@ export const CopyFailure: Story = { ...contractFixture, tags: ['critical'],
       if (descriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
       else Object.defineProperty(navigator, 'clipboard', descriptor)
     }
-  }, }
+  },
+}
 
 /** C27/E04–E12: the input boundary forwards foreground ink, while default seat Prose stays soft. */
 function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' | 'light'; narrow?: boolean }) {

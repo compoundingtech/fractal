@@ -297,7 +297,7 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(263)
+  expect(exemptions).toHaveLength(262)
 })
 
 test('scenario transcript preserves the active migrator turn without a terminal status', () => {
