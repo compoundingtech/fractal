@@ -8,7 +8,8 @@ import { DateTime } from 'effect'
 import { ChromeControl } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
-import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { compactTime } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
 import { unavailable, waiting, type Feed } from '../data/source.ts'
@@ -22,6 +23,7 @@ const unopenedResources = Atom.make<Feed<ResourcePage>>(waiting)
 /** Native conversation controls, retained from the former ConversationDetail header portal. */
 export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: string }) => {
   const source = useDataSource()
+  const narrow = React.useContext(NarrowLayoutContext)
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
   const [resourcesOpen, setResourcesOpen] = React.useState(false)
   const [declarationOpen, setDeclarationOpen] = React.useState(false)
@@ -64,11 +66,11 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
       <Aria.Popover {...stylex.props(styles.popover)}>
         <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true) }} {...stylex.props(styles.menu)}>
           <Aria.MenuSection selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))}>
-            <Aria.MenuItem id="system" {...stylex.props(styles.menuItem)}>Show all system events</Aria.MenuItem>
+            <Aria.MenuItem id="system" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Show all system events</Aria.MenuItem>
           </Aria.MenuSection>
           <Aria.MenuSection selectionMode="none">
-            <Aria.MenuItem id="resources" isDisabled={disabledReason !== undefined} textValue="Resources" {...stylex.props(styles.menuItem)}>Resources{disabledReason === undefined ? null : <span slot="description" {...stylex.props(styles.menuReason)}>{disabledReason}</span>}</Aria.MenuItem>
-            <Aria.MenuItem id="declaration" {...stylex.props(styles.menuItem)}>View KDL</Aria.MenuItem>
+            <Aria.MenuItem id="resources" isDisabled={disabledReason !== undefined} textValue="Resources" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Resources{disabledReason === undefined ? null : <span slot="description" {...stylex.props(styles.menuReason)}>{disabledReason}</span>}</Aria.MenuItem>
+            <Aria.MenuItem id="declaration" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>View KDL</Aria.MenuItem>
           </Aria.MenuSection>
         </Aria.Menu>
       </Aria.Popover>
@@ -143,4 +145,5 @@ const styles = stylex.create({
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   menu: { padding: s.xs, outline: 'none' },
   menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 }, ':is([data-selected])': { color: c.primary } },
+  touchItem: { minHeight: g.touchTarget, display: 'flex', flexDirection: 'column', justifyContent: 'center', boxSizing: 'border-box' },
 })

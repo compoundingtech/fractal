@@ -22,7 +22,7 @@ try {
   await server.listen()
   const port = server.httpServer.address().port
   browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
-  for (const scheme of ['dark', 'light']) for (const [width, preferred] of [[900, 720], [1440, 720], [1440, 440]]) {
+  for (const scheme of ['dark', 'light']) for (const failed of [false, true]) for (const [width, preferred] of [[900, 720], [1440, 720], [1440, 440]]) {
     // Each snapshot opens the real app with saved preferences, rather than inheriting focus
     // from the keyboard resize test. Pointer/keyboard resizing is covered in kit/app tests.
     const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: scheme })
@@ -35,10 +35,10 @@ try {
     }, { scheme, width, preferred })
     const page = await context.newPage(), errors = []
     page.on('pageerror', error => errors.push(String(error)))
-    await page.goto(`http://127.0.0.1:${port}/split-header-geometry.browser.html`)
+    await page.goto(`http://127.0.0.1:${port}/split-header-geometry.browser.html${failed ? '?sync-failed' : ''}`)
     await page.getByRole('button', { name: 'Toggle right panel', exact: true }).click()
     await page.getByTestId('diff-code').waitFor()
-    await page.waitForFunction(() => document.querySelector('[data-testid="transcript-header-status"] [data-testid="sync-line"]')?.getAttribute('data-sync-visible') === 'false')
+    await page.waitForFunction(failed => document.querySelector('[data-testid="transcript-header-status"] [data-testid="sync-line"]')?.getAttribute('data-sync-visible') === String(failed), failed)
     const dock = page.getByRole('separator', { name: 'Resize changes' })
     if (width === 900) {
       await dock.focus(); await page.keyboard.press('End')
@@ -70,7 +70,7 @@ try {
       if (controls.some(r => r.left < crumb.right && r.right > crumb.left && r.top < crumb.bottom && r.bottom > crumb.top)) failures.push('breadcrumb overlaps controls')
       const gear = controls.find(r => r.name === 'Conversation menu'), terminal = controls.find(r => r.name === 'Toggle terminal drawer')
       const clusterGap = gear && terminal ? terminal.left - gear.right : undefined
-      if (clusterGap !== undefined && clusterGap > 16) failures.push(`empty native cluster gap ${clusterGap}`)
+      if (clusterGap !== undefined && clusterGap > 16 && !header.querySelector('[data-sync-state="Failed"]')) failures.push(`empty native cluster gap ${clusterGap}`)
       return { laneWidth: lane.width, height: lane.height, controls, clusterGap, failures }
     })
     const rest = await dock.evaluate(node => {
@@ -84,11 +84,27 @@ try {
     assert.equal(rest.width, 1, 'Resting separator is one hairline')
     assert.equal(rest.color, rest.neutral, 'Resting separator uses the neutral pane border token')
     assert.equal(rest.focused, false); assert.equal(rest.hovered, false)
-    rows.push({ scheme, viewport: width, dock: Number(await dock.getAttribute('aria-valuenow')), ...facts, rest })
+    if (failed) {
+      const retry = page.getByRole('button', { name: 'Retry loading conversation', exact: true })
+      assert.ok((await retry.boundingBox()).width >= 24, 'Retry keeps its target')
+      const reason = page.getByTestId('thread-header').getByRole('button', { name: /subscription limit has been reached/ })
+      assert.ok((await reason.getAttribute('aria-label')).includes('previously loaded thread and captured changes remain available'))
+      const text = page.getByTestId('inline-sync-text')
+      assert.equal(await text.evaluate(node => getComputedStyle(node).textOverflow), 'ellipsis')
+      await reason.hover()
+      await page.getByRole('tooltip').filter({ hasText: 'previously loaded thread and captured changes remain available' }).waitFor()
+      await page.mouse.move(800, 500)
+      await page.getByRole('tooltip').waitFor({ state: 'hidden' })
+      if (width === 900) {
+        assert.equal(await page.getByRole('button', { name: 'Sync details for conversation', exact: true }).isVisible(), false)
+        assert.ok((await reason.innerText()).includes('Sync failed'))
+      }
+    }
+    rows.push({ scheme, failed, viewport: width, dock: Number(await dock.getAttribute('aria-valuenow')), ...facts, rest })
     if (out) {
-      const suffix = width === 900 ? '900-main-lane' : preferred === 720 ? '1440-max-dock' : '1440'
+      const suffix = failed ? width === 900 ? '900-sync-failed' : `1440-${preferred}-sync-failed` : width === 900 ? '900-main-lane' : preferred === 720 ? '1440-max-dock' : '1440'
       const image = await page.screenshot({ path: `${out}/app-${scheme}-${suffix}.png` })
-      if (width === 1440 && preferred === 440) {
+      if (!failed && width === 1440 && preferred === 440) {
         await page.getByRole('button', { name: 'Captured changes information' }).click()
         await page.getByTestId('diff-panel-info').waitFor({ state: 'visible' })
         await page.screenshot({ path: `${out}/app-${scheme}-1440-provenance.png` })
@@ -97,6 +113,13 @@ try {
         await page.getByRole('button', { name: 'Agent details', exact: true }).waitFor()
         await page.getByRole('tab', { name: 'Changes', exact: true }).waitFor()
         await page.screenshot({ path: `${out}/app-${scheme}-390-phone.png` })
+        await page.getByRole('button', { name: 'Agent details', exact: true }).click()
+        await page.getByRole('button', { name: 'Conversation menu', exact: true }).click()
+        for (const label of ['Resources', 'View KDL', 'Show all system events']) {
+          const item = page.getByRole(label === 'Show all system events' ? 'menuitemcheckbox' : 'menuitem', { name: label, exact: true })
+          assert.ok((await item.boundingBox()).height >= 44, `Phone menu touch target: ${label}`)
+        }
+        await page.keyboard.press('Escape')
         const reference = await readFile(`${out}/rm1-slice-${scheme}-1440.png`)
         await page.setViewportSize({ width: 2880, height: 940 })
         await page.setContent(`<html><body style="margin:0;background:${scheme === 'dark' ? '#111' : '#fff'};font:14px system-ui;color:${scheme === 'dark' ? '#fff' : '#111'}"><div style="display:flex"><figure style="margin:0"><figcaption style="height:40px;padding:10px;box-sizing:border-box">Live app · synthetic integration fixtures · ${scheme}</figcaption><img width="1440" src="data:image/png;base64,${image.toString('base64')}"></figure><figure style="margin:0"><figcaption style="height:40px;padding:10px;box-sizing:border-box">Accepted RM1 Slice reference · ${scheme}</figcaption><img width="1440" src="data:image/png;base64,${reference.toString('base64')}"></figure></div></body></html>`)

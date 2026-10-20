@@ -268,6 +268,12 @@ stable pane-header action slot; parked conversations contribute no header contro
 Portalled sync status uses `SyncLine.inline`: absent status takes no width, and hidden
 retry/details actions do not reserve their standalone slot. The native cluster therefore
 stays right-aligned next to the pane toggles; standalone/narrow sync layout is unchanged.
+When status is visible, inline sync is the shrinkable item: its single-line text
+ellipsizes, the full reason stays in its accessible name and tooltip, and Retry/Details
+do not shrink. Below a 440 px lane only the status glyph, “Sync failed” and Retry remain;
+the status tooltip retains the full reason. Narrow Conversation menu entries use the
+shared 44 px touch target. The browser regression covers retained subscription-limit
+failure at 360, 462 and 742 px lanes in both schemes, not only the live/empty status.
 History range, earlier-message and search navigation stay in the transcript viewport.
 
 ## Fractal web composer
