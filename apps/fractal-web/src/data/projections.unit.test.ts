@@ -86,15 +86,15 @@ test('projects authoritative native subagents, distinguishes absence and retains
     }],
   } satisfies AgentEncoded
   const projections = createProjections()
-  const first = projections.fleetFromAgents([decode(encoded)]).agents[0]!
+  const first = projections.fleetFromAgents([openAgent(decode(encoded))]).agents[0]!
   expect(first.subagents?.[0]).toMatchObject({
     id: 'reviewer', driver: 'omp', description: 'Review changes', session_id: 'session/review',
     started_at: '2026-10-18T12:00:00.000Z', lease_expires_at: '2026-10-18T12:01:00.000Z',
   })
   expect(first.subagents?.[0]).not.toHaveProperty('activity')
   expect(first.subagents?.[0]).not.toHaveProperty('usage')
-  expect(projections.fleetFromAgents([decode(encoded)]).agents[0]).toBe(first)
-  expect(projections.fleetFromAgents([decode({ ...encoded, subagents: [] })]).agents[0]).not.toBe(first)
+  expect(projections.fleetFromAgents([openAgent(decode(encoded))]).agents[0]).toBe(first)
+  expect(projections.fleetFromAgents([openAgent(decode({ ...encoded, subagents: [] }))]).agents[0]).not.toBe(first)
   expect(fleetFromAgents([row]).agents[0]?.subagents).toBeUndefined()
 })
 
