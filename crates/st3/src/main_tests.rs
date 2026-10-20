@@ -11,9 +11,9 @@ fn assistant_pairing_principal_defaults_to_chatgpt_and_accepts_mcp() {
             ["st", "devices", "--as", "person/robin", "pair", "--assistant"]
                 .into_iter().chain(flag),
         ).unwrap();
-        assert!(matches!(cli.command, Command::Devices {
-            command: DevicesCommand::Pair { assistant: Some(principal), .. }, ..
-        } if principal == expected));
+        assert!(matches!(cli.command, Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Pair { assistant: Some(principal), .. }), ..
+        }) if principal == expected));
     }
     assert!(Cli::try_parse_from([
         "st", "devices", "--as", "person/robin", "pair", "--assistant", "assistant/forged",
