@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { WorldDefinition } from '../kit/world.ts'
 import { syntheticFleetMidRefactor } from './fleetMidRefactor.ts'
 
@@ -10,3 +11,5 @@ export const failedSyncResyncCoded: WorldDefinition = {
   narrative: 'The refactor fleet retains its work and conversations while resync-coded affects synchronization.',
   selected: { sync: 'resync-coded' },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

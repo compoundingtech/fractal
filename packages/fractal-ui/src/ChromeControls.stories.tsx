@@ -57,7 +57,7 @@ function ChromeControlsStory({ scheme = 'dark', resourcesDisabledReason, convers
 const meta = {
   title: 'Fractal UI/Chrome controls',
   component: ChromeControlsStory,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'primitive', reason: "Exercises icon-button chrome, disabled reasons and menus independently of domain state." }, layout: 'fullscreen' },
   args: { scheme: 'dark', onResources: fn() },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof ChromeControlsStory>

@@ -1,22 +1,17 @@
 import * as React from 'react'
 import { composeStory, type Args, type Meta } from '@storybook/react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { flushSync } from 'react-dom'
+import { createRoot } from 'react-dom/client'
 
 import { ANCHOR_MS, catalog, DEFAULT_WORLD, foldSlice, manualClock, syncStatusAt, type SliceKind, type World } from '../index.ts'
-import { createReadTracker, type ServedSlices } from '../react/index.ts'
-import { scenarioGlobalTypes, type ScenarioParameter } from './index.ts'
+import { createReadTracker, ScenarioReadBoundary, type ServedSlices } from '../react/index.ts'
+import { scenarioGlobalTypes, validateScenarioDeclaration, type ScenarioMountedWindow, type ScenarioStoryExemption, type ScenarioStoryParameter } from './index.ts'
 import { resolveScenarioWorld, withScenario } from './runtime.ts'
 
 export { resolveScenarioWorld, withScenario } from './runtime.ts'
 
-/** Per-thread conversation mount policy; other slices retain their full marker contract. */
-export type ScenarioMountedWindow =
-  | { readonly _tag: 'all' }
-  | { readonly _tag: 'tail'; readonly turns: number; readonly historyBatch: number }
-
-export interface ScenarioStoryParameter extends ScenarioParameter {
-  readonly window?: ScenarioMountedWindow
-}
+export type { ScenarioMountedWindow, ScenarioStoryParameter } from './index.ts'
 
 type ConversationEntry = World['slices']['conversation']['state']['threads'][number]['items'][number]
 
@@ -52,6 +47,7 @@ export interface ScenarioStoryCheckResult {
   readonly failures: readonly ScenarioCheckFailure[]
   readonly checks: readonly { readonly check: ScenarioCheck; readonly _tag: 'Passed' | 'Failed' | 'Skipped'; readonly reason?: string }[]
   readonly reads: ReadonlySet<SliceKind>
+  readonly exemptions: readonly ScenarioStoryExemption[]
 }
 
 export interface ScenarioStoryCheckOptions<TArgs extends Args = Args> {
@@ -175,16 +171,59 @@ export const scenarioStoryCheck = <TArgs extends Args>(
   meta: Meta<TArgs>,
   options: ScenarioStoryCheckOptions<TArgs> = {},
 ): ScenarioStoryCheckResult => {
-  const parameter: ScenarioStoryParameter | undefined = story.parameters?.scenario === undefined
-    ? meta.parameters?.scenario
-    : { ...meta.parameters?.scenario, ...story.parameters.scenario }
-  if (parameter === undefined) throw new Error('scenarioStoryCheck requires parameters.scenario.slices')
+  const storyParameter: ScenarioStoryParameter | undefined = story.parameters?.scenario
+  const metaParameter: ScenarioStoryParameter | undefined = meta.parameters?.scenario
+  if (storyParameter !== undefined && metaParameter !== undefined && storyParameter._tag !== metaParameter._tag) {
+    throw new Error('a story must not change scenario mode from meta; declare the mode per story or split the meta')
+  }
+  const parameter = storyParameter?._tag === 'slices' && metaParameter?._tag === 'slices'
+    ? { ...metaParameter, ...storyParameter }
+    : storyParameter ?? metaParameter
+  const baselineArgs = Object.assign({}, meta.args, story.args, options.args)
+  validateScenarioDeclaration(parameter, baselineArgs)
+  if (parameter === undefined) throw new Error('Story requires parameters.scenario declaration')
+  if (parameter._tag !== 'slices') {
+    const Composed = composeStory(story, meta, { decorators: [withScenario] })
+    const violations: Error[] = []
+    const element = React.createElement(ScenarioReadBoundary, {
+      reason: `scenario ${parameter._tag} exemption`,
+      onViolation: (error) => { violations.push(error) },
+    }, React.createElement(Composed, baselineArgs))
+    if (typeof document === 'undefined') {
+      renderToStaticMarkup(element)
+    } else {
+      // Browser-only fixtures may use real portals; SSR cannot render that contract.
+      const container = document.createElement('div')
+      document.body.append(container)
+      const errors: unknown[] = []
+      const root = createRoot(container, { onUncaughtError: (error) => { errors.push(error) } })
+      try {
+        flushSync(() => { root.render(element) })
+      } finally {
+        try {
+          flushSync(() => { root.unmount() })
+        } finally {
+          container.remove()
+        }
+      }
+      if (errors.length > 0) throw errors[0]
+    }
+    // React error boundaries (client) and Suspense fallbacks (SSR) can swallow the throw.
+    // The enclosing boundary retains evidence independently of error propagation.
+    if (violations.length > 0) throw violations[0]
+    return {
+      _tag: 'Passed',
+      failures: [],
+      checks: ([1, 2, 3, 4, 5] as const).map((check) => ({ check, _tag: 'Skipped', reason: `${parameter._tag}: ${parameter.reason}` })),
+      reads: new Set(),
+      exemptions: [parameter],
+    }
+  }
   for (const [kind, reason] of Object.entries(parameter.invariant ?? {})) {
     if (typeof reason !== 'string' || reason.trim().length === 0) throw new Error(`scenario invariant ${kind} requires a reason`)
   }
   const now = options.scenarioNow ?? ANCHOR_MS
   const scenario = options.scenario ?? DEFAULT_WORLD
-  const baselineArgs = Object.assign({}, meta.args, story.args, options.args)
   const failures: ScenarioCheckFailure[] = []
   const readKinds = new Set<SliceKind>()
   const skipped: Partial<Record<ScenarioCheck, string>> = {}
@@ -297,6 +336,7 @@ export const scenarioStoryCheck = <TArgs extends Args>(
       ? { check, _tag: 'Failed' }
       : skipped[check] === undefined ? { check, _tag: 'Passed' } : { check, _tag: 'Skipped', reason: skipped[check] }),
     reads: readKinds,
+    exemptions: [],
   }
   if (options.assert === true && result._tag === 'Failed') throw new ScenarioStoryCheckError(result)
   return result
