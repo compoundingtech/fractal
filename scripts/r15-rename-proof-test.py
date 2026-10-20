@@ -18,6 +18,27 @@ loader.exec_module(proof)
 
 
 class RenameProof(unittest.TestCase):
+    def test_docs_preserve_executables_and_command_guard_rejects_crate_names(self):
+        spec = importlib.util.spec_from_file_location('rename_docs', ROOT / 'scripts/r15-rename-docs.py')
+        docs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(docs)
+        old, new = 'st-fabric-adapter', 'fractal-' + 'fabric-adapter'
+        text = f'{old} --once\n`{old}` is a separate process\n~/.local/state/{old}\ncargo test -p {old}\n'
+        expected = text.replace(f'-p {old}', f'-p {new}')
+        self.assertEqual(docs.rewrite(text), expected)
+        self.assertEqual(docs.rewrite(expected), expected)
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'scripts').mkdir()
+            (tree / 'docs').mkdir()
+            path = tree / 'docs/adapter.md'
+            path.write_text(expected)
+            self.assertEqual(proof.executable_command_guard(tree, {old}, {old: new})['result'], 'PASS')
+            for command in (f'{new} --once', f'`{new} --status`',
+                            f'subprocess.run(["{new}", "--once"])'):
+                path.write_text(command)
+                self.assertEqual(proof.executable_command_guard(tree, {old}, {old: new})['result'], 'FAIL')
+
     def test_staged_npm_authority_requires_declared_path_and_pinned_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)

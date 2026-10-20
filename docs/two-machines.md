@@ -64,19 +64,19 @@ With their user services installed, Tailscale, Fabric, and the Fractal replicati
 
 ### Reconcile Fabric runtime policy
 
-`fractal-fabric-adapter` is a separate process, not part of the st daemon. Start Fabric
+`st-fabric-adapter` is a separate process, not part of the st daemon. Start Fabric
 with `--runtime-peers`, then run the adapter on each machine:
 
 ```sh
-fractal-fabric-adapter --once
-fractal-fabric-adapter --status
+st-fabric-adapter --once
+st-fabric-adapter --status
 ```
 
 Without `--once`, it polls every five seconds and prints a JSON status after each
 attempt. `--st-socket`, `--fabric-socket`, and `--state-dir` select isolated daemons
 and adapter state; the defaults are `$XDG_RUNTIME_DIR/st3.sock`,
 `$FABRIC_HOME/run/control.sock` (or `~/.local/share/fabric/run/control.sock`), and
-`~/.local/state/fractal-fabric-adapter`. Keep that state directory across restarts and
+`~/.local/state/st-fabric-adapter`. Keep that state directory across restarts and
 use only one adapter per state directory.
 
 The adapter reads the local [membership and leave-state contract](st3/replication.md).

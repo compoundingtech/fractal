@@ -36,9 +36,20 @@ PACKAGES = {
     '@smalltalk/st3-views': '@fractal/views',
     '@smalltalk/fractal-ui': '@fractal/ui', '@st3/sdk': '@fractal/sdk',
 }
+PROTECTED_EXECUTABLES = {
+    'st2', 'st3', 'stui', 'st-chatgpt', 'st3-client-codegen',
+    'st3-client-tui', 'st3-fixture', 'st3-migrate', 'st-fabric-adapter',
+}
 
 
 def rewrite(text):
+    # Repair earlier output at reviewed runtime contexts, not Cargo selectors.
+    text = re.sub(r'(?<![\w./-])fractal-fabric-adapter(?=\s+--)',
+                  'st-fabric-adapter', text)
+    text = text.replace('`fractal-fabric-adapter` is a separate process',
+                        '`st-fabric-adapter` is a separate process')
+    text = text.replace('~/.local/state/fractal-fabric-adapter',
+                        '~/.local/state/st-fabric-adapter')
     # Historical Clippy ancestry examples name the old Git baseline, not an alias.
     historical = {}
     for old, new in CRATES.items():
@@ -62,9 +73,10 @@ def rewrite(text):
         text = re.sub(r'(?P<flag>(?:-p|--package|--exclude)[ =]+)' + re.escape(old) + r'(?![\w-])',
                       lambda match: match['flag'] + new, text)
         text = text.replace(old + '/test-support', new + '/test-support')
-        if old not in ('st3', 'st2', 'stui'):
+        if old not in PROTECTED_EXECUTABLES:
             # Do not turn socket/state names such as st3-client.sock into package names.
             text = re.sub(r'(?<![\w.-])' + re.escape(old) + r'(?![\w.-])', new, text)
+        if old not in ('st3', 'st2', 'stui'):
             text = re.sub(r'\b' + re.escape(old.replace('-', '_')) + r'(?=::)', new.replace('-', '_'), text)
     text = re.sub(r'\bst3(?=::)', 'fractal_daemon', text)
     text = re.sub(r'\bst2(?=::)', 'fractal_legacy_runner', text)
