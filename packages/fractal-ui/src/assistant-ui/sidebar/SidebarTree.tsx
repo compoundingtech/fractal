@@ -5,6 +5,7 @@ import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collectio
 import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
 import { Icon } from '../composition/Icons'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 export interface SidebarTreeItem<T> {
   readonly id: Key
@@ -18,6 +19,11 @@ export interface SidebarTreeItem<T> {
    * so the name holds while memoized row content skips rendering after a reposition.
    */
   readonly accessibleName?: string
+  /**
+   * A display-only row: RAC neither focuses, activates nor expands it, so it is never a press target. Its
+   * disclosure, if any, is inert too; parents of enabled rows leave this unset.
+   */
+  readonly isDisabled?: boolean
 }
 export interface SidebarTreeHandle { reveal(key: Key, options?: { readonly anchor: false }): void }
 export interface SidebarTreeProps<T extends SidebarTreeItem<T>> {
@@ -114,11 +120,14 @@ const copyButtonSlots: React.ContextType<typeof ButtonContext> = { slots: { [DEF
 const copyCheckboxSlots: React.ContextType<typeof CheckboxContext> = { slots: { [DEFAULT_SLOT]: {}, selection: {} } }
 const copyCheckboxFieldSlots: React.ContextType<typeof CheckboxFieldContext> = { slots: { [DEFAULT_SLOT]: {}, selection: {} } }
 /**
- * Every row reserves one `g.icon` disclosure gutter before its content, and a parent's chevron sits in it absolutely at
- * the row's depth indent. Same-depth parents and leaves therefore start their content on one edge at one width, and each
- * depth guide runs on its ancestor chevron's centre. Logical insets keep the gutter on the inline-start side in RTL.
+ * Every row reserves one disclosure gutter (`--sidebar-disclosure`) before its content, and a parent's chevron sits in it
+ * absolutely at the row's depth indent. Same-depth parents and leaves therefore start their content on one edge at one
+ * width, and each depth guide runs on its ancestor chevron's centre. Logical insets keep the gutter on the inline-start
+ * side in RTL. The gutter is `g.icon` for fine pointers and `g.touchTarget` in a narrow host or under a coarse primary
+ * pointer, so the chevron is a 44px square that never reaches into the row's own content or actions.
  */
 const depthIndent = (depth: number) => `calc(${s.lg} * ${depth})`
+const disclosureGutter = 'var(--sidebar-disclosure)'
 
 interface RowContentProps<T extends SidebarTreeItem<T>> {
   readonly item: T
@@ -140,6 +149,7 @@ const RowContent = React.memo(function RowContent<T extends SidebarTreeItem<T>>(
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
 export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProps<T>) {
   const { direction } = useLocale()
+  const narrow = React.useContext(NarrowLayoutContext)
   const layout = React.useMemo(() => new SidebarTreeLayout(layoutOptions), [])
   const rowLayoutOptions = React.useMemo(() => ({ rowContent: props.renderRow }), [props.renderRow])
   const tree = React.useRef<HTMLDivElement>(null)
@@ -424,20 +434,21 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const row = (item: T, expanded: boolean, pinned: boolean) => {
     const glyph = <Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />
     const inset = { insetInlineStart: depthIndent(item.depth) }
-    return <div {...stylex.props(styles.row)} style={{ paddingInlineStart: `calc(${depthIndent(item.depth)} + ${g.icon})` }}>
-      {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden data-sidebar-guide {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${depthIndent(depth)} + ${g.icon} / 2)` }} />)}
-      {item.children?.length ? pinned
+    const disclosure = Boolean(item.children?.length)
+    return <div {...stylex.props(styles.row, disclosure && styles.disclosureRow)} style={{ paddingInlineStart: `calc(${depthIndent(item.depth)} + ${disclosureGutter})` }}>
+      {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden data-sidebar-guide {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${depthIndent(depth)} + ${disclosureGutter} / 2)` }} />)}
+      {disclosure ? pinned
         ? <span data-pinned-chevron data-sidebar-disclosure {...stylex.props(styles.chevron, direction === 'rtl' && styles.mirrored)} style={inset}>{glyph}</span>
         : <Button slot="chevron" data-sidebar-disclosure {...stylex.props(styles.chevron, direction === 'rtl' && styles.mirrored)} style={inset}>{glyph}</Button> : null}
       <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
       {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
     </div>
   }
-  const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
+  const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} isDisabled={item.isDisabled} data-sidebar-tree-key={String(item.id)} data-sidebar-disabled={item.isDisabled || undefined} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible, isDisabled }) => stylex.props(styles.item, isDisabled ? styles.disabled : isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
     <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]}>{renderItem}</Collection>
   </TreeItem>
-  return <div {...stylex.props(styles.root, props.style)} data-sidebar-drag-active={dragging || undefined} onKeyDownCapture={event => { pending.current = undefined; keyboard(event) }} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
+  return <div {...stylex.props(styles.root, narrow && styles.narrow, props.style)} data-sidebar-drag-active={dragging || undefined} onKeyDownCapture={event => { pending.current = undefined; keyboard(event) }} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
     const target = (event.target as HTMLElement).closest('[data-sidebar-tree-key]')
     const key = target?.getAttribute('data-sidebar-tree-key')
     const item = model.visible.find(item => String(item.id) === key)
@@ -452,6 +463,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     <div aria-hidden="true" data-sidebar-pinned-stack data-top-key={snapshot.top} {...stylex.props(styles.stack)} style={{ height: snapshot.height }}>
       {snapshot.pins.map(pin => <div key={pin.item.id} {...stylex.props(styles.pinSlot)} style={{ height: pin.height }}><div draggable={false} data-pinned-key={String(pin.item.id)} data-pinned-ancestors={(pin.breadcrumb ?? [pin.item]).map(item => item.id).join(',')} {...stylex.props(styles.pin, dragging && styles.dragPassthrough)} style={{ height: pin.height, transform: `translateY(calc(${pin.offset} * ${g.hairline}))` }} onClick={event => {
         const target = event.target as HTMLElement
+        if (pin.item.isDisabled) return
         if (target.closest('[data-pinned-toggle]')) { const keys = new Set(props.expandedKeys); keys.has(pin.item.id) ? keys.delete(pin.item.id) : keys.add(pin.item.id); props.onExpandedChange(keys) }
         else focusReal(pin.item.id)
       }} onContextMenu={event => props.onRowContextMenu?.(pin.item, event)}>
@@ -464,14 +476,22 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   </div>
 }
 const styles = stylex.create({
-  root: { position: 'relative', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', color: ink.fg },
+  // `--sidebar-disclosure`: the inline-start gutter and the chevron's hit width; see `depthIndent`.
+  root: { '--sidebar-disclosure': { default: g.icon, '@media (pointer: coarse)': g.touchTarget }, position: 'relative', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', color: ink.fg },
+  narrow: { '--sidebar-disclosure': g.touchTarget },
   tree: { height: '100%', minHeight: 0, overflowY: 'auto', outline: 'none' },
   item: { outline: 'none' },
   focused: { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})`, outlineColor: ink.fgMuted },
+  // Display-only rows are never a press target (no pointer cursor, focus ring or pressed state) yet keep full ink:
+  // display-only is not dimmed disabled.
+  disabled: { cursor: 'default', opacity: 1, color: 'inherit' },
   row: { position: 'relative', display: 'flex', alignItems: 'center', minHeight: g.controlSm, minWidth: 0, boxSizing: 'border-box' },
+  // A touch-sized chevron fits inside its own row, so it never overlaps the next row's content or actions.
+  disclosureRow: { minHeight: `max(${g.controlSm}, ${disclosureGutter})` },
   guide: { position: 'absolute', top: 0, bottom: 0, width: g.hairline, backgroundColor: border.borderStrong, pointerEvents: 'none' },
-  // Absolute in the row's gutter, on line one: `g.controlSm` is the kit's minimum row and a two-line row's first line.
-  chevron: { position: 'absolute', top: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.controlSm, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
+  // Absolute in the row's gutter from the row's top. The 12px glyph stays centred on line one (`g.controlSm`, the kit's
+  // minimum row and a two-line row's first line) while a touch-sized hit area extends below it.
+  chevron: { position: 'absolute', top: 0, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', boxSizing: 'border-box', width: disclosureGutter, height: `max(${g.controlSm}, ${disclosureGutter})`, padding: 0, paddingTop: `calc((${g.controlSm} - 12px) / 2)`, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
   mirrored: { transform: 'scaleX(-1)' },
   content: { flex: 1, minWidth: 0 },
   stack: { position: 'absolute', top: 0, insetInline: 0, zIndex: 1, pointerEvents: 'none', overflow: 'hidden', maxHeight: '40%' },
@@ -481,7 +501,7 @@ const styles = stylex.create({
   dragPassthrough: { pointerEvents: 'none' },
   dropIndicator: { position: 'absolute', insetInlineStart: 0, boxSizing: 'border-box', zIndex: 3, pointerEvents: 'none', borderStyle: 'solid', borderWidth: g.focusRing, borderColor: accent.primary },
   copy: { height: '100%', pointerEvents: 'none' },
-  toggleProxy: { position: 'absolute', top: 0, width: g.icon, height: g.controlSm },
+  toggleProxy: { position: 'absolute', top: 0, width: disclosureGutter, height: `max(${g.controlSm}, ${disclosureGutter})` },
   breadcrumb: { height: '100%', display: 'flex', alignItems: 'center', paddingInline: s.md, overflow: 'hidden', fontSize: 'inherit', color: ink.fgMuted },
   // text-overflow paints only in a block container; a flex container's anonymous text is cut mid-glyph.
   breadcrumbText: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },

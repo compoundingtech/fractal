@@ -10,7 +10,6 @@ export type SidebarAgent = {
   /** Native children belong to this seat, not the arrangement roster. */
   readonly parent?: string
   readonly childId?: string
-  readonly activationRef?: string
 }
 export type SidebarFolder = { readonly _tag: 'Folder'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
 export type SidebarGroup = { readonly _tag: 'Group'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }

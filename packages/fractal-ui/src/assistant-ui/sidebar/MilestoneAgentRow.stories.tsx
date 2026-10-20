@@ -62,16 +62,19 @@ function TreeAndStandalone() {
 }
 
 const noSessionChild: Row = { ...subagent, ref: 'agent/parent/subagent/no-session', title: 'Child without session', status: 'unobserved', statusLabel: 'Unobserved', subagent: { id: 'no-session', lease_expires_at: '2026-10-17T10:00:00Z' } }
-const actionTreeItems: readonly Item[] = [toItem({ ...parent, children: [...parent.children, noSessionChild] }, 0)]
+/** A display-only subagent: the tree row is disabled and the row drops its menu, hover and active presentation. */
+const displayOnlyChild = parent.children[0]!
+const actionTreeItems: readonly Item[] = [toItem({ ...parent, children: [...parent.children, noSessionChild] }, 0)].map(root => ({ ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true } : child) }))
 
 function TreeWithActions({ phone = false }: { readonly phone?: boolean }) {
   const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([parent.ref]))
   const [opened, setOpened] = React.useState<string>()
+  const [selected, setSelected] = React.useState<string>()
   // Stable callbacks: the row is memoized.
   const onOpen = React.useCallback((row: Row) => setOpened(row.ref), [])
-  const renderRow = React.useCallback((item: Item) => <MilestoneAgentRow row={item.row} now={storyNow} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />, [onOpen])
-  return <section aria-label="With actions" data-host="actions" data-opened={opened} {...stylex.props(styles.column, styles.tree, phone && styles.phoneColumn)}>
-    <SidebarTree aria-label="Agents with actions" items={actionTreeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow}
+  const renderRow = React.useCallback((item: Item) => <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />, [onOpen])
+  return <section aria-label="With actions" data-host="actions" data-opened={opened} data-selected={selected} {...stylex.props(styles.column, styles.tree, phone && styles.phoneColumn)}>
+    <SidebarTree aria-label="Agents with actions" items={actionTreeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow} onAction={key => setSelected(String(key))}
       onRowContextMenu={(_item, event) => { if (openAgentRowMenu(event.currentTarget)) event.preventDefault() }} />
   </section>
 }
@@ -297,15 +300,76 @@ export const AllStates: StoryObj<{ scheme: Scheme }> = {
 
 export const AllStatesLight: StoryObj<{ scheme: Scheme }> = { ...AllStates, name: 'All G3 states · live default width · light', args: { scheme: 'light' } }
 
+const tap = (target: Element) => userEvent.pointer([{ keys: '[TouchA>]', target }, { keys: '[/TouchA]', target }])
 const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  const host = canvasElement.querySelector<HTMLElement>('[data-host="actions"]')!
+  const childTitles = [...parent.children, noSessionChild].map(child => child.title)
+  // The parent's disclosure is a 44px square in the row's own inline-start gutter: inside the row, before its content,
+  // clear of the trailing actions column, and every corner hit-tests to it.
+  const parentRow = await waitFor(() => canvas.getByRole('row', { name: parent.title }))
+  await expect(parentRow).toHaveAttribute('aria-expanded', 'true')
+  const disclosure = parentRow.querySelector<HTMLElement>('[data-sidebar-disclosure]')!
+  const hit = disclosure.getBoundingClientRect()
+  const row = parentRow.getBoundingClientRect()
+  const content = parentRow.querySelector('[data-milestone-row]')!.getBoundingClientRect()
+  const parentActions = within(parentRow).getByRole('button', { name: `Actions for ${parent.title}` }).getBoundingClientRect()
+  await expect(hit.width).toBeGreaterThanOrEqual(44)
+  await expect(hit.height).toBeGreaterThanOrEqual(44)
+  await expect(hit.top).toBeGreaterThanOrEqual(row.top - 0.5)
+  await expect(hit.bottom).toBeLessThanOrEqual(row.bottom + 0.5)
+  await expect(hit.right).toBeLessThanOrEqual(content.left + 0.5)
+  await expect(hit.right).toBeLessThanOrEqual(parentActions.left)
+  for (const [x, y] of [[hit.left + 1, hit.top + 1], [hit.right - 1, hit.top + 1], [hit.left + 1, hit.bottom - 1], [hit.right - 1, hit.bottom - 1]] as const) await expect(disclosure.contains(document.elementFromPoint(x, y))).toBe(true)
+  // The painted chevron keeps the desktop position: centred on line one with the status glyph.
+  const chevronGlyph = disclosure.querySelector('svg')!.getBoundingClientRect()
+  const status = parentRow.querySelector('[data-row-column="status"]')!.getBoundingClientRect()
+  await expect(Math.abs((chevronGlyph.top + chevronGlyph.bottom) / 2 - (status.top + status.bottom) / 2)).toBeLessThanOrEqual(1)
+  // Tap collapses: every child row leaves the tree. Tap again expands: each child is back and visible.
+  for (const title of childTitles) await expect(canvas.getByRole('row', { name: title })).toBeVisible()
+  await tap(disclosure)
+  await waitFor(() => {
+    expect(canvas.getByRole('row', { name: parent.title })).toHaveAttribute('aria-expanded', 'false')
+    for (const title of childTitles) expect(canvas.queryByRole('row', { name: title })).toBeNull()
+  })
+  await tap(canvas.getByRole('row', { name: parent.title }).querySelector('[data-sidebar-disclosure]')!)
+  await waitFor(() => {
+    expect(canvas.getByRole('row', { name: parent.title })).toHaveAttribute('aria-expanded', 'true')
+    for (const title of childTitles) expect(canvas.getByRole('row', { name: title })).toBeVisible()
+  })
+  // A display-only child is no press target: no button, link or menu, no tab or arrow stop, and click, double-click and
+  // Enter keep both the selection (a sibling, so a press reaching the parent would also show) and the open conversation.
+  const sibling = parent.children[1]!
+  await tap(canvas.getByRole('row', { name: sibling.title }).querySelector('[data-row-column="title"]')!)
+  await waitFor(() => expect(host).toHaveAttribute('data-selected', sibling.ref))
+  await expect(host).not.toHaveAttribute('data-opened')
+  const displayOnly = canvas.getByRole('row', { name: displayOnlyChild.title })
+  await expect(displayOnly).toHaveAttribute('aria-disabled', 'true')
+  await expect(displayOnly).not.toHaveAttribute('tabindex', '0')
+  for (const role of ['button', 'link', 'menu'] as const) await expect(within(displayOnly).queryAllByRole(role)).toHaveLength(0)
+  await expect(displayOnly.querySelector('[data-agent-menu], [data-row-action]')).toBeNull()
+  // Display-only is not disabled-looking: full opacity and the same title ink as an enabled sibling.
+  const titleInk = (title: string) => getComputedStyle(canvas.getByRole('row', { name: title }).querySelector('[data-row-column="title"]')!).color
+  await expect(getComputedStyle(displayOnly).opacity).toBe('1')
+  await expect(titleInk(displayOnlyChild.title)).toBe(titleInk(sibling.title))
+  await userEvent.click(displayOnly)
+  await userEvent.dblClick(displayOnly)
+  displayOnly.focus()
+  await expect(displayOnly).not.toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect(host).toHaveAttribute('data-selected', sibling.ref)
+  await expect(host).not.toHaveAttribute('data-opened')
+  // Arrow navigation from the parent steps over the display-only child to the next enabled sibling.
+  canvas.getByRole('row', { name: parent.title }).focus()
+  await userEvent.keyboard('{ArrowDown}')
+  await waitFor(() => expect(canvas.getByRole('row', { name: sibling.title })).toHaveFocus())
   const trigger = await waitFor(() => canvas.getByRole('button', { name: `Actions for ${noSessionChild.title}` }))
   // No mouse hover/focus setup: the narrow action must already be painted and touch-sized.
   await expect(trigger).toBeVisible()
   await expect(getComputedStyle(trigger).opacity).toBe('1')
   await expect(trigger.getBoundingClientRect().width).toBeGreaterThanOrEqual(44)
   await expect(trigger.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
-  await userEvent.pointer([{ keys: '[TouchA>]', target: trigger }, { keys: '[/TouchA]', target: trigger }])
+  await tap(trigger)
   const menu = await waitFor(() => within(document.body).getByRole('menu', { name: `Actions for ${noSessionChild.title}` }))
   await expect(within(menu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAttribute('aria-disabled', 'true')
   await waitFor(() => {
@@ -318,7 +382,7 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
     for (const item of within(menu).getAllByRole('menuitem')) expect(item.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
   })
   const details = within(menu).getByRole('menuitem', { name: 'Reported agent details' })
-  await userEvent.pointer([{ keys: '[TouchA>]', target: details }, { keys: '[/TouchA]', target: details }])
+  await tap(details)
   await waitFor(() => expect(within(document.body).getByRole('dialog', { name: `Reported details for ${noSessionChild.title}` })).toBeVisible())
   await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
   await userEvent.keyboard('{Escape}')
@@ -327,7 +391,7 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
 
 export const PhoneTouchTargets: StoryObj<{ scheme: Scheme }> = {
   tags: ['critical'], name: 'Phone · native RM1 actions without hover',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px frame and a child without a conversation verify always-visible 44px touch targets, menu bounds and details access without hover.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px frame, a parent with a display-only child and a child without a conversation verify the 44px disclosure collapsing and expanding by tap, display-only rows ignoring every activation, always-visible 44px touch targets, menu bounds and details access without hover.' } },
   args: { scheme: 'dark' },
   render: ({ scheme }) => <main {...stylex.props(styles.root, styles.phoneFrame, scheme === 'light' && lightTheme)}><NarrowLayoutContext.Provider value={true}><ThemePortal><TreeWithActions phone /></ThemePortal></NarrowLayoutContext.Provider></main>,
   play: phoneTouchPlay,
