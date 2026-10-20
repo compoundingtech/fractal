@@ -196,7 +196,7 @@ describe('live header parity', () => {
     expect(document.querySelector('[data-testid="declaration-dialog"] h2')?.textContent).toBe(agent.id)
     await click('Close declaration')
     await choose('Resources')
-    expect(document.querySelector('[role="dialog"][aria-label="Agent resources"]')?.textContent).toContain('Observed project notes')
+    expect(document.querySelector('aside[aria-label="Agent resources"]')?.textContent).toContain('Observed project notes')
     await click('Close resources')
   })
   it('opens the same declaration from the agent row context menu', async () => {

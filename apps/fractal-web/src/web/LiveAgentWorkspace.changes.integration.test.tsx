@@ -128,6 +128,7 @@ const openChanges = async () => {
     ?? [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab => tab.textContent?.trim() === 'Changes')
   expect(changes).not.toBeNull()
   await act(async () => changes!.click())
+  await act(async () => vi.dynamicImportSettled())
 }
 const key = async (value: string) => {
   await act(async () => separator().dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true })))
