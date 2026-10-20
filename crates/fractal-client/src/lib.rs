@@ -41,8 +41,8 @@ pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-const RAW_TERMINAL_SUBPROTOCOL: &str = "st3.client.pty.v0";
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
+const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
 /// Resolve the local daemon socket in the same order as the `st3` CLI.
@@ -3327,10 +3327,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // WebSocket names switch independently of the unchanged HTTP headers.
             let protocols = capability.map_or_else(
                 || RAW_TERMINAL_SUBPROTOCOL.to_owned(),
-                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             );
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
@@ -3484,10 +3484,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.collections.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.collections.v0"),
             );
             Ok(request)
         };
@@ -3589,10 +3589,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.conversation.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.conversation.v0"),
             );
             Ok(request)
         };
@@ -4031,7 +4031,7 @@ fn append_bounded(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(),
     Ok(())
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+// WebSocket-only sender cutover; HTTP header names remain deployed spellings.
 fn websocket_request(
     url: &str,
     credential: Option<&str>,
@@ -4050,7 +4050,7 @@ fn websocket_request(
     request.headers_mut().insert(
         hyper::header::SEC_WEBSOCKET_PROTOCOL,
         hyper::header::HeaderValue::from_str(&match stream_capability {
-            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             None => TERMINAL_SUBPROTOCOL.into(),
         })
         .map_err(|error| ClientError::Protocol(error.to_string()))?,
@@ -4081,8 +4081,8 @@ fn websocket_request(
 }
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
-// Sunset: 60 days after the first release shipping this bridge. Requests still offer
-// only the deployed spelling; tungstenite must continue rejecting unoffered protocols.
+// Sunset: 2026-11-01 (#3032 R5). Senders offer only Fractal protocols after every
+// host runs #3430; tungstenite must continue rejecting unoffered protocols.
 fn selected_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Option<&str> {
@@ -4098,7 +4098,13 @@ fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
     selected == expected
         || expected
             .strip_prefix("st3.")
-            .is_some_and(|suffix| selected.strip_prefix("fractal.") == Some(suffix))
+            .or_else(|| expected.strip_prefix("fractal."))
+            .is_some_and(|suffix| {
+                selected
+                    .strip_prefix("st3.")
+                    .or_else(|| selected.strip_prefix("fractal."))
+                    == Some(suffix)
+            })
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
@@ -4112,8 +4118,8 @@ mod wire_receiver_tests {
             &tokio_tungstenite::tungstenite::handshake::client::Response,
         ) -> Result<(), ClientError>;
         let receivers: [(&str, Validator); 4] = [
-            (RAW_TERMINAL_SUBPROTOCOL, validate_raw_terminal_subprotocol),
-            (TERMINAL_SUBPROTOCOL, validate_terminal_subprotocol),
+            ("st3.client.pty.v0", validate_raw_terminal_subprotocol),
+            ("st3.client.terminal.v0", validate_terminal_subprotocol),
             (
                 "st3.client.conversation.v0",
                 validate_conversation_subprotocol,
@@ -4184,7 +4190,7 @@ mod wire_receiver_tests {
             assert_eq!(decoded.error_version, error);
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
-        // Alias readers must never change emitted request bytes.
+        // WebSocket sender cutover does not change the HTTP API/error versions.
         let request = websocket_request(
             "ws://localhost/stream",
             None,
@@ -4199,6 +4205,20 @@ mod wire_receiver_tests {
         );
         assert_eq!(API_VERSION, "st3.client.v0");
         assert_eq!(ERROR_VERSION, "st3.client.error.v0");
+        assert_eq!(TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0");
+        assert_eq!(RAW_TERMINAL_SUBPROTOCOL, "fractal.client.pty.v0");
+        let request = websocket_request(
+            "ws://localhost/stream",
+            None,
+            Some("secret"),
+            None,
+            "custom-subjects.v1, conversation-blocks.v1",
+        )
+        .unwrap();
+        assert_eq!(
+            request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
+            "fractal.client.terminal.v0, fractal.cap.secret"
+        );
     }
 }
 
@@ -5285,7 +5305,7 @@ mod tests {
                                 .unwrap()
                                 .to_str()
                                 .unwrap(),
-                            format!("{TERMINAL_SUBPROTOCOL}, st3.cap.fixture-stream-capability-0000000000000000")
+                            format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.fixture-stream-capability-0000000000000000")
                         );
                         response.headers_mut().insert(
                             hyper::header::SEC_WEBSOCKET_PROTOCOL,

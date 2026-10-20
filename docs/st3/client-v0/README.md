@@ -23,15 +23,54 @@ hand.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
-The generated sender constants and request defaults remain `st3.*`. A sender
-cutover must offer both WebSocket subprotocols, Fractal first: servers select
-`fractal.*` only when offered, and clients retain the WebSocket library's
-offered-protocol guard. Rust and Swift models keep their existing lossless string
-decoding behavior; accepting aliases does not reject previously tolerated versions.
-The legacy terminal route likewise selects either `st3.terminal.v1` or
-`fractal.terminal.v1` and still permits upgrades with no supported subprotocol.
+WebSocket senders now offer only the corresponding `fractal.client.*` protocol
+and `fractal.cap.*` capability. **Land and deploy this sender cutover only after
+every receiving fleet host runs #3430 (or a later accepting release).** That
+receiver accepts either single alias, not both surface aliases in one offer:
+collections/conversation require one surface; terminal requires one surface
+plus one capability (or just the surface for direct PEEK). An old second offer
+would therefore not bridge a receiver missing alias support.
+
+Old-only clients continue connecting to the accepting receivers. New senders
+do not connect to pre-alias receivers and do not retry with old names. Rollback
+across that boundary restores old-only senders before downgrading receivers.
+The acceptance bridge is
+`arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both`, with the #3032 R5 hard
+sunset of 2026-11-01. Clients retain the WebSocket library's offered-protocol
+guard; server responses selecting an unoffered protocol remain invalid.
+Rust and Swift models keep their existing lossless string decoding behavior.
+The legacy terminal connector offers `fractal.terminal.v1`; its accepting route
+continues supporting old `st3.terminal.v1` clients and protocol-free upgrades.
 This transport vocabulary does not rename signed peer envelope tags, signature
 domains, durable identities, JSON Schema annotations or local provenance labels.
+
+### R9 WebSocket sender inventory
+
+| Sender owner | Surfaces | Source/provenance |
+| --- | --- | --- |
+| Generated Rust client | raw PTY (including direct PEEK), terminal screen, conversation, collections | `crates/fractal-client-codegen/templates/lib.rs.in` → `crates/fractal-client/src/lib.rs`; constants in `templates/generated.rs.in` → `src/generated.rs` |
+| Generated TypeScript client | terminal screen, conversation, collections | `crates/fractal-client-codegen/templates/Client.ts.in` → `clients/typescript/fractal-client/Client.generated.ts` |
+| Generated Swift client | terminal screen, conversation, collections, native collection windows | `crates/fractal-client-codegen/templates/Client.swift.in` → `clients/swift/FractalClient/Sources/FractalClient/Client.swift`; terminal constant in `templates/Models.swift.in` → `Sources/FractalClient/Models.swift` |
+| Peer raw-lease relay | raw PTY with capability | `crates/fractal-peer/src/peer/raw_lease.rs` |
+| Secrets terminal connector | legacy terminal framing, protocol `fractal.terminal.v1` | `crates/fractal-secrets/src/client.rs` |
+| Web early connection | collections before the application loads | `apps/fractal-web/src/web/index.html` |
+
+All generated artifacts continue to come from `cargo run -p fractal-client-codegen`;
+templates are the authority and generated provenance markers remain intact.
+The SDK browser socket (`apps/fractal-web/packages/fractal-sdk/src/effect/trace.ts`)
+and iOS native adapter (`apps/ios/collectionSocket.ts`) forward the generated
+client's protocol array rather than owning protocol spellings.
+Scenario replay (`clients/typescript/fractal-scenarios/src/replay/index.ts`) already
+accepts equivalent offers for one surface and identical capability aliases.
+Test-only protocol writers include the Rust raw-terminal activity/handshake
+fixtures, TypeScript contract handshake fixture, Swift request tests,
+`apps/ios/fakeFeed.mjs`, `apps/ios/collectionSocket.test.mjs` and
+`apps/fractal-web/scripts/early-connect-proof.mjs`; sender expectations use the
+new protocol spellings. Old-only receiver fixtures remain useful compatibility
+coverage and are not globally renamed.
+HTTP header names and API/error/visualization version writers are a separate
+cutover scope: this change leaves those names and all cryptographic and
+signed-envelope bytes unchanged.
 
 
 `ResourceHeader.operational` describes current versus historical state, actionability, reasons,
@@ -407,7 +446,7 @@ Rust exposes `Client::resources_list` with `ResourcesFilter` and a typed resourc
 Swift and TypeScript expose `resourcesList` with equivalent typed filters and items. Resource
 observations are distinct from operational resources: their `kind` is an open resource-vocabulary
 string, not the operational resource union's discriminator. This list route does not add a
-`resources` subscription to `st3.client.collections.v0`.
+`resources` subscription to `fractal.client.collections.v0`.
 
 
 ### Seat workspace directories
@@ -1434,7 +1473,7 @@ must distinguish unavailable, ungranted, and unsupported features.
 ## Conversation stream
 
 `GET /v1/client/conversations/{id}/stream` opens one authenticated WebSocket
-with subprotocol `st3.client.conversation.v0`. A client may pass `after=CURSOR` to
+with subprotocol `fractal.client.conversation.v0`. A client may pass `after=CURSOR` to
 resume. `{id}` may be a session ID, an agent peer ID (resolved to its current
 session), or a st message ID with a session peer. A cursor remains tied to the
 resolved session, so a new agent incarnation needs a fresh stream.
@@ -1504,7 +1543,7 @@ lease ends at `expires_at`, at `terminal.detach`, or when the runtime incarnatio
 attachment then reports `state` `expired` or `detached` with no capability and `retry_hint`
 `reattach`: attach again with a new idempotency key. A stream already open is not cut off when its
 lease expires. A client opens the URL on the same Unix or Fabric-loopback gateway with WebSocket
-subprotocol `st3.client.terminal.v0`. Authentication, capability validation, and
+subprotocol `fractal.client.terminal.v0`. Authentication, capability validation, and
 runtime-incarnation validation happen before upgrade.
 
 The WebSocket then stays open. The first message is the current screen. After that the server sends
@@ -1684,12 +1723,12 @@ and consumption. Full admission returns HTTP 429 `rate-limited` rather than evic
 consume an outstanding token or wait for expiry before requesting another.
 
 Open `/v1/client/terminals/{id}/raw-stream?incarnation=...&mode=attach` using WebSocket subprotocol
-`st3.client.pty.v0` and secondary `st3.cap.CAPABILITY`. The credential and capability never appear
+`fractal.client.pty.v0` and secondary `fractal.cap.CAPABILITY`. The credential and capability never appear
 in the URL. Authentication, mode checking, single-use consumption, owner graph fencing and the
 owner's kernel/registry incarnation proof all precede upgrade. Both modes require a concrete
 person and `terminal.read`; `attach` also requires `terminal.control`.
 
-Authenticated native clients can instead open `mode=peek` with only `st3.client.pty.v0`,
+Authenticated native clients can instead open `mode=peek` with only `fractal.client.pty.v0`,
 without a preceding POST or capability. Authentication, the concrete person and `terminal.read`
 scope, live seat/incarnation fencing and revocable lease registration are still checked for every
 open. Browser clients may keep the capability flow above. Who opened which PEEK is recorded in
@@ -1856,7 +1895,7 @@ live quota return `not-found`; a client that saves on a disconnected member may 
 ID disappear from the live view after synchronization. This rule converges independently of
 arrival order and never discards the saved structure.
 
-Subscribe to `collection: "glasses"` on `st3.client.collections.v0`, with `limit: 100`, to
+Subscribe to `collection: "glasses"` on `fractal.client.collections.v0`, with `limit: 100`, to
 follow the person's current glass set. The existing `snapshot` / `changes` frames carry full
 resource upserts and removed IDs, including deletions and quota changes. A reconnect starts
 with an authoritative snapshot. The server applies ownership and read grants to each
@@ -1997,7 +2036,7 @@ rows. List/detail and write validation read these heads, never edit history. Rep
 rebuild them once; projection digests and checkpoint proofs include the same read answers.
 There is **no new checkpoint drop rule**: agent-authored edits are durable too.
 
-Subscribe on `st3.client.collections.v0` with
+Subscribe on `fractal.client.collections.v0` with
 `{kind: "subscribe", id, collection: "arrangements", person: "person/NAME", limit: 100}`.
 Person is required and grants are checked on every read. Bounded authoritative snapshots,
 full resource upserts, removed IDs, complete order, and reconnect snapshots follow the

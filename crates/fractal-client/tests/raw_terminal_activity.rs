@@ -28,11 +28,11 @@ async fn selected_use_is_sequenced_out_of_band_and_server_text_becomes_eof() {
                 |request: &Request, mut response: Response| {
                     assert_eq!(
                         request.headers()["sec-websocket-protocol"],
-                        "st3.client.pty.v0, st3.cap.foreground-test",
+                        "fractal.client.pty.v0, fractal.cap.foreground-test",
                     );
                     response.headers_mut().insert(
                         "sec-websocket-protocol",
-                        "st3.client.pty.v0".parse().unwrap(),
+                        "fractal.client.pty.v0".parse().unwrap(),
                     );
                     Ok(response)
                 },

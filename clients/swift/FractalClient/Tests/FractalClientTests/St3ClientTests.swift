@@ -167,7 +167,7 @@ final class FractalClientTests: XCTestCase {
 
     func testWireBridgeKeepsActionSenderVersionBytes() throws {
         XCTAssertEqual(fractalClientAPIVersion, "st3.client.v0")
-        XCTAssertEqual(fractalClientTerminalSubprotocol, "st3.client.terminal.v0")
+        XCTAssertEqual(fractalClientTerminalSubprotocol, "fractal.client.terminal.v0")
         let request = try ActionRequest.workRetry(id: "work/example",
             idempotencyKey: "retry/example", fence: Fence(snapshotID: "snapshot/example"),
             parameters: WorkRetryParameters(targetID: "work/example", reason: "Retry requested"))
@@ -496,6 +496,10 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url?.path }, [
             "/v1/client/conversations/example/stream", "/v1/client/collections/stream",
             "/v1/client/collections/stream", "/v1/client/terminals/example/stream",
+        ])
+        XCTAssertEqual(requests.map { $0.value(forHTTPHeaderField: "Sec-WebSocket-Protocol") }, [
+            "fractal.client.conversation.v0", "fractal.client.collections.v0",
+            "fractal.client.collections.v0", "fractal.client.terminal.v0, fractal.cap.test-capability",
         ])
         for request in requests {
             XCTAssertEqual(request.url?.scheme, "wss")

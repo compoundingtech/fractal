@@ -1502,6 +1502,24 @@ mod tests {
     }
 
     #[test]
+    fn websocket_senders_use_fractal_without_changing_http_versions() {
+        assert!(RUST_MODELS_TEMPLATE.contains("TERMINAL_SUBPROTOCOL: &str = \"fractal.client.terminal.v0\""));
+        assert!(RUST_MODELS_TEMPLATE.contains("API_VERSION: &str = \"st3.client.v0\""));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientTerminalSubprotocol = \"fractal.client.terminal.v0\""));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientAPIVersion = \"st3.client.v0\""));
+        for (template, protocols) in [
+            (RUST_CLIENT_TEMPLATE, &["fractal.client.pty.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+            (TYPESCRIPT_CLIENT_TEMPLATE, &["fractal.client.terminal.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+            (SWIFT_CLIENT_TEMPLATE, &["fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+        ] {
+            for protocol in protocols {
+                assert!(template.contains(protocol), "missing sender spelling: {protocol}");
+            }
+            assert!(template.contains("x-st3-features"));
+        }
+    }
+
+    #[test]
     fn untagged_union_validation_checks_every_named_member() {
         let schema = serde_json::json!({ "$defs": {
             "Pair": { "oneOf": [{ "$ref": "#/$defs/Person" }, { "$ref": "#/$defs/Assistant" }] },
