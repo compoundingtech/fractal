@@ -3581,6 +3581,11 @@ export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
 export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 
+/** Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority. */
+export const TimelineRecipientRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "TimelineRecipientRef", description: "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority." }))()
+export type TimelineRecipientRef = typeof TimelineRecipientRef.Type
+export type TimelineRecipientRefEncoded = typeof TimelineRecipientRef.Encoded
+
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   /** The assistant grant that authorized the send, with sender_class. */
   "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
@@ -3595,7 +3600,7 @@ export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   "sender_class": optionalKey(Schema.Literals(["external-assistant"])).annotate({ description: "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text." }),
   "tags": optionalKey(Schema.Array(Schema.String)),
   "title": optionalKey(Schema.String),
-  "to": optionalKey(ParticipantRef)
+  "to": optionalKey(TimelineRecipientRef)
 }).annotate({ identifier: "TimelineMessageBody" }))()
 export type TimelineMessageBody = typeof TimelineMessageBody.Type
 export type TimelineMessageBodyEncoded = typeof TimelineMessageBody.Encoded

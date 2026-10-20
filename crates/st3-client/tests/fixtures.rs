@@ -17,7 +17,7 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
-fn assistant_sender_timeline_round_trip_preserves_sender_only_wire_contract() {
+fn assistant_timeline_round_trip_preserves_read_side_wire_contract() {
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
     ))
@@ -25,11 +25,13 @@ fn assistant_sender_timeline_round_trip_preserves_sender_only_wire_contract() {
     let definitions = &schema["$defs"];
     let properties = &definitions["TimelineMessageBody"]["properties"];
     assert_eq!(properties["from"]["$ref"], "#/$defs/SenderRef");
-    assert_eq!(properties["to"]["$ref"], "#/$defs/ParticipantRef");
-    assert_eq!(
-        definitions["SenderRef"]["x-st-ref"],
-        serde_json::json!(["agent", "assistant", "person", "step"])
-    );
+    assert_eq!(properties["to"]["$ref"], "#/$defs/TimelineRecipientRef");
+    for reference in ["SenderRef", "TimelineRecipientRef"] {
+        assert_eq!(
+            definitions[reference]["x-st-ref"],
+            serde_json::json!(["agent", "assistant", "person", "step"])
+        );
+    }
     for narrow in ["ParticipantRef", "ActorRef"] {
         assert!(!definitions[narrow]["x-st-ref"]
             .as_array()
