@@ -2652,6 +2652,7 @@ pub async fn publication_definition(
 
 const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
+    "write.client-diagnostics",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -12244,6 +12245,33 @@ mission "differential" state="ready" {
 
     fn test_state(root: &Path) -> AppState {
         test_state_named(root, "terminal-test")
+    }
+
+    #[tokio::test]
+    async fn diagnostics_scope_is_in_default_device_and_full_control_pairing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = super::super::router(state.clone());
+        for full_control in [false, true] {
+            let response = app.clone().oneshot(Request::builder()
+                .method("POST").uri("/v1/client/pairings")
+                .header(LOCAL_PERSON_HEADER, "person/ada")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"api_version":CLIENT_API_VERSION,"device_name":"Test phone","person_id":"person/ada","full_control":full_control}).to_string()))
+                .unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let pairing_id = body["value"]["pairing_id"].as_str().unwrap();
+            let begun = state.store.claims_for_kind_at(
+                "custom.client.pairing-begun", None, true, 10,
+            ).unwrap();
+            let begun = begun.claims.iter().find(|claim|
+                claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
+            assert!(begun.body["fields"]["scopes"].as_array().unwrap()
+                .contains(&json!("write.client-diagnostics")));
+        }
     }
 
     #[test]

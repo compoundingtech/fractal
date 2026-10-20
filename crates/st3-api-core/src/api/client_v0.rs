@@ -197,6 +197,7 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
+    "write.client-diagnostics",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -468,7 +469,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         .map(|scope| {
             json!({
                 "id": scope,
-                "version": 0,
+                "version": if *scope == "write.client-diagnostics" { 1 } else { 0 },
                 "state": if session.allows(scope) { "granted" } else { "ungranted" }
             })
         })
@@ -640,6 +641,11 @@ pub fn authenticate(
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
     session.messages_paging = messages_paging;
+    if request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/client/diagnostics"
+    {
+        require_scope(&session, "write.client-diagnostics")?;
+    }
     if request.method() == axum::http::Method::GET {
         let scope = if request
             .uri()
