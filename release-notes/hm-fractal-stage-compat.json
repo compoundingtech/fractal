@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No schema change." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
-  "compatibility": { "status": "none", "detail": "Legacy behavior is unchanged. Stage overrides force on the module-managed legacy config entry; completed disables that linker entry and preserves merged TOML in the guarded backing file. Host cutover accepts nested daemon state, locks the configured store and renames the entire product root, retaining nested state and sibling PTY suffixes beneath Fractal. Unrelated state roots and populated targets remain refused." },
+  "compatibility": { "status": "none", "detail": "Legacy behavior is unchanged. Stage overrides force on the module-managed legacy config entry; completed disables that linker entry and preserves merged TOML in the guarded backing file. Nested state and sibling PTY paths retain their suffixes beneath the Fractal root." },
   "downtime": { "status": "none", "detail": "Staging alone does not require downtime. Changing package or service settings still has normal Home Manager restart behavior." },
   "manual": { "status": "none", "detail": "Existing forced generations must still be pruned when migration preflight reports them. Resolve ordinary config collisions before staging; force no longer bypasses them in the staged generation." },
   "recovery": { "status": "none", "detail": "Receipt guards and the persistent legacy-generation fence remain required. Never activate a forced old generation after cutover." }

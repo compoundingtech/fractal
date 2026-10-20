@@ -307,7 +307,7 @@ async fn nested_store_cutover_moves_the_whole_root_and_preserves_endpoint_and_pt
             let mut request = [0; 4096];
             let count = stream.read(&mut request).await?;
             ensure!(request[..count].starts_with(b"GET /v1/health "), "unexpected API probe");
-            let body = br#"{"node":"test-host"}"#;
+            let body = br#"{"api_version":"st3.v1","value":{"node":"test-host"}}"#;
             stream.write_all(format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
