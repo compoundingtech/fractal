@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Stop idle terminal streams from rereading runtime authority on unrelated reconciliation wakes",
   "replay": {"status": "none", "detail": "No claim or replay changes."},
-  "schema": {"status": "none", "detail": "Authority subscriptions are process-local and reuse native writer notifications. Storage version remains 19."},
+  "schema": {"status": "none", "detail": "Authority subscriptions are process-local and reuse native writer notifications. No storage version or schema change."},
   "rules": {"status": "none", "detail": "Runtime ownership, reachability and incarnation fences retain their existing snapshot authority checks."},
   "compatibility": {"status": "changed", "detail": "Local terminal streams subscribe before their initial authority read. Subsequent reads follow relevant claim, canonical-order, repair, operation-conflict and desired-projection changes instead of broad API wake notifications. Operation inserts and updates route to the subjects of all claims sharing their operation ID, so unrelated idempotent message traffic does not wake terminals. Multiple viewers share notification routing; actual changes retain the existing 250 ms coalescing bound."},
   "downtime": {"status": "none", "detail": "No migration; the notification change takes effect on process restart."},
