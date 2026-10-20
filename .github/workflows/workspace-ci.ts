@@ -661,14 +661,35 @@ export const fractalWebStoreCache = {
 } as const
 
 /**
- * The web lane's devShell closure and `print-dev-env` script (scripts/ci-web-shell), so the job
- * neither fetches and evaluates the flake's inputs nor builds the shell's local tools. The key names
- * every file `.#web` is built from; only protected-main upkeep fills this shared cache.
+ * The web lane's complete devShell closure and `print-dev-env` script. Hash its isolated
+ * definition and declared transitive lock inputs; only upkeep evaluates/verifies its derivation.
+ * No prefix restore: a different identity is always a miss. Only protected-main upkeep fills it.
  */
-export const fractalWebShellEnv = { CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell' } as const
+export const fractalWebShellEnv = {
+  CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell',
+  CI_WEB_SHELL_KEY: '${{ steps.web-shell-key.outputs.key }}',
+} as const
 export const fractalWebShellCache = {
   path: fractalWebShellEnv.CI_WEB_SHELL_DIR,
-  key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}",
+  key: '${{ steps.web-shell-key.outputs.key }}',
+} as const
+
+export const fractalWebShellKeyStep = {
+  name: 'Identify the web shell inputs',
+  id: 'web-shell-key',
+  shell: 'bash',
+  env: {
+    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}",
+  },
+  run: 'bash scripts/ci-web-shell key',
+} as const
+
+export const fractalWebRunnerStep = {
+  name: 'Identify runner hardware',
+  shell: 'bash',
+  env: { CI_RUNNER_NAME: '${{ runner.name }}' },
+  run: `cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+printf 'Runner: name=%s region=%s cpu=%s cores=%s\\n' "$CI_RUNNER_NAME" "\${RUNNER_REGION:-\${AWS_REGION:-\${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"`,
 } as const
 
 const embeddedPython = (script: string) =>
@@ -696,6 +717,7 @@ export const fractalWebJobs = {
       'kit-inputs': '${{ steps.detect.outputs.kit-inputs }}',
     },
     steps: [
+      fractalWebRunnerStep,
       {
         name: 'Detect web-relevant changes',
         id: 'detect',
@@ -725,8 +747,11 @@ export const fractalWebJobs = {
     ...evidenceStepJob(),
     defaults: { run: { shell: 'bash' } },
     steps: [
+      fractalWebRunnerStep,
       { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+      { name: 'Check web shell identity invariants', run: 'python3 scripts/ci-web-shell-test' },
+      fractalWebShellKeyStep,
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
       { name: 'Restore the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: fractalWebShellCache },
       {
@@ -787,6 +812,7 @@ export const fractalWebJobs = {
     'timeout-minutes': 1,
     permissions: { contents: 'read' },
     steps: [
+      fractalWebRunnerStep,
       {
         name: 'Require detection and, for web changes, execution',
         env: {

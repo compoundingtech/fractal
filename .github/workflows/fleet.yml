@@ -3294,6 +3294,13 @@ jobs:
       relevant: ${{ steps.detect.outputs.relevant }}
       kit-inputs: ${{ steps.detect.outputs.kit-inputs }}
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - name: Detect web-relevant changes
         id: detect
         env:
@@ -3355,8 +3362,10 @@ jobs:
               "buck2/**",
               "genie/**",
               "nix/web/**",
+              "nix/web-shell*",
               "nix/fractal-web*.nix",
               "scripts/ci-fractal-web*",
+              "scripts/ci-web-shell*",
               "scripts/ci-typescript-client*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
@@ -3502,6 +3511,8 @@ jobs:
               "flake.nix",
               "flake.lock",
               "scripts/ci-fractal-web*",
+              "scripts/ci-web-shell*",
+              "nix/web-shell*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
           )
@@ -3608,6 +3619,13 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -3623,6 +3641,14 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
+      - name: Check web shell identity invariants
+        run: python3 scripts/ci-web-shell-test
+      - name: Identify the web shell inputs
+        id: web-shell-key
+        shell: bash
+        env:
+          CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}
+        run: bash scripts/ci-web-shell key
       - name: Restore the pnpm store
         id: pnpm-store
         uses: actions/cache/restore@v4
@@ -3634,7 +3660,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
+          key: ${{ steps.web-shell-key.outputs.key }}
       - name: Run the fractal-web lanes and dependency license check
         id: run
         shell: bash
@@ -3642,6 +3668,7 @@ jobs:
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
+          CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
           KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
           KIT_SHARD_INDEX: ${{ matrix.shard }}
           KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '2' || '1' }}
@@ -3737,6 +3764,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - name: Require detection and, for web changes, execution
         env:
           CHANGES_RESULT: ${{ needs.fractal-web-changes.result }}
