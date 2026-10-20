@@ -44,6 +44,12 @@ export const checkFixtureGraph = (
   graph: RuntimeSourceGraph,
   policy: FixtureGraphPolicy,
 ): FixtureGraphResult => {
+  // The public Storybook entry defers its scenario loader until a slices declaration.
+  // Exempt stories never invoke it. This exact resolved edge is the only exception;
+  // all other dynamic imports count, including imports in lazy or conditional code.
+  const allowedLoaderEdges: Readonly<Record<string, readonly string[]>> = {
+    [`${policy.kitSource}/storybook/index.ts`]: [`${policy.kitSource}/storybook/runtime.ts`],
+  }
   const violations: string[] = []
   const contractData = new Map<string, string[]>()
   for (const file of policy.contractDataModules ?? []) contractData.set(file, [])
@@ -80,7 +86,7 @@ export const checkFixtureGraph = (
         const target = graph.resolve(specifier, file)
         if (target === undefined) {
           violations.push(`${chain.join(' -> ')} -> ${specifier} (unresolved runtime import)`)
-        } else if (!graph.isExternal(target)) {
+        } else if (!allowedLoaderEdges[file]?.includes(target) && !graph.isExternal(target)) {
           pending.push([...chain, target])
         }
       }
@@ -93,23 +99,16 @@ export const checkFixtureGraph = (
 const emittedImports = (javascript: string): readonly string[] => {
   const source = ts.createSourceFile('runtime.js', javascript, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
   const imports: string[] = []
-  const visit = (node: ts.Node, conditional = false): void => {
+  const visit = (node: ts.Node): void => {
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
       imports.push(node.moduleSpecifier.text)
     }
-    // Conditional/lazy loaders do not read domain state merely by being imported.
-    if (ts.isFunctionLike(node)) return
-    const guarded = conditional || ts.isIfStatement(node) || ts.isConditionalExpression(node)
-      || ts.isSwitchStatement(node) || ts.isIterationStatement(node, false)
-      || (ts.isBinaryExpression(node) && [
-        ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
-      ].includes(node.operatorToken.kind))
-    if (!guarded && ts.isCallExpression(node)
+    if (ts.isCallExpression(node)
       && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
       const argument = node.arguments[0]
       imports.push(argument !== undefined && ts.isStringLiteral(argument) ? argument.text : '<non-literal runtime import>')
     }
-    ts.forEachChild(node, child => visit(child, guarded))
+    ts.forEachChild(node, visit)
   }
   visit(source)
   return imports

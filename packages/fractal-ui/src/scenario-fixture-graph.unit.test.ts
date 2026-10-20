@@ -28,6 +28,13 @@ const sources: Readonly<Record<string, string>> = {
   [`${policy.kitSource}/worlds/types.ts`]: 'export interface Shape { value: number }; export interface OtherShape { value: number }',
   [source('loader.stories.ts')]: "export const load = () => import('../../kit/src/index'); if (globalThis) { void import('../../kit/src/index') }; export const conditional = globalThis ? import('../../kit/src/index') : undefined",
   [source('eager.stories.ts')]: "export const loaded = import('../../kit/src/index')",
+  [source('kit-loader.stories.ts')]: "export { load } from '../../kit/src/storybook/index'",
+  [`${policy.kitSource}/storybook/index.ts`]: "export const load = () => import('./runtime')",
+  [`${policy.kitSource}/storybook/runtime.ts`]: "export { value } from '../index'",
+  [source('iife.stories.ts')]: "export const value = (() => import('../../kit/src/index'))()",
+  [source('condition.stories.ts')]: "if (await import('../../kit/src/index')) { }",
+  [source('switch.stories.ts')]: "switch (await import('../../kit/src/index')) { default: break }",
+  [source('logical.stories.ts')]: "void (import('../../kit/src/index') && true)",
   [source('unresolved.stories.ts')]: "import './not-present'",
   [source('recording.stories.ts')]: "import data from '../../kit/recordings/data.json'; export const story = data",
   '/fixture-graph/kit/recordings/data.json': '{}',
@@ -69,9 +76,13 @@ test('local contract-data is allowed only for contract fixtures and reports tran
 test('explicit and inferred erased type imports do not create runtime edges', () => {
   expect(check('types.stories.ts', 'primitive').violations).toEqual([])
 })
-test('conditional dynamic loaders are excluded but eager dynamic imports are checked', () => {
-  expect(check('loader.stories.ts', 'primitive').violations).toEqual([])
+test('only the exact resolved kit loader edge is excluded', () => {
+  expect(check('kit-loader.stories.ts', 'primitive').violations).toEqual([])
+  expect(check('loader.stories.ts', 'primitive').violations.join('\n')).toContain(`${policy.kitSource}/index.ts`)
   expect(check('eager.stories.ts', 'primitive').violations.join('\n')).toContain(`${policy.kitSource}/index.ts`)
+})
+test.each(['iife', 'condition', 'switch', 'logical'])('dynamic imports in %s expressions cannot bypass the graph', name => {
+  expect(check(`${name}.stories.ts`, 'contract-fixture').violations.join('\n')).toContain(`${policy.kitSource}/index.ts`)
 })
 test('unresolved runtime edges fail closed instead of disappearing from the graph', () => {
   expect(check('unresolved.stories.ts', 'primitive').violations).toEqual([

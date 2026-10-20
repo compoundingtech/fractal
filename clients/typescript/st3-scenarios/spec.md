@@ -1057,7 +1057,10 @@ The kit exposes `scenarioDomainFixture` through `/domain-fixture`; domain source
 `scenarioDomainFixtureMarker` with that unique-symbol type. A coverage test requires markers on
 the catalog, worlds, recorded/fixture TypeScript source modules and projection harnesses.
 Data-only recordings remain covered by their marked TypeScript owners; JSON cannot export a marker.
-Erased type-only imports are allowed. Conditional dynamic loader edges are not fixture reads.
+Erased type-only imports are allowed. Every runtime import edge counts, including dynamic imports
+inside functions, conditions and expressions. The only exception is the exact resolved kit
+`src/storybook/index.ts` to `src/storybook/runtime.ts` loader edge: exempt declarations never invoke
+that loader. A single explicit allowlist identifies that edge; there is no general lazy-code exemption.
 Slice stories and exempt stories live in separate CSF files so this is a file-level proof,
 not fragile attribution of imports to individual exports.
 

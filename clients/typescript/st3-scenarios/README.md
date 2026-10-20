@@ -70,8 +70,10 @@ The check reports exempt stories with reasons; consumers pin sorted export ident
 
 The consumer's all-story gate checks transitive runtime module imports from exempt files.
 Kit worlds/catalog/recorded sources, scenario projections and typed domain-fixture markers are
-forbidden; erased type imports and conditional loader edges are not data reads. A primitive
-file also cannot import any `*fixture*`-named module. Its inline domain data remains review-only.
+forbidden. Erased type imports are allowed; all dynamic imports count, even inside functions or
+conditions. Only the exact resolved kit `storybook/index.ts` to `storybook/runtime.ts` loader edge
+is allowlisted, because exempt declarations never invoke that loader. A primitive file also cannot
+import any `*fixture*`-named module. Its inline domain data remains review-only.
 Contract fixtures may use local exact-contract inputs; their allowed contract-data modules and
 exempt importers print in check output. Inline and closure-held contract inputs require review.
 Import `scenarioDomainFixture` from `/domain-fixture` to mark a domain source with the exported
