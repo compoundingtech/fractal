@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `4e2afded6a2d811d83bc15d63d1d013f6c76e368ac18455bf7650f13eb49f00d`
+Storage digest: `ab318454d85787af18a36821c53eefcd4bc33c97da610305e607525dc6fb0b92`
 
 ## Subject families
 
@@ -348,6 +348,14 @@ maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `check
 and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
 this table existed), and the writer floor; the chain's previous hash is the higher of the newest
 batch and the stored head.
+
+## Repaired claim replacements
+
+`repaired_claim_replacements` keeps, for each repaired original claim, its current replacement and
+the repaired record's reference. A trigger copies them whenever a record becomes repaired or is
+repaired again, and deleting the record leaves them; rows are never deleted. A one-time copy at
+open reads only the repaired records that predate the triggers, through their partial index.
+Readers still use the records and `projection_digest_repaired_claims`.
 
 ## Retired claim facts
 
