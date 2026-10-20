@@ -64,7 +64,7 @@ export const PaneSyncStatus = React.memo(function PaneSyncStatus({ status: obser
         <Dialog data-pane-sync-details aria-describedby={failureText === undefined ? undefined : textId} {...stylex.props(styles.dialog)}>
           <Heading slot="title" id={headingId} {...stylex.props(styles.heading)}>Load failed</Heading>
           {failureText !== undefined && <><div id={textId}><p {...stylex.props(styles.paragraph, styles.failureText)}>{failureText}.</p><p {...stylex.props(styles.paragraph)}>{recovery}</p></div>
-          <div {...stylex.props(styles.cause)}><SyncFailureDetails cause={failure} />{gateway !== undefined && <p {...stylex.props(styles.paragraph)}>Gateway: {gateway}</p>}</div></>}
+          <div {...stylex.props(styles.cause)}><SyncFailureDetails status={observation} gateway={gateway} /></div></>}
           {retryable && <div {...stylex.props(styles.dialogActions)}><Button data-command-id="sync.retry.details" onPress={() => { setDetailsOpen(false); onRetry() }} {...stylex.props(styles.primary, touch && styles.primaryTouch)}>Retry</Button></div>}
         </Dialog>
       </Popover>

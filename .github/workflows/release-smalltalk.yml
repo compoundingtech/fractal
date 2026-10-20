@@ -6,7 +6,7 @@ name: Smalltalk tag release
 on:
   push:
     branches: [main]
-    tags: ["**", "!edge"]
+    tags: ["**", "!edge", "!evidence/**"]
   workflow_dispatch: null
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
@@ -14,7 +14,7 @@ on:
       - .github/workflows/release-smalltalk.yml
       - .github/workflows/release-smalltalk.yml.genie.ts
       - .gitignore
-      - crates/st-drivers/build.rs
+      - crates/st-build-stamp/**
       - crates/st-drivers/src/version.rs
       - install.sh
       - scripts/download-install-test

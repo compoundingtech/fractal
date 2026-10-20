@@ -28,8 +28,8 @@ const resources: WorkbenchResources = {
 
 export interface AgentDetailsPanelProps {
   readonly agentRef: string
-  /** A number is the sized side panel; `fill` flows at the container's width (the narrow Details sheet). */
-  readonly width: number | 'fill'
+  /** A number sizes a standalone panel; `dock` fills DockedSplit, and `fill` flows in the narrow sheet. */
+  readonly width: number | 'fill' | 'dock'
   readonly scheme: 'dark' | 'light'
   readonly onClose: () => void
   readonly onOpen: (uri: string, split: boolean) => void
@@ -49,7 +49,7 @@ export function AgentDetailsPanel({ agentRef, width, scheme, onClose, onOpen, va
   const detailsKey = `details:${agentRef} view=details`
   const [selected, setSelected] = React.useState(detailsKey)
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
-  return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={width === 'fill' ? undefined : { width }} {...stylex.props(styles.root, width === 'fill' && styles.fillRoot)}>
+  return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={typeof width === 'number' ? { width } : undefined} {...stylex.props(styles.root, typeof width !== 'number' && styles.fillRoot)}>
     {/* Phone: a recognizable 44px control (icon, label, filled shape); desktop keeps the quiet text button. */}
     <div {...stylex.props(styles.closeBar)}><Button aria-label="Close agent inspector" data-agent-inspector-close onPress={onClose} {...stylex.props(styles.close, narrow && styles.closeTouch)}>{narrow && <Icon name="x" />}Close</Button></div>
     <Workbench layout={layout} resources={resources} workspaceId={`live-inspector:${agentRef}`} scheme={scheme}

@@ -27,6 +27,7 @@
 set -Eeuo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$here/../script_process.py" --check-platform
 audit="${AUDIT:-/var/tmp/st-images-audit}"
 home="$audit/home"
 instance=images-audit
@@ -227,7 +228,7 @@ pond() {
 }
 
 pond_off() {
-  pkill -u "$(id -u)" -f "$audit/tools/st3 --instance images-audit-pond" 2>/dev/null || true
+  python3 "$here/../script_process.py" all 15 --root "$audit" --contains "--instance images-audit-pond" 2>/dev/null || true
 }
 
 # Keep each case's timeline as a client sees it (conversation blocks negotiated), with the signed
@@ -294,7 +295,7 @@ UI
 
 down() {
   # Only processes that run from the audit tree, never a shell that merely names it.
-  pkill -u "$(id -u)" -f "$audit/(tools|home|workspace)/" 2>/dev/null || true
+  python3 "$here/../script_process.py" all 15 --root "$audit" 2>/dev/null || true
   sleep 1
   rm -rf "$audit"
 }

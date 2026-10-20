@@ -260,16 +260,20 @@ async function checkCoverage(canvasElement: HTMLElement) {
 }
 async function checkNotCovered(canvasElement: HTMLElement) {
   const root = scenarioPane(canvasElement, 'notCovered')
-  const trigger = within(spend(root)).getByRole('button', { name: 'Not tracked for Claude Code' })
-  await focusInView(trigger)
-  requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Coverage explanation is not keyboard reachable')
-  await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
-  await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the coverage trigger'))
-  await waitFor(() => requireContract(within(canvasElement.ownerDocument.body).getByRole('tooltip').textContent === 'Spend is recorded only for OMP sessions today.', 'Not-covered explanation differs'))
-  const wrong=falsifyText(root,'[data-details-coverage]','Not tracked for Codex')
-  await rejectsControl('Not-covered harness display name differs', () => requireContract(wrong.querySelector('[data-details-coverage]')?.textContent === 'Not tracked for Claude Code', 'Not-covered harness display name differs'))
+  const line = spend(root).querySelector<HTMLElement>('[data-details-coverage-line]')
+  requireContract(line?.querySelector('[data-details-coverage]')?.textContent === 'Spend · not reported' && line.querySelector('[data-details-group-summary]')?.textContent === 'This session does not report spend.', 'Not-covered line is not the standard not-reported copy')
+  const wrong=falsifyText(root,'[data-details-coverage]','Not tracked for Claude Code')
+  await rejectsControl('Not-covered line is not the standard not-reported copy', () => requireContract(wrong.querySelector('[data-details-coverage]')?.textContent === 'Spend · not reported', 'Not-covered line is not the standard not-reported copy'))
+  const why = within(line).getByRole('button', { name: 'Why? Spend not reported' })
+  const panel = why.ownerDocument.getElementById(why.getAttribute('aria-controls')!)
+  requireContract(panel?.hidden && why.getAttribute('aria-expanded') === 'false', 'Not-covered reason is not collapsed')
+  await focusInView(why)
+  requireContract(canvasElement.ownerDocument.activeElement === why, 'Not-covered Why? is not keyboard reachable')
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => requireContract(!panel.hidden && why.getAttribute('aria-expanded') === 'true' && panel.textContent === 'Only some agent types report spend.', 'Not-covered explanation differs'))
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => requireContract(panel.hidden && why.getAttribute('aria-expanded') === 'false', 'Not-covered reason did not collapse'))
   requireContract(spend(root).textContent?.includes('$12.34') && spend(root).textContent?.includes('480'), 'Not-covered descendants erased native metrics')
-  await userEvent.keyboard('{Escape}')
 }
 function assertDescendantListWindow(root:HTMLElement) {
  const label=root.querySelector('[data-details-subagent-window]')?.textContent

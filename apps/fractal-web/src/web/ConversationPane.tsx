@@ -17,6 +17,7 @@ import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
+import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
@@ -214,6 +215,7 @@ function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.Compone
   const snapshot = useNowSnapshot()
   const now = paused ?? snapshot
   const observation = useConversationSync(agentRef)
-  return <Transcript {...props} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
+  const headerActionsHost = React.useContext(ThreadHeaderSlotContext)
+  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
 }
 

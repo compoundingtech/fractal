@@ -5,7 +5,7 @@ Runs in the `Evidence observe` workflow on the signing runners, never on a pull 
 code. It does not run any check: it asks the protected observer (`st3 evidence observe-ci`,
 behind a sekrets grant) to record what the run already did, imports the returned object
 pack into a scratch repository, verifies every full-trust record with scripts/evidence-verify
-against the accepted key list, and only then creates and pushes refs/notes/evidence/<id>.
+against the accepted key list, and only then creates and pushes refs/notes/evidence/<tree>/<id>.
 
   exit 0  every record was imported (full records verified; degraded ones labelled as such),
           or the run was cancelled/skipped and has nothing to attest
@@ -340,7 +340,7 @@ def one_run(args, run, attempt):
                 failures.append(f'record {record} has unexpected tier {tier!r}; not published')
                 entry['error'] = failures[-1]
                 continue
-            ref = NOTES + record
+            ref = f'{NOTES}{tree}/{record}'
             existing = git(scratch, 'for-each-ref', '--format=%(objectname)', ref).stdout.decode().strip()
             if existing and existing != record:
                 failures.append(f'{ref} already names {existing}; evidence refs are never replaced')

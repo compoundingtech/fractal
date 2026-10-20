@@ -1,4 +1,4 @@
-import { scenarioStoryCheck, withScenario } from '@smalltalk/st3-scenarios/storybook'
+import { scenarioStoryCheck, withScenario } from '@smalltalk/st3-scenarios/storybook/check'
 import { loadWorld } from '@smalltalk/st3-scenarios'
 import { scenarioSections } from './scenario-transcript.story-harness'
 import { expect, test } from 'vitest'

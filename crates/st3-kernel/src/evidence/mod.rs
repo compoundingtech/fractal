@@ -690,6 +690,11 @@ fn records(repo: &Path) -> Result<Vec<String>> {
         let id = name
             .strip_prefix(NOTES_PREFIX)
             .context("evidence namespace")?;
+        // refs/notes/evidence/<tree>/<record> is the layout the CI scripts write (scripts/evidence-verify reads it); this module's
+        // records are the first layout, one object id under the prefix, so a deeper name is not one of them and not an error.
+        if id.contains('/') {
+            continue;
+        }
         oid(id)?;
         ensure!(id == value, "evidence ref is not immutable: {name}");
         records.push(id.to_owned());

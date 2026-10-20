@@ -11,7 +11,7 @@ import { adaptTrace } from './trace/adapter.ts'
 import { CompactSpend, CompactSpendPending } from './trace/CompactSpend.tsx'
 import { ContextPanel, ContextPanelPending, contextPanelFootprint, type ContextPanelFootprint } from './trace/ContextPanel.tsx'
 import { SpendPanel, SpendPanelPending } from './trace/SpendPanel.tsx'
-import { DescribedTooltipButton, DetailsInlineReason, DetailsNotReported, DetailsWhy, DetailsWhyPending, notReportedNotesSummary, type NotReportedField } from './DetailsUnavailable.tsx'
+import { DetailsInlineReason, DetailsNotReported, DetailsWhy, DetailsWhyPending, notReportedNotesSummary, type NotReportedField } from './DetailsUnavailable.tsx'
 import { NarrowLayoutContext } from '../composition/NarrowLayout.tsx'
 import { joinDetailsReasons, traceFactReason } from './trace-reasons.ts'
 export interface DetailsChartsProps {
@@ -114,27 +114,25 @@ export const accumulationParts = (fact:TraceFact<TraceAccumulationWindow>):reado
     ? [`${from.slice(0,10)} ${from.slice(11,16)}–${to.slice(11,16)} UTC`]
     : [`${from.slice(0,10)} ${from.slice(11,16)}–`, `${to.slice(0,10)} ${to.slice(11,16)} UTC`]
 }
-/** The painted coverage sentence and whether a Why? explains it; unavailable coverage is a Why?-only note. */
-interface CoverageFootprint { readonly label: string; readonly why: boolean }
+/** The painted coverage sentence, an optional plain summary beneath it, and whether a Why? explains it; unavailable coverage is a Why?-only note. */
+interface CoverageFootprint { readonly label: string; readonly summary?: string; readonly why: boolean }
 const linkedSpendReason = 'This percentage shows how much spend could be linked to this agent.'
 const unreportedLinkReason = 'How much spend could be linked to this agent isn’t reported.'
+const notCoveredReason = 'Only some agent types report spend.'
 /** Both row props and pending footprints normalize only the malformed row's coverage. */
 const coverageFootprint=(coverage:TraceCoverageState):CoverageFootprint|undefined=>{
  const state=traceCoverageState(coverage)
  return state._tag==='Complete'||state._tag==='Unavailable'?undefined
   :state._tag==='PartialUnreported'?{label:'Part of spend linked to this agent',why:true}
   :state._tag==='Partial'?{label:`${Math.min(99,Math.floor(state.attributedFraction*100))}% of spend matched to this agent`,why:true}
-  :{label:`Not tracked for ${state.harnessName}`,why:false}
+  :{label:'Spend · not reported',summary:spendSummary,why:true}
 }
-const notCoveredExplanation = 'Spend is recorded only for OMP sessions today.'
 export const TraceCoverageNote = ({trace,coverage=trace.coverage}:{readonly trace:TraceSeries;readonly coverage?:TraceCoverage}):ReactNode => {
- const narrow=React.useContext(NarrowLayoutContext)
  const state=traceCoverageState(coverage)
  const footprint=coverageFootprint(state)
  if(footprint===undefined)return null
- if(state._tag==='NotCovered')return narrow
-  ?<p data-details-coverage {...stylex.props(styles.scopeNote)}>{footprint.label}<DetailsInlineReason block>{notCoveredExplanation}</DetailsInlineReason></p>
-  :<DescribedTooltipButton data-details-coverage description={notCoveredExplanation} tooltipStyle={styles.coverageTooltip} {...stylex.props(styles.coverageTrigger)}>{footprint.label}</DescribedTooltipButton>
+ // An untracked agent type reads as the standard not-reported line: one plain sentence, the reason behind a collapsed Why?.
+ if(state._tag==='NotCovered')return <p data-details-coverage-line {...stylex.props(styles.coverageLine)}><span data-details-coverage {...stylex.props(styles.coverageSummary)}>{footprint.label}</span><DetailsInlineReason block><span data-details-group-summary>{footprint.summary}</span></DetailsInlineReason><DetailsWhy explains="Spend not reported" reasons={[notCoveredReason]} /></p>
  // One painted sentence; what the percentage means waits behind the kit's collapsed Why?.
  return <p data-details-coverage-line {...stylex.props(styles.coverageLine)}><span data-details-coverage {...stylex.props(styles.coverageSummary)}>{footprint.label}</span><DetailsWhy explains="Spend linked to this agent" reasons={[state._tag==='Partial'?linkedSpendReason:unreportedLinkReason]} /></p>
 }
@@ -214,9 +212,9 @@ const SpendMeter = ({ trace }: { readonly trace: TraceSeries }): ReactNode => {
   </div>
 }
 
-/** Loading twin of a coverage sentence: the same ink and, when the live line has one, its Why? row. */
+/** Loading twin of a coverage sentence: the same ink, its summary sentence and, when the live line has one, its Why? row. */
 const CoveragePending = ({ footprint }: { readonly footprint: CoverageFootprint }): ReactNode => {
-  return <p {...stylex.props(styles.coverageLine)}><span {...stylex.props(styles.coverageSummary)}><span {...stylex.props(styles.pendingText)}>{footprint.label}</span></span>{footprint.why && <DetailsWhyPending />}</p>
+  return <p {...stylex.props(styles.coverageLine)}><span {...stylex.props(styles.coverageSummary)}><span {...stylex.props(styles.pendingText)}>{footprint.label}</span></span>{footprint.summary !== undefined && <DetailsInlineReason block><span {...stylex.props(styles.pendingText)}>{footprint.summary}</span></DetailsInlineReason>}{footprint.why && <DetailsWhyPending />}</p>
 }
 /** Loading twin of SpendMeter: the same reported rows and the same absent ones. */
 const SpendMeterPending = ({ footprint }: { readonly footprint: DetailsPendingShape['spend'] }): ReactNode => footprint.rows.length === 0 && footprint.subagents.length === 0 ? null : <div aria-hidden="true" inert {...stylex.props(styles.body)}>
@@ -434,7 +432,6 @@ const styles = stylex.create({
   // A coverage sentence on its own row; its Why? starts beneath it.
   coverageLine: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', margin: 0, minWidth: 0, color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
   coverageSummary: { flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
-  coverageTrigger: { appearance:'none', borderWidth:0, padding:0, backgroundColor:surface.transparent, textAlign:'left', color:text.fgSoft, fontSize:type.denseSize, cursor:'help', outlineColor:accent.primary, outlineOffset:2 },
   coverageTooltip: { backgroundColor:surface.canvas, color:text.fg, borderWidth:1, borderStyle:'solid', borderColor:border.borderStrong, padding:space.md, fontSize:type.metaSize, maxWidth:280 },
   occupancy: { display: 'inline-flex', alignItems: 'baseline', gap: space.xs },
   estimate: { appearance: 'none', borderWidth: 0, padding: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'help', borderRadius: radius.sm, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },

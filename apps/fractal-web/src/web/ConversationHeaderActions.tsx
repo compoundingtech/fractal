@@ -7,9 +7,13 @@ import * as Atom from 'effect/reactivity/Atom'
 import { DateTime } from 'effect'
 import { SidePanel } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SidePanel.tsx'
 import { ChromeControl } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { SyncFailureDetails } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/SyncLine.tsx'
+import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { HumanTime } from '@smalltalk/fractal-ui/human-time'
-import { useDataSource } from '../data/react.tsx'
+import { useConversation, useConversationSync, useDataSource } from '../data/react.tsx'
 import { unavailable, waiting, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { resourceState, resourceTitle, type ResourcePage } from '../resources/agent/model.ts'
@@ -42,6 +46,7 @@ export const retainedResourceAtoms = (source: DataSource): ResourceAtoms => {
 /** Native conversation controls, retained from the former ConversationDetail header portal. */
 export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef: string; readonly ux?: UxTelemetry }) => {
   const source = useDataSource()
+  const narrow = React.useContext(NarrowLayoutContext)
   const registry = React.useContext(RegistryContext)
   const atoms = retainedResourceAtoms(source)
   const prefetch = () => {
@@ -50,9 +55,17 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
   }
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
   const [resourcesOpen, setResourcesOpen] = React.useState(false)
+  const [declarationOpen, setDeclarationOpen] = React.useState(false)
+  const [syncDetailsOpen, setSyncDetailsOpen] = React.useState(false)
+  const conversation = useConversation(agentRef)
+  const sync = useConversationSync(agentRef)
+  const retainedFailure = conversation._tag === 'Observed' && conversation.value.items.length > 0 && sync?.status._tag === 'Failed'
   const [opening, setOpening] = React.useState<OpenOperation>()
   const [cache, setCache] = React.useState<'retained' | 'cold'>('cold')
-  const onOpenChange = (open: boolean) => {
+  // The header control and the narrow overflow item share this one transition, so reopening an
+  // already open panel from the menu never restarts its open measurement.
+  const changeResourcesOpen = (open: boolean) => {
+    if (open === resourcesOpen) return
     if (open) {
       markStart('resources_panel', { key: agentRef })
       setCache(registry.get(atoms.resources(agentRef))._tag === 'Observed' ? 'retained' : 'cold')
@@ -77,19 +90,41 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
   // A non-modal complementary panel: opening it never inerts or hides the workspace, so the click
   // commits the panel in the same frame instead of restyling the whole app.
   return <div {...stylex.props(styles.actions)}>
-    <ChromeControl icon="folder" label="Resources" active={resourcesOpen} expanded={resourcesOpen} {...(resourcesOpen ? { controls: panelId } : {})} onPrefetch={prefetch} onPress={() => onOpenChange(!resourcesOpen)} {...(disabledReason === undefined ? {} : { disabledReason })} />
-    {resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} aria-label="Agent resources" heading="Resources" actions={<Aria.Button aria-label="Close resources" onPress={() => onOpenChange(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button>} onClose={() => onOpenChange(false)}>
+    <span {...stylex.props(styles.secondary)}>
+      <ChromeControl icon="folder" label="Resources" active={resourcesOpen} expanded={resourcesOpen} {...(resourcesOpen ? { controls: panelId } : {})} onPrefetch={prefetch} onPress={() => changeResourcesOpen(!resourcesOpen)} {...(disabledReason === undefined ? {} : { disabledReason })} />
+    </span>
+    {resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} aria-label="Agent resources" heading="Resources" actions={<Aria.Button aria-label="Close resources" onPress={() => changeResourcesOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close resources</Aria.Button>} onClose={() => changeResourcesOpen(false)}>
       <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
     </SidePanel> : null}
-    <Aria.DialogTrigger>
-      <Aria.Button {...stylex.props(styles.button)}>View KDL</Aria.Button>
-      <DeclarationDialog subject={agentRef} />
-    </Aria.DialogTrigger>
+    <span {...stylex.props(styles.secondary)}>
+      <Tooltip label="View KDL">
+        <Aria.Button aria-label="View KDL" onPress={() => setDeclarationOpen(true)} {...stylex.props(styles.button, styles.declarationButton)}>
+          <span {...stylex.props(styles.declarationIcon)}><Icon name="checklist" /></span>
+          <span {...stylex.props(styles.declarationLabel)}>View KDL</span>
+        </Aria.Button>
+      </Tooltip>
+    </span>
+    <DeclarationDialog subject={agentRef} isOpen={declarationOpen} onOpenChange={setDeclarationOpen} />
+    <Aria.ModalOverlay isOpen={syncDetailsOpen && retainedFailure} onOpenChange={setSyncDetailsOpen} isDismissable {...stylex.props(styles.overlay)}>
+      <Aria.Modal {...stylex.props(styles.modal)}>
+        <Aria.Dialog aria-label="Sync details for conversation" {...stylex.props(styles.dialog)}>
+          <header {...stylex.props(styles.heading)}><strong>Sync details</strong><Aria.Button aria-label="Close sync details" onPress={() => setSyncDetailsOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close</Aria.Button></header>
+          {sync !== undefined && <SyncFailureDetails status={sync.status} />}
+        </Aria.Dialog>
+      </Aria.Modal>
+    </Aria.ModalOverlay>
     <Aria.MenuTrigger>
       <ChromeControl icon="gear" label="Conversation menu" />
       <Aria.Popover {...stylex.props(styles.popover)}>
-        <Aria.Menu aria-label="Conversation settings" selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))} {...stylex.props(styles.menu)}>
-          <Aria.MenuItem id="system" {...stylex.props(styles.menuItem)}>Show all system events</Aria.MenuItem>
+        <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true); else if (key === 'sync-details') setSyncDetailsOpen(true) }} {...stylex.props(styles.menu)}>
+          <Aria.MenuSection selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))}>
+            <Aria.MenuItem id="system" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Show all system events</Aria.MenuItem>
+          </Aria.MenuSection>
+          <Aria.MenuSection selectionMode="none">
+            <Aria.MenuItem id="resources" isDisabled={disabledReason !== undefined} textValue="Resources" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Resources{disabledReason === undefined ? null : <span slot="description" {...stylex.props(styles.menuReason)}>{disabledReason}</span>}</Aria.MenuItem>
+            <Aria.MenuItem id="declaration" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>View KDL</Aria.MenuItem>
+            {retainedFailure ? <Aria.MenuItem id="sync-details" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Sync details</Aria.MenuItem> : null}
+          </Aria.MenuSection>
         </Aria.Menu>
       </Aria.Popover>
     </Aria.MenuTrigger>
@@ -150,8 +185,17 @@ const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { r
   <p role="status" data-wf-read-reason={feed._tag === 'Unavailable' ? feed.reason : undefined}>{feed._tag === 'Waiting' ? `Loading ${label.toLowerCase()}…` : feed.reason === 'ungranted' ? `Read access to ${label.toLowerCase()} has not been granted.` : feed.reason === 'unsupported' ? `This connection does not support ${label.toLowerCase()}.` : `${label} could not be loaded; reconnect and try again.`}</p>
 
 const styles = stylex.create({
-  actions: { display: 'flex', alignItems: 'center', gap: s.md },
-  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
+  actions: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },
+  secondary: { display: { default: 'inline-flex', '@container thread-header (max-width: 440px)': 'none' }, flexShrink: 0 },
+  declarationButton: { height: 28, minWidth: 28, justifyContent: 'center', paddingInline: { default: 8, '@container thread-header (max-width: 680px)': 0 } },
+  declarationIcon: { display: { default: 'none', '@container thread-header (max-width: 680px)': 'inline-flex' } },
+  declarationLabel: { display: { default: 'inline', '@container thread-header (max-width: 680px)': 'none' } },
+  menuReason: { display: 'block', maxWidth: 240, color: c.fgMuted, fontSize: t.denseSize },
+  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, whiteSpace: 'nowrap', flexShrink: 0, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
+  overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', justifyContent: 'flex-end', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
+  modal: { width: 380, maxWidth: 'calc(100vw - 24px)', height: '100%', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
+  dialog: { display: 'flex', flexDirection: 'column', height: '100%', outline: 'none' },
+  heading: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
   contents: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
   sectionTitle: { fontSize: t.uiSize, marginBlock: s.md },
   list: { listStyle: 'none', padding: 0 },
@@ -163,4 +207,5 @@ const styles = stylex.create({
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   menu: { padding: s.xs, outline: 'none' },
   menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 }, ':is([data-selected])': { color: c.primary } },
+  touchItem: { minHeight: g.touchTarget, display: 'flex', flexDirection: 'column', justifyContent: 'center', boxSizing: 'border-box' },
 })

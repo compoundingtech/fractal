@@ -51,6 +51,12 @@ pub async fn replication_record(
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
 
+/// How long a dry-run plan waits for another checkpoint proof, such as the one a daemon runs as
+/// soon as it starts. Half the route's BULK deadline (120 s) leaves the other half for this
+/// plan's own capture and proof; a proof still running then is refused as retryable.
+const PLAN_PROOF_WAIT: Duration = Duration::from_secs(60);
+const PLAN_PROOF_POLL: Duration = Duration::from_millis(250);
+
 pub async fn checkpoint_plan(
     State(state): State<AppState>,
     Json(request): Json<crate::store::CheckpointPlanRequest>,
@@ -59,15 +65,54 @@ pub async fn checkpoint_plan(
         Some(day) => crate::store::checkpoint_cut(day).map_err(ApiError::bad)?,
         None => crate::store::newest_due_cut(client_now_ms()),
     };
+    plan_waiting_for_proof(&state, cut, PLAN_PROOF_WAIT, || {}).await.map(Json)
+}
+
+/// Plan, and plan again while another proof owns the scratch lock, until `wait` has passed. The
+/// wait is here, on the plan route alone, so the daemon's scheduled proof never waits on a plan.
+/// `busy` runs at each refusal that is followed by another attempt.
+pub(super) async fn plan_waiting_for_proof(
+    state: &AppState,
+    cut: u128,
+    wait: Duration,
+    mut busy: impl FnMut(),
+) -> Result<crate::store::CheckpointPlanView, ApiError> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let error = match plan_once(state, cut).await? {
+            Ok(plan) => return Ok(plan),
+            Err(error) => error,
+        };
+        if error.downcast_ref::<smallclaims::store::checkpoint::CheckpointProofBusy>().is_none() {
+            return Err(ApiError::internal(error));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ApiError::bad(St3Error::new(
+                "checkpoint-proof-in-progress",
+                "a checkpoint proof is running; retry shortly",
+            )));
+        }
+        busy();
+        tokio::time::sleep(PLAN_PROOF_POLL.min(remaining)).await;
+    }
+}
+
+async fn plan_once(
+    state: &AppState,
+    cut: u128,
+) -> Result<anyhow::Result<crate::store::CheckpointPlanView>, ApiError> {
     let scratch = state.state_dir.join("checkpoint");
     let capture_dir = scratch.join("plan");
     let capture = state.store.clone();
-    let staged = blocking_store(move || capture.checkpoint_staged_set(cut, None, &capture_dir)).await?;
+    let staged = match blocking_store(move || Ok(capture.checkpoint_staged_set(cut, None, &capture_dir))).await? {
+        Ok(staged) => staged,
+        Err(error) => return Ok(Err(error)),
+    };
     let store = state.store.clone();
     // The capture may seal/register the live writer. Planning and proof on the
     // scratch copy do not borrow it and must not occupy its worker capacity.
-    blocking_external(move || store.checkpoint_plan_view_from_staged(cut, staged, &scratch))
-        .await?.map(Json).map_err(ApiError::internal)
+    blocking_external(move || store.checkpoint_plan_view_from_staged(cut, staged, &scratch)).await
 }
 
 pub async fn checkpoint_status(
@@ -326,10 +371,7 @@ pub async fn replication_peer_failure(
         let before_index = store.index()?;
         let previous = store.replication_peer_transport(&request.peer).1;
         let stale = store.record_peer_failure_via(
-            &request.peer,
-            &request.status,
-            &request.error,
-            request.carrier,
+            &request.peer, &request.status, &request.error, request.carrier, request.failure.as_ref(),
         )?;
         if stale && store.observes_transport_to(&request.peer)? {
             store.record_transport_observation(

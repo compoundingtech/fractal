@@ -615,8 +615,8 @@ export const DesktopReasonDescriptions:Story={
   },
 }
 
-/** Internal vocabulary and source wording never reach production copy: painted text, accessible names, descriptions and disclosed reasons. */
-const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series|ledger|attribution|window-global|matched|traced|self)\b|\broot completeness\b|\b(?:by )?this source\b|\bst resources\b|\breported window\b/i
+/** Internal vocabulary, source wording and retired harness-specific copy never reach production copy: painted text, accessible names, descriptions and disclosed reasons. */
+const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series|ledger|attribution|window-global|matched|traced|self)\b|\broot completeness\b|\b(?:by )?this source\b|\bst resources\b|\breported window\b|\bdeclared harness setting\b|\bnot the observed runtime model\b|\bspend is recorded only for omp sessions\b/i
 /** The one plain sentence allowed to say "matched"; exactly it is stripped before the ban applies. */
 const matchedSentence=/\b\d+(?:\.\d+)?% of spend matched to this agent\b/g
 const internalCopy='Production Details exposes internal vocabulary'
@@ -626,7 +626,7 @@ function assertPlainCopy(root:HTMLElement){
   requireContract(offenders.length===0,`${internalCopy}: ${offenders.join(', ')}`)
 }
 /** One sample per banned term, so every word in the list has its own negative control; the near misses prove only the exact percentage sentence may say "matched". */
-const bannedSamples=['Native session','Traced descendant','Root incarnation','Reported provenance','Spend series','Spend ledger','Cost attribution','Window-global spend','Root completeness','Timing not reported by this source.','Traced sessions','Main session · self','Observed st resources','Reported window · 7d','Matched sessions','99% matched','Spend matched to this agent','100% of spend matched to this seat','99% of spend matched to this session']
+const bannedSamples=['Native session','Traced descendant','Root incarnation','Reported provenance','Spend series','Spend ledger','Cost attribution','Window-global spend','Root completeness','Timing not reported by this source.','Traced sessions','Main session · self','Observed st resources','Reported window · 7d','Matched sessions','99% matched','Spend matched to this agent','100% of spend matched to this seat','99% of spend matched to this session','declared harness setting, not the observed runtime model.','Spend is recorded only for OMP sessions today.']
 const allowedMatched='99% of spend matched to this agent'
 const epochLeak='Production Details renders the 1970 epoch'
 /** No placeholder epoch reaches painted text, collapsed Why? panels, descriptions or accessible names. */

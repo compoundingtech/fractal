@@ -34,6 +34,7 @@ const reconnect = vi.fn()
 const askingAgents: ReadonlySet<string> = new Set()
 vi.mock('../data/react.tsx', () => ({
   useFleet: () => rosterFeed,
+  useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),

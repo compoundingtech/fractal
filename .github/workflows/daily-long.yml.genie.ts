@@ -8,12 +8,13 @@ import {
   linuxRunner,
   linuxStageJob,
   linuxStageRunner,
+  perfStoresCache,
   testArchiveConsumerSetup,
   testArchiveProducer,
 } from './workspace-ci.ts'
 
 // The long lanes, once a day on main: the ones that need a VM, real sockets across restarts or an older
-// st3, and the whole test selection at full scale (docs/ci.md, Daily long lanes). Each runs exactly as Workspace CI runs it, from the same shared
+// st3, the cost check, and the whole test selection at full scale (docs/ci.md, Daily long lanes). Each runs exactly as Workspace CI (the cost check: Main upkeep) runs it, from the same shared
 // steps, on Namespace and at the lowest job priority. There is no pick-runner (its token is a secret), no
 // evidence signing and no cache write the warm-up jobs own. Job names carry a `daily-` prefix so no check
 // on main ever looks like a required check. The report job writes each lane's result, time and failed
@@ -29,6 +30,7 @@ const lanes = {
   'linux-fleet-compat': 'daily-fleet-compat',
   'daily-tests': 'daily-tests',
   'daily-tests-shard-2': 'daily-tests-shard-2',
+  'perf-cost': 'daily-perf-cost',
 } as const
 
 const onMain = "github.ref == 'refs/heads/main'"
@@ -105,6 +107,23 @@ export default githubWorkflow(auditCaches({
         description: 'Run fleet compatibility against the pinned older st3',
         setup: commonSetupSteps,
         cacheSaveSetup: [],
+      }),
+      if: onMain,
+    },
+    // The cost check (scripts/ci-perf cost, with the owned link_minutes quarantine inside it), as Main
+    // upkeep runs it on each push to main. It left pull requests: about 40% of a PR run's compute for an
+    // optional lane. Counts, not timings, so a lightly optimized build only speeds up store generation.
+    'perf-cost': {
+      ...linuxStageJob({
+        name: lanes['perf-cost'],
+        stage: 'cost',
+        description: 'Run the cost check',
+        setup: commonSetupSteps,
+        cacheSaveSetup: [],
+        command: ['bash', 'scripts/ci-perf', 'cost'],
+        env: { CARGO_PROFILE_DEV_OPT_LEVEL: '1' },
+        extraLogs: '${{ runner.temp }}/perf/',
+        before: [perfStoresCache('cost')],
       }),
       if: onMain,
     },

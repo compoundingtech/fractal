@@ -1,4 +1,5 @@
-import type { Agent, AgentTodo, HarnessPhase } from '@smalltalk/st3-client/schema'
+import type { AgentTodo, HarnessPhase } from '@smalltalk/st3-client/schema'
+import type { DecodedAgent, Open } from '@st3/sdk/effect'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 
@@ -12,9 +13,9 @@ export type TodoState =
   | { readonly _tag: 'Missing' }
   | {
       readonly _tag: 'Observed'
-      readonly todo: AgentTodo
+      readonly todo: Open<AgentTodo>
       readonly binding: 'current' | 'pending' | 'stale'
-      readonly phase: HarnessPhase | undefined
+      readonly phase: Open<HarnessPhase> | undefined
       readonly completed: number
       readonly total: number
     }
@@ -25,7 +26,7 @@ export const projectTodos = ({
   agentRef,
   sync,
 }: {
-  feed: Feed<readonly Agent[]>
+  feed: Feed<readonly DecodedAgent[]>
   agentRef: string
   sync?: FeedSyncObservation['status']
 }): TodoState => {
