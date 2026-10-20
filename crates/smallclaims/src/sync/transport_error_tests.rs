@@ -290,6 +290,9 @@ async fn a_response_cut_off_after_its_head_fails_reading_the_body() {
 }
 
 fn assert_transport_advances(error: anyhow::Error, expected: RouteFailure) {
+    let error = exchange_failure(
+        error, ReplicationFailurePhase::RequestHeaders, std::time::Instant::now(), None,
+    );
     let error = error.context("outer exchange context");
     assert_eq!(route_failure(&error), expected);
     let mut route = 0;
@@ -321,6 +324,9 @@ fn only_transport_classes_advance_routes() {
         }),
     ];
     for error in errors {
+        let error = exchange_failure(
+            error, ReplicationFailurePhase::Verify, std::time::Instant::now(), None,
+        );
         let error = error.context("exchange failed");
         let mut route = 2;
         assert_eq!(route_failure(&error), RouteFailure::Application);
